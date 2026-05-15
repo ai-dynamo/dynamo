@@ -7,6 +7,7 @@ use dynamo_llm::block_manager::{
 
 pub mod leader;
 pub mod trtllm_leader;
+pub mod trtllm_onboarding_advisor;
 pub mod trtllm_worker;
 pub mod worker;
 
@@ -165,7 +166,6 @@ pub struct ConnectorMetadata {
 
     /// The operations that were initialized in this iteration.
     pub operations: Vec<WorkerTransferRequest>,
-
 }
 
 impl ConnectorMetadata {

@@ -3,11 +3,15 @@
 
 import logging
 import os
-from collections.abc import Callable
 from typing import List, Optional
 
 import tensorrt_llm
 from kvbm import KvbmLeader
+from kvbm.async_loading_advisor import (
+    clear_async_loading_advisor,
+    get_async_loading_advisor,
+    register_async_loading_advisor,
+)
 from kvbm.trtllm_integration.consolidator_config import is_truthy
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
@@ -25,22 +29,6 @@ logger = logging.getLogger(__name__)
 DistributedRuntime = None
 if is_dyn_runtime_enabled():
     from dynamo.runtime import DistributedRuntime
-
-AsyncLoadingAdvisor = Callable[[str, List[int], Optional[str], Optional[str], int, int], None]
-_async_loading_advisor: Optional[AsyncLoadingAdvisor] = None
-
-
-def register_async_loading_advisor(advisor: Optional[AsyncLoadingAdvisor]) -> None:
-    global _async_loading_advisor
-    _async_loading_advisor = advisor
-
-
-def clear_async_loading_advisor() -> None:
-    register_async_loading_advisor(None)
-
-
-def get_async_loading_advisor() -> Optional[AsyncLoadingAdvisor]:
-    return _async_loading_advisor
 
 
 class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):

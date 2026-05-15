@@ -44,11 +44,32 @@ def _check_kvbm_imports():
     try:
         import kvbm
         from kvbm import BlockManager, KvbmLeader, KvbmWorker
+        from kvbm.async_loading_advisor import (
+            clear_async_loading_advisor,
+            get_async_loading_advisor,
+            register_async_loading_advisor,
+        )
 
         assert kvbm is not None, "kvbm module is None"
         assert BlockManager is not None, "BlockManager class not available"
         assert KvbmLeader is not None, "KvbmLeader class not available"
         assert KvbmWorker is not None, "KvbmWorker class not available"
+        assert get_async_loading_advisor() is None
+
+        def advisor(
+            request_id: str,
+            token_ids: list[int],
+            lora_name: str | None,
+            salt_hash: str | None,
+            transfer_for_ms: int,
+            min_blocks: int,
+        ) -> None:
+            return None
+
+        register_async_loading_advisor(advisor)
+        assert get_async_loading_advisor() is advisor
+        clear_async_loading_advisor()
+        assert get_async_loading_advisor() is None
     except ImportError as e:
         pytest.fail(f"Failed to import KVBM package or core classes: {e}")
 
