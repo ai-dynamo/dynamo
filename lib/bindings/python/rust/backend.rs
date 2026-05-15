@@ -713,10 +713,7 @@ impl LLMEngine for PyLLMEngine {
         .map_err(py_err_to_dynamo)
     }
 
-    async fn setup_metrics(
-        &self,
-        ctx: MetricsCtx<'_>,
-    ) -> Result<MetricsBindings, DynamoError> {
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         // Step 1: call Python's `register_prometheus` for vendor-registry
         // bridging (side effect on ctx.metrics; nothing flows back). Engines
         // that don't override the ABC default no-op return immediately.
@@ -772,97 +769,103 @@ impl PyLLMEngine {
         let py_metrics_state = crate::prometheus_metrics::EngineMetrics::from_rust(ctx.metrics);
 
         let join = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, BridgeError> {
-                // 1. Construct LLMBackendMetrics + a dedicated registry,
-                //    UNCONDITIONALLY. This is what guarantees that
-                //    `dynamo_component_model_load_time_seconds` (and the
-                //    KV gauge SHAPES) show up in /metrics regardless of
-                //    whether the engine returned snapshot sources.
-                //    Framework lifecycle gauges (cleanup/drain) live
-                //    Rust-side and aren't tied to this construction.
-                let metrics_mod = py
-                    .import("dynamo.common.backend._internal_metrics")
-                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?;
-                let pair = metrics_mod
-                    .call_method1("make_component_metrics", (model.as_str(), component.as_str()))
-                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?;
-                let pair_tuple = pair
-                    .downcast::<pyo3::types::PyTuple>()
-                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e.into()))?;
-                let gauges = pair_tuple
-                    .get_item(0)
-                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?
-                    .unbind();
-                let registry = pair_tuple
-                    .get_item(1)
-                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?
-                    .unbind();
+            Python::with_gil(
+                |py| -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, BridgeError> {
+                    // 1. Construct LLMBackendMetrics + a dedicated registry,
+                    //    UNCONDITIONALLY. This is what guarantees that
+                    //    `dynamo_component_model_load_time_seconds` (and the
+                    //    KV gauge SHAPES) show up in /metrics regardless of
+                    //    whether the engine returned snapshot sources.
+                    //    Framework lifecycle gauges (cleanup/drain) live
+                    //    Rust-side and aren't tied to this construction.
+                    let metrics_mod = py
+                        .import("dynamo.common.backend._internal_metrics")
+                        .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?;
+                    let pair = metrics_mod
+                        .call_method1(
+                            "make_component_metrics",
+                            (model.as_str(), component.as_str()),
+                        )
+                        .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?;
+                    let pair_tuple = pair
+                        .downcast::<pyo3::types::PyTuple>()
+                        .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e.into()))?;
+                    let gauges = pair_tuple
+                        .get_item(0)
+                        .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?
+                        .unbind();
+                    let registry = pair_tuple
+                        .get_item(1)
+                        .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?
+                        .unbind();
 
-                // 2. Set model_load_time once (parity with legacy entry points).
-                gauges
-                    .bind(py)
-                    .call_method1("set_model_load_time", (load_time,))
-                    .map_err(|e| BridgeError::new(BridgeStage::SetLoadTime, e))?;
-
-                // 3. Wire the registry as a /metrics callback against the
-                //    shared EngineMetrics handle. Happens BEFORE we look at
-                //    engine sources so model_load_time emits even if the
-                //    engine opts out of per-rank gauges.
-                let py_metrics = Py::new(py, py_metrics_state)
-                    .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
-                metrics_mod
-                    .call_method1(
-                        "register_engine_registry",
-                        (py_metrics.clone_ref(py), registry),
-                    )
-                    .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
-
-                // 4. Ask engine for source descriptors. Empty list means
-                //    the engine has no per-rank KV gauges to expose; the
-                //    framework still emits lifecycle + model_load_time
-                //    gauges from steps 1-3 above.
-                let bound = engine.bind(py);
-                let py_sources_obj = bound
-                    .call_method0("component_metrics_sources")
-                    .map_err(|e| BridgeError::new(BridgeStage::GetSources, e))?;
-                let py_sources = py_sources_obj
-                    .downcast::<pyo3::types::PyList>()
-                    .map_err(|e| BridgeError::new(BridgeStage::GetSources, e.into()))?;
-                if py_sources.is_empty() {
-                    return Ok(None);
-                }
-
-                // 5. Seed zeros for each rank so the per-rank gauges show
-                //    up in the very first /metrics scrape.
-                for item in py_sources.iter() {
-                    let dp_rank: u32 = item
-                        .getattr("dp_rank")
-                        .and_then(|v| v.extract())
-                        .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
-                    let rank_str = dp_rank.to_string();
+                    // 2. Set model_load_time once (parity with legacy entry points).
                     gauges
                         .bind(py)
-                        .call_method1("set_total_blocks", (rank_str.clone(), 0u64))
-                        .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
-                    gauges
-                        .bind(py)
-                        .call_method1("set_gpu_cache_usage", (rank_str, 0.0f64))
-                        .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
-                }
+                        .call_method1("set_model_load_time", (load_time,))
+                        .map_err(|e| BridgeError::new(BridgeStage::SetLoadTime, e))?;
 
-                // 6. Wrap each Python snapshot fn as a Rust closure.
-                let sources_cache: Vec<ComponentMetricsSource> = py_sources
-                    .iter()
-                    .map(|item| build_rust_source(&item))
-                    .collect::<PyResult<_>>()
-                    .map_err(|e| BridgeError::new(BridgeStage::WrapPySource, e))?;
+                    // 3. Wire the registry as a /metrics callback against the
+                    //    shared EngineMetrics handle. Happens BEFORE we look at
+                    //    engine sources so model_load_time emits even if the
+                    //    engine opts out of per-rank gauges.
+                    let py_metrics = Py::new(py, py_metrics_state)
+                        .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
+                    metrics_mod
+                        .call_method1(
+                            "register_engine_registry",
+                            (py_metrics.clone_ref(py), registry),
+                        )
+                        .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
 
-                Ok(Some(Arc::new(PyComponentMetricsPublisher {
-                    gauges,
-                    sources_cache,
-                    update_failed_logged: AtomicBool::new(false),
-                }) as Arc<dyn ComponentMetricsPublisher>))
-            })
+                    // 4. Ask engine for source descriptors. Empty list means
+                    //    the engine has no per-rank KV gauges to expose; the
+                    //    framework still emits lifecycle + model_load_time
+                    //    gauges from steps 1-3 above.
+                    let bound = engine.bind(py);
+                    let py_sources_obj = bound
+                        .call_method0("component_metrics_sources")
+                        .map_err(|e| BridgeError::new(BridgeStage::GetSources, e))?;
+                    let py_sources = py_sources_obj
+                        .downcast::<pyo3::types::PyList>()
+                        .map_err(|e| BridgeError::new(BridgeStage::GetSources, e.into()))?;
+                    if py_sources.is_empty() {
+                        return Ok(None);
+                    }
+
+                    // 5. Seed zeros for each rank so the per-rank gauges show
+                    //    up in the very first /metrics scrape.
+                    for item in py_sources.iter() {
+                        let dp_rank: u32 = item
+                            .getattr("dp_rank")
+                            .and_then(|v| v.extract())
+                            .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
+                        let rank_str = dp_rank.to_string();
+                        gauges
+                            .bind(py)
+                            .call_method1("set_total_blocks", (rank_str.clone(), 0u64))
+                            .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
+                        gauges
+                            .bind(py)
+                            .call_method1("set_gpu_cache_usage", (rank_str, 0.0f64))
+                            .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
+                    }
+
+                    // 6. Wrap each Python snapshot fn as a Rust closure.
+                    let sources_cache: Vec<ComponentMetricsSource> = py_sources
+                        .iter()
+                        .map(|item| build_rust_source(&item))
+                        .collect::<PyResult<_>>()
+                        .map_err(|e| BridgeError::new(BridgeStage::WrapPySource, e))?;
+
+                    Ok(Some(Arc::new(PyComponentMetricsPublisher {
+                        gauges,
+                        sources_cache,
+                        update_failed_logged: AtomicBool::new(false),
+                    })
+                        as Arc<dyn ComponentMetricsPublisher>))
+                },
+            )
         })
         .await;
 
@@ -953,10 +956,8 @@ impl ComponentMetricsPublisher for PyComponentMetricsPublisher {
                 ));
             // hit_rate is None when the engine hasn't observed requests yet.
             if let Some(hit_rate) = snap.kv_cache_hit_rate {
-                result = result.and(g.call_method1(
-                    "set_kv_cache_hit_rate",
-                    (rank_str, hit_rate as f64),
-                ));
+                result = result
+                    .and(g.call_method1("set_kv_cache_hit_rate", (rank_str, hit_rate as f64)));
             }
             if let Err(e) = result
                 && !self.update_failed_logged.swap(true, Ordering::Relaxed)
