@@ -35,7 +35,7 @@ from dynamo.common.backend.engine import (
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
     build_health_check_payload,
-    build_text_health_check_payload,
+    is_probe,
 )
 from dynamo.common.backend.publisher import (
     KvEventSource,
@@ -277,6 +277,31 @@ class SglangLLMEngine(LLMEngine):
         # above) before we yield the bootstrap chunk — otherwise the
         # decode peer can connect to a room that doesn't exist yet.
         if self.serving_mode == DisaggregationMode.PREFILL:
+            # Canary probes: drain the engine stream and yield a single
+            # terminal so `HealthCheckManager` observes actual engine
+            # completion. Without this, the bootstrap chunk below makes
+            # the probe "succeed" before the engine has done any work.
+            if is_probe(request):
+                try:
+                    async for _ in stream:
+                        if context.is_stopped():
+                            break
+                except Exception as e:
+                    logger.warning(
+                        "prefill canary stream failed (rid=%s): %s",
+                        context.trace_id,
+                        e,
+                        exc_info=True,
+                    )
+                    self._abort_sglang_request(context.trace_id)
+                    yield {
+                        "token_ids": [],
+                        "index": 0,
+                        "finish_reason": f"error: {e}",
+                    }
+                    return
+                yield {"token_ids": [], "index": 0, "finish_reason": "stop"}
+                return
             yield {
                 "token_ids": [],
                 "index": 0,
@@ -578,6 +603,20 @@ class SglangLLMEngine(LLMEngine):
         ]
 
     async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        # `--use-sglang-tokenizer` consumes `messages`/`prompt`/`text` via
+        # `_input_param_manager.get_input_param(use_tokenizer=True)` and
+        # reads flat sampling fields. Neither shape survives the
+        # `PreprocessedRequest` typed deserialize on the canary path
+        # (no `prompt`/`messages` fields on the struct), so the canary
+        # is opted out in tokenizer mode. Activity-driven health remains.
+        if self._use_sglang_tokenizer:
+            logger.warning(
+                "SGLang tokenizer-mode worker: health-check canary disabled — "
+                "PreprocessedRequest has no prompt/messages field for the "
+                "JSON probe adapter. Endpoint readiness will rely on real "
+                "request traffic."
+            )
+            return None
         extras: Optional[dict[str, Any]] = None
         # FAKE_BOOTSTRAP_HOST tells SGLang to short-circuit real KV transfer;
         # room=0 always routes to DP rank 0.
@@ -599,11 +638,6 @@ class SglangLLMEngine(LLMEngine):
                     "bootstrap_room": 0,
                 }
             }
-        # `--use-sglang-tokenizer` reads flat sampling fields + a prompt
-        # via `_input_param_manager.get_input_param(..., use_tokenizer=True)`;
-        # token-shape payloads silently ignore `max_tokens` in that mode.
-        if self._use_sglang_tokenizer:
-            return build_text_health_check_payload(extras=extras)
         bos = bos_token_id_or(getattr(self.engine, "tokenizer_manager", None))
         return build_health_check_payload(bos_token_id=bos, extras=extras)
 

@@ -28,7 +28,6 @@ __all__ = [
     "HEALTH_CHECK_KEY",
     "bos_token_id_or",
     "build_health_check_payload",
-    "build_text_health_check_payload",
     "is_probe",
     "parse_health_check_payload_cli",
 ]
@@ -49,25 +48,6 @@ def build_health_check_payload(
         "token_ids": [bos_token_id],
         "stop_conditions": {"max_tokens": 1, "ignore_eos": True},
         "sampling_options": {"temperature": 0.0},
-    }
-    if extras:
-        payload.update(extras)
-    return _finalize(payload)
-
-
-def build_text_health_check_payload(
-    prompt: str = "Test",
-    *,
-    extras: Optional[dict[str, Any]] = None,
-) -> dict[str, Any]:
-    """Text-shape canary payload for backends whose handler expects a
-    `prompt` plus flat sampling fields (e.g. SGLang's text-input mode).
-    Same env-override + marker semantics as :func:`build_health_check_payload`.
-    """
-    payload: dict[str, Any] = {
-        "prompt": prompt,
-        "max_tokens": 1,
-        "temperature": 0.0,
     }
     if extras:
         payload.update(extras)

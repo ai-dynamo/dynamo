@@ -13,7 +13,6 @@ from dynamo.common.backend.health_check import (
     HEALTH_CHECK_KEY,
     bos_token_id_or,
     build_health_check_payload,
-    build_text_health_check_payload,
     is_probe,
     parse_health_check_payload_cli,
 )
@@ -57,15 +56,6 @@ def test_env_override_empty_dict_wins_over_engine_default(monkeypatch):
     monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", "{}")
     payload = build_health_check_payload(bos_token_id=42)
     assert payload == {HEALTH_CHECK_KEY: True}
-
-
-def test_text_payload_shape(monkeypatch):
-    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
-    payload = build_text_health_check_payload()
-    assert payload["prompt"] == "Test"
-    assert payload["max_tokens"] == 1
-    assert payload["temperature"] == 0.0
-    assert payload[HEALTH_CHECK_KEY] is True
 
 
 def test_bos_token_id_or_walks_tokenizer_chain():
