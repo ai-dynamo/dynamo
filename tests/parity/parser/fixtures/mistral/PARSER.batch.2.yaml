@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+mode: batch
+cases:
+  PARSER.batch.2.a:
+    description: Parallel calls in JSON array
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments":
+      {"timezone": "EST"}}][/TOOL_CALLS]'
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id003
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *id001
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.2.c:
+    description: With surrounding narration
+    ref: dynamo
+    model_text: 'Both: [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments":
+      {"timezone": "EST"}}][/TOOL_CALLS] Done.'
+    tools:
+    - *id002
+    - *id003
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:'
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both: '
+      sglang:
+        calls: []
+        normal_text: 'Both:'
+  PARSER.batch.2.d:
+    description: Same-name twice
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments":
+      {"location": "LA"}}][/TOOL_CALLS]'
+    tools:
+    - *id002
+    - *id002
+    expected:
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id004
+      sglang:
+        calls: []
+        normal_text: ''

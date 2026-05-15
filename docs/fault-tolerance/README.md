@@ -15,6 +15,7 @@ Fault tolerance in Dynamo operates at multiple levels:
 |-------|-----------|---------|
 | **Request** | Migration, Cancellation | Handle in-flight request failures |
 | **Worker** | Health Checks, Graceful Shutdown | Detect and recover from worker failures |
+| **Engine Process** | [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) | Active/passive recovery for same-node engine-process failures in Kubernetes |
 | **System** | Load Shedding, Request Rejection | Prevent system overload |
 | **Infrastructure** | etcd HA, NATS resilience | Handle infrastructure component failures |
 
@@ -70,6 +71,10 @@ Dynamo provides multiple health check mechanisms:
 
 See [Health Checks](../observability/health-checks.md) for details.
 
+### Shadow Engine Failover
+
+For Kubernetes deployments, [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) can help with same-node recovery from unknown backend engine or software-process failures. It uses GPU Memory Service to keep model weights resident while a standby or replacement engine attaches. It does not preserve in-flight requests or KV cache state, and it does not cover GPU or node loss.
+
 ## Configuration Quick Reference
 
 | Feature | Environment Variable | Default |
@@ -78,8 +83,9 @@ See [Health Checks](../observability/health-checks.md) for details.
 | Canary health checks | `DYN_HEALTH_CHECK_ENABLED` | `false` |
 | Canary wait time | `DYN_CANARY_WAIT_TIME` | `10` seconds |
 | Health check timeout | `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` seconds |
-| Decode blocks threshold | `--active-decode-blocks-threshold` | None (disabled) |
-| Prefill tokens threshold | `--active-prefill-tokens-threshold` | None (disabled) |
+| Decode blocks threshold | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` |
+| Prefill tokens threshold | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` |
+
 
 ## Failure Scenarios and Recovery
 
@@ -126,6 +132,7 @@ See [Fault Tolerance Testing](testing.md) for details.
 ## Related Documentation
 
 - [Observability](../observability/README.md) - Metrics and monitoring
+- [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) - Same-node active/passive engine failover for Kubernetes deployments
 - [Distributed Runtime](../design-docs/distributed-runtime.md) - Service discovery architecture
 - [Event Plane](../design-docs/event-plane.md) - Pub/sub for KV cache events and worker metrics
 - [Discovery Plane](../design-docs/discovery-plane.md) - Service discovery and coordination

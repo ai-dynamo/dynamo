@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: minimax_m2
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: Invoke with no <parameter>
+    ref: dynamo
+    model_text: |-
+      <minimax:tool_call>
+      <invoke name="get_time">
+      </invoke>
+      </minimax:tool_call>
+    tools:
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  PARSER.batch.6.b:
+    description: Invoke with extra newline
+    ref: dynamo
+    model_text: |-
+      <minimax:tool_call>
+      <invoke name="get_time">
+
+      </invoke>
+      </minimax:tool_call>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id003
+      sglang: *id003

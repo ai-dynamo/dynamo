@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen25
+model_label: Qwen 2.5
+mode: batch
+cases:
+  PARSER.batch.1:
+    description: Single tool call (happy path)
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+  PARSER.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id001
+    expected:
+      dynamo: &id002
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang: *id002
+  PARSER.batch.9:
+    description: Empty input
+    model_text: ''
+    tools:
+    - *id001
+    expected:
+      dynamo: &id003
+        calls: []
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang: *id003
+  PARSER.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather",
+      "arguments": {"location": "LA"}}</tool_call>'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name":
+          "get_weather", "arguments": {"location": "LA"}}</tool_call>'

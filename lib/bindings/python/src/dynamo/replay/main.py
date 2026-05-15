@@ -419,10 +419,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     parser.add_argument(
+        "--trace-format",
+        choices=("mooncake", "applied_compute_agentic"),
+        default="mooncake",
+        help="format of trace_file when replaying from a file",
+    )
+    parser.add_argument(
         "--trace-block-size",
         type=int,
         default=512,
         help="tokens represented by each hash_id in the trace file; only used for file replay",
+    )
+    parser.add_argument(
+        "--trace-shared-prefix-ratio",
+        type=float,
+        default=0.0,
+        help="fraction of the initial prompt blocks to share across sessions for applied_compute_agentic trace replay",
+    )
+    parser.add_argument(
+        "--trace-num-prefix-groups",
+        type=int,
+        default=0,
+        help="number of cross-session shared-prefix groups for applied_compute_agentic trace replay",
     )
     parser.add_argument(
         "--report-json",
@@ -458,6 +476,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if using_synthetic and not all(value is not None for value in synthetic_args):
         parser.error(
             "synthetic replay requires --input-tokens, --output-tokens, and --request-count"
+        )
+    if (
+        using_trace_file
+        and args.trace_format == "applied_compute_agentic"
+        and args.replay_concurrency is None
+    ):
+        parser.error(
+            "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
 
     extra_engine_args = _load_engine_args(args.extra_engine_args)
@@ -531,6 +557,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
             trace_block_size=args.trace_block_size,
+            trace_format=args.trace_format,
+            trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
+            trace_num_prefix_groups=args.trace_num_prefix_groups,
         )
     else:
         report = run_synthetic_trace_replay(

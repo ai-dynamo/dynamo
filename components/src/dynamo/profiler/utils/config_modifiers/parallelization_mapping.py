@@ -1,14 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Profiler-internal parallelization helpers.
+
+``PickedParallelConfig`` has been relocated to
+``dynamo.planner.config.parallelization`` so both the profiler and the planner
+can share it. It is re-exported here for back-compat.
+"""
+
 import copy
 import logging
 from dataclasses import dataclass
 from enum import Enum
 
 from dynamo.planner.config.defaults import SubComponentType
+from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
 from dynamo.profiler.utils.model_info import MOE_ADDITIONAL_TP_ARCHITECTURES, ModelInfo
+
+__all__ = [
+    "ParallelizationStrategy",
+    "ParallelizationMapping",
+    "PickedParallelConfig",
+    "get_candidate_parallel_mappings",
+    "apply_parallel_mapping_to_config",
+]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -100,51 +116,6 @@ class ParallelizationMapping:
         raise ValueError(
             "Invalid ParallelizationMapping: no parallelization strategy set"
         )
-
-
-@dataclass(frozen=True)
-class PickedParallelConfig:
-    """Lightweight representation of a picked parallelization config.
-
-    Uses the same (tp, pp, dp, moe_tp, moe_ep) tuple that AIC's enumeration
-    and picking pipelines produce.  Unlike :class:`ParallelizationMapping`,
-    this stores all five dimensions explicitly rather than using mutually
-    exclusive optional fields.
-    """
-
-    tp: int = 1
-    pp: int = 1
-    dp: int = 1
-    moe_tp: int = 1
-    moe_ep: int = 1
-
-    @property
-    def num_gpus(self) -> int:
-        return self.tp * self.pp * self.dp
-
-    @property
-    def tp_size(self) -> int:
-        """Effective TP for KV-head splitting (TP or TEP; 1 for DEP)."""
-        if self.moe_ep > 1:
-            return 1
-        if self.moe_tp > 1:
-            return self.moe_tp
-        return self.tp
-
-    def label(self) -> str:
-        if self.moe_ep > 1:
-            return f"dep{self.moe_ep}"
-        elif self.moe_tp > 1:
-            return f"tep{self.moe_tp}"
-        return f"tp{self.tp}"
-
-    def to_parallelization_mapping(self) -> ParallelizationMapping:
-        """Convert to :class:`ParallelizationMapping`."""
-        if self.moe_ep > 1:
-            return ParallelizationMapping(dep=self.moe_ep)
-        elif self.moe_tp > 1:
-            return ParallelizationMapping(tep=self.moe_tp)
-        return ParallelizationMapping(tp=self.tp)
 
 
 def _check_divisibility(

@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.audio_loader as audio_loader_module
+from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.multimodal.audio_loader import AudioLoader
 
 pytestmark = [
@@ -16,34 +17,35 @@ pytestmark = [
 ]
 
 
-def test_normalize_audio_url_converts_local_paths(tmp_path):
-    audio_path = tmp_path / "sample.wav"
-    audio_path.write_bytes(b"RIFF")
+def _permissive_http_policy() -> UrlValidationPolicy:
+    """Policy that lets existing tests keep using https://example.com/... URLs.
 
-    assert (
-        AudioLoader._normalize_audio_url(str(audio_path))
-        == audio_path.resolve().as_uri()
+    Private/loopback IPs and DNS checks are bypassed so tests don't depend on
+    real DNS resolution of example.com.
+    """
+    return UrlValidationPolicy(
+        allow_http=True,
+        allow_private_ips=True,
     )
 
 
-def test_normalize_audio_url_preserves_data_urls():
-    data_url = "data:audio/wav;base64,UklGRg=="
-    assert AudioLoader._normalize_audio_url(data_url) == data_url
+@pytest.mark.asyncio
+async def test_load_audio_rejects_http_by_default():
+    """Wiring smoke: AudioLoader plumbs ``url_policy`` to the validator.
 
+    Validator behavior is covered in ``test_url_validator.py``;
+    per-hop SSRF revalidation in ``http/test_http_backends.py``.
+    """
+    loader = AudioLoader(url_policy=UrlValidationPolicy())
 
-def test_normalize_audio_url_preserves_http_urls():
-    url = "https://example.com/audio.wav"
-    assert AudioLoader._normalize_audio_url(url) == url
-
-
-def test_normalize_audio_url_raises_on_missing_file():
-    with pytest.raises(FileNotFoundError, match="Error reading file"):
-        AudioLoader._normalize_audio_url("/nonexistent/audio.wav")
+    with pytest.raises(ValueError, match="not allowed"):
+        await loader.load_audio("http://example.com/x.wav")
 
 
 @pytest.mark.asyncio
 async def test_load_audio_uses_vllm_media_connector():
     loader = AudioLoader()
+    loader._url_policy = UrlValidationPolicy()
     waveform = np.random.randn(16000).astype(np.float32)
     sr = 44100.0
     loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
@@ -60,7 +62,7 @@ async def test_load_audio_uses_vllm_media_connector():
 
 @pytest.mark.asyncio
 async def test_load_audio_rejects_empty_waveform():
-    loader = AudioLoader()
+    loader = AudioLoader(url_policy=_permissive_http_policy())
     loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
         return_value=(np.array([], dtype=np.float32), 16000.0)
     )

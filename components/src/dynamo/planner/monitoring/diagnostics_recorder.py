@@ -124,7 +124,7 @@ class DiagnosticsRecorder:
             return
 
         diag = effects.diagnostics or TickDiagnostics()
-        interval = self.config.throughput_adjustment_interval
+        interval = self.config.throughput_adjustment_interval_seconds
 
         prefill_engines: list[PerEngineFpm] = []
         decode_engines: list[PerEngineFpm] = []
@@ -231,7 +231,7 @@ class DiagnosticsRecorder:
         ]
 
         fig = make_subplots(
-            rows=6,
+            rows=7,
             cols=2,
             subplot_titles=(
                 "Replica Counts",
@@ -246,6 +246,8 @@ class DiagnosticsRecorder:
                 "Sequence Lengths (Observed vs Predicted)",
                 "Load Scaling Decisions",
                 "Throughput Scaling Decisions",
+                "Cumulative GPU Hours",
+                "",
             ),
             vertical_spacing=0.055,
             horizontal_spacing=0.08,
@@ -342,10 +344,10 @@ class DiagnosticsRecorder:
             col=1,
         )
         fig.add_hline(
-            y=self.config.ttft,
+            y=self.config.ttft_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.ttft:.0f}ms)",
+            annotation_text=f"SLA ({self.config.ttft_ms:.0f}ms)",
             row=2,
             col=1,
         )
@@ -363,10 +365,10 @@ class DiagnosticsRecorder:
             col=2,
         )
         fig.add_hline(
-            y=self.config.itl,
+            y=self.config.itl_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.itl:.0f}ms)",
+            annotation_text=f"SLA ({self.config.itl_ms:.0f}ms)",
             row=2,
             col=2,
         )
@@ -385,10 +387,10 @@ class DiagnosticsRecorder:
             col=1,
         )
         fig.add_hline(
-            y=self.config.ttft,
+            y=self.config.ttft_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.ttft:.0f}ms)",
+            annotation_text=f"SLA ({self.config.ttft_ms:.0f}ms)",
             row=3,
             col=1,
         )
@@ -406,10 +408,10 @@ class DiagnosticsRecorder:
             col=2,
         )
         fig.add_hline(
-            y=self.config.itl,
+            y=self.config.itl_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.itl:.0f}ms)",
+            annotation_text=f"SLA ({self.config.itl_ms:.0f}ms)",
             row=3,
             col=2,
         )
@@ -705,6 +707,18 @@ class DiagnosticsRecorder:
                 2,
             )
 
+        # -- Row 7: Cumulative GPU hours ---------------------------------
+        fig.add_trace(
+            go.Scatter(
+                x=labels,
+                y=_vals("gpu_hours"),
+                name="Cumulative GPU Hours",
+                mode="lines+markers",
+            ),
+            row=7,
+            col=1,
+        )
+
         # -- Layout -------------------------------------------------------
 
         # Count actual replica transitions, not just ticks where a decision
@@ -736,11 +750,11 @@ class DiagnosticsRecorder:
             f"Time range: {t0} — {t1} ({len(snaps)} ticks)<br>"
             f"Replica transitions: {num_scaling_events} | "
             f"GPU hours: {snaps[-1].gpu_hours:.2f}<br>"
-            f"SLA targets: TTFT={self.config.ttft:.0f}ms, ITL={self.config.itl:.0f}ms"
+            f"SLA targets: TTFT={self.config.ttft_ms:.0f}ms, ITL={self.config.itl_ms:.0f}ms"
         )
         fig.update_layout(
             title=dict(text=summary, font=dict(size=14), y=0.99, yanchor="top"),
-            height=2000,
+            height=2300,
             showlegend=True,
             legend=dict(orientation="h", yanchor="top", y=-0.05),
             template="plotly_white",

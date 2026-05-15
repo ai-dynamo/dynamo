@@ -11,7 +11,10 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{BlockHashOptions, OverlapScores, RouterEvent, WorkerId};
+use dynamo_kv_router::protocols::{
+    BlockHashOptions, OverlapScores, RouterEvent, StorageTier, WorkerId,
+};
+use dynamo_kv_router::scheduling::TierOverlapBlocks;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -33,6 +36,10 @@ enum ReplayIndexer {
 
 impl ReplayIndexer {
     async fn apply_event(&self, event: RouterEvent) {
+        // TODO: support lower tier events in replay indexer
+        if !event.storage_tier.is_gpu() {
+            return;
+        }
         match self {
             Self::Single(indexer) => indexer.apply_event(event).await,
             Self::Concurrent(indexer) => indexer.apply_event(event).await,
@@ -94,6 +101,20 @@ impl KvCacheEventSink for ReplayKvEventSink {
             .send(RouterEvent::new(self.worker_id, event))
             .map_err(|_| anyhow!("replay router event channel closed"))
     }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: dynamo_kv_router::protocols::KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.event_tx
+            .send(RouterEvent::with_storage_tier(
+                self.worker_id,
+                event,
+                storage_tier,
+            ))
+            .map_err(|_| anyhow!("replay router event channel closed"))
+    }
 }
 
 #[derive(Default)]
@@ -111,6 +132,7 @@ pub(crate) struct KvReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
     scheduler: Arc<ReplayScheduler>,
+    scheduler_cancel: CancellationToken,
     event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
@@ -131,7 +153,8 @@ impl KvReplayRouter {
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
         let selector = replay_selector(&config);
-        let policy = replay_policy(&config, args);
+        let policy = replay_policy(&config);
+        let scheduler_cancel = CancellationToken::new();
         let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
             slots,
             worker_config_rx,
@@ -142,7 +165,7 @@ impl KvReplayRouter {
             prefill_load_estimator,
             config.router_queue_recheck_interval(),
             config.router_track_prefill_tokens,
-            CancellationToken::new(),
+            scheduler_cancel.clone(),
             "replay",
             false,
         ));
@@ -159,6 +182,7 @@ impl KvReplayRouter {
             config,
             block_size: args.block_size as u32,
             scheduler,
+            scheduler_cancel,
             event_tx: Mutex::new(Some(event_tx)),
             event_task: Mutex::new(Some(event_task)),
             indexer,
@@ -187,6 +211,21 @@ impl KvReplayRouter {
             .indexer
             .find_matches_for_request(&request.tokens, None)
             .await?;
+        let effective_overlap_blocks = overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| (*worker, *overlap as f64))
+            .collect();
+        let effective_cached_tokens = overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap)| {
+                (
+                    *worker,
+                    (*overlap as usize) * usize::try_from(self.block_size).unwrap_or(0),
+                )
+            })
+            .collect();
         let token_seq = self.config.compute_seq_hashes_for_tracking(
             &request.tokens,
             self.block_size,
@@ -200,7 +239,9 @@ impl KvReplayRouter {
                 Some(uuid.to_string()),
                 request.tokens.len(),
                 token_seq,
-                overlaps,
+                TierOverlapBlocks::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
                 None,
                 true,
                 None,
@@ -209,6 +250,7 @@ impl KvReplayRouter {
                     u32::try_from(request.max_output_tokens)
                         .context("max_output_tokens does not fit into u32")?,
                 ),
+                None,
                 None,
                 None,
             )
@@ -232,6 +274,7 @@ impl KvReplayRouter {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        self.scheduler_cancel.cancel();
         self.event_tx.lock().unwrap().take();
         let Some(event_task) = self.event_task.lock().unwrap().take() else {
             return Ok(());
@@ -251,7 +294,7 @@ impl KvReplayRouter {
         self.scheduler.get_potential_loads(
             None,
             isl_tokens,
-            OverlapScores::default(),
+            std::collections::HashMap::new(),
             track_prefill_tokens,
         )
     }
@@ -340,5 +383,69 @@ impl ReplayRouter {
             Self::RoundRobin(_) => Vec::new(),
             Self::Kv(router) => router.debug_potential_loads(isl_tokens, track_prefill_tokens),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, StorageTier, WorkerWithDpRank,
+        compute_block_hash_for_seq,
+    };
+
+    use super::*;
+
+    fn store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        tokens_hash: LocalBlockHash,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash,
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+            storage_tier,
+        )
+    }
+
+    #[tokio::test]
+    async fn replay_indexer_ignores_lower_tier_events_for_primary_overlap() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let tokens = vec![1, 2, 3, 4];
+        let tokens_hash = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())[0];
+        let indexer = create_replay_indexer(4, 1);
+
+        indexer
+            .apply_event(store_event(7, 1, tokens_hash, StorageTier::HostPinned))
+            .await;
+        indexer.flush().await;
+        let matches = indexer
+            .find_matches_for_request(&tokens, None)
+            .await
+            .unwrap();
+        assert_eq!(matches.scores.get(&worker), None);
+
+        indexer
+            .apply_event(store_event(7, 2, tokens_hash, StorageTier::Device))
+            .await;
+        indexer.flush().await;
+        let matches = indexer
+            .find_matches_for_request(&tokens, None)
+            .await
+            .unwrap();
+        assert_eq!(matches.scores.get(&worker), Some(&1));
     }
 }

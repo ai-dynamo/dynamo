@@ -15,7 +15,14 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HealthCheckPayload", "load_health_check_from_env"]
+# Marker key set on health-check probe requests. Backend payloads layer it
+# onto their default_payload via a to_dict() override so the marker survives
+# DYN_HEALTH_CHECK_PAYLOAD overrides. Handlers may inspect it to branch
+# probe-specific behavior (e.g. skip a synthetic first-yield that would
+# mask a hung engine rank).
+HEALTH_CHECK_KEY = "_HEALTH_CHECK"
+
+__all__ = ["HealthCheckPayload", "HEALTH_CHECK_KEY", "load_health_check_from_env"]
 
 
 def load_health_check_from_env(

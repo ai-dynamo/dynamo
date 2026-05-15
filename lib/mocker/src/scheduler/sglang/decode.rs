@@ -57,9 +57,12 @@ pub(super) fn cache_materialized_prefix(
         return;
     }
 
-    let Some(last_node) = req.last_node else {
-        return;
-    };
+    let last_node = req.last_node.unwrap_or_else(|| {
+        panic!(
+            "cache_materialized_prefix: request {} has aligned_tokens={aligned_tokens} but last_node is None",
+            req.uuid
+        )
+    });
 
     let sequence = req.sequence_prefix(aligned_tokens);
     let new_last =
