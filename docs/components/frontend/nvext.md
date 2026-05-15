@@ -209,7 +209,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Routed expert capture payload returned by SGLang-backed requests. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
 | `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
-| `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs accumulated across the chat-completions response and emitted on the final chunk. |
+| `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs accumulated across the chat-completions response and emitted on the final chunk. Supported only for single-choice requests (`n <= 1`). |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
 
 ### Example response `nvext`

@@ -364,6 +364,15 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
+        if self.inner.n.unwrap_or(1) > 1
+            && self
+                .nvext
+                .as_ref()
+                .and_then(|nvext| nvext.extra_fields.as_ref())
+                .is_some_and(|fields| fields.iter().any(|field| field == "completion_token_ids"))
+        {
+            anyhow::bail!("`nvext.extra_fields=[\"completion_token_ids\"]` requires `n <= 1`");
+        }
         // none for modalities
         // none for prediction
         // none for audio
@@ -563,6 +572,26 @@ mod tests {
         assert_eq!(
             <NvCreateChatCompletionRequest as NvExtProvider>::cache_salt(&request),
             Some("nvext-level")
+        );
+    }
+
+    #[test]
+    fn test_completion_token_ids_rejects_multiple_choices() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "(token-in mode)"}],
+            "n": 2,
+            "nvext": {
+                "extra_fields": ["completion_token_ids"]
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("n > 1 should be rejected");
+        assert!(
+            err.to_string().contains("completion_token_ids"),
+            "unexpected error: {err}"
         );
     }
 }
