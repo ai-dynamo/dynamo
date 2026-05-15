@@ -155,7 +155,7 @@ spec:
         - name: ENDPOINT
           value: kimi-k25-disagg-kv-eagle-frontend:8000
         - name: TRACE_FILE
-          value: /model-cache/traces/kv-reuse-difficult_200k-fixed/dataset.jsonl
+          value: /model-cache/traces/agent_trace_data/dataset.jsonl
         - name: CONCURRENCIES
           value: "32"
         - name: BENCHMARK_DURATION
