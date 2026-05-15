@@ -7,5 +7,6 @@ pub mod push_endpoint;
 pub mod push_handler;
 pub mod shared_tcp_endpoint;
 pub mod unified_server;
+pub mod velo_endpoint;
 
 use super::*;

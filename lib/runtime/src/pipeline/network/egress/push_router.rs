@@ -381,7 +381,7 @@ fn spawn_instance_removal_watcher(
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
     let manager = endpoint.drt().network_manager();
-    let req_client = manager.create_client()?;
+    let req_client = manager.create_client().await?;
     let resp_transport = endpoint.drt().tcp_server().await?;
 
     tracing::debug!(
@@ -876,6 +876,14 @@ where
                                     "Using NATS transport for instance"
                                 );
                                 (subject.clone(), "transport.nats.request")
+                            }
+                            TransportType::Velo(velo_endpoint) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    velo_endpoint = %velo_endpoint,
+                                    "Using velo transport for instance"
+                                );
+                                (velo_endpoint.clone(), "transport.velo.request")
                             }
                         };
                         (addr, kind, instance.clone())

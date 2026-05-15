@@ -17,6 +17,7 @@ use super::egress::unified_client::RequestPlaneClient;
 use super::ingress::shared_tcp_endpoint::SharedTcpServer;
 use super::ingress::unified_server::RequestPlaneServer;
 use crate::distributed::RequestPlaneMode;
+use crate::storage::kv;
 use anyhow::Result;
 use async_once_cell::OnceCell;
 use std::sync::Arc;
@@ -130,6 +131,9 @@ struct NetworkConfig {
 
     // NATS configuration (provided externally, not from env)
     nats_client: Option<async_nats::Client>,
+
+    // Velo bind config (host/port for the velo TCP transport).
+    velo: super::velo::VeloRuntimeConfig,
 }
 
 impl NetworkConfig {
@@ -164,6 +168,9 @@ impl NetworkConfig {
 
             // NATS (external)
             nats_client,
+
+            // Velo bind configuration (reads DYN_VELO_HOST / DYN_VELO_PORT).
+            velo: super::velo::VeloRuntimeConfig::from_env(),
         }
     }
 }
@@ -195,7 +202,7 @@ impl NetworkConfig {
 /// server.register_endpoint(...).await?;
 ///
 /// // Create client (not cached, lightweight)
-/// let client = manager.create_client()?;
+/// let client = manager.create_client().await?;
 /// client.send_request(...).await?;
 /// ```
 pub struct NetworkManager {
@@ -204,6 +211,10 @@ pub struct NetworkManager {
     server: Arc<OnceCell<Arc<dyn RequestPlaneServer>>>,
     cancellation_token: CancellationToken,
     component_registry: crate::component::Registry,
+    /// KV manager — required for the velo request plane (it backs velo's
+    /// `PeerDiscovery`). `None` for Kubernetes-discovery deployments; the
+    /// velo arm of `create_server`/`create_client` errors clearly in that case.
+    kv_manager: Option<kv::Manager>,
 }
 
 impl NetworkManager {
@@ -226,6 +237,7 @@ impl NetworkManager {
         nats_client: Option<async_nats::Client>,
         component_registry: crate::component::Registry,
         mode: RequestPlaneMode,
+        kv_manager: Option<kv::Manager>,
     ) -> Self {
         let config = NetworkConfig::from_env(nats_client);
 
@@ -261,6 +273,14 @@ impl NetworkManager {
                     "Initializing NetworkManager with NATS request plane"
                 );
             }
+            RequestPlaneMode::Velo => {
+                tracing::info!(
+                    %mode,
+                    host = %config.velo.bind_host,
+                    port = ?config.velo.bind_port,
+                    "Initializing NetworkManager with velo request plane"
+                );
+            }
         }
 
         Self {
@@ -269,6 +289,7 @@ impl NetworkManager {
             server: Arc::new(OnceCell::new()),
             cancellation_token,
             component_registry,
+            kv_manager,
         }
     }
 
@@ -309,11 +330,12 @@ impl NetworkManager {
     /// Returns an error if:
     /// - Client creation fails (e.g., invalid configuration)
     /// - NATS mode is selected but NATS client is not available
-    pub fn create_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
+    pub async fn create_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         match self.mode {
             RequestPlaneMode::Http => self.create_http_client(),
             RequestPlaneMode::Tcp => self.create_tcp_client(),
             RequestPlaneMode::Nats => self.create_nats_client(),
+            RequestPlaneMode::Velo => self.create_velo_client().await,
         }
     }
 
@@ -334,6 +356,7 @@ impl NetworkManager {
             RequestPlaneMode::Http => self.create_http_server().await,
             RequestPlaneMode::Tcp => self.create_tcp_server().await,
             RequestPlaneMode::Nats => self.create_nats_server().await,
+            RequestPlaneMode::Velo => self.create_velo_server().await,
         }
     }
 
@@ -467,5 +490,39 @@ impl NetworkManager {
 
         tracing::debug!("Creating NATS request plane client");
         Ok(Arc::new(NatsRequestClient::new(nats_client.clone())))
+    }
+
+    // ============================================================================
+    // PRIVATE: Velo
+    // ============================================================================
+
+    fn velo_kv_manager(&self) -> Result<kv::Manager> {
+        match &self.kv_manager {
+            Some(km) => Ok(km.clone()),
+            None => Err(anyhow::anyhow!(
+                "velo request plane requires a KV-store discovery backend (etcd/file/memory); \
+                 Kubernetes-only deployments are not yet supported by the velo transport"
+            )),
+        }
+    }
+
+    async fn create_velo_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
+        use super::ingress::velo_endpoint::VeloRequestPlaneServer;
+        let kv = self.velo_kv_manager()?;
+        let handle = super::velo::global_velo(kv, self.config.velo.clone()).await?;
+        let server = VeloRequestPlaneServer::new(handle.velo().clone())?;
+        Ok(server as Arc<dyn RequestPlaneServer>)
+    }
+
+    /// Build the velo request-plane client. Lazily initializes the per-process
+    /// velo instance on first call (a router-only process never calls
+    /// [`create_server`](Self::create_server), so the client path can't rely on
+    /// the server having initialized it first).
+    async fn create_velo_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
+        use super::egress::velo_client::VeloRequestPlaneClient;
+        let kv = self.velo_kv_manager()?;
+        let handle = super::velo::global_velo(kv, self.config.velo.clone()).await?;
+        let client = VeloRequestPlaneClient::new(handle.velo().clone());
+        Ok(client as Arc<dyn RequestPlaneClient>)
     }
 }

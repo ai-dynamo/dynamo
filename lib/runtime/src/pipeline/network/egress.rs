@@ -10,4 +10,6 @@ pub mod push_router;
 pub mod tcp_client;
 pub mod unified_client;
 
+pub mod velo_client;
+
 use super::*;

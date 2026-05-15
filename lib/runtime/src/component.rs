@@ -76,6 +76,8 @@ pub enum TransportType {
     Nats(String),
     Http(String),
     Tcp(String),
+    /// Velo-backed request plane address (`velo://<uuid>/<inst_hex>/<endpoint>`).
+    Velo(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]

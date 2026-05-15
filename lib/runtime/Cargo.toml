@@ -16,7 +16,6 @@ description = "Dynamo Runtime Library"
 ignored = ["mio"]
 
 [features]
-default = []
 integration = []
 testing-etcd = [] # Tests that require an active ETCD server
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
@@ -73,6 +72,9 @@ validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
 cudarc = { workspace = true, features = ["nvtx"], optional = true }
+
+# Velo (request plane transport)
+velo = { workspace = true }
 
 arc-swap = { version = "1" }
 crossbeam-queue = { version = "0.3" }
