@@ -142,10 +142,14 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
             extra_env=otel_env,
             worker_id="sample-agg-otlp",
         ):
-            wait_for_http_completions_ready(frontend_port=frontend_port, model=TEST_MODEL)
+            wait_for_http_completions_ready(
+                frontend_port=frontend_port, model=TEST_MODEL
+            )
 
             resp = _send_chat_completions(frontend_port, model=TEST_MODEL, max_tokens=5)
-            assert resp.status_code == 200, f"curl failed: {resp.status_code} {resp.text!r}"
+            assert (
+                resp.status_code == 200
+            ), f"curl failed: {resp.status_code} {resp.text!r}"
 
             # Poll until the batch exporter flushes (~5s default delay).
             deadline = time.monotonic() + 15.0
@@ -163,11 +167,13 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
 
     # Verify auto-span attributes round-tripped through OTLP.
     span = eg_spans[0]
-    assert _get_attr(span, "disagg_role") == "agg", (
-        f"expected disagg_role=agg, got {_get_attr(span, 'disagg_role')!r}"
-    )
+    assert (
+        _get_attr(span, "disagg_role") == "agg"
+    ), f"expected disagg_role=agg, got {_get_attr(span, 'disagg_role')!r}"
     assert _get_attr(span, "model") is not None, "missing `model` attribute"
-    assert _get_attr(span, "input_tokens") is not None, "missing `input_tokens` attribute"
+    assert (
+        _get_attr(span, "input_tokens") is not None
+    ), "missing `input_tokens` attribute"
 
 
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
@@ -196,7 +202,10 @@ def test_disagg_decode_span_links_to_prefill_span(
 
     ports = dynamo_dynamic_ports
     frontend_port = ports.frontend_port
-    prefill_system_port, decode_system_port = ports.system_ports[0], ports.system_ports[1]
+    prefill_system_port, decode_system_port = (
+        ports.system_ports[0],
+        ports.system_ports[1],
+    )
 
     with DynamoFrontendProcess(
         request,
@@ -224,12 +233,16 @@ def test_disagg_decode_span_links_to_prefill_span(
                 extra_env=otel_env,
                 worker_id="sample-decode",
             ):
-                wait_for_http_completions_ready(frontend_port=frontend_port, model=TEST_MODEL)
-
-                resp = _send_chat_completions(frontend_port, model=TEST_MODEL, max_tokens=5)
-                assert resp.status_code == 200, (
-                    f"curl failed: {resp.status_code} {resp.text!r}"
+                wait_for_http_completions_ready(
+                    frontend_port=frontend_port, model=TEST_MODEL
                 )
+
+                resp = _send_chat_completions(
+                    frontend_port, model=TEST_MODEL, max_tokens=5
+                )
+                assert (
+                    resp.status_code == 200
+                ), f"curl failed: {resp.status_code} {resp.text!r}"
 
                 # Wait for BOTH prefill and decode spans to arrive at the collector.
                 deadline = time.monotonic() + 20.0
@@ -246,8 +259,12 @@ def test_disagg_decode_span_links_to_prefill_span(
     # Single curl ⇒ at most one span per role; if there were retries the
     # last would win, which is fine for this regression test.
     by_role = {_get_attr(s, "disagg_role"): s for s in eg_spans}
-    assert "prefill" in by_role, f"no prefill engine.generate span; got roles {set(by_role)}"
-    assert "decode" in by_role, f"no decode engine.generate span; got roles {set(by_role)}"
+    assert (
+        "prefill" in by_role
+    ), f"no prefill engine.generate span; got roles {set(by_role)}"
+    assert (
+        "decode" in by_role
+    ), f"no decode engine.generate span; got roles {set(by_role)}"
 
     prefill_span = by_role["prefill"]
     decode_span = by_role["decode"]

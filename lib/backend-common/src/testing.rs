@@ -65,7 +65,9 @@ pub enum ConformanceFailure {
     NoTerminalChunk,
     StreamYieldedError(String),
     ConcurrentGenerateFailed(String),
-    CancellationNotObserved { after: Duration },
+    CancellationNotObserved {
+        after: Duration,
+    },
     CancellationIgnored,
     CleanupFailed(String),
     SecondCleanupFailed(String),
@@ -74,7 +76,9 @@ pub enum ConformanceFailure {
     KvEventSourcesNotIdempotent,
     MetricsSourcesFailed(String),
     MetricsSourcesNotIdempotent,
-    MetricsSnapshotTooSlow { took: Duration },
+    MetricsSnapshotTooSlow {
+        took: Duration,
+    },
     /// The engine's terminal `completion_usage.completion_tokens` doesn't
     /// match the sum of `chunk.token_ids.len()` it emitted across the
     /// stream. The framework records `output_tokens` from the chunk-token

@@ -52,7 +52,12 @@ fn is_otlp_export_enabled() -> bool {
         return true;
     }
     std::env::var("OTEL_EXPORT_ENABLED")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -943,7 +948,7 @@ mod tests {
         }
 
         fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: TraceCtx<'_, S>) {
-            if !ctx.span(id).is_some_and(|s| s.name() == self.span_name) {
+            if ctx.span(id).is_none_or(|s| s.name() != self.span_name) {
                 return;
             }
             let mut out = self.out.0.lock().unwrap();

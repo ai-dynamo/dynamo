@@ -70,7 +70,10 @@ def _find_engine_generate_span_entries(entries):
 
 
 def test_unified_worker_emits_engine_generate_span(
-    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_tokenizers
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_tokenizers,
 ):
     """Aggregated unified worker must emit at least one engine.generate
     span event under OTEL_EXPORT_ENABLED=1.
@@ -95,10 +98,14 @@ def test_unified_worker_emits_engine_generate_span(
             extra_env=_OTEL_ENV,
             worker_id="sample-agg",
         ) as worker:
-            wait_for_http_completions_ready(frontend_port=frontend_port, model=TEST_MODEL)
+            wait_for_http_completions_ready(
+                frontend_port=frontend_port, model=TEST_MODEL
+            )
 
             resp = _send_chat_completions(frontend_port, model=TEST_MODEL, max_tokens=5)
-            assert resp.status_code == 200, f"curl failed: {resp.status_code} {resp.text!r}"
+            assert (
+                resp.status_code == 200
+            ), f"curl failed: {resp.status_code} {resp.text!r}"
 
             # Poll the JSONL log for the span event — flush timing varies.
             engine_spans = []
@@ -124,6 +131,6 @@ def test_unified_worker_emits_engine_generate_span(
                     f"engine.generate SPAN_FIRST_ENTRY missing `{required}` "
                     f"attribute. Got keys: {sorted(first.keys())}"
                 )
-            assert first["disagg_role"] == "agg", (
-                f"expected disagg_role=agg, got {first['disagg_role']!r}"
-            )
+            assert (
+                first["disagg_role"] == "agg"
+            ), f"expected disagg_role=agg, got {first['disagg_role']!r}"
