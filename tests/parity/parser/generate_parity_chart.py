@@ -54,6 +54,7 @@ import datetime
 import html as html_lib
 import json
 import re
+import subprocess
 import zoneinfo
 from pathlib import Path
 
@@ -65,6 +66,22 @@ PARSER_CASES_MD = REPO_ROOT / "lib/parsers/PARSER_CASES.md"
 PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
 
 RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
+
+
+def _commit_sha() -> str | None:
+    """HEAD SHA at chart-generation time, or None if not in a git tree."""
+    try:
+        out = (
+            subprocess.check_output(
+                ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+        return out or None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
 
 
 def _peer_versions() -> dict[str, str]:
@@ -81,6 +98,142 @@ def _peer_versions() -> dict[str, str]:
         m = re.search(rf'"{name}(?:\[[^\]]*\])?==([0-9][^"]*)"', text)
         if m:
             out[name] = m.group(1)
+    return out
+
+
+def _build_family_inheritance(
+    refs: dict[str, tuple[str, int]],
+) -> dict[str, dict]:
+    """Derive each family's parser-inheritance map from config.rs + parsers.rs.
+
+    Detects:
+      • `ParserConfig::<Variant>(...)` — top-level backend variant
+      • `JsonParserType::<Sub>`         — Json sub-dispatch (Basic / DeepseekV3 / DeepseekV31)
+      • `Self::<factory>(...)`          — private factories (e.g. `deepseek_dsml`)
+      • `map.insert("alias", ToolCallConfig::<family>())` — aliases (parsers.rs)
+
+    Backend file is derived from the resolved (variant, sub_variant) tuple.
+    Returns `{family: {variant, sub_variant, factory, backend_file,
+    base_label, shared_with, aliases, filed_under_xml_misleading}}`.
+    """
+    cfg = (RUST_TOOL_CALLING_DIR / "config.rs").read_text()
+    pars_path = RUST_TOOL_CALLING_DIR / "parsers.rs"
+    pars = pars_path.read_text() if pars_path.exists() else ""
+
+    # Extract all ctor bodies (pub fn + fn) — captures private factories too.
+    ctor_pat = re.compile(
+        r"^\s*(?:pub )?fn (\w+)\([^)]*\)\s*->\s*Self\s*\{", re.MULTILINE
+    )
+    bodies: dict[str, str] = {}
+    for m in ctor_pat.finditer(cfg):
+        start = m.end()
+        depth, i = 1, start
+        while i < len(cfg) and depth > 0:
+            c = cfg[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            i += 1
+        bodies[m.group(1)] = cfg[start : i - 1]
+
+    def _classify(body: str) -> tuple[str | None, str | None, str | None]:
+        vm = re.search(r"ParserConfig::(\w+)\b", body)
+        variant = vm.group(1) if vm else None
+        sub = None
+        if variant == "Json":
+            sm = re.search(r"JsonParserType::(\w+)\b", body)
+            sub = sm.group(1) if sm else "Basic"
+        fm = re.search(r"Self::(\w+)\(([^)]*)\)", body)
+        factory = f"{fm.group(1)}({fm.group(2).strip()})" if fm else None
+        return variant, sub, factory
+
+    backend_file = {
+        ("Json", "Basic"): "json/base_json_parser.rs",
+        ("Json", "DeepseekV3"): "json/deepseek_v3_parser.rs",
+        ("Json", "DeepseekV31"): "json/deepseek_v3_1_parser.rs",
+        ("Xml", None): "xml/parser.rs",
+        ("Pythonic", None): "pythonic/pythonic_parser.rs",
+        ("Harmony", None): "harmony/harmony_parser.rs",
+        ("Dsml", None): "dsml/parser.rs",
+        ("Glm47", None): "xml/glm47_parser.rs",
+        ("KimiK2", None): "xml/kimi_k2_parser.rs",
+        ("Gemma4", None): "gemma4/parser.rs",
+    }
+    base_label = {
+        ("Json", "Basic"): "base_json_parser (JsonParserType::Basic)",
+        ("Json", "DeepseekV3"): "deepseek_v3_parser (JsonParserType::DeepseekV3)",
+        ("Json", "DeepseekV31"): "deepseek_v3_1_parser (JsonParserType::DeepseekV31)",
+        ("Xml", None): "xml::parser (shared XML base)",
+        ("Pythonic", None): "pythonic::parser (standalone)",
+        (
+            "Harmony",
+            None,
+        ): "harmony::parser (standalone; partial reuse of base_json's try_repair_truncated_json)",
+        ("Dsml", None): "dsml::parser (shared via deepseek_dsml() factory)",
+        ("Glm47", None): "glm47_parser (standalone; filed under xml/)",
+        ("KimiK2", None): "kimi_k2_parser (standalone; filed under xml/)",
+        ("Gemma4", None): "gemma4::parser (standalone)",
+    }
+
+    out: dict[str, dict] = {}
+    for family in refs:
+        body = bodies.get(family)
+        if body is None:
+            continue
+        variant, sub, factory = _classify(body)
+        if variant is None and factory:
+            # Resolve through factory (e.g. deepseek_dsml)
+            fbody = bodies.get(factory.split("(")[0])
+            if fbody:
+                variant, sub, _ = _classify(fbody)
+        key = (variant, sub) if variant == "Json" else (variant, None)
+        out[family] = {
+            "variant": variant,
+            "sub_variant": sub,
+            "factory": factory,
+            "backend_file": backend_file.get(key, "unknown"),
+            "base_label": base_label.get(key, f"{variant}"),
+            "key": key,
+            "aliases": [],
+            "shared_with": [],
+            "filed_under_xml_misleading": False,
+        }
+
+    # Aliases from parsers.rs (only ones where alias name != family name).
+    alias_pat = re.compile(r'map\.insert\("([^"]+)",\s*ToolCallConfig::(\w+)\(\)\)')
+    alias_to_target: dict[str, str] = {}
+    for m in alias_pat.finditer(pars):
+        alias, fam = m.group(1), m.group(2)
+        if alias != fam and fam in out:
+            out[fam]["aliases"].append(alias)
+            alias_to_target[alias] = fam
+
+    # shared_with — other families with the same (variant, sub_variant).
+    by_key: dict[tuple, list[str]] = {}
+    for fam, info in out.items():
+        by_key.setdefault(info["key"], []).append(fam)
+    for fam, info in out.items():
+        info["shared_with"] = [s for s in by_key[info["key"]] if s != fam]
+        info["filed_under_xml_misleading"] = (
+            info["backend_file"].startswith("xml/") and info["variant"] != "Xml"
+        )
+
+    # Synthesize entries for alias-only families (e.g. nemotron_nano, qwen25).
+    # These are in `refs` (registered in parsers.rs) but have no ctor of their
+    # own — the alias `map.insert("nemotron_nano", ToolCallConfig::qwen3_coder())`
+    # routes to the target's config. The alias gets the target's full
+    # inheritance tree, plus `alias_of` so the tooltip can mark itself as a
+    # leaf under the target rather than as the target itself.
+    for alias, target in alias_to_target.items():
+        if alias in out or target not in out:
+            continue
+        tgt = out[target]
+        out[alias] = {
+            **tgt,
+            "alias_of": target,
+        }
+
     return out
 
 
@@ -167,7 +320,10 @@ def _derive_no_peer_sets(cases: dict) -> tuple[set[str], set[str]]:
         by_family.setdefault(fam, []).append(case)
 
     def all_unavail(fam_cases: list[dict], impl: str) -> bool:
-        for c in fam_cases:
+        expected_cases = [c for c in fam_cases if isinstance(c.get("expected"), dict)]
+        if not expected_cases:
+            return False
+        for c in expected_cases:
             block = c.get("expected", {}).get(impl)
             if not isinstance(block, dict) or "unavailable" not in block:
                 return False
@@ -181,9 +337,9 @@ def _derive_no_peer_sets(cases: dict) -> tuple[set[str], set[str]]:
 def family_suffix(fam: str, no_vllm: set[str], no_sglang: set[str]) -> str:
     suff = ""
     if fam in no_vllm:
-        suff += " †"
+        suff += "†"
     if fam in no_sglang:
-        suff += " §"
+        suff += "§"
     return suff
 
 
@@ -294,6 +450,15 @@ def cell_for(case: dict | None) -> str:
     elif s_kind == "err":
         parts.append("S!")
 
+    # `reason:` on the `expected.dynamo` block flags Dynamo's own output as
+    # leaking tool call markup only when Dynamo also leaves residual
+    # `normal_text`. Dynamo can have non-leak reasons for dropped malformed
+    # markup, so don't mark those as `↯`.
+    if isinstance(dyn, dict) and dyn.get("reason") and bool(dyn.get("normal_text")):
+        if parts:
+            return "↯" + "".join(parts)
+        return "↯"
+
     if parts:
         return "".join(parts)
     if v_kind == "unavail" and s_kind == "unavail":
@@ -319,6 +484,8 @@ _LEGEND_MD = (
     "`=` full parity (Dynamo, vLLM, and SGLang produce the same results) · "
     "`V`/`S` divergence (V = vLLM, S = SGLang; intentional, has `reason:`) · "
     "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
+    "`↯` Dynamo leaks tool call markup into `normal_text` "
+    "(`expected.dynamo.reason:` carries the explanation) · "
     "`!` expected-error suffix (e.g. V!, S! — engine crashes by design) · "
     "`n/a` not applicable · "
     "`†` (parser column) = no vLLM peer parser for this family · "
@@ -358,7 +525,7 @@ def _format_output_block_html(block) -> str:
     if not isinstance(block, dict):
         return html_lib.escape("(no expectation)")
     if block.get("unavailable"):
-        return html_lib.escape("(unavailable)")
+        return html_lib.escape(f"unavailable: {block['unavailable']}")
     if "error" in block:
         return html_lib.escape(f"error matching {block['error']!r}")
     nt = block.get("normal_text", "") or ""
@@ -552,7 +719,9 @@ def _build_tooltip_html(case: dict, dyn) -> str:
     model_text = case.get("model_text")
     if isinstance(model_text, str) and model_text:
         parts.append('<div class="ttip-section">Input:</div>')
-        parts.append(f'<pre class="ttip-pre">{_colorize_xml(model_text)}</pre>')
+        parts.append(
+            f"<pre class=\"ttip-pre\">input_text='{_colorize_xml(model_text)}'</pre>"
+        )
 
     expected = case.get("expected") or {}
 
@@ -584,8 +753,17 @@ def _build_tooltip_html(case: dict, dyn) -> str:
 
     reasons = _tooltip_for(case, dyn) if isinstance(dyn, dict) else ""
     if reasons:
-        parts.append('<div class="ttip-section">Divergence:</div>')
+        parts.append('<div class="ttip-section">Divergence reason:</div>')
         parts.append(f'<pre class="ttip-pre">{html_lib.escape(reasons)}</pre>')
+
+    dyn_leak = (
+        dyn.get("reason")
+        if isinstance(dyn, dict) and bool(dyn.get("normal_text"))
+        else None
+    )
+    if dyn_leak:
+        parts.append('<div class="ttip-section">↯ Dynamo tool call leaks:</div>')
+        parts.append(f'<pre class="ttip-pre">{html_lib.escape(str(dyn_leak))}</pre>')
 
     parts.append("</div>")
     return "".join(parts)
@@ -612,9 +790,7 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
             continue
         name = _IMPL_DISPLAY.get(impl, impl)
         if "error" in block:
-            parts.append(
-                f"Divergent {name}: expected error matching {block['error']!r}"
-            )
+            parts.append(f"{name}: expected error matching {block['error']!r}")
             continue
         # Don't rely on PyYAML preserving anchor identity (the `block is dyn`
         # check above is the fast path; value equality is the safety net).
@@ -625,9 +801,9 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
         if n_block == n_dyn:
             continue
         if "reason" in block:
-            parts.append(f"Divergent reason ({name}): {block['reason']}")
+            parts.append(f"{name}: {block['reason']}")
         elif "calls" in block or "normal_text" in block:
-            parts.append(f"Divergent {name}: research-needed (no `reason:` field yet)")
+            parts.append(f"{name}: (research-needed — no `reason:` field yet)")
     return "\n".join(parts)
 
 
@@ -636,11 +812,30 @@ def _cell_class(text: str) -> str:
         return "na"
     if "!" in text:
         return "err"
-    if "?" in text:
+    if "?" in text or "↯" in text:
         return "research"
-    # = and intentional-divergence cells (V, S, VS) share the "ok" class:
-    # a documented `reason:` means the divergence is accounted for.
-    return "ok"
+    if text == "=":
+        return "ok"
+    # V / S / VS with a documented `reason:` — accepted divergence, but
+    # NOT parity, so don't color it green.
+    return "documented"
+
+
+def _build_na_tooltip_html(case: dict) -> str:
+    """Tooltip for an n/a stub case (only `reason:` in YAML, no `expected:`
+    block). Renders case id + description + the reason. Used when the cell
+    is n/a because the scenario doesn't apply to the family's parser syntax."""
+    case_id = case.get("__case_id", "")
+    desc = case.get("description") or ""
+    head = f"{case_id} — {desc}" if (case_id and desc) else (case_id or desc)
+    reason = case.get("reason") or "n/a (no reason given)"
+    parts = ['<div class="ttip">']
+    if head:
+        parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
+    parts.append('<div class="ttip-section">Why n/a:</div>')
+    parts.append(f'<pre class="ttip-pre">{html_lib.escape(str(reason))}</pre>')
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def render_cell_html(case: dict | None) -> str:
@@ -651,7 +846,13 @@ def render_cell_html(case: dict | None) -> str:
 
     dyn = case.get("expected", {}).get("dynamo")
     if not isinstance(dyn, dict):
-        return f'<td class="cell {cls}">{text}</td>'
+        # n/a stub: case has only `reason:` (no `expected:` block).
+        fp = case.get("__fixture_path", "")
+        ttip = _build_na_tooltip_html(case)
+        if not fp:
+            return f'<td class="cell {cls}">{text}{ttip}</td>'
+        href = html_lib.escape(fp)
+        return f'<td class="cell {cls}"><a href="{href}">{text}</a>{ttip}</td>'
 
     fp = case.get("__fixture_path", "")
     # Case id + description live in the rich CSS tooltip head — don't also
@@ -663,20 +864,165 @@ def render_cell_html(case: dict | None) -> str:
     return f'<td class="cell {cls}"><a href="{href}">{text}</a>{ttip}</td>'
 
 
+def _parser_inheritance_tooltip_html(
+    family: str,
+    info: dict,
+    ctor_ref: tuple[str, int] | None,
+    no_vllm: set[str] | None = None,
+    no_sglang: set[str] | None = None,
+) -> str:
+    """Rich `.ttip` tooltip rendering the parser inheritance as an ASCII
+    tree localized to the target family: variant header, siblings sharing
+    the same backend, the target marked with `← THIS`, aliases nested under
+    the target, and a warning when filed under `xml/` but bypassing the
+    shared XML base. `ctor_ref` is unused here (was for older field-based
+    layout) — kept for API stability with `_parser_cell_html`."""
+    del ctor_ref
+
+    variant = info["variant"] or "?"
+    sub_variant = info["sub_variant"]
+    backend_file = info["backend_file"]
+    factory = info["factory"]
+    alias_of = info.get("alias_of")  # set when this family is an alias-only entry
+
+    # Header: ParserConfig::<Variant>[::<Sub>] → <backend file>  [(factory: <name>)]
+    head_parts = [f"ParserConfig::{variant}"]
+    if sub_variant:
+        head_parts[-1] = f"ParserConfig::{variant}::{sub_variant}"
+    bf_href = html_lib.escape(f"../../../lib/parsers/src/tool_calling/{backend_file}")
+    bf_link = f'<a href="{bf_href}">{html_lib.escape(backend_file)}</a>'
+    header_html = f"{html_lib.escape(head_parts[0])} → {bf_link}"
+    if factory:
+        factory_name = factory.split("(", 1)[0]
+        header_html += html_lib.escape(f"  (factory: {factory_name})")
+
+    # Body: anchor + siblings, alphabetical, target marked with ← THIS.
+    # Anchor is the family whose entry "owns" this backend. If `family` is
+    # an alias-only entry, the anchor is its target and the marker drops
+    # to the alias's leaf row under that target.
+    anchor = alias_of or family
+    siblings = info["shared_with"]
+    fam_list = sorted([anchor] + siblings)
+    body_lines: list[str] = []
+    for i, fam in enumerate(fam_list):
+        is_last_fam = i == len(fam_list) - 1
+        branch = "└── " if is_last_fam else "├── "
+        # block="..." suffix only renders for the anchor row, since we only
+        # have factory args for the current entry (not for siblings).
+        suffix = ""
+        if fam == anchor and info["factory"]:
+            fm = re.search(r'\("([^"]+)"\)', info["factory"])
+            if fm:
+                suffix = f'  block="{fm.group(1)}"'
+        # ← THIS goes on the target family's line only when the chart cell
+        # IS the target (not an alias).
+        marker_html = (
+            "  <strong>← THIS</strong>" if (fam == family and not alias_of) else ""
+        )
+        body_lines.append(
+            f"{branch}{html_lib.escape(fam)}{html_lib.escape(suffix)}{marker_html}"
+        )
+
+        # Aliases nested under the anchor. If we're rendering the alias's
+        # own tooltip, the alias's row carries the ← THIS marker.
+        if fam == anchor and info["aliases"]:
+            cont = "    " if is_last_fam else "│   "
+            for j, alias in enumerate(info["aliases"]):
+                alast = j == len(info["aliases"]) - 1
+                ab = "└── " if alast else "├── "
+                a_marker = (
+                    "  <strong>← THIS</strong>"
+                    if (alias_of and alias == family)
+                    else ""
+                )
+                body_lines.append(
+                    f"{cont}{ab}{html_lib.escape(alias)}  (alias){a_marker}"
+                )
+
+    # Peer-availability footnote (†/§) — embedded here so symbols don't need
+    # their own native tooltip. Anchored on the chart-cell family, so an
+    # alias inherits its target's peer markers (they share the same fixture
+    # YAMLs and the same `expected.<impl>.unavailable` flags).
+    peer_notes: list[str] = []
+    if no_vllm and family in no_vllm:
+        peer_notes.append(
+            '<span class="parser-suffix">†</span> no vLLM peer parser for this family'
+        )
+    if no_sglang and family in no_sglang:
+        peer_notes.append(
+            '<span class="parser-suffix">§</span> no SGLang peer parser for this family'
+        )
+    peer_html = ("\n\n" + "\n".join(peer_notes)) if peer_notes else ""
+
+    # Misleading-location warning appended as a separate paragraph below the tree.
+    warn_html = ""
+    if info["filed_under_xml_misleading"]:
+        warn_html = (
+            "\n\n⚠ Filed under xml/ but does NOT use the shared xml::parser.\n"
+            f"   Has its own ParserConfig::{html_lib.escape(variant)} variant."
+        )
+
+    tree_html = header_html + "\n" + "\n".join(body_lines) + peer_html + warn_html
+
+    if alias_of:
+        head_text = f"{family} — alias of {alias_of}; inherits {info['base_label']}"
+    else:
+        head_text = f"{family} — inherits {info['base_label']}"
+    return (
+        '<div class="ttip">'
+        f'<div class="ttip-head">{html_lib.escape(head_text)}</div>'
+        f'<pre class="ttip-pre">{tree_html}</pre>'
+        "</div>"
+    )
+
+
+_SHARED_BACKEND_SHORT = {
+    ("Json", "Basic"): "base_json",
+    ("Xml", None): "xml",
+    ("Dsml", None): "dsml",
+}
+
+
 def _parser_cell_html(
     family: str,
     refs: dict[str, tuple[str, int]],
     no_vllm: set[str],
     no_sglang: set[str],
+    inheritance: dict[str, dict],
 ) -> str:
-    label = html_lib.escape(family + family_suffix(family, no_vllm, no_sglang))
+    suff = family_suffix(family, no_vllm, no_sglang)
+    label = html_lib.escape(family)
+    if suff:
+        label += f'<span class="parser-suffix">{html_lib.escape(suff)}</span>'
     ref = refs.get(family)
-    if ref is None:
-        return f'<td class="parser">{label}</td>'
-    fname, line = ref
-    href = f"../../../lib/parsers/src/tool_calling/{fname}"
-    title = html_lib.escape(f"→ {fname}:{line} (pub fn {family} / alias registration)")
-    return f'<td class="parser"><a href="{href}" title="{title}">{label}</a></td>'
+    info = inheritance.get(family)
+    ttip = (
+        _parser_inheritance_tooltip_html(family, info, ref, no_vllm, no_sglang)
+        if info
+        else ""
+    )
+
+    # Shared-base suffix: only show when 2+ families share this backend, so
+    # the column calls out the consolidation rows without adding noise to
+    # standalone parsers (pythonic, gemma4, glm47, kimi_k2, harmony, ...).
+    base_suffix = ""
+    if info and info["shared_with"]:
+        short = _SHARED_BACKEND_SHORT.get(info["key"])
+        if short:
+            base_suffix = f'<span class="parser-base">→ {html_lib.escape(short)}</span>'
+
+    # Family-name link points to the **actual parser code** (backend_file from
+    # the inheritance map), not to the config-ctor location in config.rs. The
+    # ctor location is still referenced in the inheritance tooltip body when
+    # useful (factory calls). For families with no inheritance info, fall back
+    # to the refs entry (config.rs or parsers.rs).
+    if info and info["backend_file"] != "unknown":
+        href = f"../../../lib/parsers/src/tool_calling/{info['backend_file']}"
+    elif ref is not None:
+        href = f"../../../lib/parsers/src/tool_calling/{ref[0]}"
+    else:
+        return f'<td class="parser">{label}{base_suffix}{ttip}</td>'
+    return f'<td class="parser"><a href="{href}">{label}</a>{base_suffix}{ttip}</td>'
 
 
 def render_row_html(
@@ -687,11 +1033,12 @@ def render_row_html(
     refs: dict[str, tuple[str, int]],
     no_vllm: set[str],
     no_sglang: set[str],
+    inheritance: dict[str, dict],
 ) -> str:
     cells = "".join(render_cell_html(cases.get((family, sub))) for sub in sub_cases)
     return (
         f'<tr><td class="model">{html_lib.escape(model)}</td>'
-        f"{_parser_cell_html(family, refs, no_vllm, no_sglang)}"
+        f"{_parser_cell_html(family, refs, no_vllm, no_sglang, inheritance)}"
         f"{cells}</tr>"
     )
 
@@ -766,18 +1113,21 @@ def _glossary_html(descriptions: dict[str, str], sub_cases: list[str]) -> str:
 _HTML_STYLE = """
 body { font-family: -apple-system, system-ui, sans-serif; margin: 1.5em; }
 table { border-collapse: collapse; font-family: ui-monospace, monospace; font-size: 13px; }
-th, td { border: 1px solid #ccc; padding: 3px 7px; }
+th, td { border: 1px solid #ccc; padding: 3px 4px; }
 th { background: #f5f5f5; }
+.parser-base   { color: #888;    font-size: 11px; margin-left: 4px; }
+.parser-suffix { color: #007acc; font-weight: bold; vertical-align: super; font-size: 0.75em; }
 th a { color: inherit; text-decoration: none; }
 th a:hover { background: #ffd; }
 td.model, td.parser { white-space: nowrap; }
 td.parser a { color: inherit; text-decoration: none; }
 td.parser a:hover { background: #ffd; }
 td.cell { text-align: center; min-width: 24px; }
-td.cell.ok       { color: #0a7d2c; }
-td.cell.research { color: #c63;    font-weight: bold; }
-td.cell.err      { color: #b00;    font-weight: bold; }
-td.cell.na       { color: #aaa; }
+td.cell.ok         { color: #0a7d2c; }
+td.cell.documented { color: #555; }
+td.cell.research   { color: #c63;    font-weight: bold; }
+td.cell.err        { color: #b00;    font-weight: bold; }
+td.cell.na         { color: #aaa; }
 td.cell a { color: inherit; text-decoration: none; display: block; }
 td.cell a:hover { background: #ffd; }
 tr.section td { background: #eef; font-weight: bold; text-align: left; }
@@ -790,8 +1140,10 @@ table.glossary { margin-top: 0.5em; }
 table.glossary td.sub { white-space: nowrap; font-weight: bold; }
 
 /* CSS hover tooltip on cells (replaces native title= for cells).
- * 500ms delay on appear; instant disappear when the cursor leaves. */
-td.cell { position: relative; }
+ * 500ms delay on appear; instant disappear when the cursor leaves.
+ * `td.parser` participates so the parser-column inheritance tooltip
+ * uses the same styling as data-cell tooltips. */
+td.cell, td.parser { position: relative; }
 .ttip {
     visibility: hidden;
     opacity: 0;
@@ -814,7 +1166,8 @@ td.cell { position: relative; }
     pointer-events: none;
     white-space: normal;
 }
-td.cell:hover .ttip {
+td.cell:hover .ttip,
+td.parser:hover .ttip {
     visibility: visible;
     opacity: 1;
     transition: opacity 0s 500ms, visibility 0s 500ms;
@@ -864,29 +1217,58 @@ _HTML_SCRIPT = r"""
       ttip.style.bottom = '100%';
     }
   }
-  document.querySelectorAll('td.cell').forEach(function (cell) {
+  document.querySelectorAll('td.cell, td.parser').forEach(function (cell) {
     cell.addEventListener('mouseenter', function () { place(cell); });
   });
 })();
 """
 
-_LEGEND_HTML = (
-    '<p class="legend">'
-    "<strong>Legend:</strong> "
-    '<span style="color:#0a7d2c">=</span> full parity '
-    "(Dynamo, vLLM, and SGLang produce the same results) · "
-    '<span style="color:#0a7d2c">V/S</span> divergence '
-    "(V = vLLM, S = SGLang; intentional, has <code>reason:</code>) · "
-    '<span style="color:#c63">?</span> research-needed suffix '
-    "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
-    '<span style="color:#b00">!</span> expected-error suffix '
-    "(e.g. V!, S! — engine crashes by design) · "
-    '<span style="color:#aaa">n/a</span> not applicable · '
-    "<strong>†</strong> (parser column) = no vLLM peer parser for this family "
-    "(every case is <code>expected.vllm.unavailable</code>) · "
-    "<strong>§</strong> (parser column) = no SGLang peer parser for this family."
-    "</p>"
-)
+
+def _legend_html(versions: dict[str, str]) -> str:
+    """Build the legend block. `versions` is `_peer_versions()` output;
+    when non-empty, the pinned vLLM / SGLang versions are appended as a
+    final line so the legend is self-contained."""
+    peer_line = ""
+    if versions:
+        peer_bits = " · ".join(
+            f"{name} <code>{html_lib.escape(versions[name])}</code>"
+            for name in ("vllm", "sglang")
+            if name in versions
+        )
+        peer_line = (
+            "<br><br>"
+            "<strong>Peer parser versions</strong> pinned in "
+            '<a href="../../../pyproject.toml">pyproject.toml</a>: '
+            f"{peer_bits}."
+        )
+    return (
+        '<p class="legend">'
+        "<strong>Legend:</strong> "
+        '<span style="color:#0a7d2c">=</span> full parity '
+        "(Dynamo, vLLM, and SGLang produce the same results) · "
+        '<span style="color:#555">V/S</span> divergence '
+        "(V = vLLM, S = SGLang; intentional, has <code>reason:</code>) · "
+        '<span style="color:#c63">?</span> more research needed '
+        "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
+        '<span style="color:#c63">↯</span> Dynamo leaks tool call markup into <code>normal_text</code> '
+        "(<code>expected.dynamo.reason:</code> carries the explanation) · "
+        '<span style="color:#b00">!</span> expected-error suffix '
+        "(e.g. V!, S! — engine crashes by design) · "
+        '<span style="color:#aaa">n/a</span> not applicable · '
+        '<span class="parser-suffix">†</span> = no vLLM peer parser for this family · '
+        '<span class="parser-suffix">§</span> = no SGLang peer parser for this family.'
+        "<br><br>"
+        "<strong>Tooltip fields:</strong> "
+        "<code>input_text</code>=raw model output fed into the parser · "
+        "<code>normal_text</code>=the <em>residual</em> prose left after "
+        "stripping tool calls and reasoning blocks "
+        '(<em>not</em> all of the model\'s output — "normal" as in '
+        '"non-structured", to distinguish it from the structured '
+        "<code>calls</code> and reasoning_content) · "
+        "<code>calls</code>=extracted tool calls."
+        f"{peer_line}"
+        "</p>"
+    )
 
 
 def _compute_stats(
@@ -916,7 +1298,7 @@ def _compute_stats(
                 s["parity"] += 1
             elif "!" in text:
                 s["errors"] += 1
-            elif "?" in text:
+            elif "?" in text or "↯" in text:
                 s["research"] += 1
             else:
                 s["documented"] += 1
@@ -930,7 +1312,7 @@ def _stats_html(s: dict[str, int]) -> str:
         f"= {s['slots']} grid slots ({s['na']} n/a). "
         f"<strong>{s['real']}</strong> real cases: "
         f'<span style="color:#0a7d2c">{s["parity"]} full parity</span> · '
-        f'<span style="color:#0a7d2c">{s["documented"]} documented divergences</span> '
+        f'<span style="color:#555">{s["documented"]} documented divergences</span> '
         "(have <code>reason:</code>) · "
         f'<span style="color:#c63">{s["research"]} research-needed</span> '
         "(no <code>reason:</code> yet) · "
@@ -949,6 +1331,7 @@ def render_html(
 ) -> str:
     descriptions = _parse_subcase_descriptions()
     refs = _build_family_to_rust_ref()
+    inheritance = _build_family_inheritance(refs)
 
     fixed_headers = "".join(
         f"<th>{html_lib.escape(h)}</th>" for h in ("model", "parser")
@@ -961,12 +1344,16 @@ def render_html(
     ]
     for model, fam in top_n:
         body_rows.append(
-            render_row_html(model, fam, cases, sub_cases, refs, no_vllm, no_sglang)
+            render_row_html(
+                model, fam, cases, sub_cases, refs, no_vllm, no_sglang, inheritance
+            )
         )
     body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
     for model, fam in others:
         body_rows.append(
-            render_row_html(model, fam, cases, sub_cases, refs, no_vllm, no_sglang)
+            render_row_html(
+                model, fam, cases, sub_cases, refs, no_vllm, no_sglang, inheritance
+            )
         )
 
     all_families = [fam for _, fam in top_n] + [fam for _, fam in others]
@@ -982,20 +1369,14 @@ def render_html(
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
 
-    versions = _peer_versions()
-    if versions:
-        peer_bits = " · ".join(
-            f"{name} <code>{html_lib.escape(versions[name])}</code>"
-            for name in ("vllm", "sglang")
-            if name in versions
-        )
-        versions_html = (
-            f'<p class="versions">Peer parser versions pinned in '
-            f'<a href="../../../pyproject.toml">pyproject.toml</a>: '
-            f"{peer_bits}.</p>\n"
+    sha = _commit_sha()
+    if sha:
+        sha_html = (
+            f' on commit <a href="https://github.com/ai-dynamo/dynamo/commit/{sha}">'
+            f"<code>{html_lib.escape(sha[:12])}</code></a>"
         )
     else:
-        versions_html = ""
+        sha_html = ""
 
     return (
         "<!DOCTYPE html>\n"
@@ -1004,8 +1385,7 @@ def render_html(
         f"<style>{_HTML_STYLE}</style></head>\n"
         "<body>\n"
         "<h1>Dynamo parser parity chart</h1>\n"
-        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)} '
-        f"from <code>tests/parity/parser/fixtures/**/PARSER.*.yaml</code>: "
+        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)}{sha_html}: '
         f"<code>python3 tests/parity/parser/generate_parity_chart.py --html "
         f"&gt; tests/parity/parser/PARITY.html</code></p>\n"
         "<p>Parser column links to the family's Rust config / parser. "
@@ -1015,8 +1395,7 @@ def render_html(
         "fixture YAML; hover a non-= cell for the case description and "
         "the divergence reason.</p>\n"
         f"{table_html}\n"
-        f"{_LEGEND_HTML}\n"
-        f"{versions_html}"
+        f"{_legend_html(_peer_versions())}\n"
         f"{_stats_html(stats)}\n"
         f"{_glossary_html(descriptions, sub_cases)}\n"
         f"<script>{_HTML_SCRIPT}</script>\n"

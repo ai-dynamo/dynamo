@@ -186,13 +186,41 @@ in the HTML chart), `V?` / `S?` = divergence not yet classified
 † vLLM has no engine peer (or returns `UNAVAILABLE` at runtime, e.g.
   `harmony#vllm` requires token IDs not text). Cells show SGLang status
   only when SGLang is wired; otherwise the row is fully `n/a`.
-§ SGLang has no engine peer for this family. Cells show vLLM status
-  only when vLLM is wired; otherwise the row is fully `n/a`.
+§ SGLang `v0.5.10.post1` (the version pinned in `container/context.yaml`)
+  has no peer detector for this family. Cells show vLLM status only when
+  vLLM is wired; otherwise the row is fully `n/a`. **This may change with
+  future SGLang releases** — re-audit on each version bump.
 
 `nemotron_deci` and `nemotron_nano` carry both daggers (`†§`) — neither
 upstream has a peer parser, so the rows are fully `n/a`. Listed here for
 completeness; Dynamo-only self-parity could be added in a follow-up but
 yields no cross-impl signal.
+
+### Coverage gaps — missing upstream peer parsers
+
+Snapshot pinned to **SGLang `v0.5.10.post1`** (per `container/context.yaml`)
+and the vLLM version installed in the parity dev image. **This may change
+with future releases** — re-audit on every SGLang / vLLM bump.
+
+**SGLang `v0.5.10.post1` has no detector for 4 families that DO have a vLLM peer (`§` in matrix):**
+`deepseek_v4`, `gemma4`, `jamba`, `phi4`. The harness skips the SGLang side
+of these rows at runtime (`UNAVAILABLE: SGLang has no detector for
+family='<name>'`); cells carry vLLM-only signal.
+
+**`llama3_json` is also `§` in the matrix but for a different reason** —
+SGLang does ship a Llama 3 detector ([sglang tool-parser docs](https://sgl-project.github.io/advanced_features/tool_parser.html));
+we just haven't wired it in `_FAMILY_TO_SGLANG_DETECTOR` yet. TODO follow-up
+to add it and regenerate the `llama3_json` SGLang fixtures.
+
+**Neither upstream has a peer parser for 2 families (`†§` in matrix):**
+`nemotron_deci`, `nemotron_nano`. Rows are fully `n/a`.
+
+Wrapper enumeration: `tests/parity/parser/sglang.py::_FAMILY_TO_SGLANG_DETECTOR`
+(missing keys = missing detectors). Adding an SGLang detector for any
+`§`-marked family above (either upstream-shipped in a newer SGLang release,
+or by us standing up a Dynamo-side stub) would let the harness surface
+`S`/`VS` divergences on those rows; today they carry only `V`/`✓`
+(vLLM-side).
 
 **Hot columns:**
 - `PARSER.batch.4` (malformed JSON) and `PARSER.batch.5` (missing

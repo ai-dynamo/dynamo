@@ -9,7 +9,7 @@ cases:
     description: Single tool call (happy path)
     model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,46 +17,43 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_1
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_1
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_3
+      dynamo: &id003
         calls: []
         normal_text: Hello, how can I help you today?
-      vllm: *d_3
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.9:
     description: Empty input
     model_text: ''
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_9
+      dynamo: &id004
         calls: []
         normal_text: ''
-      vllm: *d_9
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      vllm: *id004
+      sglang: *id004
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><|tool_call>call:get_weather{location:<|"|>LA<|"|>}<tool_call|>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_10
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -65,6 +62,69 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_10
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      vllm: *id005
+      sglang: *id005
+  PARSER.batch.11:
+    description: Single call with argument delimiters inside string value
+    ref: dynamo
+    model_text: <|tool_call>call:run_query{sql:<|"|>SELECT a,b:and{brace}<|"|>}<tool_call|>
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo: &d_11
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a,b:and{brace}
+        normal_text: ''
+      vllm: *d_11
+      sglang: *d_11
+  PARSER.batch.12:
+    description: Parallel calls where one argument contains delimiter characters
+    ref: dynamo
+    model_text: <|tool_call>call:run_query{sql:<|"|>SELECT a,b:and{brace}<|"|>}<tool_call|><|tool_call>call:get_time{timezone:<|"|>EST<|"|>}<tool_call|>
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &d_12
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a,b:and{brace}
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_12
+      sglang: *d_12
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_function_call_parser.py#L4312
+    model_text: <|tool_call>call:unknown_tool{location:<|"|>NYC<|"|>}<tool_call|>
+    tools:
+    - *id002
+    expected:
+      dynamo: &d_13
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_13
+      sglang: *d_13
