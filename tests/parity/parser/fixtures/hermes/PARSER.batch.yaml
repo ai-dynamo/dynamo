@@ -115,7 +115,7 @@ cases:
         reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
   PARSER.batch.13.c:
     description: Mixed known and unknown calls in one response
-    ref: SGLang TestHunyuanDetectorDetectAndParse.test_mixed_known_and_unknown_tools
+    ref: dynamo
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "unknown_tool",
       "arguments": {"location": "LA"}}</tool_call>'
     tools:

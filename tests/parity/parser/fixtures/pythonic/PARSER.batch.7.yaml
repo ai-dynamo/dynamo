@@ -99,7 +99,7 @@ cases:
       sglang: *id004
   PARSER.batch.7.e:
     description: Large / deep JSON-edge argument payload
-    ref: 'SGLang/LightSeek audit: large payload, nested JSON, null, and empty-object argument coverage'
+    ref: dynamo
     model_text: '[process_data(payload={"regions":[{"name":"west","scores":[1,2,3]},{"name":"east","scores":[4,5,6]}],"flags":{"enabled":True,"retry":None},"empty":{}})]'
     tools:
     - name: process_data

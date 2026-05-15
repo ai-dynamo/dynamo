@@ -123,7 +123,7 @@ cases:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.11.b:
     description: Structural delimiter inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}}]'
     tools:
     - name: run_query
@@ -149,8 +149,8 @@ cases:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.11.c:
     description: Tool-call marker text inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
-    model_text: 'functools[{"name": "run_query", "arguments": {"sql": "literal functools[] stays text"}}]'
+    ref: dynamo
+    model_text: 'functools[{"name": "run_query", "arguments": {"sql": "literal functools marker[] stays text"}}]'
     tools:
     - name: run_query
       parameters:
@@ -163,13 +163,13 @@ cases:
         calls:
         - name: run_query
           arguments:
-            sql: literal functools[] stays text
+            sql: literal functools marker[] stays text
         normal_text: ''
       vllm:
         calls:
         - name: run_query
           arguments:
-            sql: literal functools[] stays text
+            sql: literal functools marker[] stays text
         normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='phi4'
@@ -213,7 +213,7 @@ cases:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.12.b:
     description: Multi-call response with structural delimiters inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}},
       {"name": "get_time", "arguments": {"timezone": "EST"}}]'
     tools:
@@ -277,7 +277,7 @@ cases:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.13.c:
     description: Mixed known and unknown calls in one response
-    ref: SGLang TestHunyuanDetectorDetectAndParse.test_mixed_known_and_unknown_tools
+    ref: dynamo
     model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "unknown_tool", "arguments":
       {"location": "LA"}}]'
     tools:

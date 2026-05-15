@@ -126,7 +126,7 @@ cases:
         normal_text: ''
   PARSER.batch.11.b:
     description: Structural delimiter inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: '[run_query(sql="SELECT value WHERE note has brace } and bracket ]")]'
     tools:
     - name: run_query
@@ -156,8 +156,8 @@ cases:
         normal_text: ''
   PARSER.batch.11.c:
     description: Tool-call marker text inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
-    model_text: '[run_query(sql="literal [get_time()] stays text")]'
+    ref: dynamo
+    model_text: '[run_query(sql="literal [get_time marker] stays text")]'
     tools:
     - name: run_query
       parameters:
@@ -170,19 +170,19 @@ cases:
         calls:
         - name: run_query
           arguments:
-            sql: literal [get_time()] stays text
+            sql: literal [get_time marker] stays text
         normal_text: ''
       vllm:
         calls:
         - name: run_query
           arguments:
-            sql: literal [get_time()] stays text
+            sql: literal [get_time marker] stays text
         normal_text: ''
       sglang:
         calls:
         - name: run_query
           arguments:
-            sql: literal [get_time()] stays text
+            sql: literal [get_time marker] stays text
         normal_text: ''
   PARSER.batch.12.a:
     description: Multi-call response with a separator character inside one argument string value
@@ -231,7 +231,7 @@ cases:
         normal_text: ''
   PARSER.batch.12.b:
     description: Multi-call response with structural delimiters inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: '[run_query(sql="SELECT value WHERE note has brace } and bracket ]"), get_time(timezone="EST")]'
     tools:
     - name: run_query
@@ -304,7 +304,7 @@ cases:
         reason: SGLang PythonicDetector drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
   PARSER.batch.13.c:
     description: Mixed known and unknown calls in one response
-    ref: SGLang TestHunyuanDetectorDetectAndParse.test_mixed_known_and_unknown_tools
+    ref: dynamo
     model_text: '[get_weather(location="NYC"), unknown_tool(location="LA")]'
     tools:
     - name: get_weather

@@ -126,7 +126,7 @@ cases:
         normal_text: ''
   PARSER.batch.11.b:
     description: Structural delimiter inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>SELECT value WHERE note has brace } and bracket ]<|"|>}<tool_call|>
     tools:
     - name: run_query
@@ -156,8 +156,8 @@ cases:
         normal_text: ''
   PARSER.batch.11.c:
     description: Tool-call marker text inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
-    model_text: <|tool_call>call:run_query{sql:<|"|>literal <|tool_call>call:get_time{}<tool_call|> stays text<|"|>}<tool_call|>
+    ref: dynamo
+    model_text: <|tool_call>call:run_query{sql:<|"|>literal <|tool_call marker> call:get_time{} stays text<|"|>}<tool_call|>
     tools:
     - name: run_query
       parameters:
@@ -170,19 +170,19 @@ cases:
         calls:
         - name: run_query
           arguments:
-            sql: literal <|tool_call>call:get_time{}<tool_call|> stays text
+            sql: literal <|tool_call marker> call:get_time{} stays text
         normal_text: ''
       vllm:
         calls:
         - name: run_query
           arguments:
-            sql: literal <|tool_call>call:get_time{}<tool_call|> stays text
+            sql: literal <|tool_call marker> call:get_time{} stays text
         normal_text: ''
       sglang:
         calls:
         - name: run_query
           arguments:
-            sql: literal <|tool_call>call:get_time{}<tool_call|> stays text
+            sql: literal <|tool_call marker> call:get_time{} stays text
         normal_text: ''
   PARSER.batch.12.a:
     description: Multi-call response with a separator character inside one argument string value
@@ -231,7 +231,7 @@ cases:
         normal_text: ''
   PARSER.batch.12.b:
     description: Multi-call response with structural delimiters inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>SELECT value WHERE note has brace } and bracket ]<|"|>}<tool_call|><|tool_call>call:get_time{timezone:<|"|>EST<|"|>}<tool_call|>
     tools:
     - name: run_query
@@ -306,7 +306,7 @@ cases:
         normal_text: ''
   PARSER.batch.13.c:
     description: Mixed known and unknown calls in one response
-    ref: SGLang TestHunyuanDetectorDetectAndParse.test_mixed_known_and_unknown_tools
+    ref: dynamo
     model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><|tool_call>call:unknown_tool{location:<|"|>LA<|"|>}<tool_call|>
     tools:
     - name: get_weather

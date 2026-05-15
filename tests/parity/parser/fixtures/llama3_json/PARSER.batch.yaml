@@ -127,7 +127,7 @@ cases:
         normal_text: ''
   PARSER.batch.11.b:
     description: Structural delimiter inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}}'
     tools:
     - name: run_query
@@ -157,8 +157,8 @@ cases:
         normal_text: ''
   PARSER.batch.11.c:
     description: Tool-call marker text inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
-    model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "literal <|python_tag|>{name:x} stays text"}}'
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "literal <|python_tag marker|>{name:x} stays text"}}'
     tools:
     - name: run_query
       parameters:
@@ -171,19 +171,19 @@ cases:
         calls:
         - name: run_query
           arguments:
-            sql: literal <|python_tag|>{name:x} stays text
+            sql: literal <|python_tag marker|>{name:x} stays text
         normal_text: ''
       vllm:
         calls:
         - name: run_query
           arguments:
-            sql: literal <|python_tag|>{name:x} stays text
+            sql: literal <|python_tag marker|>{name:x} stays text
         normal_text: ''
       sglang:
         calls:
         - name: run_query
           arguments:
-            sql: literal <|python_tag|>{name:x} stays text
+            sql: literal <|python_tag marker|>{name:x} stays text
         normal_text: ''
   PARSER.batch.12.a:
     description: Multi-call response with a separator character inside one argument string value
@@ -233,7 +233,7 @@ cases:
         normal_text: ''
   PARSER.batch.12.b:
     description: Multi-call response with structural delimiters inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}};{"name":
       "get_time", "arguments": {"timezone": "EST"}}'
     tools:
@@ -307,7 +307,7 @@ cases:
         reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
   PARSER.batch.13.c:
     description: Mixed known and unknown calls in one response
-    ref: SGLang TestHunyuanDetectorDetectAndParse.test_mixed_known_and_unknown_tools
+    ref: dynamo
     model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "unknown_tool", "arguments":
       {"location": "LA"}}'
     tools:

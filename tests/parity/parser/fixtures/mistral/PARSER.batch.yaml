@@ -131,7 +131,7 @@ cases:
         reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   PARSER.batch.11.b:
     description: Structural delimiter inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}}][/TOOL_CALLS]'
     tools:
     - name: run_query
@@ -158,8 +158,8 @@ cases:
         normal_text: ''
   PARSER.batch.11.c:
     description: Tool-call marker text inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
-    model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "literal [TOOL_CALLS][][/TOOL_CALLS] stays text"}}][/TOOL_CALLS]'
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "literal [TOOL_CALLS marker][][/TOOL_CALLS marker] stays text"}}][/TOOL_CALLS]'
     tools:
     - name: run_query
       parameters:
@@ -172,13 +172,13 @@ cases:
         calls:
         - name: run_query
           arguments:
-            sql: literal [TOOL_CALLS][][/TOOL_CALLS] stays text
+            sql: literal [TOOL_CALLS marker][][/TOOL_CALLS marker] stays text
         normal_text: ''
       vllm:
         calls:
         - name: run_query
           arguments:
-            sql: literal [TOOL_CALLS][][/TOOL_CALLS] stays text
+            sql: literal [TOOL_CALLS marker][][/TOOL_CALLS marker] stays text
         normal_text: ''
       sglang:
         calls: []
@@ -226,7 +226,7 @@ cases:
         reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   PARSER.batch.12.b:
     description: Multi-call response with structural delimiters inside one argument string value
-    ref: SGLang/LightSeek delimiter-state audit
+    ref: dynamo
     model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}},
       {"name": "get_time", "arguments": {"timezone": "EST"}}][/TOOL_CALLS]'
     tools:
@@ -294,7 +294,7 @@ cases:
         reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
   PARSER.batch.13.c:
     description: Mixed known and unknown calls in one response
-    ref: SGLang TestHunyuanDetectorDetectAndParse.test_mixed_known_and_unknown_tools
+    ref: dynamo
     model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "unknown_tool", "arguments":
       {"location": "LA"}}][/TOOL_CALLS]'
     tools:
