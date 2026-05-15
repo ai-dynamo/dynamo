@@ -485,7 +485,7 @@ vllm_configs = {
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
             pytest.mark.skip(
-                reason="Temporary: video stream load failure for local media URI in CI"
+                reason="Flaky: https://github.com/ai-dynamo/dynamo/issues/9601"
             ),
             pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
         ],  # TODO: profile to get max_vram
@@ -775,8 +775,7 @@ def lora_chat_payload(
 @pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.xpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
+@pytest.mark.model("Qwen/Qwen3-0.6B", "codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
 def test_lora_aggregated(

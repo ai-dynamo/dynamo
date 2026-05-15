@@ -21,6 +21,9 @@ from sglang.srt.function_call.function_call_parser import (  # type: ignore[impo
     DeepSeekV31Detector,
     Glm47MoeDetector,
 )
+from sglang.srt.function_call.gemma4_detector import (
+    Gemma4Detector,  # type: ignore[import-untyped]
+)
 from sglang.srt.function_call.gpt_oss_detector import (
     GptOssDetector,  # type: ignore[import-untyped]
 )
@@ -29,6 +32,9 @@ from sglang.srt.function_call.hermes_detector import (
 )
 from sglang.srt.function_call.kimik2_detector import (
     KimiK2Detector,  # type: ignore[import-untyped]
+)
+from sglang.srt.function_call.llama32_detector import (
+    Llama32Detector,  # type: ignore[import-untyped]
 )
 from sglang.srt.function_call.minimax_m2 import (
     MinimaxM2Detector,  # type: ignore[import-untyped]
@@ -58,7 +64,9 @@ _FAMILY_TO_SGLANG_DETECTOR = {
     "deepseek_v3_1": DeepSeekV31Detector,
     "deepseek_v3_2": DeepSeekV32Detector,
     "deepseek_v3": DeepSeekV3Detector,
+    "gemma4": Gemma4Detector,
     "harmony": GptOssDetector,
+    "llama3_json": Llama32Detector,
     "minimax_m2": MinimaxM2Detector,
     "pythonic": PythonicDetector,
     "hermes": HermesDetector,
@@ -66,7 +74,7 @@ _FAMILY_TO_SGLANG_DETECTOR = {
 }
 
 # Families with no SGLang detector today: nemotron_deci, nemotron_nano,
-# gemma4, deepseek_v4, jamba, llama3_json, phi4.
+# deepseek_v4, jamba, phi4.
 
 
 def parse(

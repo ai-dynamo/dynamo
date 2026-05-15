@@ -16,14 +16,14 @@ cases:
       {"timezone": "EST"}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
         properties:
           location:
             type: string
-    - &id002
+    - &id003
       name: get_time
       parameters:
         type: object
@@ -31,7 +31,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_2_a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -40,8 +40,8 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2_a
-      sglang: *d_2_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.2.b:
     description: Two back-to-back fence pairs
     ref: dynamo
@@ -54,10 +54,10 @@ cases:
       {"timezone": "EST"}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
-      dynamo: &d_2_b
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -66,8 +66,8 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2_b
-      sglang: *d_2_b
+      vllm: *id004
+      sglang: *id004
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -80,10 +80,10 @@ cases:
       {"timezone": "EST"}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜> Done.
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
-      dynamo: &d_2_c
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -92,17 +92,16 @@ cases:
           arguments:
             timezone: EST
         normal_text: 'Both: '
-      vllm: *d_2_c
+      vllm: *id005
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: 'Both:'
-        reason: "trims trailing space from preceding normal_text"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -115,10 +114,10 @@ cases:
       {"location": "LA"}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - *id001
-    - *id001
+    - *id002
+    - *id002
     expected:
-      dynamo: &d_2_d
+      dynamo: &id006
         calls:
         - name: get_weather
           arguments:
@@ -127,5 +126,5 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_2_d
-      sglang: *d_2_d
+      vllm: *id006
+      sglang: *id006

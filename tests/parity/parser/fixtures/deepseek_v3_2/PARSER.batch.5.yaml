@@ -33,7 +33,7 @@ cases:
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
 
           </｜DSML｜invoke>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang: *d_5_a
   PARSER.batch.5.b:
     description: Closing </｜DSML｜function_calls> without matching open
@@ -47,6 +47,7 @@ cases:
     - *id001
     expected:
       dynamo: &d_5_b
+        reason: "Dynamo's DSML parser leaves <｜DSML｜…> envelope in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">
@@ -75,5 +76,69 @@ cases:
           <｜DSML｜invoke name="get_weather">
 
           <｜DSML｜parameter name="location" string="true">NY'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang: *d_5_c
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
+      </｜DSML｜invoke>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <｜DSML｜function_calls>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
+          </｜DSML｜invoke>
+      sglang:
+        calls: []
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">New York
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <｜DSML｜function_calls>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">New York
+      sglang:
+        calls: []
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!

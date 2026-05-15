@@ -68,8 +68,8 @@ def _case_sort_key(case_id: str) -> tuple[int, str]:
     """Sort key for case IDs that may carry a sub-letter.
 
     `PARSER.batch.5`   → (5, "")
+    `PARSER.batch.5.d` → (5, "d")
     `PARSER.batch.8.a` → (8, "a")
-    `PARSER.batch.8.b` → (8, "b")
     """
     parts = case_id.split(".")
     top = int(parts[2])
@@ -99,6 +99,13 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
 FIXTURES = _load_fixtures()
 
 
+def _is_na_stub(fixture: dict[str, Any]) -> bool:
+    return set(fixture) == {"description", "reason"} and all(
+        isinstance(fixture[key], str) and fixture[key].strip()
+        for key in ("description", "reason")
+    )
+
+
 def _run_parity_case(
     family: str,
     case_id: str,
@@ -112,6 +119,17 @@ def _run_parity_case(
     # ImportError (e.g. a stale upstream API ref after a vLLM/SGLang rename)
     # propagates as a real test ERROR rather than a silent green skip.
     pytest.importorskip(_PACKAGE[impl_name])
+    if "expected" not in fixture:
+        if not _is_na_stub(fixture):
+            pytest.fail(
+                f"{impl_name}/{family}/{case_id}: fixture is missing expected: "
+                "but is not an explicit n/a stub. n/a stubs must contain only "
+                "non-empty description: and reason: fields."
+            )
+        pytest.skip(
+            f"{impl_name}/{family}/{case_id}: n/a stub (no expected: block): "
+            f"{fixture['reason']}"
+        )
     parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
     got = parse_mod.parse(family, fixture["model_text"], fixture.get("tools"))
 
