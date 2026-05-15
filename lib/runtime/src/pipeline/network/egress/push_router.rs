@@ -814,7 +814,8 @@ where
                     request_id = %request_id,
                     instance_id,
                     router_mode = ?self.router_mode,
-                    total_workers = self.client.instance_source.borrow().len(),
+                    busy_workers = self.client.busy_instance_count(),
+                    total_workers = self.client.instance_count(),
                     all_instances_busy,
                     "checked worker busy state"
                 );
@@ -822,7 +823,7 @@ where
             if all_instances_busy {
                 tracing::warn!(
                     instance_id,
-                    total_workers = self.client.instance_source.borrow().len(),
+                    total_workers = self.client.instance_count(),
                     "Rejecting request: all workers are busy"
                 );
                 let cause = PipelineError::ServiceOverloaded(
