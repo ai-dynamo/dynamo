@@ -108,20 +108,6 @@ pub(crate) async fn get_or_create_routing_occupancy_state(
 /// Default interval for periodic reconciliation of instance_avail with instance_source
 const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
-fn reconcile_free_instance_ids(
-    instance_ids: &[u64],
-    known_instance_ids: &HashSet<u64>,
-    previous_free_ids: &[u64],
-) -> Vec<u64> {
-    let previous_free_ids = previous_free_ids.iter().copied().collect::<HashSet<_>>();
-
-    instance_ids
-        .iter()
-        .copied()
-        .filter(|id| previous_free_ids.contains(id) || !known_instance_ids.contains(id))
-        .collect()
-}
-
 /// Shared endpoint discovery state for a single endpoint query.
 ///
 /// This wraps both the coalesced instance snapshot used for routing decisions
@@ -318,13 +304,14 @@ impl Client {
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
         let endpoint_id = self.endpoint.id();
+        let mut known_instance_ids = self
+            .instance_source
+            .borrow()
+            .iter()
+            .map(|instance| instance.id())
+            .collect::<HashSet<_>>();
         tokio::task::spawn(async move {
             let mut rx = client.instance_source.as_ref().clone();
-            let mut known_instance_ids = rx
-                .borrow()
-                .iter()
-                .map(|instance| instance.id())
-                .collect::<HashSet<_>>();
             while !cancel_token.is_cancelled() {
                 let instance_ids: Vec<u64> = rx
                     .borrow_and_update()
@@ -334,11 +321,16 @@ impl Client {
 
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
                 client.instance_free.rcu(|previous_free_ids| {
-                    Arc::new(reconcile_free_instance_ids(
-                        &instance_ids,
-                        &known_instance_ids,
-                        previous_free_ids,
-                    ))
+                    let previous_free_ids =
+                        previous_free_ids.iter().copied().collect::<HashSet<_>>();
+                    let free_ids = instance_ids
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            previous_free_ids.contains(id) || !known_instance_ids.contains(id)
+                        })
+                        .collect();
+                    Arc::new(free_ids)
                 });
                 known_instance_ids = instance_ids.iter().copied().collect();
 
@@ -548,23 +540,52 @@ mod tests {
         rt.shutdown();
     }
 
-    #[test]
-    fn test_reconcile_free_instance_ids_preserves_existing_busy_state() {
-        let known_instance_ids = std::collections::HashSet::from([1_u64, 2, 3]);
+    #[tokio::test]
+    async fn test_instance_reconciliation_preserves_busy_existing_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
-        assert_eq!(
-            reconcile_free_instance_ids(&[1, 2, 3, 4], &known_instance_ids, &[1, 3]),
-            vec![1, 3, 4],
-            "existing busy workers stay busy while new workers become free"
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_busy_reconciliation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_free().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+        assert!(
+            client.instance_ids_free().contains(&worker_id),
+            "worker should be free after initial discovery reconciliation"
         );
 
-        let known_instance_ids = std::collections::HashSet::from([1_u64, 2, 3, 4]);
-
-        assert_eq!(
-            reconcile_free_instance_ids(&[2, 3, 4], &known_instance_ids, &[1, 3, 4]),
-            vec![3, 4],
-            "removed workers are dropped without freeing existing busy workers"
+        client.update_free_instances(&[worker_id]);
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "worker should be busy before periodic reconciliation"
         );
+
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "periodic reconciliation should not mark an existing busy worker free"
+        );
+
+        rt.shutdown();
     }
 
     /// Test that instance_avail_watcher receives updates when instances change.
