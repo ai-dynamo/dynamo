@@ -441,7 +441,7 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_attention_dp_size: Option<usize>,
 
-    /// GPU memory fraction for AIC KV capacity estimation with vLLM/TRT-LLM.
+    /// GPU memory fraction for AIC KV capacity estimation with vLLM.
     #[builder(default = "None")]
     #[validate(range(min = 0.0, max = 1.0))]
     pub gpu_memory_utilization: Option<f64>,

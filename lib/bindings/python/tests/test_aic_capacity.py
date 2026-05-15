@@ -3,7 +3,7 @@
 
 import pytest
 
-from dynamo._internal.aic import AicSession
+from dynamo._internal.aic import AicSession, resolve_backend_version
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -84,3 +84,27 @@ def test_estimate_num_gpu_blocks_uses_sglang_static_memory_fraction():
     )
 
     assert blocks == 37
+
+
+def test_unsupported_aic_backend_fails_hard():
+    with pytest.raises(ValueError, match="unsupported AIC backend"):
+        resolve_backend_version("trtllm", None)
+
+    session = make_session(
+        "trtllm",
+        {
+            "total": 400.0,
+            "kvcache": 50.0,
+            "weights": 300.0,
+            "activations": 40.0,
+            "nccl": 5.0,
+            "others": 5.0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="unsupported AIC backend"):
+        session.estimate_num_gpu_blocks(
+            block_size=10,
+            max_num_batched_tokens=128,
+            gpu_memory_utilization=0.8,
+        )

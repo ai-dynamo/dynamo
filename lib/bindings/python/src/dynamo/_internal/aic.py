@@ -11,7 +11,6 @@ import math
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKEND_VERSIONS = {
-    "trtllm": "1.2.0rc5",
     "vllm": "0.14.0",
     "sglang": "0.5.6.post2",
 }
@@ -21,11 +20,20 @@ DEFAULT_MEM_FRACTION_STATIC = 0.88
 _BYTES_PER_GIB = 1 << 30
 
 
+def _validate_supported_backend(backend_name: str) -> None:
+    if backend_name not in DEFAULT_BACKEND_VERSIONS:
+        supported = ", ".join(sorted(DEFAULT_BACKEND_VERSIONS))
+        raise ValueError(
+            f"unsupported AIC backend {backend_name!r}; supported backends: {supported}"
+        )
+
+
 def resolve_backend_version(backend_name: str, backend_version: str | None) -> str:
     """Return the pinned backend version used for AIC perf lookups."""
+    _validate_supported_backend(backend_name)
     if backend_version is not None:
         return backend_version
-    return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
+    return DEFAULT_BACKEND_VERSIONS[backend_name]
 
 
 def _load_aiconfigurator():
@@ -185,6 +193,7 @@ class AicSession:
         mem_fraction_static: float | None = None,
     ) -> int:
         """Estimate rank-local KV cache blocks from AIC's per-GPU memory model."""
+        _validate_supported_backend(self._backend_name)
         if block_size <= 0:
             raise ValueError(
                 f"block_size must be positive, got block_size={block_size}"
@@ -244,8 +253,8 @@ class AicSession:
             fraction_name = "mem_fraction_static"
             fraction_value = mem_fraction_static
         else:
-            # vLLM/TRT-LLM's knob caps total engine memory. Subtract AIC's
-            # modeled non-KV footprint from that cap to get the KV budget.
+            # vLLM's knob caps total engine memory. Subtract AIC's modeled
+            # non-KV footprint from that cap to get the KV budget.
             non_kv_bytes = (
                 float(memory["total"]) - float(memory.get("kvcache", 0.0))
             ) * _BYTES_PER_GIB

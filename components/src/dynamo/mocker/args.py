@@ -284,7 +284,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gpu-memory-utilization",
         type=float,
         default=None,
-        help="GPU memory fraction for AIC KV capacity estimation with vLLM/TRT-LLM "
+        help="GPU memory fraction for AIC KV capacity estimation with vLLM "
         "(default: 0.9).",
     )
     parser.add_argument(
@@ -304,11 +304,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-backend",
         type=str,
         default=None,
-        choices=["vllm", "sglang", "trtllm"],
+        choices=["vllm", "sglang"],
         help="AIC backend name used for perf database lookups. When unset, "
         "falls back to --engine-type. Set this to decouple the AIC perf model "
-        "from the simulated engine type (e.g. simulate with vllm while using "
-        "trtllm AIC data).",
+        "from the simulated engine type.",
     )
     parser.add_argument(
         "--aic-backend-version",
