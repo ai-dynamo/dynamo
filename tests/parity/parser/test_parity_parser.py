@@ -94,6 +94,13 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
 FIXTURES = _load_fixtures()
 
 
+def _is_na_stub(fixture: dict[str, Any]) -> bool:
+    return set(fixture) == {"description", "reason"} and all(
+        isinstance(fixture[key], str) and fixture[key].strip()
+        for key in ("description", "reason")
+    )
+
+
 def _run_parity_case(
     family: str,
     case_id: str,
@@ -107,12 +114,16 @@ def _run_parity_case(
     # ImportError (e.g. a stale upstream API ref after a vLLM/SGLang rename)
     # propagates as a real test ERROR rather than a silent green skip.
     pytest.importorskip(_PACKAGE[impl_name])
-    # n/a stub case: only a `reason:` field, no `expected:` block. Skip — the
-    # stub exists solely to populate the chart's n/a tooltip.
     if "expected" not in fixture:
+        if not _is_na_stub(fixture):
+            pytest.fail(
+                f"{impl_name}/{family}/{case_id}: fixture is missing expected: "
+                "but is not an explicit n/a stub. n/a stubs must contain only "
+                "non-empty description: and reason: fields."
+            )
         pytest.skip(
             f"{impl_name}/{family}/{case_id}: n/a stub (no expected: block): "
-            f"{fixture.get('reason', '(no reason given)')}"
+            f"{fixture['reason']}"
         )
     parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
     got = parse_mod.parse(family, fixture["model_text"], fixture.get("tools"))
