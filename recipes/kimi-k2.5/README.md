@@ -12,9 +12,9 @@ We compare four Dynamo + TRTLLM deployment modes on **6x GB200 (24 GPU)**:
 | Mode | Routing | Speculative | KV Cache Offloading? | Concurrency | GPUs |
 |------|---------|-------------|----------------------|-------------|------|
 | **Disaggregated** | KV-aware | Eagle3 | ✅ (TRTLLM-native offload) | 32 | 3x TEP4 prefill + 3x DEP4 decode |
-| **Aggregated** | KV-aware | Eagle3 | ❌ | 24 | 3x TP=8 |
-| **Aggregated** | Round-robin | Eagle3 | ❌ | 24 | 3x TP=8 |
-| **Aggregated** | Round-robin | ❌ | ❌ | 8 | 3x TP=8 |
+| **Aggregated** | KV-aware | Eagle3 | ❌ | 24 | 3x TEP=8 |
+| **Aggregated** | Round-robin | Eagle3 | ❌ | 24 | 3x TEP=8 |
+| **Aggregated** | Round-robin | ❌ | ❌ | 8 | 3x TEP=8 |
 
 
 ## Results
@@ -74,7 +74,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 ```bash
 # Use any pod that mounts the model-cache PVC at /model-cache as a helper
-kubectl cp <local_trace.jsonl> ${NAMESPACE}/<helper-pod>:/model-cache/traces/kv-reuse-difficult_200k-fixed/dataset.jsonl
+kubectl cp <local_trace.jsonl> ${NAMESPACE}/<helper-pod>:/model-cache/traces/agent_trace_data/dataset.jsonl
 ```
 
 ### 5. Deploy & benchmark each variant
