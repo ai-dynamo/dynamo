@@ -2699,7 +2699,6 @@ dependencies = [
  "figment",
  "futures",
  "humantime",
- "hyper-util",
  "jsonschema",
  "k8s-openapi",
  "kube",
