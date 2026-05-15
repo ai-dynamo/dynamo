@@ -180,8 +180,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--num-gpu-blocks-override",
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
-        default=16384,
-        help="Number of GPU blocks for KV cache (default: 16384)",
+        default=None,
+        help="Explicit number of GPU blocks for KV cache. When unset, AIC-backed "
+        "mocker estimates the value; non-AIC mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",
@@ -278,6 +279,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Use direct AIC SDK calls for latency prediction. "
         "Requires aiconfigurator SDK installed.",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="GPU memory fraction for AIC KV capacity estimation with vLLM/TRT-LLM "
+        "(default: 0.9).",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help="Static memory fraction for AIC KV capacity estimation with SGLang "
+        "(default: 0.88).",
     )
     parser.add_argument(
         "--aic-system",

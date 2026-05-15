@@ -441,6 +441,16 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_attention_dp_size: Option<usize>,
 
+    /// GPU memory fraction for AIC KV capacity estimation with vLLM/TRT-LLM.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub gpu_memory_utilization: Option<f64>,
+
+    /// Static memory fraction for AIC KV capacity estimation with SGLang.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub mem_fraction_static: Option<f64>,
+
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
     pub enable_local_indexer: bool,
@@ -641,6 +651,8 @@ impl MockEngineArgs {
             "aic_moe_tp_size",
             "aic_moe_ep_size",
             "aic_attention_dp_size",
+            "gpu_memory_utilization",
+            "mem_fraction_static",
             "enable_local_indexer",
             "bootstrap_port",
             "kv_bytes_per_token",
@@ -961,6 +973,20 @@ impl MockEngineArgs {
             && let Some(n) = v.as_u64()
         {
             builder = builder.aic_attention_dp_size(Some(n as usize));
+        }
+        if let Some(value) = extra_args.get("gpu_memory_utilization") {
+            if value.is_null() {
+                builder = builder.gpu_memory_utilization(None);
+            } else if let Some(num) = value.as_f64() {
+                builder = builder.gpu_memory_utilization(Some(num));
+            }
+        }
+        if let Some(value) = extra_args.get("mem_fraction_static") {
+            if value.is_null() {
+                builder = builder.mem_fraction_static(None);
+            } else if let Some(num) = value.as_f64() {
+                builder = builder.mem_fraction_static(Some(num));
+            }
         }
         // Build the MockEngineArgs with either defaults or overridden values
         builder

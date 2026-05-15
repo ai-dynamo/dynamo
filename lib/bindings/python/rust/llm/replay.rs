@@ -19,8 +19,13 @@ use pythonize::pythonize;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
+use super::aic_callback::{
+    create_aic_callback, create_aic_prefill_load_estimator, estimate_aic_num_gpu_blocks,
+};
 use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
+
+const DEFAULT_GPU_MEMORY_UTILIZATION: f64 = 0.9;
+const DEFAULT_MEM_FRACTION_STATIC: f64 = 0.88;
 
 fn parse_mocker_engine_type(engine_type: &str) -> PyResult<RsMockerEngineType> {
     match engine_type {
@@ -122,22 +127,27 @@ impl SglangArgs {
 #[derive(Clone, Debug, Default)]
 pub struct MockEngineArgs {
     inner: RsMockEngineArgs,
+    num_gpu_blocks_explicit: bool,
 }
 
 impl MockEngineArgs {
     pub fn inner(&self) -> RsMockEngineArgs {
         self.inner.clone()
     }
+
+    pub(crate) fn num_gpu_blocks_explicit(&self) -> bool {
+        self.num_gpu_blocks_explicit
+    }
 }
 
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=16384, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, gpu_memory_utilization=None, mem_fraction_static=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
-        num_gpu_blocks: usize,
+        num_gpu_blocks: Option<usize>,
         block_size: usize,
         max_num_seqs: Option<usize>,
         max_num_batched_tokens: Option<usize>,
@@ -157,6 +167,8 @@ impl MockEngineArgs {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        gpu_memory_utilization: Option<f64>,
+        mem_fraction_static: Option<f64>,
         enable_local_indexer: bool,
         bootstrap_port: Option<u16>,
         kv_bytes_per_token: Option<usize>,
@@ -181,7 +193,6 @@ impl MockEngineArgs {
 
         let mut builder = RsMockEngineArgs::builder()
             .engine_type(engine_type)
-            .num_gpu_blocks(num_gpu_blocks)
             .block_size(block_size)
             .max_num_seqs(max_num_seqs)
             .max_num_batched_tokens(max_num_batched_tokens)
@@ -201,6 +212,8 @@ impl MockEngineArgs {
             .aic_moe_tp_size(aic_moe_tp_size)
             .aic_moe_ep_size(aic_moe_ep_size)
             .aic_attention_dp_size(aic_attention_dp_size)
+            .gpu_memory_utilization(gpu_memory_utilization)
+            .mem_fraction_static(mem_fraction_static)
             .enable_local_indexer(enable_local_indexer)
             .bootstrap_port(bootstrap_port)
             .kv_bytes_per_token(kv_bytes_per_token)
@@ -211,6 +224,10 @@ impl MockEngineArgs {
             .preemption_mode(preemption_mode)
             .router_queue_policy(router_queue_policy)
             .sglang(sglang.map(|config| config.inner()));
+        let num_gpu_blocks_explicit = num_gpu_blocks.is_some();
+        if let Some(num_gpu_blocks) = num_gpu_blocks {
+            builder = builder.num_gpu_blocks(num_gpu_blocks);
+        }
 
         if let Some(npz_path) = planner_profile_data {
             let perf_model = PerfModel::from_npz(&npz_path).map_err(|e| {
@@ -230,13 +247,27 @@ impl MockEngineArgs {
                 PyException::new_err(format!("Failed to normalize MockEngineArgs: {e}"))
             })?;
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            num_gpu_blocks_explicit,
+        })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
+        let num_gpu_blocks_explicit = serde_json::from_str::<serde_json::Value>(config_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .as_object()
+                    .map(|object| object.get("num_gpu_blocks").is_some_and(|v| !v.is_null()))
+            })
+            .unwrap_or(false);
         RsMockEngineArgs::from_json_str(config_json)
-            .map(|inner| Self { inner })
+            .map(|inner| Self {
+                inner,
+                num_gpu_blocks_explicit,
+            })
             .map_err(|e| PyException::new_err(format!("Failed to parse MockEngineArgs JSON: {e}")))
     }
 
@@ -259,9 +290,12 @@ impl MockEngineArgs {
             .router_queue_policy
             .as_ref()
             .map(|policy| policy.to_string());
+        let num_gpu_blocks = self
+            .num_gpu_blocks_explicit
+            .then_some(self.inner.num_gpu_blocks);
         let payload = json!({
             "engine_type": engine_type,
-            "num_gpu_blocks": self.inner.num_gpu_blocks,
+            "num_gpu_blocks": num_gpu_blocks,
             "block_size": self.inner.block_size,
             "max_num_seqs": self.inner.max_num_seqs,
             "max_num_batched_tokens": self.inner.max_num_batched_tokens,
@@ -281,6 +315,8 @@ impl MockEngineArgs {
             "aic_moe_tp_size": self.inner.aic_moe_tp_size,
             "aic_moe_ep_size": self.inner.aic_moe_ep_size,
             "aic_attention_dp_size": self.inner.aic_attention_dp_size,
+            "gpu_memory_utilization": self.inner.gpu_memory_utilization,
+            "mem_fraction_static": self.inner.mem_fraction_static,
             "enable_local_indexer": self.inner.enable_local_indexer,
             "bootstrap_port": self.inner.bootstrap_port,
             "kv_bytes_per_token": self.inner.kv_bytes_per_token,
@@ -426,6 +462,26 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn gpu_memory_utilization(&self) -> Option<f64> {
+        self.inner.gpu_memory_utilization
+    }
+
+    #[setter]
+    fn set_gpu_memory_utilization(&mut self, value: Option<f64>) {
+        self.inner.gpu_memory_utilization = value;
+    }
+
+    #[getter]
+    fn mem_fraction_static(&self) -> Option<f64> {
+        self.inner.mem_fraction_static
+    }
+
+    #[setter]
+    fn set_mem_fraction_static(&mut self, value: Option<f64>) {
+        self.inner.mem_fraction_static = value;
+    }
+
+    #[getter]
     fn worker_type(&self) -> &'static str {
         match self.inner.worker_type {
             RsWorkerType::Aggregated => "aggregated",
@@ -443,6 +499,7 @@ impl MockEngineArgs {
     #[setter]
     fn set_num_gpu_blocks(&mut self, value: usize) {
         self.inner.num_gpu_blocks = value;
+        self.num_gpu_blocks_explicit = true;
     }
 
     fn is_prefill(&self) -> bool {
@@ -454,7 +511,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, gpu_memory_utilization=None, mem_fraction_static=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -470,10 +527,13 @@ impl MockEngineArgs {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        gpu_memory_utilization: Option<f64>,
+        mem_fraction_static: Option<f64>,
         enable_prefix_caching: Option<bool>,
         worker_type: Option<String>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
+        let mut num_gpu_blocks_explicit = self.num_gpu_blocks_explicit;
         if let Some(port) = bootstrap_port {
             inner.bootstrap_port = Some(port);
         }
@@ -488,6 +548,7 @@ impl MockEngineArgs {
         }
         if let Some(blocks) = num_gpu_blocks {
             inner.num_gpu_blocks = blocks;
+            num_gpu_blocks_explicit = true;
         }
         if let Some(backend) = aic_backend {
             inner.aic_backend = Some(backend);
@@ -513,15 +574,27 @@ impl MockEngineArgs {
         if let Some(attention_dp_size) = aic_attention_dp_size {
             inner.aic_attention_dp_size = Some(attention_dp_size);
         }
+        if let Some(gpu_memory_utilization) = gpu_memory_utilization {
+            inner.gpu_memory_utilization = Some(gpu_memory_utilization);
+        }
+        if let Some(mem_fraction_static) = mem_fraction_static {
+            inner.mem_fraction_static = Some(mem_fraction_static);
+        }
         if let Some(enable_prefix_caching) = enable_prefix_caching {
             inner.enable_prefix_caching = enable_prefix_caching;
         }
         if let Some(worker_type) = worker_type {
             inner.worker_type = parse_worker_type(&worker_type)?;
         }
-        inner.normalized().map(|inner| Self { inner }).map_err(|e| {
-            PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))
-        })
+        inner
+            .normalized()
+            .map(|inner| Self {
+                inner,
+                num_gpu_blocks_explicit,
+            })
+            .map_err(|e| {
+                PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))
+            })
     }
 }
 
@@ -982,14 +1055,15 @@ fn load_optional_replay_mocker_args(
     extra_engine_args: Option<MockEngineArgs>,
 ) -> PyResult<Option<RsMockEngineArgs>> {
     extra_engine_args
-        .map(|extra_args| materialize_replay_mocker_args(py, extra_args.inner()))
+        .map(|extra_args| materialize_replay_mocker_args(py, extra_args))
         .transpose()
 }
 
 fn materialize_replay_mocker_args(
     py: Python<'_>,
-    mut args: RsMockEngineArgs,
+    extra_args: MockEngineArgs,
 ) -> PyResult<RsMockEngineArgs> {
+    let mut args = extra_args.inner();
     if let Some(ref backend_name) = args.aic_backend.clone() {
         let backend = backend_name.clone();
         let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
@@ -1002,6 +1076,31 @@ fn materialize_replay_mocker_args(
         let moe_tp_size = args.aic_moe_tp_size;
         let moe_ep_size = args.aic_moe_ep_size;
         let attention_dp_size = args.aic_attention_dp_size;
+        if !extra_args.num_gpu_blocks_explicit() {
+            args.num_gpu_blocks = estimate_aic_num_gpu_blocks(
+                py,
+                &backend,
+                &system,
+                &model_name,
+                tp_size,
+                args.block_size,
+                args.max_num_batched_tokens.unwrap_or(8192),
+                args.gpu_memory_utilization
+                    .unwrap_or(DEFAULT_GPU_MEMORY_UTILIZATION),
+                args.mem_fraction_static
+                    .or(Some(DEFAULT_MEM_FRACTION_STATIC)),
+                backend_version.as_deref(),
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+            )
+            .map_err(|e| {
+                PyException::new_err(format!(
+                    "Failed to estimate AIC KV cache capacity (--aic-perf-model was requested): {}",
+                    e
+                ))
+            })?;
+        }
         let callback = create_aic_callback(
             py,
             &backend,

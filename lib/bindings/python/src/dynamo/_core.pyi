@@ -1416,7 +1416,7 @@ class MockEngineArgs:
     def __init__(
         self,
         engine_type: str = "vllm",
-        num_gpu_blocks: int = 16384,
+        num_gpu_blocks: Optional[int] = None,
         block_size: int = 0,
         max_num_seqs: Optional[int] = 256,
         max_num_batched_tokens: Optional[int] = 8192,
@@ -1436,6 +1436,8 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        mem_fraction_static: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
@@ -1536,6 +1538,18 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def gpu_memory_utilization(self) -> Optional[float]: ...
+
+    @gpu_memory_utilization.setter
+    def gpu_memory_utilization(self, value: Optional[float]) -> None: ...
+
+    @property
+    def mem_fraction_static(self) -> Optional[float]: ...
+
+    @mem_fraction_static.setter
+    def mem_fraction_static(self, value: Optional[float]) -> None: ...
+
+    @property
     def worker_type(self) -> str: ...
 
     @worker_type.setter
@@ -1560,6 +1574,8 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        mem_fraction_static: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...

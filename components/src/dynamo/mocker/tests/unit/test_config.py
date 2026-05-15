@@ -31,7 +31,7 @@ def make_args(**overrides):
     defaults = {
         "extra_engine_args": None,
         "engine_type": "vllm",
-        "num_gpu_blocks": 16384,
+        "num_gpu_blocks": None,
         "block_size": None,
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
@@ -59,6 +59,8 @@ def make_args(**overrides):
         "aic_moe_tp_size": None,
         "aic_moe_ep_size": None,
         "aic_attention_dp_size": None,
+        "gpu_memory_utilization": None,
+        "mem_fraction_static": None,
         "model_path": None,
         "is_prefill_worker": False,
         "is_decode_worker": False,
@@ -187,6 +189,8 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         aic_backend_version="0.5.6.post2",
         aic_tp_size=8,
         model_path="/models/mock",
+        gpu_memory_utilization=None,
+        mem_fraction_static=None,
     )
 
     engine_args = CONFIG.build_mocker_engine_args(args)
@@ -214,6 +218,8 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         "aic_moe_tp_size": None,
         "aic_moe_ep_size": None,
         "aic_attention_dp_size": None,
+        "gpu_memory_utilization": None,
+        "mem_fraction_static": None,
         "enable_local_indexer": True,
         "bootstrap_port": None,
         "kv_bytes_per_token": None,
@@ -247,6 +253,7 @@ def test_aic_backend_override_decouples_from_engine_type():
         aic_system="h200_sxm",
         aic_backend="trtllm",
         aic_tp_size=4,
+        num_gpu_blocks=16384,
     )
 
     engine_args = CONFIG.build_mocker_engine_args(args)
@@ -254,6 +261,107 @@ def test_aic_backend_override_decouples_from_engine_type():
 
     assert payload["engine_type"] == "vllm"
     assert payload["aic_backend"] == "trtllm"
+
+
+def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 46000
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            aic_perf_model=True,
+            model_path="/models/mock",
+            aic_system="h200_sxm",
+            aic_tp_size=4,
+            max_num_batched_tokens=4096,
+            gpu_memory_utilization=0.8,
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 46000
+    assert calls == [
+        {
+            "backend_name": "vllm",
+            "system": "h200_sxm",
+            "model_path": "/models/mock",
+            "tp_size": 4,
+            "block_size": 64,
+            "max_num_batched_tokens": 4096,
+            "gpu_memory_utilization": 0.8,
+            "mem_fraction_static": 0.88,
+            "backend_version": None,
+            "moe_tp_size": None,
+            "moe_ep_size": None,
+            "attention_dp_size": None,
+        }
+    ]
+
+
+def test_build_mocker_engine_args_estimates_sglang_blocks_with_static_fraction(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 32000
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            engine_type="sglang",
+            aic_perf_model=True,
+            model_path="/models/mock",
+            sglang_page_size=128,
+            mem_fraction_static=0.77,
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 32000
+    assert calls[0]["backend_name"] == "sglang"
+    assert calls[0]["block_size"] == 128
+    assert calls[0]["mem_fraction_static"] == 0.77
+
+
+def test_build_mocker_engine_args_explicit_blocks_skip_aic_estimate(monkeypatch):
+    def fail_estimate_num_gpu_blocks(**_kwargs):
+        raise AssertionError("estimator should not be called")
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fail_estimate_num_gpu_blocks)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            aic_perf_model=True,
+            num_gpu_blocks=12345,
+            model_path="/models/mock",
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 12345
+
+
+def test_load_mocker_engine_args_estimates_json_aic_blocks(tmp_path, monkeypatch):
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        assert kwargs["model_path"] == "/models/from-cli"
+        assert kwargs["block_size"] == 64
+        return 47000
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    config_path = tmp_path / "engine_args.json"
+    config_path.write_text(json.dumps({"aic_backend": "vllm"}))
+
+    engine_args = CONFIG.load_mocker_engine_args(
+        make_args(extra_engine_args=config_path, model_path="/models/from-cli")
+    )
+
+    assert engine_args.num_gpu_blocks == 47000
 
 
 def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
