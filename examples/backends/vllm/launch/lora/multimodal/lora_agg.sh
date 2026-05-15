@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../../common/launch_utils.sh"
 # Cleanup: see common/launch_utils.sh::dynamo_reap_and_exit
-trap 'echo "Cleaning up..."; dynamo_reap_and_exit $?' EXIT
+trap '_rc=$?; echo "Cleaning up..."; dynamo_reap_and_exit "$_rc"' EXIT
 
 # ── Configuration ────────────────────────────────────────────────────────
 
@@ -153,5 +153,4 @@ DYN_SYSTEM_PORT="$SYSTEM_PORT" \
         "${MODEL_SPECIFIC_ARGS[@]}" \
         "${EXTRA_ARGS[@]}" &
 
-# Wait for all background processes
-wait
+wait_any_exit

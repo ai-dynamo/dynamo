@@ -23,7 +23,7 @@ set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 # Cleanup: see common/launch_utils.sh::dynamo_reap_and_exit
-trap 'echo "Cleaning up..."; dynamo_reap_and_exit $?' EXIT
+trap '_rc=$?; echo "Cleaning up..."; dynamo_reap_and_exit "$_rc"' EXIT
 
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TP="${TENSOR_PARALLEL_SIZE:-16}"
@@ -65,7 +65,7 @@ if [[ "${ROLE}" == "head" ]]; then
     --master-addr "${HEAD_IP}" \
     --enforce-eager &
 
-  wait
+  wait_any_exit
 else
   echo "Starting dynamo.vllm headless worker (TP=${TP}, nnodes=${NNODES}, node-rank=1)..."
   python3 -m dynamo.vllm \
@@ -75,5 +75,7 @@ else
     --node-rank 1 \
     --master-addr "${HEAD_IP}" \
     --enforce-eager \
-    --headless
+    --headless &
+
+  wait_any_exit
 fi

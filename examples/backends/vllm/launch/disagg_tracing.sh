@@ -5,7 +5,7 @@ set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 # Cleanup: see common/launch_utils.sh::dynamo_reap_and_exit
-trap 'echo Cleaning up...; dynamo_reap_and_exit $?' EXIT
+trap '_rc=$?; echo Cleaning up...; dynamo_reap_and_exit "$_rc"' EXIT
 
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
@@ -75,4 +75,6 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+
+wait_any_exit

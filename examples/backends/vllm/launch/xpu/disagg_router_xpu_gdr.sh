@@ -6,7 +6,7 @@ set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 # Cleanup: see common/launch_utils.sh::dynamo_reap_and_exit
-trap 'echo Cleaning up...; dynamo_reap_and_exit $?' EXIT
+trap '_rc=$?; echo Cleaning up...; dynamo_reap_and_exit "$_rc"' EXIT
 
 # Set deterministic hash for KV event IDs
 export PYTHONHASHSEED=0
@@ -62,4 +62,6 @@ ZE_AFFINITY_MASK=3 python3 -m dynamo.vllm \
     --block-size $BLOCK_SIZE \
     --kv-transfer-config "{\"kv_connector\": \"NixlConnector\", \"kv_role\": \"kv_both\", \"kv_buffer_device\": \"${NIXL_BUFFER_DEVICE}\", \"kv_connector_extra_config\": {\"backends\": [\"${VLLM_NIXL_BACKEND}\"]}}" \
     --is-prefill-worker \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559", "enable_kv_cache_events":true}'
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559", "enable_kv_cache_events":true}' &
+
+wait_any_exit

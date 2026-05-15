@@ -5,7 +5,7 @@ set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 # Cleanup: see common/launch_utils.sh::dynamo_reap_and_exit
-trap 'echo Cleaning up...; dynamo_reap_and_exit $?' EXIT
+trap '_rc=$?; echo Cleaning up...; dynamo_reap_and_exit "$_rc"' EXIT
 
 # Default model
 MODEL="Qwen/Qwen3-0.6B"
@@ -64,4 +64,6 @@ export OTEL_SERVICE_NAME=dynamo-worker-vllm
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
     --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" &
+
+wait_any_exit
