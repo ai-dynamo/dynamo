@@ -85,3 +85,79 @@ cases:
         normal_text: ''
       vllm: *id003
       sglang: *id003
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      Boston
+      </parameter>
+      </function>
+      </tool_call>
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      New York
+      </parameter>
+      </function>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm: *id004
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      Boston
+      </parameter>
+      </function>
+      </tool_call>
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      New York
+    tools:
+    - *id002
+    expected:
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm: *id005
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
