@@ -30,6 +30,7 @@ from dynamo._core import PlannerReplayBridge as PlannerReplayBridge
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import ReasoningConfig as ReasoningConfig
+from dynamo._core import RoutingConstraints as RoutingConstraints
 from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import SglangArgs as SglangArgs

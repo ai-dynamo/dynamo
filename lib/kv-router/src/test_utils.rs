@@ -3,6 +3,7 @@
 
 //! Shared test utilities for radix tree tests.
 
+use std::collections::HashSet;
 use std::future;
 
 use crate::indexer::KvIndexerInterface;
@@ -406,4 +407,3 @@ impl WorkerConfigLike for SimpleWorkerConfig {
         &self.taints
     }
 }
-use std::collections::HashSet;
