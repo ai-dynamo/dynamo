@@ -28,7 +28,9 @@ sample_configs = {
         script_args=["--model-name", "Qwen/Qwen3-0.6B"],
         marks=[
             pytest.mark.gpu_0,
-            pytest.mark.timeout(300),
+            # 300s left only ~60s of test budget after #9421 preflight + xdist stagger
+            # on slower runners (efa, gw16+); match EngineConfig.timeout (600s). OPS-5850.
+            pytest.mark.timeout(600),
             pytest.mark.pre_merge,
             pytest.mark.unified,
             pytest.mark.vllm,
