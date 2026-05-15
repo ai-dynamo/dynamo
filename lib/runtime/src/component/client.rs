@@ -155,8 +155,6 @@ pub struct Client {
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // These are the instance source ids less those reported as down from sending rpc
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
-    // These are the instance source ids less those reported as busy (above threshold)
-    instance_free: Arc<ArcSwap<Vec<u64>>>,
     // These are the instance ids reported as busy (above threshold)
     instance_busy: Arc<StdMutex<HashSet<u64>>>,
     // Watch sender for available instance IDs (for sending updates)
@@ -204,7 +202,6 @@ impl Client {
             endpoint_discovery_source,
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
             instance_busy: Arc::new(StdMutex::new(HashSet::new())),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
@@ -227,8 +224,14 @@ impl Client {
         self.instance_avail.load()
     }
 
-    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
-        self.instance_free.load()
+    pub fn instance_ids_free(&self) -> Vec<u64> {
+        let instance_ids = self.instance_ids();
+        let busy_ids = self.instance_busy.lock().unwrap();
+
+        instance_ids
+            .into_iter()
+            .filter(|id| !busy_ids.contains(id))
+            .collect()
     }
 
     /// Get a watcher for available instance IDs
@@ -291,13 +294,6 @@ impl Client {
         let mut busy_ids = self.instance_busy.lock().unwrap();
         busy_ids.clear();
         busy_ids.extend(busy_instance_ids.iter().copied());
-
-        let free_ids = self
-            .instance_ids()
-            .into_iter()
-            .filter(|id| !busy_ids.contains(id))
-            .collect();
-        self.instance_free.store(Arc::new(free_ids));
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -321,15 +317,6 @@ impl Client {
                     .collect();
 
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
-                {
-                    let busy_ids = client.instance_busy.lock().unwrap();
-                    let free_ids = instance_ids
-                        .iter()
-                        .copied()
-                        .filter(|id| !busy_ids.contains(id))
-                        .collect();
-                    client.instance_free.store(Arc::new(free_ids));
-                }
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 let registry = client.endpoint.drt().routing_occupancy_states();
@@ -586,7 +573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_instance_reconciliation_preserves_busy_new_instances() {
+    async fn test_instance_ids_free_excludes_busy_new_instances() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
         let rt = Runtime::from_current().unwrap();
@@ -608,12 +595,16 @@ mod tests {
         endpoint.register_endpoint_instance().await.unwrap();
         let instances = client.wait_for_instances().await.unwrap();
         assert_eq!(instances[0].id(), worker_id);
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "newly discovered busy worker should not be free"
+        );
 
         tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
 
         assert!(
             client.instance_ids_free().is_empty(),
-            "discovery reconciliation should not mark a newly discovered busy worker free"
+            "discovery reconciliation should not affect recomputed free workers"
         );
 
         rt.shutdown();
