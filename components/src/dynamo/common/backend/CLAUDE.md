@@ -154,6 +154,32 @@ proper error chain observability. Engines can raise `DynamoException`
 subclasses directly from `generate()` -- these pass through unchanged.
 Non-`DynamoException` errors are wrapped as `Unknown`.
 
+## Metrics cost notes
+
+The framework polls each `ComponentMetricsSource.snapshot` every 100 ms
+to drive the `dynamo_component_*` gauges and the router-input signal.
+Per-backend costs:
+
+- **vLLM**: stat-logger writes a dict on every engine iteration; the
+  framework's poll reads from it. Negligible — dict assignment plus
+  100 ms tokio interval.
+- **SGLang**: scheduler ZMQ messages drive the dict write. Negligible.
+- **TRT-LLM**: a dedicated `_metrics_poll_loop` thread calls
+  `engine.llm.get_stats(timeout=0.2)` to populate the dict. `get_stats`
+  returns within 200 ms and exceeds the framework's 1 ms snapshot
+  ceiling, which is why TRT-LLM keeps its own thread — the framework
+  poll just dict-reads. The cost is the 200 ms poll cycle into
+  TRT-LLM's stat-collection path (driven by `enable_iter_perf_stats=True`
+  and `return_perf_metrics=True`, which are now unconditional).
+
+If you're running TRT-LLM **without** KV routing AND don't scrape
+`dynamo_component_*` from `/metrics`, you can opt out of the
+stat-collection cost via `--trtllm.enable_iter_perf_stats false`
+(and `--trtllm.return_perf_metrics false`). The component gauges will
+stay at zero; the poll thread will run but find nothing to record.
+This is the only `dynamo_component_*` escape hatch we surface — the
+default is "metrics on, KV events gated by `--publish-kv-events`."
+
 ## Logging
 
 Keep logging **standardized across all three engines** (vllm, sglang, trtllm).

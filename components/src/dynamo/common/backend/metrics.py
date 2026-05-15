@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prometheus integration helpers for unified backend ``LLMEngine`` implementations.
+"""Engine-facing Prometheus helpers.
 
-Engines call these from inside :meth:`LLMEngine.register_prometheus`.
-The ``EngineMetrics`` handle is the single entry point — engines never
-construct ``Endpoint`` instances or compute hierarchy labels directly.
+Engines call :func:`register_global_registry` from inside
+:meth:`LLMEngine.register_prometheus` to bridge their vendor-prefixed
+registry (``vllm:``, ``sglang:``, ``trtllm_``, ``lmcache:``) into the
+runtime's combined ``/metrics`` output.
 
-See ``dynamo/common/backend/README.md`` for the ``register_prometheus``
-contract and a worked example.
+The ``dynamo_component_*`` registry is owned by the framework and built
+via the PyO3 bridge — engines do not construct it. See
+:mod:`dynamo.common.backend._internal_metrics`.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import tempfile
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Optional
 
-from dynamo.common.utils.prometheus import LLMBackendMetrics, get_prometheus_expfmt
+from dynamo.common.utils.prometheus import get_prometheus_expfmt
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
@@ -70,32 +72,6 @@ def ensure_prometheus_multiproc_dir(
     return tmpdir
 
 
-def register_engine_registry(
-    metrics: "EngineMetrics",
-    registry: "CollectorRegistry",
-    *,
-    prefix_filters: Optional[list[str]] = None,
-    exclude_prefixes: Optional[list[str]] = None,
-) -> None:
-    """Register an engine-owned registry as a ``/metrics`` source.
-
-    Use for the per-engine ``dynamo_component_*`` registry from
-    :func:`make_component_metrics`, or for a SGLang-style private
-    multiprocess registry. Engines that write to the global
-    ``prometheus_client.REGISTRY`` (vLLM, TRT-LLM) should call
-    :func:`register_global_registry` instead.
-    """
-    labels = metrics.auto_labels
-    metrics.register_prometheus_expfmt_callback(
-        lambda: gather_with_labels(
-            registry,
-            labels,
-            prefix_filters=prefix_filters,
-            exclude_prefixes=exclude_prefixes,
-        )
-    )
-
-
 def register_global_registry(
     metrics: "EngineMetrics",
     *,
@@ -105,8 +81,8 @@ def register_global_registry(
 ) -> None:
     """Register the global ``prometheus_client.REGISTRY`` against
     ``/metrics``, handling the K8s ``MultiProcessCollector`` conflict.
-    Use for engines that write to the global REGISTRY (vLLM, TRT-LLM);
-    engines with a private registry use :func:`register_engine_registry`.
+    Use from inside :meth:`LLMEngine.register_prometheus` to bridge an
+    engine's native metrics into the runtime's combined output.
 
     ``engine_prefix`` is the in-memory prefix (e.g. ``"vllm:"``);
     ``multiproc_only_prefixes`` is for prefixes that live only in
@@ -116,6 +92,8 @@ def register_global_registry(
     # set_prometheus_multiproc_dir during sgl.Engine init) can import
     # this module before prometheus_client touches the env var.
     from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
+
+    from ._internal_metrics import register_engine_registry
 
     all_prefixes = [engine_prefix] + list(multiproc_only_prefixes or [])
     multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
@@ -167,46 +145,8 @@ def register_global_registry(
     )
 
 
-def make_component_metrics(
-    model_name: str,
-    component_name: str,
-) -> tuple[LLMBackendMetrics, "CollectorRegistry"]:
-    """Build ``dynamo_component_*`` gauges on a dedicated registry.
-
-    Returns ``(gauges, registry)``. The engine feeds ``gauges`` from
-    its stat-logger callbacks and exposes ``registry`` via
-    :func:`register_engine_registry`. Both label values must be
-    non-empty — empty strings would mask the framework's auto-injected
-    labels via the existing-label-wins rule.
-    """
-    if not model_name:
-        raise ValueError(
-            "make_component_metrics requires a non-empty model_name; "
-            "empty-string labels mask auto-injected values"
-        )
-    if not component_name:
-        raise ValueError(
-            "make_component_metrics requires a non-empty component_name; "
-            "empty-string labels mask auto-injected values"
-        )
-
-    from prometheus_client import (
-        CollectorRegistry,  # lazy; see register_global_registry
-    )
-
-    registry = CollectorRegistry()
-    gauges = LLMBackendMetrics(
-        registry=registry,
-        model_name=model_name,
-        component_name=component_name,
-    )
-    return gauges, registry
-
-
 __all__ = [
     "ensure_prometheus_multiproc_dir",
     "gather_with_labels",
-    "make_component_metrics",
-    "register_engine_registry",
     "register_global_registry",
 ]

@@ -754,56 +754,79 @@ impl LLMEngine for PyLLMEngine {
         let load_time = ctx.model_load_time_seconds;
         let py_metrics_state = crate::prometheus_metrics::EngineMetrics::from_rust(ctx.metrics);
 
-        tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<Option<Arc<dyn ComponentMetricsPublisher>>> {
+        let join = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, BridgeError> {
                 // 1. Ask engine for source descriptors. Engines that opt out
                 //    return an empty list and we return None to the framework.
                 let bound = engine.bind(py);
-                let py_sources_obj = bound.call_method0("component_metrics_sources")?;
-                let py_sources = py_sources_obj.downcast::<pyo3::types::PyList>()?;
+                let py_sources_obj = bound
+                    .call_method0("component_metrics_sources")
+                    .map_err(|e| BridgeError::new(BridgeStage::GetSources, e))?;
+                let py_sources = py_sources_obj
+                    .downcast::<pyo3::types::PyList>()
+                    .map_err(|e| BridgeError::new(BridgeStage::GetSources, e.into()))?;
                 if py_sources.is_empty() {
                     return Ok(None);
                 }
 
-                // 2. Construct gauges + registry via the engine-facing helper.
-                let metrics_mod = py.import("dynamo.common.backend.metrics")?;
+                // 2. Construct gauges + registry via the framework-only helper.
+                let metrics_mod = py
+                    .import("dynamo.common.backend._internal_metrics")
+                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?;
                 let pair = metrics_mod
-                    .call_method1("make_component_metrics", (model.as_str(), component.as_str()))?;
-                let pair_tuple = pair.downcast::<pyo3::types::PyTuple>()?;
-                let gauges = pair_tuple.get_item(0)?.unbind();
-                let registry = pair_tuple.get_item(1)?.unbind();
+                    .call_method1("make_component_metrics", (model.as_str(), component.as_str()))
+                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?;
+                let pair_tuple = pair
+                    .downcast::<pyo3::types::PyTuple>()
+                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e.into()))?;
+                let gauges = pair_tuple
+                    .get_item(0)
+                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?
+                    .unbind();
+                let registry = pair_tuple
+                    .get_item(1)
+                    .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?
+                    .unbind();
 
                 // 3. Seed zeros for each rank so the gauges show up in the
                 //    very first /metrics scrape. Set model_load_time once.
-                let mut ranks: Vec<u32> = Vec::with_capacity(py_sources.len());
                 for item in py_sources.iter() {
-                    let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
+                    let dp_rank: u32 = item
+                        .getattr("dp_rank")
+                        .and_then(|v| v.extract())
+                        .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
                     let rank_str = dp_rank.to_string();
                     gauges
                         .bind(py)
-                        .call_method1("set_total_blocks", (rank_str.clone(), 0u64))?;
+                        .call_method1("set_total_blocks", (rank_str.clone(), 0u64))
+                        .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
                     gauges
                         .bind(py)
-                        .call_method1("set_gpu_cache_usage", (rank_str, 0.0f64))?;
-                    ranks.push(dp_rank);
+                        .call_method1("set_gpu_cache_usage", (rank_str, 0.0f64))
+                        .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
                 }
                 gauges
                     .bind(py)
-                    .call_method1("set_model_load_time", (load_time,))?;
+                    .call_method1("set_model_load_time", (load_time,))
+                    .map_err(|e| BridgeError::new(BridgeStage::SetLoadTime, e))?;
 
                 // 4. Wire the registry as a /metrics callback against the
                 //    shared EngineMetrics handle.
-                let py_metrics = Py::new(py, py_metrics_state)?;
-                metrics_mod.call_method1(
-                    "register_engine_registry",
-                    (py_metrics.clone_ref(py), registry),
-                )?;
+                let py_metrics = Py::new(py, py_metrics_state)
+                    .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
+                metrics_mod
+                    .call_method1(
+                        "register_engine_registry",
+                        (py_metrics.clone_ref(py), registry),
+                    )
+                    .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
 
                 // 5. Wrap each Python snapshot fn as a Rust closure.
                 let sources_cache: Vec<ComponentMetricsSource> = py_sources
                     .iter()
                     .map(|item| build_rust_source(&item))
-                    .collect::<PyResult<_>>()?;
+                    .collect::<PyResult<_>>()
+                    .map_err(|e| BridgeError::new(BridgeStage::WrapPySource, e))?;
 
                 Ok(Some(Arc::new(PyComponentMetricsPublisher {
                     gauges,
@@ -812,14 +835,71 @@ impl LLMEngine for PyLLMEngine {
                 }) as Arc<dyn ComponentMetricsPublisher>))
             })
         })
-        .await
-        .map_err(|e| {
-            DynamoError::builder()
+        .await;
+
+        match join {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(bridge_err)) => Err(bridge_err.into()),
+            Err(join_err) => Err(DynamoError::builder()
                 .error_type(ErrorType::Backend(BackendError::Unknown))
-                .message(format!("setup_component_metrics offload error: {e}"))
-                .build()
-        })?
-        .map_err(py_err_to_dynamo)
+                .message(format!(
+                    "setup_component_metrics spawn_blocking join failed: {join_err}"
+                ))
+                .build()),
+        }
+    }
+}
+
+/// Per-step labels for the cross-language pipeline in
+/// [`PyLLMEngine::setup_component_metrics`]. The pipeline runs ~5
+/// distinct Python calls; tagging the failing stage in the error
+/// message means production diagnostics point at the exact step
+/// (gauge construction vs callback registration vs snapshot wrapping)
+/// without spelunking through logs.
+#[derive(Debug, Clone, Copy)]
+enum BridgeStage {
+    GetSources,
+    BuildGauges,
+    SeedZeros,
+    SetLoadTime,
+    RegisterCallback,
+    WrapPySource,
+}
+
+impl BridgeStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            BridgeStage::GetSources => "get_sources",
+            BridgeStage::BuildGauges => "build_gauges",
+            BridgeStage::SeedZeros => "seed_zeros",
+            BridgeStage::SetLoadTime => "set_load_time",
+            BridgeStage::RegisterCallback => "register_callback",
+            BridgeStage::WrapPySource => "wrap_py_source",
+        }
+    }
+}
+
+struct BridgeError {
+    stage: BridgeStage,
+    inner: PyErr,
+}
+
+impl BridgeError {
+    fn new(stage: BridgeStage, inner: PyErr) -> Self {
+        Self { stage, inner }
+    }
+}
+
+impl From<BridgeError> for DynamoError {
+    fn from(e: BridgeError) -> Self {
+        DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::Unknown))
+            .message(format!(
+                "setup_component_metrics[{}]: {}",
+                e.stage.as_str(),
+                e.inner
+            ))
+            .build()
     }
 }
 
@@ -848,12 +928,45 @@ impl ComponentMetricsPublisher for PyComponentMetricsPublisher {
         Python::with_gil(|py| {
             let rank_str = snap.dp_rank.to_string();
             let g = self.gauges.bind(py);
-            let r1 = g.call_method1("set_total_blocks", (rank_str.clone(), snap.kv_total_blocks));
-            let r2 = g.call_method1("set_gpu_cache_usage", (rank_str, snap.gpu_cache_usage as f64));
-            if let Err(e) = r1.and(r2)
+            let mut result = g
+                .call_method1("set_total_blocks", (rank_str.clone(), snap.kv_total_blocks))
+                .and(g.call_method1(
+                    "set_gpu_cache_usage",
+                    (rank_str.clone(), snap.gpu_cache_usage as f64),
+                ));
+            // hit_rate is None when the engine hasn't observed requests yet.
+            if let Some(hit_rate) = snap.kv_cache_hit_rate {
+                result = result.and(g.call_method1(
+                    "set_kv_cache_hit_rate",
+                    (rank_str, hit_rate as f64),
+                ));
+            }
+            if let Err(e) = result
                 && !self.update_failed_logged.swap(true, Ordering::Relaxed)
             {
                 tracing::warn!(error = %e, "component gauge update failed; suppressing further");
+            }
+        });
+    }
+    fn set_cleanup_time(&self, seconds: f64) {
+        Python::with_gil(|py| {
+            if let Err(e) = self
+                .gauges
+                .bind(py)
+                .call_method1("set_cleanup_time", (seconds,))
+            {
+                tracing::warn!(error = %e, "set_cleanup_time failed");
+            }
+        });
+    }
+    fn set_drain_time(&self, seconds: f64) {
+        Python::with_gil(|py| {
+            if let Err(e) = self
+                .gauges
+                .bind(py)
+                .call_method1("set_drain_time", (seconds,))
+            {
+                tracing::warn!(error = %e, "set_drain_time failed");
             }
         });
     }
@@ -914,10 +1027,19 @@ fn build_rust_source(item: &Bound<'_, PyAny>) -> PyResult<ComponentMetricsSource
                     }
                 }
             };
+            // Optional field: engines that don't expose hit-rate (or
+            // haven't observed any requests yet) leave it None. Missing
+            // attribute is also acceptable for forward-compat.
+            let kv_cache_hit_rate: Option<f32> = match bound.getattr("kv_cache_hit_rate") {
+                Ok(v) if v.is_none() => None,
+                Ok(v) => v.extract().ok(),
+                Err(_) => None,
+            };
             Some(ComponentSnapshot {
                 kv_used_blocks: extract_u64("kv_used_blocks")?,
                 kv_total_blocks: extract_u64("kv_total_blocks")?,
                 gpu_cache_usage: extract_f32("gpu_cache_usage")?,
+                kv_cache_hit_rate,
                 dp_rank,
             })
         })

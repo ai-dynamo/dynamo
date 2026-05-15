@@ -234,10 +234,14 @@ class SglangLLMEngine(LLMEngine):
                 if kv_metrics.data_parallel_rank is not None
                 else 0
             )
+            # SGLang's KvMetrics carries `cache_hit_rate_perc` on recent
+            # versions; older releases (pre-N-1) may omit it.
+            hit_rate = getattr(kv_metrics, "cache_hit_rate_perc", None)
             self._snapshots[dp_rank] = ComponentSnapshot(
                 kv_used_blocks=kv_metrics.kv_active_blocks,
                 kv_total_blocks=kv_metrics.kv_total_blocks,
                 gpu_cache_usage=kv_metrics.gpu_cache_usage_perc,
+                kv_cache_hit_rate=hit_rate,
                 dp_rank=dp_rank,
             )
 

@@ -38,17 +38,23 @@ class ComponentSnapshot:
     """Rich per-rank snapshot returned by
     :class:`ComponentMetricsSource`. ``Worker`` consumes it to drive both
     the router-input signal (``kv_used_blocks``) and the engine-side
-    ``dynamo_component_*`` gauges (``kv_total_blocks``, ``gpu_cache_usage``).
+    ``dynamo_component_*`` gauges (``kv_total_blocks``, ``gpu_cache_usage``,
+    ``kv_cache_hit_rate``).
 
     Engines fill an in-memory dict from their natural push surface
     (stat-logger / ZMQ / poll thread); the snapshot fn just returns the
     latest entry as a cheap field read.
+
+    ``kv_cache_hit_rate`` is ``None`` when the engine hasn't observed
+    requests yet — avoids reporting a misleading 0.0 as the operator's
+    dashboard signal.
     """
 
     kv_used_blocks: int
     kv_total_blocks: int
     gpu_cache_usage: float
     dp_rank: int
+    kv_cache_hit_rate: Optional[float] = None
 
 
 @dataclass(frozen=True)

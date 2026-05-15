@@ -85,10 +85,21 @@ class _UnifiedStatLogger(StatLoggerBase):
         # on the few iterations between AsyncLLM startup and the patch.
         total = max(1, self._factory.num_gpu_blocks)
         usage = scheduler_stats.kv_cache_usage
+        # vLLM's `prefix_cache_stats` exposes cumulative hits/queries; older
+        # versions and configurations without prefix caching omit the field.
+        # Treat absent as "no data yet" rather than reporting a 0.0 hit rate.
+        hit_rate: Optional[float] = None
+        pcs = getattr(scheduler_stats, "prefix_cache_stats", None)
+        if pcs is not None:
+            hits = getattr(pcs, "hits", 0) or 0
+            queries = getattr(pcs, "queries", 0) or 0
+            if queries > 0:
+                hit_rate = float(hits) / float(queries)
         self._factory.snapshots[self.dp_rank] = ComponentSnapshot(
             kv_used_blocks=int(total * usage),
             kv_total_blocks=total,
             gpu_cache_usage=usage,
+            kv_cache_hit_rate=hit_rate,
             dp_rank=self.dp_rank,
         )
 

@@ -19,7 +19,13 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
 from dynamo._core import Endpoint
-from dynamo.prometheus_names import kvstats, labels, model_info, name_prefix
+from dynamo.prometheus_names import (
+    kvstats,
+    labels,
+    lifecycle,
+    model_info,
+    name_prefix,
+)
 
 # Import CollectorRegistry and Gauge only for type hints to avoid importing prometheus_client at module load time.
 # prometheus_client must be imported AFTER set_prometheus_multiproc_dir() is called.
@@ -361,9 +367,35 @@ class LLMBackendMetrics:
             registry=registry,
             multiprocess_mode="max",
         )
+        self.kv_cache_hit_rate = Gauge(
+            f"{name_prefix.COMPONENT}_{kvstats.KV_CACHE_HIT_RATE}",
+            "Prefix cache hit rate (0.0-1.0). Portable across engines.",
+            labelnames=[labels.MODEL, labels.COMPONENT, labels.DP_RANK],
+            registry=registry,
+            multiprocess_mode="max",
+        )
         self.model_load_time = Gauge(
             f"{name_prefix.COMPONENT}_{model_info.LOAD_TIME_SECONDS}",
             "Model load time in seconds.",
+            labelnames=[labels.MODEL, labels.COMPONENT],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.cleanup_time = Gauge(
+            f"{name_prefix.COMPONENT}_{lifecycle.CLEANUP_TIME_SECONDS}",
+            "Time spent releasing engine resources during shutdown. "
+            "Set by the framework once after engine.cleanup() returns; "
+            "must be scraped before pod termination completes.",
+            labelnames=[labels.MODEL, labels.COMPONENT],
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.drain_time = Gauge(
+            f"{name_prefix.COMPONENT}_{lifecycle.DRAIN_TIME_SECONDS}",
+            "Time spent draining in-flight work before cleanup (prefill "
+            "workers polling-until-idle on NIXL transfers). Set by the "
+            "framework once after engine.drain() returns; stays at 0 for "
+            "engines without a drain hook.",
             labelnames=[labels.MODEL, labels.COMPONENT],
             registry=registry,
             multiprocess_mode="max",
@@ -389,8 +421,27 @@ class LLMBackendMetrics:
             }
         ).set(value)
 
+    def set_kv_cache_hit_rate(self, dp_rank: str, value: float) -> None:
+        self.kv_cache_hit_rate.labels(
+            **{
+                labels.MODEL: self.model_name,
+                labels.COMPONENT: self.component_name,
+                labels.DP_RANK: dp_rank,
+            }
+        ).set(value)
+
     def set_model_load_time(self, value: float) -> None:
         self.model_load_time.labels(
+            **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
+        ).set(value)
+
+    def set_cleanup_time(self, value: float) -> None:
+        self.cleanup_time.labels(
+            **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
+        ).set(value)
+
+    def set_drain_time(self, value: float) -> None:
+        self.drain_time.labels(
             **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
         ).set(value)
 

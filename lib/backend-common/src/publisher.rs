@@ -21,12 +21,14 @@ const METRICS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Live publisher handles owned by `Worker` for the lifetime of serving.
 /// `kv_publishers` and `metrics_publishers` are kept alive solely so their
-/// `Drop` impls run on shutdown.
+/// `Drop` impls run on shutdown. `component_publisher` is reached from
+/// `Worker::cleanup_once` / `Worker::drain` to record lifecycle gauges.
 pub(crate) struct PublisherHandles {
     #[allow(dead_code)]
     kv_publishers: Vec<Arc<KvEventPublisher>>,
     #[allow(dead_code)]
     metrics_publishers: Vec<Arc<WorkerMetricsPublisher>>,
+    pub(crate) component_publisher: Option<Arc<dyn ComponentMetricsPublisher>>,
     metrics_task: Option<JoinHandle<()>>,
     cancel: CancellationToken,
 }
@@ -202,11 +204,13 @@ pub(crate) async fn setup_publishers(
         Vec::new()
     };
     let cancel = CancellationToken::new();
+    let component_publisher_for_handles = component_publisher.clone();
     let (metrics_publishers, metrics_task) =
         setup_metrics_publishers(component, component_publisher, cancel.clone()).await?;
     Ok(PublisherHandles {
         kv_publishers,
         metrics_publishers,
+        component_publisher: component_publisher_for_handles,
         metrics_task,
         cancel,
     })
@@ -215,7 +219,103 @@ pub(crate) async fn setup_publishers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::engine::ComponentSnapshot;
+
+    /// Recording publisher: snapshot fn pulls from `state`, `update` records.
+    struct RecordingPublisher {
+        sources: Vec<ComponentMetricsSource>,
+        updates: Arc<Mutex<Vec<ComponentSnapshot>>>,
+    }
+
+    impl ComponentMetricsPublisher for RecordingPublisher {
+        fn sources(&self) -> Vec<ComponentMetricsSource> {
+            self.sources
+                .iter()
+                .map(|s| ComponentMetricsSource {
+                    snapshot: s.snapshot.clone(),
+                    dp_rank: s.dp_rank,
+                })
+                .collect()
+        }
+        fn update(&self, snapshot: &ComponentSnapshot) {
+            self.updates.lock().unwrap().push(*snapshot);
+        }
+    }
+
+    fn snapshot_source(
+        dp_rank: u32,
+        state: Arc<Mutex<Option<ComponentSnapshot>>>,
+    ) -> ComponentMetricsSource {
+        ComponentMetricsSource {
+            snapshot: Arc::new(move || *state.lock().unwrap()),
+            dp_rank,
+        }
+    }
+
+    /// `publish_tick` drives both consumers from the same snapshot: the
+    /// router-input `WorkerMetricsPublisher` AND the component publisher's
+    /// `update`. Verifies the "single source of truth" guarantee.
+    #[test]
+    fn publish_tick_feeds_both_consumers() {
+        let state = Arc::new(Mutex::new(Some(ComponentSnapshot {
+            kv_used_blocks: 42,
+            kv_total_blocks: 100,
+            gpu_cache_usage: 0.42,
+            kv_cache_hit_rate: Some(0.85),
+            dp_rank: 3,
+        })));
+        let source = snapshot_source(3, state);
+        let router_pub = Arc::new(WorkerMetricsPublisher::new().expect("wmp::new"));
+        let updates = Arc::new(Mutex::new(Vec::<ComponentSnapshot>::new()));
+        let component_pub: Arc<dyn ComponentMetricsPublisher> = Arc::new(RecordingPublisher {
+            sources: vec![ComponentMetricsSource {
+                snapshot: source.snapshot.clone(),
+                dp_rank: source.dp_rank,
+            }],
+            updates: updates.clone(),
+        });
+
+        let pairs = vec![(router_pub.clone(), source)];
+        let mut warned: Vec<u32> = Vec::new();
+        publish_tick(&pairs, &component_pub, &mut warned);
+
+        // Component publisher saw the snapshot exactly once.
+        let recorded = updates.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].kv_used_blocks, 42);
+        assert_eq!(recorded[0].kv_total_blocks, 100);
+        assert_eq!(recorded[0].dp_rank, 3);
+        // No warnings — router publish succeeded.
+        assert!(warned.is_empty());
+    }
+
+    /// Snapshot returning `None` is the engine signalling "no data yet."
+    /// `publish_tick` must skip both sides — no spurious gauge update, no
+    /// router publish with stale data.
+    #[test]
+    fn publish_tick_skips_none_snapshot() {
+        let state: Arc<Mutex<Option<ComponentSnapshot>>> = Arc::new(Mutex::new(None));
+        let source = snapshot_source(0, state);
+        let router_pub = Arc::new(WorkerMetricsPublisher::new().expect("wmp::new"));
+        let updates = Arc::new(Mutex::new(Vec::<ComponentSnapshot>::new()));
+        let component_pub: Arc<dyn ComponentMetricsPublisher> = Arc::new(RecordingPublisher {
+            sources: vec![ComponentMetricsSource {
+                snapshot: source.snapshot.clone(),
+                dp_rank: source.dp_rank,
+            }],
+            updates: updates.clone(),
+        });
+
+        let pairs = vec![(router_pub, source)];
+        let mut warned: Vec<u32> = Vec::new();
+        publish_tick(&pairs, &component_pub, &mut warned);
+
+        assert!(updates.lock().unwrap().is_empty(), "no update on None");
+        assert!(warned.is_empty());
+    }
 
     /// `PublisherHandles::shutdown` cancels the shared token and awaits the
     /// metrics task. Drives one synthetic task that loops on the cancel
@@ -237,6 +337,7 @@ mod tests {
         let mut handles = PublisherHandles {
             kv_publishers: Vec::new(),
             metrics_publishers: Vec::new(),
+            component_publisher: None,
             metrics_task: Some(task),
             cancel,
         };
@@ -257,6 +358,7 @@ mod tests {
         let mut handles = PublisherHandles {
             kv_publishers: Vec::new(),
             metrics_publishers: Vec::new(),
+            component_publisher: None,
             metrics_task: Some(task),
             cancel,
         };

@@ -137,6 +137,7 @@ class SampleLLMEngine(LLMEngine):
                     kv_used_blocks=self._kv_used_blocks,
                     kv_total_blocks=1000,
                     gpu_cache_usage=self._kv_used_blocks / 1000.0,
+                    kv_cache_hit_rate=None,  # sample engine doesn't track hits
                     dp_rank=0,
                 ),
                 dp_rank=0,

@@ -400,3 +400,113 @@ async fn check_cancellation<E: LLMEngine>(
         None => Err(NoChunksYielded),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{
+        ComponentMetricsPublisher, ComponentMetricsSource, ComponentSnapshot, EngineConfig,
+        PreprocessedRequest,
+    };
+    use crate::error::DynamoError;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+
+    /// Minimal engine that opts out of everything except `start`/`cleanup`
+    /// and a custom `setup_component_metrics`. Other trait methods that
+    /// `check_component_metrics` doesn't touch are stubbed with
+    /// `unreachable!`.
+    struct ConfigurableMetricsEngine {
+        publisher: Option<Arc<dyn ComponentMetricsPublisher>>,
+    }
+
+    #[async_trait]
+    impl LLMEngine for ConfigurableMetricsEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            unreachable!()
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+        async fn setup_component_metrics(
+            &self,
+            _ctx: crate::engine::ComponentMetricsCtx<'_>,
+        ) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError> {
+            Ok(self.publisher.clone())
+        }
+    }
+
+    /// Publisher whose snapshot fn always returns the configured value.
+    struct StaticPublisher {
+        snapshot_value: Option<ComponentSnapshot>,
+        dp_rank: u32,
+    }
+
+    impl ComponentMetricsPublisher for StaticPublisher {
+        fn sources(&self) -> Vec<ComponentMetricsSource> {
+            let value = self.snapshot_value;
+            vec![ComponentMetricsSource {
+                snapshot: Arc::new(move || value),
+                dp_rank: self.dp_rank,
+            }]
+        }
+        fn update(&self, _snapshot: &ComponentSnapshot) {}
+    }
+
+    /// Engines that haven't sampled yet return `None` from snapshot fns —
+    /// must NOT trigger ComponentMetricsFailed. The conformance kit only
+    /// asserts cheap-call latency and idempotent rank set.
+    #[tokio::test]
+    async fn check_component_metrics_accepts_none_snapshot() {
+        let publisher: Arc<dyn ComponentMetricsPublisher> = Arc::new(StaticPublisher {
+            snapshot_value: None,
+            dp_rank: 0,
+        });
+        let engine = ConfigurableMetricsEngine {
+            publisher: Some(publisher),
+        };
+        let result = check_component_metrics(&engine).await;
+        assert!(result.is_ok(), "None snapshot should pass: {:?}", result);
+    }
+
+    /// Engines that opt out entirely (returning `None` from
+    /// `setup_component_metrics`) are also acceptable.
+    #[tokio::test]
+    async fn check_component_metrics_accepts_no_publisher() {
+        let engine = ConfigurableMetricsEngine { publisher: None };
+        let result = check_component_metrics(&engine).await;
+        assert!(result.is_ok(), "no publisher should pass: {:?}", result);
+    }
+
+    /// Engines that DO return snapshots must still pass cheap-call check.
+    #[tokio::test]
+    async fn check_component_metrics_accepts_real_snapshot() {
+        let publisher: Arc<dyn ComponentMetricsPublisher> = Arc::new(StaticPublisher {
+            snapshot_value: Some(ComponentSnapshot {
+                kv_used_blocks: 1,
+                kv_total_blocks: 10,
+                gpu_cache_usage: 0.1,
+                kv_cache_hit_rate: None,
+                dp_rank: 0,
+            }),
+            dp_rank: 0,
+        });
+        let engine = ConfigurableMetricsEngine {
+            publisher: Some(publisher),
+        };
+        assert!(check_component_metrics(&engine).await.is_ok());
+    }
+}

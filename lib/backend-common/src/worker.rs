@@ -517,9 +517,20 @@ impl Worker {
             }
             LifecycleState::Running | LifecycleState::StartFailed => {}
         }
+        let cleanup_start = std::time::Instant::now();
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
+        }
+        let cleanup_elapsed = cleanup_start.elapsed().as_secs_f64();
+        // Record cleanup latency on dynamo_component_cleanup_time_seconds
+        // BEFORE stopping the publisher loops — otherwise the next /metrics
+        // scrape sees stale state. The gauge is operator-useful when scraped
+        // in the brief window between cleanup-complete and pod-terminate.
+        if let Some(handles) = self.publishers.as_ref()
+            && let Some(publisher) = handles.component_publisher.as_ref()
+        {
+            publisher.set_cleanup_time(cleanup_elapsed);
         }
         // Stop publisher metric loops AFTER engine.cleanup so the engine's
         // last metric snapshots get published. Then drop the handles so the
@@ -647,8 +658,15 @@ impl Worker {
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
         }
 
+        let drain_start = std::time::Instant::now();
         if let Err(e) = self.engine.drain().await {
             tracing::warn!(error = %e, "engine drain failed");
+        }
+        let drain_elapsed = drain_start.elapsed().as_secs_f64();
+        if let Some(handles) = self.publishers.as_ref()
+            && let Some(publisher) = handles.component_publisher.as_ref()
+        {
+            publisher.set_drain_time(drain_elapsed);
         }
 
         self.cleanup_once().await;

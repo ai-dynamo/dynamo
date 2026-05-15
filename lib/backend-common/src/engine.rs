@@ -343,6 +343,11 @@ pub struct ComponentSnapshot {
     pub kv_total_blocks: u64,
     /// Fractional cache usage, 0.0..1.0.
     pub gpu_cache_usage: f32,
+    /// Fractional prefix cache hit rate, 0.0..1.0. Portable across
+    /// engines — each backend computes from its native counters. `None`
+    /// when the engine hasn't observed any requests yet (avoids
+    /// reporting a misleading 0.0).
+    pub kv_cache_hit_rate: Option<f32>,
     pub dp_rank: u32,
 }
 
@@ -372,6 +377,15 @@ pub trait ComponentMetricsPublisher: Send + Sync {
     fn sources(&self) -> Vec<ComponentMetricsSource>;
     /// Apply `snapshot` to wherever gauges live.
     fn update(&self, snapshot: &ComponentSnapshot);
+    /// Record total cleanup latency on `dynamo_component_cleanup_time_seconds`.
+    /// `Worker` brackets `engine.cleanup()` and calls this exactly once
+    /// per worker lifetime. Default no-op for publishers that don't
+    /// expose the gauge.
+    fn set_cleanup_time(&self, _seconds: f64) {}
+    /// Record drain latency on `dynamo_component_drain_time_seconds`.
+    /// `Worker` brackets `engine.drain()` and calls this exactly once
+    /// per worker lifetime. Default no-op.
+    fn set_drain_time(&self, _seconds: f64) {}
 }
 
 /// Context handed to [`LLMEngine::setup_component_metrics`].

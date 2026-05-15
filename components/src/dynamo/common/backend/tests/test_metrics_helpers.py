@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Behavioural tests for ``dynamo.common.backend.metrics``.
+"""Behavioural tests for engine-facing helpers in
+``dynamo.common.backend.metrics``.
 
-The real PyO3 ``EngineMetrics`` requires a `MetricsHierarchy` (an
-endpoint), which is only available inside `Worker.run`. These tests stub
-the handle — registration logic is pure Python, and the helpers only
-need ``register_prometheus_expfmt_callback`` plus ``auto_labels``.
+Framework-only helpers (``make_component_metrics``,
+``register_engine_registry``) are tested in ``test_internal_metrics.py``.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from prometheus_client import CollectorRegistry, Gauge
 
 from dynamo.common.backend.metrics import (
     gather_with_labels,
-    make_component_metrics,
     register_global_registry,
 )
 
@@ -67,10 +65,3 @@ def test_register_global_registry_splits_on_multiprocesscollector_conflict(
             multiproc_only_prefixes=["lmcache:"],
         )
     assert len(metrics.callbacks) == 2
-
-
-def test_make_component_metrics_rejects_empty_names():
-    with pytest.raises(ValueError):
-        make_component_metrics("", "backend")
-    with pytest.raises(ValueError):
-        make_component_metrics("model", "")

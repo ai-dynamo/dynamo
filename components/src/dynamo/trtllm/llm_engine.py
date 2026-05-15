@@ -409,10 +409,14 @@ class TrtllmLLMEngine(LLMEngine):
                     continue
                 rank = int(snap.get("attentionDpRank", 0))
                 kv_total = int(kv_stats.get("maxNumBlocks") or 0)
+                # cacheHitRate is on the kvCacheStats payload in recent
+                # TRT-LLM; absent on older releases. None means "no data."
+                hit_rate = kv_stats.get("cacheHitRate")
                 self._snapshots[rank] = ComponentSnapshot(
                     kv_used_blocks=int(kv_used),
                     kv_total_blocks=kv_total,
                     gpu_cache_usage=(kv_used / kv_total) if kv_total else 0.0,
+                    kv_cache_hit_rate=float(hit_rate) if hit_rate is not None else None,
                     dp_rank=rank,
                 )
 

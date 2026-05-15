@@ -156,6 +156,7 @@ impl ComponentMetricsPublisher for MockerComponentMetrics {
                     kv_used_blocks: used.load(Ordering::Relaxed),
                     kv_total_blocks: 0,
                     gpu_cache_usage: 0.0,
+                    kv_cache_hit_rate: None,
                     dp_rank: DP_RANK,
                 })
             }),
