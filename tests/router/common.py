@@ -1170,7 +1170,11 @@ def _test_router_overload_503(
 
                     if not stop_event.is_set():
                         try:
-                            await asyncio.wait_for(stop_event.wait(), timeout=10)
+                            # OPS-5851: KV event propagation from the slow mocker
+                            # (speedup_ratio=0.01) to the router can take >10s on
+                            # arm64 / contended runners. Give the router time to
+                            # actually observe high utilization before asserting.
+                            await asyncio.wait_for(stop_event.wait(), timeout=30)
                         except asyncio.TimeoutError:
                             logger.error("Timed out waiting for overload 503")
                 finally:

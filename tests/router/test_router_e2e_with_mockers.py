@@ -1073,7 +1073,9 @@ def test_mocker_two_kv_router(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
-@pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
+@pytest.mark.timeout(
+    90
+)  # OPS-5851: inner wait bumped from 10s→30s for arm64 KV-event lag
 def test_mocker_kv_router_overload_503(
     request,
     runtime_services_dynamic_ports,
