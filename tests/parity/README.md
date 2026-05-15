@@ -192,9 +192,9 @@ in the HTML chart), `V?` / `S?` = divergence not yet classified
   future SGLang releases** — re-audit on each version bump.
 
 `nemotron_deci` and `nemotron_nano` carry both daggers (`†§`) — neither
-upstream has a peer parser, so the rows are fully `n/a`. Listed here for
-completeness; Dynamo-only self-parity could be added in a follow-up but
-yields no cross-impl signal.
+upstream has a peer parser, so the rows are fully `n/a`. They live under
+**Others** for completeness; Dynamo-only self-parity could be added in a
+follow-up but yields no cross-impl signal.
 
 ### Coverage gaps — missing upstream peer parsers
 

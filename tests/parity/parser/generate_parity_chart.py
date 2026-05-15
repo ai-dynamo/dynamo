@@ -276,11 +276,10 @@ def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
 # fixture YAML's `model_label:` field, so the label travels with the
 # family definition, not with this script.
 #
-# Source of truth: the Top-8 models in DIS-1839's Medium Term Plan,
-# mirrored in DIS-1842 ("Top-N model unit-test coverage matrix") under
-# its "Top 8 models → parser mapping" table. When DIS-1842 changes, this
-# list and the corresponding `model_label:` fields under
-# `fixtures/<family>/PARSER.batch.yaml` must be updated together.
+# Source of truth: the tracked Top-N model mapping used by the parity
+# planning notes. When that list changes, this list and the corresponding
+# `model_label:` fields under `fixtures/<family>/PARSER.batch.yaml` must
+# be updated together.
 # Alphabetical-by-family-id within the list (matches DIS-1842's chart
 # row order).
 TOP_N_FAMILIES = [
@@ -290,7 +289,6 @@ TOP_N_FAMILIES = [
     "harmony",
     "kimi_k2",
     "minimax_m2",
-    "nemotron_deci",
     "qwen3_coder",
 ]
 
