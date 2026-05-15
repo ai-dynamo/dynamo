@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 from uuid import uuid4
 
+import torch
 from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
     cuda_ensure_initialized,
@@ -30,6 +32,7 @@ class AllocationInfo:
     size: int
     aligned_size: int
     handle: int
+    export_fd: int
     tag: str
     layout_slot: int
     created_at: float
@@ -47,7 +50,7 @@ class GMSAllocationManager:
         device: int = 0,
         *,
         allocation_retry_interval: float = 0.5,
-        allocation_retry_timeout: Optional[float] = None,
+        allocation_retry_timeout: Optional[float] = 60.0,
     ):
         if allocation_retry_interval <= 0:
             raise ValueError(
@@ -122,19 +125,36 @@ class GMSAllocationManager:
                         f"tag={tag}, waited_sec={waited:.3f}"
                     )
 
+            # Visibility while retrying. Logged every iteration with elapsed
+            # time + free GPU memory, so a stuck retry loop is observable
+            # rather than silent.
+            try:
+                free_b, total_b = torch.cuda.mem_get_info(self._device)
+            except RuntimeError:
+                logger.debug(
+                    "torch.cuda.mem_get_info(%d) failed", self._device, exc_info=True
+                )
+                free_b, total_b = -1, -1
+            elapsed = time.monotonic() - started_at
             logger.warning(
-                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s; retrying in %.3fs",
+                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s, "
+                "elapsed=%.2fs free=%d total=%d; retrying in %.3fs",
                 aligned_size,
                 tag,
+                elapsed,
+                free_b,
+                total_b,
                 self._allocation_retry_interval,
             )
             await asyncio.sleep(self._allocation_retry_interval)
 
+        export_fd = int(cumem_export_to_shareable_handle(int(handle)))
         info = AllocationInfo(
             allocation_id=str(uuid4()),
             size=size,
             aligned_size=aligned_size,
             handle=int(handle),
+            export_fd=export_fd,
             tag=tag,
             layout_slot=self._next_layout_slot,
             created_at=time.time(),
@@ -152,14 +172,14 @@ class GMSAllocationManager:
         return info
 
     def export_allocation(self, allocation_id: str) -> int:
-        return cumem_export_to_shareable_handle(
-            self.get_allocation(allocation_id).handle
-        )
+        info = self.get_allocation(allocation_id)
+        return os.dup(info.export_fd)
 
     def free_allocation(self, allocation_id: str) -> bool:
         info = self._allocations.get(allocation_id)
         if info is None:
             return False
+        os.close(info.export_fd)
         cumem_release(info.handle)
         self._allocations.pop(allocation_id, None)
         logger.debug("Freed allocation: %s", allocation_id)
@@ -169,6 +189,7 @@ class GMSAllocationManager:
         allocation_ids = list(self._allocations)
         for allocation_id in allocation_ids:
             info = self._allocations[allocation_id]
+            os.close(info.export_fd)
             cumem_release(info.handle)
             self._allocations.pop(allocation_id, None)
         if allocation_ids:

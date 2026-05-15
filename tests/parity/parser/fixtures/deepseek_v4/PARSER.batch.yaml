@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+model_label: DeepSeek V4
+mode: batch
+cases:
+  PARSER.batch.1:
+    description: Single tool call (happy path)
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &d_1
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_1
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_3
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *d_3
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.9:
+    description: Empty input
+    model_text: ''
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_9
+        calls: []
+        normal_text: ''
+      vllm: *d_9
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">LA</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_10
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *d_10
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'

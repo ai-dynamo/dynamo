@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: llama3_json
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: 'Canonical "arguments": {}'
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "get_time", "arguments": {}}'
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      dynamo: &d_6_a
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_a
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
+  PARSER.batch.6.b:
+    description: Whitespace inside arguments {}
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "get_time", "arguments": { }}'
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_6_b
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_b
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
+  PARSER.batch.6.c:
+    description: No arguments key
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "get_time"}'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<|python_tag|>{"name": "get_time"}'
+        reason: "both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty"
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -10,11 +9,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId};
-use dynamo_runtime::{
-    engine::AsyncEngineContext,
-    pipeline::{AsyncEngineContextProvider, Context, SingleIn},
-    protocols::maybe_error::MaybeError,
-};
+use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
@@ -94,7 +89,11 @@ impl PrefillRouter {
             return PrefillResolveDecision::NoBootstrapEndpoint;
         };
 
-        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
+        let dp_size: Option<u32> = self
+            .model_manager
+            .get_data_parallel_size(endpoint_id, worker_id);
+        let r: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
+        let bootstrap_room = compute_bootstrap_room(dp_rank, dp_size, r);
 
         tracing::debug!(
             worker_id = worker_id,
@@ -123,7 +122,7 @@ impl PrefillRouter {
     ///
     /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
     /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
-    /// the prefill route must finish `record_worker_full` before the phase can change to Decode.
+    /// the prefill route must finish worker recording before the phase can change to Decode.
     ///
     /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
@@ -131,8 +130,11 @@ impl PrefillRouter {
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
+    ) -> Result<(PrefillResult, Option<(u64, Option<u32>)>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
+        // Clone tracker before request is consumed by generate_to_worker.
+        // Used to record prefill_complete_time for KV transfer latency metric.
+        let tracker = request.tracker.clone();
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
@@ -143,7 +145,7 @@ impl PrefillRouter {
                 )
             })?;
 
-        // Release the phase barrier now that routing completed and record_worker_full already ran.
+        // Release the phase barrier now that routing completed and worker recording already ran.
         // Decode may proceed without waiting for prefill output streaming to finish.
         drop(phase_transition_permit);
 
@@ -153,6 +155,12 @@ impl PrefillRouter {
                 None,
             ));
         };
+
+        // Record when prefill result arrived at the router (for KV transfer latency metric).
+        // This is after drop(phase_transition_permit) and after first_output is received.
+        if let Some(ref tracker) = tracker {
+            tracker.record_prefill_complete();
+        }
 
         if let Some(err) = first_output.err() {
             return Err(PrefillError::PrefillError(
@@ -201,8 +209,7 @@ impl PrefillRouter {
                     let dp_rank = worker_id_json
                         .get("prefill_dp_rank")
                         .and_then(|v| v.as_u64())
-                        .map(|r| r as u32)
-                        .unwrap_or(0);
+                        .map(|r| r as u32);
                     Some((worker_id, dp_rank))
                 });
         Ok((
@@ -308,9 +315,10 @@ impl PrefillRouter {
         }
     }
 
-    /// Check if disaggregated mode is currently active (prefill router activated)
+    /// Check if disaggregated mode is currently active (prefill router activated).
+    /// Uses the same `activated` flag as `can_serve_requests()` for consistency.
     pub fn is_activated(&self) -> bool {
-        self.prefill_router.get().is_some()
+        self.activated.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Whether disaggregated mode is strictly enforced (fail if no prefill workers).
@@ -319,12 +327,159 @@ impl PrefillRouter {
     }
 }
 
-pub(super) fn link_child_context<T: Send + Sync + 'static>(
-    engine_ctx: &Arc<dyn AsyncEngineContext>,
-    request: T,
-    request_id: &str,
-) -> Context<T> {
-    let child_context = Context::with_id(request, request_id.to_string());
-    engine_ctx.link_child(child_context.context());
-    child_context
+/// Derive a `bootstrap_room` from a pre-sampled `r` such that
+/// `room % dp_size == dp_rank` and `room <= i64::MAX`. The 63-bit cap is the
+/// existing room contract on the SGLang side. Falls back to `r` when
+/// `dp_rank` or `dp_size` is unavailable. `r` must be in `[0, i64::MAX]`.
+fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, r: u64) -> u64 {
+    let max_room = i64::MAX.cast_unsigned();
+    debug_assert!(r <= max_room);
+    match (dp_rank, dp_size) {
+        (Some(rank), Some(size)) if size > 0 => {
+            let size = size as u64;
+            let rank = rank as u64;
+            // Bound the quotient so `q * size + rank <= i64::MAX`.
+            let max_q = (max_room - rank) / size;
+            let q = r % (max_q + 1);
+            q * size + rank
+        }
+        _ => r,
+    }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAX_ROOM: u64 = i64::MAX as u64;
+
+    #[test]
+    fn bootstrap_room_falls_back_when_dp_unavailable() {
+        // Missing rank, missing size, or both -> return r unchanged.
+        assert_eq!(compute_bootstrap_room(None, None, 12345), 12345);
+        assert_eq!(compute_bootstrap_room(Some(3), None, 12345), 12345);
+        assert_eq!(compute_bootstrap_room(None, Some(8), 12345), 12345);
+        // size=0 is a guard against divide-by-zero; treated as unavailable.
+        assert_eq!(compute_bootstrap_room(Some(0), Some(0), 12345), 12345);
+    }
+
+    #[test]
+    fn bootstrap_room_respects_63bit_cap_at_max_r() {
+        // Sweep ranks for the sizes that overflowed in the buggy version:
+        //   - size = 48 (i64::MAX % 48 = 31, so ranks 32..47 overflowed)
+        //   - size = 49 (49 divides i64::MAX, so ranks 1..48 overflowed)
+        //   - size = 7  (7 divides i64::MAX, so ranks 1..6 overflowed)
+        for size in [3u32, 5, 6, 7, 9, 16, 32, 48, 49, 64, 128] {
+            for rank in 0..size {
+                let room = compute_bootstrap_room(Some(rank), Some(size), MAX_ROOM);
+                assert!(
+                    room <= MAX_ROOM,
+                    "size={size} rank={rank} r=MAX produced {room} > i64::MAX",
+                );
+                assert_eq!(
+                    room % size as u64,
+                    rank as u64,
+                    "size={size} rank={rank} broke modulo contract",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_room_modulo_contract_across_r() {
+        // Across many `r` values, the modulo contract must hold and the
+        // result must stay within the 63-bit cap.
+        let r_samples = [
+            0u64,
+            1,
+            47,
+            48,
+            49,
+            1_000_000,
+            1u64 << 32,
+            (1u64 << 62) - 1,
+            1u64 << 62,
+            MAX_ROOM - 1,
+            MAX_ROOM,
+        ];
+        for size in [3u32, 8, 48, 49] {
+            for rank in [0u32, 1, size / 2, size - 1] {
+                for &r in &r_samples {
+                    let room = compute_bootstrap_room(Some(rank), Some(size), r);
+                    assert!(
+                        room <= MAX_ROOM,
+                        "size={size} rank={rank} r={r} produced {room} > i64::MAX",
+                    );
+                    assert_eq!(
+                        room % size as u64,
+                        rank as u64,
+                        "size={size} rank={rank} r={r} broke modulo contract",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_room_balances_dp_rank_assignments() {
+        // For a non-power-of-two dp_size, sampling many rooms with the real
+        // RNG must (a) put every room in its requested rank's modulo bucket
+        // and (b) leave no rank starved -- each rank should claim roughly its
+        // fair share when assignments cycle round-robin.
+        let dp_size: u32 = 48;
+        let trials_per_rank: usize = 2_000;
+
+        let mut per_rank_counts = vec![0usize; dp_size as usize];
+        let mut max_room_seen = 0u64;
+        let mut min_room_seen = u64::MAX;
+
+        for rank in 0..dp_size {
+            for _ in 0..trials_per_rank {
+                let r = rand::random_range(0..=MAX_ROOM);
+                let room = compute_bootstrap_room(Some(rank), Some(dp_size), r);
+
+                assert!(room <= MAX_ROOM, "room {room} exceeds i64::MAX");
+                assert_eq!(
+                    room % dp_size as u64,
+                    rank as u64,
+                    "room {room} did not land in rank {rank}'s bucket",
+                );
+
+                per_rank_counts[rank as usize] += 1;
+                max_room_seen = max_room_seen.max(room);
+                min_room_seen = min_room_seen.min(room);
+            }
+        }
+
+        // Every rank received its requested share (nothing was silently dropped).
+        for (rank, &count) in per_rank_counts.iter().enumerate() {
+            assert_eq!(count, trials_per_rank, "rank {rank} count mismatch");
+        }
+
+        // Sanity check that the quotient sampler is not collapsing onto a
+        // tiny region: with 96k samples in [0, i64::MAX], the spread should
+        // cover most of the 63-bit range.
+        let span = max_room_seen - min_room_seen;
+        assert!(
+            span > MAX_ROOM / 2,
+            "rooms clustered in span={span}, expected wide spread across [0, i64::MAX]",
+        );
+    }
+
+    #[test]
+    fn bootstrap_room_is_deterministic_in_r() {
+        // Same (rank, size, r) -> same room. Guards against accidental
+        // re-introduction of an internal random call inside the helper.
+        let room_a = compute_bootstrap_room(Some(7), Some(48), 123_456_789);
+        let room_b = compute_bootstrap_room(Some(7), Some(48), 123_456_789);
+        assert_eq!(room_a, room_b);
+        assert_eq!(room_a % 48, 7);
+    }
+}
+
+// NVBugs 5969206: link_child_context removed — linking prefill as a child of
+// engine_context caused kill propagation that tears down the RPC transport,
+// interrupting NIXL KV cache transfers and leaking blocks permanently.
+// Prefill context is now created without linking (Context::with_id only).
+// Abort on the decode side is deferred via kv_transfer_complete_event in
+// handler_base.py until the first generation result confirms KV receipt.

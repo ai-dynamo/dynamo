@@ -46,6 +46,7 @@ func runCheckpoint(args []string) error {
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
 	checkpointID := flags.String("checkpoint-id", "", "Explicit checkpoint ID; defaults to a generated value")
+	container := flags.String("container", "", "Required. Name of the workload container inside the manifest to checkpoint. May be omitted if the manifest already sets the nvidia.com/snapshot-target-containers annotation")
 	disableCudaCheckpointJobFile := flags.Bool("disable-cuda-checkpoint-job-file", false, "Preserve the manifest command instead of wrapping it with cuda-checkpoint --launch-job")
 	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for checkpoint completion")
 
@@ -65,6 +66,7 @@ func runCheckpoint(args []string) error {
 		Namespace:                    *namespace,
 		KubeContext:                  *kubeContext,
 		CheckpointID:                 *checkpointID,
+		Container:                    *container,
 		DisableCudaCheckpointJobFile: *disableCudaCheckpointJobFile,
 		Timeout:                      *timeout,
 	})
@@ -91,7 +93,7 @@ func runRestore(args []string) error {
 	namespace := flags.String("namespace", "", "Namespace override; defaults to the manifest namespace or current kube context namespace")
 	kubeContext := flags.String("kube-context", "", "Kubernetes context override")
 	checkpointID := flags.String("checkpoint-id", "", "Checkpoint ID to restore")
-	timeout := flags.Duration("timeout", 45*time.Minute, "Maximum time to wait for restore completion")
+	containers := flags.String("containers", "", "Required. Comma-separated target container names to restore the checkpoint into. May be omitted if the manifest/pod already sets the nvidia.com/snapshot-target-containers annotation")
 
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -110,12 +112,12 @@ func runRestore(args []string) error {
 		Namespace:    *namespace,
 		KubeContext:  *kubeContext,
 		CheckpointID: *checkpointID,
-		Timeout:      *timeout,
+		Containers:   *containers,
 	})
 	if err != nil {
 		return err
 	}
-	snapshotctlLog.Info("Restore completed", "pod", result.RestorePod, "checkpoint_id", result.CheckpointID)
+	snapshotctlLog.Info("Restore requested", "pod", result.RestorePod, "checkpoint_id", result.CheckpointID)
 
 	fmt.Printf("status=%s\n", result.Status)
 	fmt.Printf("namespace=%s\n", result.Namespace)
@@ -134,8 +136,8 @@ Subcommands:
   restore
 
 Examples:
-  snapshotctl checkpoint --manifest /tmp/vllm-worker-pod.yaml
-  snapshotctl restore --manifest /tmp/sglang-worker-pod.yaml --checkpoint-id manual-snapshot-123
-  snapshotctl restore --pod existing-restore-target --checkpoint-id manual-snapshot-123
+  snapshotctl checkpoint --manifest /tmp/vllm-worker-pod.yaml --container main
+  snapshotctl restore --manifest /tmp/sglang-worker-pod.yaml --checkpoint-id manual-snapshot-123 --containers main
+  snapshotctl restore --pod existing-restore-target --checkpoint-id manual-snapshot-123 --containers engine-0,engine-1
 `)
 }

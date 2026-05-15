@@ -65,7 +65,7 @@ data:
     {{- $natsAddr := "" }}
     {{- if .Values.natsAddr }}
       {{- $natsAddr = .Values.natsAddr }}
-    {{- else if and .Values.nats .Values.nats.enabled }}
+    {{- else if and .Values.global .Values.global.nats .Values.global.nats.install }}
       {{- $natsAddr = printf "nats://%s-nats.%s.svc.cluster.local:4222" .Release.Name .Release.Namespace }}
     {{- end }}
     {{- $etcdAddr := "" }}
@@ -118,6 +118,16 @@ data:
       hostSuffix: {{ $ingressHostSuffix | quote }}
       {{- end }}
     {{- end }}
+    {{- if and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled }}
+    serviceMesh:
+      provider: {{ .Values.dynamo.serviceMesh.provider | default "istio" | quote }}
+      {{- if eq (.Values.dynamo.serviceMesh.provider | default "istio") "istio" }}
+      istio:
+        {{- $istio := .Values.dynamo.serviceMesh.istio | default dict }}
+        tlsMode: {{ $istio.tlsMode | default "SIMPLE" | quote }}
+        insecureSkipVerify: {{ $istio.insecureSkipVerify | default true }}
+      {{- end }}
+    {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}
     rbac:
       plannerClusterRoleName: {{ include "dynamo-operator.fullname" . }}-planner
@@ -132,8 +142,37 @@ data:
     {{- if .Values.checkpoint.enabled }}
     checkpoint:
       enabled: true
-      {{- if ne (.Values.checkpoint.readyForCheckpointFilePath | toString) "/tmp/ready-for-checkpoint" }}
-      readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
+      {{- if or .Values.checkpoint.seccomp.disabled .Values.checkpoint.seccomp.profile }}
+      seccomp:
+        {{- if .Values.checkpoint.seccomp.disabled }}
+        disabled: true
+        {{- else if .Values.checkpoint.seccomp.profile }}
+        profile: {{ .Values.checkpoint.seccomp.profile | quote }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.checkpoint.storage }}
+      {{- if .type }}
+      {{- $pvc := .pvc | default dict }}
+      storage:
+        type: {{ .type | quote }}
+        {{- if eq .type "pvc" }}
+        pvc:
+          pvcName: {{ required "checkpoint.storage.pvc.pvcName is required when checkpoint.storage.type=pvc" $pvc.pvcName | quote }}
+          basePath: {{ required "checkpoint.storage.pvc.basePath is required when checkpoint.storage.type=pvc" $pvc.basePath | quote }}
+          {{- if $pvc.create }}
+          create: true
+          {{- end }}
+          {{- if $pvc.size }}
+          size: {{ $pvc.size | quote }}
+          {{- end }}
+          {{- if $pvc.storageClassName }}
+          storageClassName: {{ $pvc.storageClassName | quote }}
+          {{- end }}
+          {{- if $pvc.accessMode }}
+          accessMode: {{ $pvc.accessMode | quote }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
       {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}

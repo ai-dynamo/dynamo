@@ -30,11 +30,14 @@ rules:
   - delete
   - get
   - list
+  - watch
 - apiGroups:
   - ""
   resources:
   - pods
   verbs:
+  - delete
+  - deletecollection
   - get
   - list
   - watch
@@ -130,6 +133,8 @@ rules:
   - grove.io
   resources:
   - clustertopologies
+  - podcliques
+  - podcliquescalinggroups
   verbs:
   - get
   - list
@@ -182,6 +187,7 @@ rules:
 - apiGroups:
   - networking.istio.io
   resources:
+  - destinationrules
   - virtualservices
   verbs:
   - create
@@ -244,6 +250,26 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - resource.k8s.io
+  resources:
+  - deviceclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - resource.k8s.io
+  resources:
+  - resourceclaimtemplates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - scheduling.run.ai
   resources:

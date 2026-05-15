@@ -109,6 +109,16 @@ pub trait RequestPlaneClient: Send + Sync {
         ClientStats::default()
     }
 
+    /// Start a background task that eagerly warms connections for newly-discovered backends.
+    /// Only TCP overrides this; HTTP and NATS clients inherit the no-op.
+    fn start_warmup(
+        &self,
+        _instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,
+        _cancel_token: tokio_util::sync::CancellationToken,
+    ) {
+        // No-op default
+    }
+
     /// Close the client gracefully (optional)
     ///
     /// Implementations should:

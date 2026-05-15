@@ -15,6 +15,7 @@ sla:
 searchStrategy: thorough
 features:
   planner:
+    optimization_target: sla
     pre_deployment_sweeping_mode: thorough
     enable_throughput_scaling: true
     enable_load_scaling: false

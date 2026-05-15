@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing [/TOOL_CALLS] end marker
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &d_5_a
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_5_a
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+  PARSER.batch.5.b:
+    description: Closing [/TOOL_CALLS] without matching [TOOL_CALLS] open
+    ref: dynamo
+    model_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_5_b
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
+      vllm: *d_5_b
+      sglang: *d_5_b
+  PARSER.batch.5.c:
+    description: Truncation mid-arguments JSON
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
+      vllm:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"loc'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: ''

@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: jamba
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Tool_calls wrapper with garbage
+    ref: dynamo
+    model_text: <tool_calls>not a json array</tool_calls>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &d_4_a
+        calls: []
+        normal_text: <tool_calls>not a json array</tool_calls>
+      vllm: *d_4_a
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.4.b:
+    description: Missing close brace in JSON
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"]</tool_calls>'
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_4_b
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"]</tool_calls>'
+      vllm: *d_4_b
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.4.c:
+    description: Missing name key
+    ref: dynamo
+    model_text: '<tool_calls>[{"arguments": {"location": "NYC"}}]</tool_calls>'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_calls>[{"arguments": {"location": "NYC"}}]</tool_calls>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.4.d:
+    description: Missing </tool_calls> close
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'

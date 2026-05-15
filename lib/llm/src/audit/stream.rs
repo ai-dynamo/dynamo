@@ -221,7 +221,6 @@ pub fn final_response_to_one_chunk_stream(
             index: idx as u32,
             delta,
             finish_reason: ch.finish_reason,
-            stop_reason: ch.stop_reason.clone(),
             logprobs: ch.logprobs.clone(),
         };
         choices.push(choice);
@@ -278,7 +277,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -319,7 +317,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: Some(FinishReason::Stop),
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -379,8 +376,9 @@ mod tests {
         ];
 
         let input_stream = stream::iter(chunks.clone());
-        let (passthrough, _future) = scan_aggregate_with_future(input_stream);
+        let (passthrough, future) = scan_aggregate_with_future(input_stream);
         let results: Vec<_> = passthrough.collect().await;
+        let final_resp = future.await;
 
         // Verify chunk count
         assert_eq!(results.len(), 3, "Should pass through all chunks unchanged");
@@ -392,6 +390,14 @@ mod tests {
 
         // Verify complete content reconstruction
         assert_eq!(reconstruct_content(&results), "Hello World");
+        assert_eq!(
+            final_resp.inner.choices[0]
+                .message
+                .content
+                .as_ref()
+                .unwrap(),
+            &ChatCompletionMessageContent::Text("Hello World".to_string())
+        );
     }
 
     #[tokio::test]
@@ -452,7 +458,6 @@ mod tests {
                                 reasoning_content: None,
                             },
                             finish_reason: None,
-                            stop_reason: None,
                             logprobs: None,
                         }
                     }],

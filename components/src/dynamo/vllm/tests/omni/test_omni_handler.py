@@ -1,17 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 try:
     from PIL import Image
+    from vllm.sampling_params import SamplingParams
+    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
     from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
 except ImportError:
@@ -25,7 +29,7 @@ pytestmark = [
 ]
 
 
-def _make_handler():
+def _make_handler(stage_types=("diffusion",)):
     with patch(
         "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__", return_value=None
     ):
@@ -36,6 +40,22 @@ def _make_handler():
     config.served_model_name = None
     config.output_modalities = ["text"]
     handler.config = config
+
+    defaults = []
+    for st in stage_types:
+        if st == "diffusion":
+            defaults.append(OmniDiffusionSamplingParams())
+        else:
+            llm_default = MagicMock(spec=SamplingParams)
+            llm_default.clone.return_value = SamplingParams()
+            defaults.append(llm_default)
+
+    engine_client = MagicMock()
+    engine_client.default_sampling_params_list = defaults
+    engine_client.engine.get_stage_metadata.side_effect = lambda i: {
+        "stage_type": stage_types[i]
+    }
+    handler.engine_client = engine_client
     return handler
 
 
@@ -47,6 +67,7 @@ class TestEngineInputs:
         assert ei.fps == 0
         assert ei.sampling_params_list is None
         assert ei.response_format is None
+        assert ei.output_format is None
 
 
 class TestBuildEngineInputs:
@@ -68,9 +89,38 @@ class TestBuildEngineInputs:
         inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
         assert inputs.request_type == RequestType.IMAGE_GENERATION
         assert inputs.prompt["prompt"] == "a cat"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 512,
+            "target_w": 512,
+        }
         assert len(inputs.sampling_params_list) == 1
         sp = inputs.sampling_params_list[0]
         assert sp.height == 512
+        assert sp.width == 512
+
+    @pytest.mark.asyncio
+    async def test_image_chat_completion_uses_multimodal_prompt(self):
+        """Image chat requests must use vLLM-Omni multimodal preprocessing."""
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        handler.config.output_modalities = ["image"]
+        raw = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "seed": 123},
+        }
+
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+
+        assert inputs.request_type == RequestType.CHAT_COMPLETION
+        assert inputs.prompt["prompt"] == "a glass teapot"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 768,
+            "target_w": 512,
+        }
+        assert len(inputs.sampling_params_list) == 2
+        sp = inputs.sampling_params_list[1]
+        assert sp.height == 768
         assert sp.width == 512
 
     @pytest.mark.asyncio
@@ -167,6 +217,36 @@ class TestI2VEngineInputs:
         assert empty.guidance_scale_2 is None
 
 
+class TestBuildSamplingParamsList:
+    def test_single_diffusion_stage(self):
+        handler = _make_handler(stage_types=("diffusion",))
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert len(result) == 1
+        assert result[0] is sp
+
+    def test_llm_then_diffusion(self):
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert len(result) == 2
+        assert isinstance(result[0], SamplingParams)
+        assert result[1] is sp
+
+    def test_fallback_when_defaults_empty(self):
+        handler = _make_handler()
+        handler.engine_client.default_sampling_params_list = []
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert result == [sp]
+
+    def test_llm_default_is_cloned(self):
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        sp = OmniDiffusionSamplingParams()
+        handler._build_sampling_params_list(sp)
+        handler.engine_client.default_sampling_params_list[0].clone.assert_called_once()
+
+
 class TestBuildOriginalPrompt:
     """build_original_prompt only carries prompt/negative_prompt/multi_modal_data.
 
@@ -213,42 +293,187 @@ class TestBuildOriginalPrompt:
 
 
 class TestParseOmniRequest:
-    """parse_omni_request: original_prompt only has prompt/negative_prompt,
-    geometry goes into sampling_params_list dict."""
+    """parse_omni_request: image geometry goes into sampling params and processor kwargs."""
 
-    def test_image_sampling_params_has_geometry(self):
+    @pytest.mark.asyncio
+    async def test_image_sampling_params_has_geometry(self):
         request = {
             "prompt": "a sunset",
             "size": "512x512",
             "output_modalities": ["image"],
         }
-        result = parse_omni_request(request, ["image"])
+        result = await parse_omni_request(request, ["image"])
         sp = result["sampling_params_list"]
         assert sp["height"] == 512
         assert sp["width"] == 512
 
-    def test_image_original_prompt_no_geometry(self):
+    @pytest.mark.asyncio
+    async def test_image_prompt_uses_multimodal_preprocessor_kwargs(self):
         request = {
             "prompt": "a sunset",
             "size": "512x512",
             "output_modalities": ["image"],
         }
-        result = parse_omni_request(request, ["image"])
+        result = await parse_omni_request(request, ["image"])
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a sunset"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
         op = result["original_prompt"]
         assert op["prompt"] == "a sunset"
         assert "height" not in op
         assert "width" not in op
+        assert op["modalities"] == ["image"]
+        assert op["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
 
-    def test_nvext_params_go_into_sampling_params_not_prompt(self):
+    def test_image_request_uses_nvext_negative_prompt(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "1024x1024",
+            "nvext": {"negative_prompt": "blurry, low quality"},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
+        assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
+
+    def test_image_request_uses_nvext_dimensions_consistently(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "512x512",
+            "nvext": {"height": 640, "width": 768},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["sampling_params_list"]["height"] == 640
+        assert result["sampling_params_list"]["width"] == 768
+        assert result["engine_inputs"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
+        assert result["original_prompt"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
+
+    @pytest.mark.asyncio
+    async def test_nvext_params_go_into_sampling_params_not_prompt(self):
         request = {
             "prompt": "x",
             "size": "512x512",
             "nvext": {"num_inference_steps": 30, "guidance_scale": 4.0},
         }
-        result = parse_omni_request(request, ["image"])
+        result = await parse_omni_request(request, ["image"])
         sp = result["sampling_params_list"]
         assert sp["num_inference_steps"] == 30
         assert sp["guidance_scale"] == 4.0
         op = result["original_prompt"]
         assert "num_inference_steps" not in op
         assert "guidance_scale" not in op
+
+    @pytest.mark.asyncio
+    async def test_image_chat_request_uses_multimodal_preprocessor_kwargs(self):
+        request = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "guidance_scale": 1.5},
+        }
+
+        result = await parse_omni_request(request, ["image"])
+
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a glass teapot"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 768, "target_w": 512}
+        assert result["original_prompt"] == prompt
+        assert result["sampling_params_list"] == {
+            "height": 768,
+            "width": 512,
+            "guidance_scale": 1.5,
+        }
+
+
+# ---------------------------------------------------------------------------
+# AudioGenerationHandler — data_source / response_format field mapping
+# ---------------------------------------------------------------------------
+
+
+def _make_audio_handler():
+    config = MagicMock()
+    config.tts_max_instructions_length = 200
+    config.tts_max_new_tokens_min = 1
+    config.tts_max_new_tokens_max = 4096
+    config.tts_ref_audio_timeout = 10
+    config.tts_ref_audio_max_bytes = 1024 * 1024
+    engine_client = MagicMock()
+    engine_client.model_config.hf_config.talker_config = None
+    return AudioGenerationHandler(config, engine_client, None, None)
+
+
+class TestAudioHandlerFieldMapping:
+    """AudioGenerationHandler maps data_source→response_format and response_format→output_format."""
+
+    @pytest.mark.asyncio
+    async def test_generic_path_maps_data_source_to_response_format(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hello", data_source="url", response_format="mp3"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "url"  # data_source → response_format
+        assert result.output_format == "mp3"  # response_format → output_format
+
+    @pytest.mark.asyncio
+    async def test_generic_path_maps_data_source_b64_json(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hello", data_source="b64_json", response_format="opus"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "b64_json"
+        assert result.output_format == "opus"
+
+    @pytest.mark.asyncio
+    async def test_generic_path_no_data_source_passes_none(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        # No data_source → response_format in EngineInputs will be None
+        req = NvCreateAudioSpeechRequest(input="hello", response_format="wav")
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format is None
+        assert result.output_format == "wav"
+
+    @pytest.mark.asyncio
+    async def test_tts_path_applies_same_field_mapping(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=True)
+        handler._validate_tts_request = MagicMock()
+        handler._estimate_tts_prompt_len = MagicMock(return_value=10)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hi", data_source="url", response_format="flac"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "url"
+        assert result.output_format == "flac"
+
+    @pytest.mark.asyncio
+    async def test_request_type_is_audio_generation(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        result = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hi")
+        )
+        assert result.request_type == RequestType.AUDIO_GENERATION

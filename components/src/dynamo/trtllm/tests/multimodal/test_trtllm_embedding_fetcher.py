@@ -51,7 +51,7 @@ def create_mock_encode_client(
                 "prompt_token_ids": prompt_token_ids or [1, 2, 3],
             }
 
-    async def mock_round_robin(req: dict[str, Any]) -> Any:
+    async def mock_round_robin(req: dict[str, Any], context=None) -> Any:
         async def gen():
             yield MockResponse()
 

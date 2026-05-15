@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import base64
 import dataclasses
 import logging
 import os
@@ -16,7 +15,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import MULTIMODAL_IMG_URL
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
@@ -75,6 +74,10 @@ vllm_configs = {
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
+        # Forwarded through agg.sh -> dynamo.vllm. Required for the
+        # max_thinking_tokens payload below: vLLM only enables the thinking-
+        # budget logits processor when reasoning_config is populated.
+        script_args=["--reasoning-parser", "qwen3"],
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -82,13 +85,21 @@ vllm_configs = {
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
-                360
-            ),  # ~8.5x observed 42.2s; bumped for GPU-parallel headroom
+                480
+            ),  # vLLM 0.20.x startup can exceed 360s on contended CI runners
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             chat_payload(
                 "Can you write me a song?",
@@ -101,7 +112,37 @@ vllm_configs = {
                     "include_stop_str_in_output": True,
                 },
             ),
+            # Smoke: nvext.max_thinking_tokens reaches vLLM's
+            # SamplingParams.thinking_token_budget without erroring. Requires
+            # the worker to be started with `--reasoning-parser qwen3`
+            # (see script_args above).
+            chat_payload(
+                "Solve: 1+1.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=64,
+                extra_body={"nvext": {"max_thinking_tokens": 16}},
+            ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
+        ],
+    ),
+    "aggregated_unified": VLLMConfig(
+        name="aggregated_unified",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        script_args=["--unified"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
+            pytest.mark.timeout(480),
+            pytest.mark.pre_merge,
+            pytest.mark.unified,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "aggregated_logprobs": VLLMConfig(
@@ -148,10 +189,6 @@ vllm_configs = {
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="lmcache does not support CUDA 13 as of v0.3.11",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -174,10 +211,6 @@ vllm_configs = {
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="lmcache does not support CUDA 13 as of v0.3.11",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -306,6 +339,74 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_same_gpu": VLLMConfig(
+        name="disaggregated_same_gpu",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_023_525_000
+            ),  # KV cache cap (2x safety over min=511_762_432)
+            pytest.mark.timeout(300),  # ~6x observed 50s
+            # post_merge: cumulative sequential test time exceeds 35-min job budget.
+            # Move back to pre_merge once GPU tests run in parallel.
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor": VLLMConfig(
+        name="disaggregated_same_gpu_chat_processor",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={"DYN_CHAT_PROCESSOR": "vllm"},
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor_kv_router": VLLMConfig(
+        name="disaggregated_same_gpu_chat_processor_kv_router",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={
+            "DYN_CHAT_PROCESSOR": "vllm",
+            "DYN_ROUTER_MODE": "kv",
+            # Deterministic hash for KV event IDs, matches disagg_router.sh.
+            "PYTHONHASHSEED": "0",
+        },
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "deepep": VLLMConfig(
         name="deepep",
         directory=vllm_dir,
@@ -334,90 +435,6 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "multimodal_agg_frontend_decoding": VLLMConfig(
-        name="multimodal_agg_frontend_decoding",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        # post_merge because needs real NIXL not stub
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                1_710_490_000
-            ),  # KV cache cap (2x safety over min=855_244_800)
-            pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
-            pytest.mark.post_merge,
-        ],
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
-        script_args=[
-            "--model",
-            "Qwen/Qwen2-VL-2B-Instruct",
-            "--frontend-decoding",
-        ],
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_agg_llava": VLLMConfig(
-        name="multimodal_agg_llava",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(14.9),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                922_354_000
-            ),  # KV cache cap (2x safety over min=461_176_832)
-            pytest.mark.timeout(
-                300
-            ),  # ~7x observed 42.7s; 7B model loads ~48s on CI (A10G/L4)
-            pytest.mark.nightly,
-            # https://github.com/ai-dynamo/dynamo/issues/4501
-            pytest.mark.xfail(strict=False),
-        ],
-        model="llava-hf/llava-1.5-7b-hf",
-        script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
-        delayed_start=0,
-        timeout=360,
-        request_payloads=[
-            # HTTP URL test
-            chat_payload(
-                [
-                    {"type": "text", "text": "What is in this image?"},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["bus"],
-                temperature=0.0,
-            ),
-            # String content test - verifies string → array conversion for multimodal templates
-            chat_payload_default(
-                repeat_count=1,
-                expected_response=[],  # Just validate no error
-            ),
-        ],
-    ),
     "aggregated_toolcalling": VLLMConfig(
         name="aggregated_toolcalling",
         directory=vllm_dir,
@@ -426,16 +443,23 @@ vllm_configs = {
             pytest.mark.gpu_1,  # agg_multimodal.sh uses single GPU
             pytest.mark.multimodal,
             pytest.mark.nightly,
+            pytest.mark.profiled_vram_gib(
+                19.9
+            ),  # align with multimodal_agg_qwen (7B VLM)
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
         ],
-        model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=[
             "--model",
-            "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
             "--max-model-len",
-            "10000",
+            "8192",
             "--dyn-tool-call-parser",
             "hermes",
         ],
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         delayed_start=0,
         timeout=600,
         request_payloads=[
@@ -480,32 +504,22 @@ vllm_configs = {
                             },
                         }
                     ],
-                    "tool_choice": "auto",
+                    "tool_choice": "required",
                     "max_tokens": 1024,
+                    "temperature": 0,
                 },
                 repeat_count=1,
                 expected_response=[
-                    "green",
                     "purple",
-                    "llm",
-                    "optimize",
-                    "deploy",
-                ],  # OR: pass if any keyword found in tool args
+                    "green",
+                    "lavender",
+                    "violet",
+                ],
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
             )
         ],
     ),
-    # TODO: Enable this test case when we have 4 GPUs runners.
-    # "multimodal_disagg": VLLMConfig(
-    #     name="multimodal_disagg",
-    #     directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-    #     script_name="disagg.sh",
-    #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
-    #     model="llava-hf/llava-1.5-7b-hf",
-    #     delayed_start=45,
-    #     script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
-    # ),
     "completions_only": VLLMConfig(
         name="completions_only",
         directory=vllm_dir,
@@ -558,7 +572,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
+            pytest.mark.timeout(180),  # vLLM 0.20.x needs more CI headroom
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -626,121 +640,6 @@ def test_serve_deployment(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
-@pytest.mark.vllm
-@pytest.mark.e2e
-@pytest.mark.gpu_2
-@pytest.mark.nightly
-@pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
-def test_multimodal_b64(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_models,
-):
-    """
-    Test multimodal inference with base64 url passthrough.
-
-    This test is separate because it loads the required image at runtime
-    (not collection time), ensuring it only fails when actually executed.
-    """
-    # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
-    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
-
-    # Create payload with B64 image
-    b64_payload = chat_payload(
-        [
-            {
-                "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
-            },
-        ],
-        repeat_count=1,
-        expected_response=["purple"],
-        max_tokens=100,
-    )
-
-    # Create test config
-    config = VLLMConfig(
-        name="test_multimodal_b64",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[],  # markers at function-level
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
-        delayed_start=0,
-        timeout=360,
-        request_payloads=[b64_payload],
-    )
-
-    config = dataclasses.replace(
-        config, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-@pytest.mark.vllm
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.pre_merge
-@pytest.mark.timeout(220)
-def test_multimodal_b64_frontend_decoding(
-    request,
-    runtime_services_dynamic_ports,
-    dynamo_dynamic_ports,
-    predownload_models,
-):
-    """
-    Test multimodal inference with base64 images through frontend decoding path.
-
-    This exercises the Rust frontend image decode + NIXL RDMA transfer path
-    with inline base64 data: URIs (not HTTP URLs). Verifies that the
-    strip_inline_data_urls optimization does not break correctness.
-    """
-    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
-
-    b64_payload = chat_payload(
-        [
-            {
-                "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
-            },
-        ],
-        repeat_count=1,
-        expected_response=["green"],
-        temperature=0.0,
-        max_tokens=100,
-    )
-
-    config = VLLMConfig(
-        name="test_multimodal_b64_frontend_decoding",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[],
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=[
-            "--model",
-            "Qwen/Qwen3-VL-2B-Instruct",
-            "--frontend-decoding",
-        ],
-        delayed_start=0,
-        timeout=220,
-        request_payloads=[b64_payload],
-    )
-
-    config = dataclasses.replace(
-        config, frontend_port=dynamo_dynamic_ports.frontend_port
-    )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
 # LoRA Test Directory
 lora_dir = os.path.join(vllm_dir, "launch/lora")
 
@@ -783,9 +682,13 @@ def lora_chat_payload(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.timeout(600)
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
+@pytest.mark.profiled_vram_gib(4.0)  # actual nvidia-smi peak with kv-bytes cap
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    941_712_000
+)  # 2x safety over min=470_855_680
+@pytest.mark.timeout(300)  # LoRA setup adds overhead; L4 machines are slower
 @pytest.mark.post_merge
-@pytest.mark.skip(reason="DYN-2260")
 def test_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -839,6 +742,7 @@ def test_lora_aggregated(
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)

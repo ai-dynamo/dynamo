@@ -463,7 +463,17 @@ class ActiveOperation(AbstractOperation):
                 case OperationStatus.INITIALIZED | OperationStatus.IN_PROGRESS:
                     await asyncio.sleep(sleep_time / 1000)
                     sleep_time = min(sleep_time * backoff_factor, max_poll_ms)
-                # Any other state indicates completion or error.
+                # ERRORED indicates the remote agent may have disconnected or
+                # its memory may be invalid (e.g. prefill worker scaled down).
+                # Raise so the caller can surface this as a retryable error
+                # rather than silently returning stale/empty data.
+                case OperationStatus.ERRORED:
+                    raise RuntimeError(
+                        f"NIXL transfer operation ERRORED for remote '{self._remote.name}'. "
+                        "The remote agent may have disconnected or its GPU memory may be "
+                        "invalid (e.g. the prefill worker was scaled down mid-transfer)."
+                    )
+                # Any other state (COMPLETE, CANCELLED) indicates the transfer is done.
                 case _:
                     return
 
@@ -489,7 +499,11 @@ class ActiveOperation(AbstractOperation):
         """
         # Early return if the operation is already complete, errored, or cancelled.
         match self._status:
-            case OperationStatus.COMPLETE | OperationStatus.ERRORED | OperationStatus.CANCELLED:
+            case (
+                OperationStatus.COMPLETE
+                | OperationStatus.ERRORED
+                | OperationStatus.CANCELLED
+            ):
                 return self._status
 
         if self._xfer_hndl is None:
@@ -1466,7 +1480,11 @@ class PassiveOperation(AbstractOperation):
         """
         # Early return if the operation is already complete, errored, or cancelled.
         match self._status:
-            case OperationStatus.COMPLETE | OperationStatus.ERRORED | OperationStatus.CANCELLED:
+            case (
+                OperationStatus.COMPLETE
+                | OperationStatus.ERRORED
+                | OperationStatus.CANCELLED
+            ):
                 return self._status
 
         old_status = self._status

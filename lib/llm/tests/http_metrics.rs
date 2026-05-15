@@ -6,6 +6,7 @@ use async_stream::stream;
 use dynamo_llm::{
     http::service::{metrics::Endpoint, service_v2::HttpService},
     model_card::ModelDeploymentCard,
+    preprocessor::LLMMetricAnnotation,
     protocols::{
         Annotated,
         openai::chat_completions::{
@@ -24,7 +25,7 @@ use std::{sync::Arc, time::Duration};
 
 #[path = "common/ports.rs"]
 mod ports;
-use ports::get_random_port;
+use ports::bind_random_port;
 
 // Mock engine for testing metrics
 struct MockModelEngine {}
@@ -50,10 +51,32 @@ impl
             // Simulate some processing time
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-            // Generate 5 response chunks
+            // Generate 5 response chunks with LLMMetricAnnotation so that
+            // output_sequence_tokens is properly recorded (the histogram only
+            // records when osl > 0, which requires the annotation to be present).
             for i in 0..5 {
-                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
-                yield Annotated::from_data(output);
+                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None);
+                let mut annotated = Annotated::from_data(output);
+                let metrics = LLMMetricAnnotation {
+                    input_tokens: 5,
+                    output_tokens: (i + 1) as usize,
+                    chunk_tokens: 1,
+                    cached_tokens: None,
+                    prefill_worker_id: None,
+                    prefill_dp_rank: None,
+                    prefill_worker_type: None,
+                    decode_worker_id: None,
+                    decode_dp_rank: None,
+                    decode_worker_type: None,
+                    tokenize_latency: None,
+                    detokenize_total_latency: None,
+                    detokenize_count: None,
+                };
+                if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
+                    annotated.event = ann.event;
+                    annotated.comment = ann.comment;
+                }
+                yield annotated;
             }
         };
 
@@ -65,10 +88,10 @@ impl
 async fn test_metrics_prefix_default() {
     // Test default prefix when no env var is set
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener).await;
         wait_for_metrics_ready(port).await;
 
         // Populate labeled metrics
@@ -90,6 +113,7 @@ async fn test_metrics_prefix_default() {
             .unwrap();
 
         // Assert metrics that are actually present in the default configuration
+        assert!(body.contains("dynamo_frontend_requests_started_total"));
         assert!(body.contains("dynamo_frontend_requests_total"));
         assert!(body.contains("dynamo_frontend_inflight_requests"));
         assert!(body.contains("dynamo_frontend_request_duration_seconds"));
@@ -105,10 +129,10 @@ async fn test_metrics_prefix_default() {
 async fn test_metrics_prefix_custom() {
     // Test custom prefix override via environment variable
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, Some("custom_prefix"))], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener).await;
         wait_for_metrics_ready(port).await;
 
         // Populate labeled metrics
@@ -128,6 +152,7 @@ async fn test_metrics_prefix_custom() {
             .text()
             .await
             .unwrap();
+        assert!(body.contains("custom_prefix_requests_started_total"));
         assert!(body.contains("custom_prefix_requests_total"));
         assert!(!body.contains("dynamo_frontend_requests_total"));
 
@@ -141,10 +166,10 @@ async fn test_metrics_prefix_custom() {
 async fn test_metrics_prefix_sanitized() {
     // Test that invalid prefix characters are sanitized
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, Some("nv-llm/http service"))], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener).await;
         wait_for_metrics_ready(port).await;
 
         let state = service.state_clone();
@@ -193,7 +218,7 @@ async fn test_metrics_with_mock_model() {
     // Test metrics collection with a mock model serving requests
     // Ensure we use the default prefix
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
             .port(port)
             .enable_chat_endpoints(true)
@@ -206,7 +231,8 @@ async fn test_metrics_with_mock_model() {
         // Start the HTTP service
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let task = tokio::spawn(async move { service.run(token.clone()).await });
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
 
         // Add mock model engine
         let card = ModelDeploymentCard::with_name_only("mockmodel");
@@ -308,7 +334,7 @@ mod integration_tests {
     #[ignore = "Requires etcd and distributed runtime"]
     async fn test_metrics_with_mdc_registration() {
         // Integration test for metrics collection with full MDC registration (like real model servers)
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
 
         // Create distributed runtime (required for MDC registration)
         let runtime = dynamo_runtime::Runtime::from_settings().unwrap();
@@ -342,7 +368,8 @@ mod integration_tests {
             distributed_runtime.clone(),
             service.state().manager_clone(),
             dynamo_llm::entrypoint::RouterConfig::default(),
-            0, // migration_limit
+            0,    // migration_limit
+            None, // migration_max_seq_len
             None,
             None,
             service.state().metrics_clone(),
@@ -359,7 +386,7 @@ mod integration_tests {
 
         // Spawn watcher task to discover models
         let _watcher_task = tokio::spawn(async move {
-            model_watcher
+            Arc::new(model_watcher)
                 .watch(discovery_stream, NamespaceFilter::Global)
                 .await;
         });
@@ -412,7 +439,11 @@ mod integration_tests {
         let token = CancellationToken::new();
         let cancel_token = token.clone();
         let service_for_task = service.clone();
-        let task = tokio::spawn(async move { service_for_task.run(token.clone()).await });
+        let task = tokio::spawn(async move {
+            service_for_task
+                .run_with_listener(token.clone(), listener)
+                .await
+        });
 
         // Wait for service to be ready
         wait_for_metrics_ready(port).await;
@@ -476,6 +507,7 @@ mod integration_tests {
 
         // Assert basic metrics are present (using service_name from the model)
         let model_name = model.service_name();
+        assert!(metrics_body.contains("dynamo_frontend_requests_started_total"));
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains(&format!("model=\"{}\"", model_name)));
         assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));

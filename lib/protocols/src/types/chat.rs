@@ -29,7 +29,6 @@ pub use async_openai::types::chat::{
     ChatCompletionFunctionCall,
     ChatCompletionFunctions,
     ChatCompletionFunctionsArgs,
-    ChatCompletionMessageToolCallChunk,
     ChatCompletionRequestAssistantMessageAudio,
     ChatCompletionRequestAssistantMessageContent,
     ChatCompletionRequestAssistantMessageContentPart,
@@ -56,8 +55,6 @@ pub use async_openai::types::chat::{
     CompletionFinishReason,
     CompletionTokensDetails,
     CompletionUsage,
-    FunctionCall,
-    FunctionCallStream,
     FunctionObject,
     FunctionObjectArgs,
     InputAudio,
@@ -80,8 +77,72 @@ pub use async_openai::types::chat::{
     WebSearchUserLocationType,
 };
 
-// Upstream renamed Stop -> StopConfiguration; re-export under old name for compat
-pub use async_openai::types::chat::StopConfiguration as Stop;
+/// OpenAI stop configuration, with Dynamo's token-id stop extension.
+///
+/// The standard OpenAI shape accepts a string or string array. Dynamo also
+/// accepts an integer array, e.g. `"stop": [576]`, to express token-id stop
+/// conditions for tokenized in/out workflows. Strings like `"token_id:576"`
+/// remain ordinary string stops; the `token_id:<id>` format is only an output
+/// display format for logprobs.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum Stop {
+    String(String),
+    StringArray(Vec<String>),
+    TokenIdArray(Vec<u32>),
+}
+
+impl Stop {
+    pub fn strings(&self) -> Option<Vec<String>> {
+        match self {
+            Stop::String(s) => Some(vec![s.clone()]),
+            Stop::StringArray(arr) => Some(arr.clone()),
+            Stop::TokenIdArray(_) => None,
+        }
+    }
+
+    pub fn token_ids(&self) -> Option<Vec<u32>> {
+        match self {
+            Stop::TokenIdArray(arr) => Some(arr.clone()),
+            Stop::String(_) | Stop::StringArray(_) => None,
+        }
+    }
+}
+
+impl From<String> for Stop {
+    fn from(value: String) -> Self {
+        Stop::String(value)
+    }
+}
+
+impl From<&str> for Stop {
+    fn from(value: &str) -> Self {
+        Stop::String(value.to_string())
+    }
+}
+
+impl From<Vec<String>> for Stop {
+    fn from(value: Vec<String>) -> Self {
+        Stop::StringArray(value)
+    }
+}
+
+impl From<Vec<u32>> for Stop {
+    fn from(value: Vec<u32>) -> Self {
+        Stop::TokenIdArray(value)
+    }
+}
+
+impl From<async_openai::types::chat::StopConfiguration> for Stop {
+    fn from(value: async_openai::types::chat::StopConfiguration) -> Self {
+        match value {
+            async_openai::types::chat::StopConfiguration::String(value) => Stop::String(value),
+            async_openai::types::chat::StopConfiguration::StringArray(value) => {
+                Stop::StringArray(value)
+            }
+        }
+    }
+}
 
 // Upstream renamed FinishReason (streaming) -- re-export
 pub use async_openai::types::chat::FinishReason;
@@ -89,6 +150,90 @@ pub use async_openai::types::chat::FinishReason;
 // Upstream uses FunctionType where we used ChatCompletionToolType.
 // Re-export both names for compatibility.
 pub use async_openai::types::chat::FunctionType;
+
+// ---------------------------------------------------------------------------
+// Flexible `arguments` deserialisation helpers
+// ---------------------------------------------------------------------------
+// Some agent frameworks (e.g. LangChain, custom harnesses) send tool-call
+// arguments as a pre-parsed JSON object instead of the canonical JSON
+// string.  The helpers below normalise both representations to a `String` so
+// downstream code never needs to branch on the wire format.
+
+fn deserialize_arguments<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        v @ serde_json::Value::Object(_) => {
+            // serde_json::to_string on a Value is infallible
+            Ok(serde_json::to_string(&v).unwrap())
+        }
+        other => Err(D::Error::custom(format!(
+            "expected string or object for `arguments`, got {other}"
+        ))),
+    }
+}
+
+fn deserialize_arguments_opt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(v @ serde_json::Value::Object(_)) => serde_json::to_string(&v)
+            .map(Some)
+            .map_err(|e| D::Error::custom(e.to_string())),
+        Some(other) => Err(D::Error::custom(format!(
+            "expected string or object for `arguments`, got {other}"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FunctionCall / FunctionCallStream — local definitions with flexible deser
+// ---------------------------------------------------------------------------
+// Upstream `async-openai` only accepts a JSON string for `arguments`.
+// We define these locally so we can attach `#[serde(deserialize_with)]` and
+// accept both string and object representations on the wire.
+
+/// The name and arguments of a function that should be called.
+///
+/// Accepts `arguments` as either a JSON string (`"{\"key\":\"value\"}"`) or a
+/// JSON object (`{"key": "value"}`); both are normalised to a JSON string
+/// on deserialisation so callers always see the canonical form.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct FunctionCall {
+    pub name: String,
+    #[serde(deserialize_with = "deserialize_arguments")]
+    pub arguments: String,
+}
+
+/// Streaming variant of [`FunctionCall`] where both fields are optional.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct FunctionCallStream {
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_arguments_opt")]
+    pub arguments: Option<String>,
+}
+
+/// Streaming tool-call chunk.
+///
+/// Defined locally (instead of re-exporting from upstream) because its
+/// `function` field references our local [`FunctionCallStream`] with the
+/// flexible `arguments` deserialiser.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct ChatCompletionMessageToolCallChunk {
+    pub index: u32,
+    pub id: Option<String>,
+    pub r#type: Option<FunctionType>,
+    pub function: Option<FunctionCallStream>,
+}
 
 // ---------------------------------------------------------------------------
 // Types with structural differences from upstream (kept locally)
@@ -200,11 +345,13 @@ pub struct ChatCompletionTool {
 /// Inference backends (vLLM, SGLang) report which stop condition triggered:
 /// - `String`: a matched user-provided stop sequence
 /// - `Int`: a matched stop token ID
+/// - `IntArray`: matched stop token IDs reported as a sequence
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum StopReason {
     String(String),
     Int(i64),
+    IntArray(Vec<i64>),
 }
 
 /// Reasoning content from a previous assistant turn.
@@ -493,7 +640,9 @@ pub enum ServiceTierResponse {
 /// - `reasoning_content`: model reasoning output (DeepSeek-R1, QwQ)
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChatCompletionResponseMessage {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always serialized (as `null` when None) so clients can rely on the
+    /// `content` key being present alongside `reasoning_content` or
+    /// `tool_calls`. Matches the upstream OpenAI API shape (DGH-651).
     pub content: Option<ChatCompletionMessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
@@ -611,9 +760,6 @@ pub struct ChatChoice {
     pub index: u32,
     pub message: ChatCompletionResponseMessage,
     pub finish_reason: Option<FinishReason>,
-    /// Matched stop condition from the backend.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
     pub logprobs: Option<ChatChoiceLogprobs>,
 }
 
@@ -658,22 +804,16 @@ pub struct ChatCompletionStreamResponseDelta {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChatCompletionStreamResponseDeltaFunctionCall {
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_arguments_opt")]
     pub arguments: Option<String>,
 }
 
-/// Streaming chat choice with stop reason support.
-///
-/// Extends upstream `ChatChoiceStream` with:
-/// - `stop_reason`: the matched stop sequence (string) or stop token ID (integer)
-///   reported by inference backends
+/// Streaming chat choice.
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct ChatChoiceStream {
     pub index: u32,
     pub delta: ChatCompletionStreamResponseDelta,
     pub finish_reason: Option<FinishReason>,
-    /// Matched stop condition from the backend.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
     pub logprobs: Option<ChatChoiceLogprobs>,
 }
 
@@ -693,6 +833,56 @@ pub struct CreateChatCompletionStreamResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_accepts_token_id_array() {
+        let stop: Stop = serde_json::from_value(serde_json::json!([32, 34])).unwrap();
+
+        assert_eq!(stop, Stop::TokenIdArray(vec![32, 34]));
+    }
+
+    #[test]
+    fn stop_accepts_string_and_string_array() {
+        let stop: Stop = serde_json::from_value(serde_json::json!(" The")).unwrap();
+
+        assert_eq!(stop, Stop::String(" The".to_string()));
+
+        let stop: Stop = serde_json::from_value(serde_json::json!(["A", "B"])).unwrap();
+
+        assert_eq!(
+            stop,
+            Stop::StringArray(vec!["A".to_string(), "B".to_string()])
+        );
+    }
+
+    #[test]
+    fn stop_token_id_display_string_remains_string_stop() {
+        let stop: Stop = serde_json::from_value(serde_json::json!("token_id:576")).unwrap();
+
+        assert_eq!(stop, Stop::String("token_id:576".to_string()));
+
+        let stop: Stop = serde_json::from_value(serde_json::json!(["token_id:576"])).unwrap();
+
+        assert_eq!(stop, Stop::StringArray(vec!["token_id:576".to_string()]));
+    }
+
+    #[test]
+    fn stop_rejects_single_token_id() {
+        let result = serde_json::from_value::<Stop>(serde_json::json!(576));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stop_converts_from_upstream_stop_configuration() {
+        let upstream =
+            async_openai::types::chat::StopConfiguration::StringArray(vec!["END".to_string()]);
+
+        assert_eq!(
+            Stop::from(upstream),
+            Stop::StringArray(vec!["END".to_string()])
+        );
+    }
 
     #[test]
     fn tool_call_defaults_type_on_deserialize() {
@@ -721,5 +911,140 @@ mod tests {
 
         let json = serde_json::to_value(tool_call).unwrap();
         assert_eq!(json["type"], "function");
+    }
+
+    // -- dict-format arguments tests --
+
+    #[test]
+    fn function_call_accepts_string_arguments() {
+        let fc: FunctionCall = serde_json::from_value(serde_json::json!({
+            "name": "get_weather",
+            "arguments": "{\"location\":\"SF\"}"
+        }))
+        .unwrap();
+        assert_eq!(fc.arguments, "{\"location\":\"SF\"}");
+    }
+
+    #[test]
+    fn function_call_accepts_dict_arguments() {
+        let fc: FunctionCall = serde_json::from_value(serde_json::json!({
+            "name": "get_weather",
+            "arguments": {"location": "SF"}
+        }))
+        .unwrap();
+        assert_eq!(fc.arguments, "{\"location\":\"SF\"}");
+    }
+
+    #[test]
+    fn function_call_rejects_integer_arguments() {
+        let result = serde_json::from_value::<FunctionCall>(serde_json::json!({
+            "name": "f",
+            "arguments": 42
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_rejects_boolean_arguments() {
+        let result = serde_json::from_value::<FunctionCall>(serde_json::json!({
+            "name": "f",
+            "arguments": true
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_rejects_null_arguments() {
+        let result = serde_json::from_value::<FunctionCall>(serde_json::json!({
+            "name": "f",
+            "arguments": null
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_rejects_array_arguments() {
+        let result = serde_json::from_value::<FunctionCall>(serde_json::json!({
+            "name": "f",
+            "arguments": [1, 2, 3]
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_stream_null_arguments_produces_none() {
+        let fcs: FunctionCallStream = serde_json::from_value(serde_json::json!({
+            "name": "f",
+            "arguments": null
+        }))
+        .unwrap();
+        assert_eq!(fcs.arguments, None);
+    }
+
+    #[test]
+    fn function_call_stream_rejects_integer_arguments() {
+        let result = serde_json::from_value::<FunctionCallStream>(serde_json::json!({
+            "name": "f",
+            "arguments": 42
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_stream_rejects_boolean_arguments() {
+        let result = serde_json::from_value::<FunctionCallStream>(serde_json::json!({
+            "name": "f",
+            "arguments": true
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_stream_accepts_dict_arguments() {
+        let fcs: FunctionCallStream = serde_json::from_value(serde_json::json!({
+            "name": "get_weather",
+            "arguments": {"location": "SF"}
+        }))
+        .unwrap();
+        assert_eq!(fcs.arguments.as_deref(), Some("{\"location\":\"SF\"}"));
+    }
+
+    #[test]
+    fn function_call_stream_accepts_null_arguments() {
+        let fcs: FunctionCallStream = serde_json::from_value(serde_json::json!({
+            "name": "get_weather"
+        }))
+        .unwrap();
+        assert_eq!(fcs.arguments, None);
+    }
+
+    #[test]
+    fn tool_call_with_dict_arguments_roundtrip() {
+        let tc: ChatCompletionMessageToolCall = serde_json::from_value(serde_json::json!({
+            "id": "call_abc",
+            "type": "function",
+            "function": {
+                "name": "search",
+                "arguments": {"query": "hello", "limit": 10}
+            }
+        }))
+        .unwrap();
+        // Compare as parsed JSON values since key order is non-deterministic
+        let parsed: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap();
+        assert_eq!(parsed, serde_json::json!({"query": "hello", "limit": 10}));
+        // Re-serialisation produces a string, not an object
+        let json = serde_json::to_value(&tc).unwrap();
+        assert!(json["function"]["arguments"].is_string());
+    }
+
+    #[test]
+    fn stream_delta_function_call_accepts_dict_arguments() {
+        let delta: ChatCompletionStreamResponseDeltaFunctionCall =
+            serde_json::from_value(serde_json::json!({
+                "name": "get_weather",
+                "arguments": {"location": "SF"}
+            }))
+            .unwrap();
+        assert_eq!(delta.arguments.as_deref(), Some("{\"location\":\"SF\"}"));
     }
 }

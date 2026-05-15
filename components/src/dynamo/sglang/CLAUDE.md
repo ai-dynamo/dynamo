@@ -9,15 +9,18 @@ registration, request routing, metrics, and disaggregated serving.
 SGLang is pre-1.0 and regularly moves/renames internal APIs between releases. We
 support the current version plus 1 version back (N and N-1). The pattern:
 
-1. **All SGLang imports that have broken (or may break) across versions go through
-   `_compat.py`**, never directly from `sglang.*` in component code.
+1. **Only SGLang imports that have actually broken across a version upgrade go through
+   `_compat.py`.** Do not preemptively route every `sglang.*` import through the shim --
+   import directly until a real breakage is observed. When an upgrade breaks an import,
+   move that specific symbol into `_compat.py` and replace direct imports in component
+   code with the shim.
 2. `_compat.py` uses try/except ImportError: new path first, old path fallback.
 3. When SGLang introduces a new class/function that doesn't exist in older versions
    (e.g., `NetworkAddress`), add a minimal polyfill in the except branch -- just
    enough surface area to cover what Dynamo actually calls.
 4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
    version it supports and when it can be removed, e.g.:
-   `# Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+`
+   `# Fallback for sglang <= 0.5.10. Remove when min supported version is 0.5.12+`
 5. When a new SGLang version is released and the old N-1 falls outside the support
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
@@ -225,6 +228,12 @@ absolute sequence position where logprob computation starts: `-1` (default) = ou
 only (`len(prompt) - 1`), `0` = from prompt start. We set it to 0 when `prompt_logprobs`
 is requested.
 
+**Top-logprobs gate**: `logprobs >= 1` (or `prompt_logprobs >= 1`) raises `ValueError`
+by default. SGLang's tokenizer manager detokenizes top-k tokens per-position serially,
+causing severe latency degradation (O(N) per generated token). Callers must use
+`logprobs=0` for chosen-token-only logprobs. Set `DYN_SGL_ALLOW_TOP_LOGPROBS=1` to
+override once upstream batches `detokenize_top_logprobs_tokens`.
+
 **Streaming behavior** (`_extract_logprobs`):
 
 Dynamo forces `stream_output=True` (args.py:374), making `output_ids` disjoint per chunk.
@@ -273,8 +282,8 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 - **engine=None**: Multimodal encode worker passes `engine=None` to
   BaseWorkerHandler. Any code in the base class that touches engine must guard with
   `if engine is not None`.
-- **GenerationResult is a dataclass**: SGLang 0.5.9 changed `DiffGenerator.generate()`
-  to return `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
+- **GenerationResult is a dataclass**: SGLang `DiffGenerator.generate()`
+  returns `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
@@ -283,6 +292,14 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
+- **Session control graceful degradation**: Session control is request-driven --
+  the router's `AgentController` and `StickySessionRouter` are always created but
+  activate lazily. If no worker has `--enable-streaming-session`, the router warns
+  once and ignores `session_control` in requests. On the handler side,
+  `_session_kwargs()` checks `enable_streaming_session` before injecting
+  `session_params` into SGLang calls. Both layers must agree: the router skips
+  lifecycle RPCs, and the handler skips session params. Without both guards,
+  SGLang errors with "session id does not exist".
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
@@ -330,7 +347,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 
 ```
 sglang/
-  _compat.py               # SGLang version compat shim (network imports + NetworkAddress polyfill)
+  _compat.py               # SGLang version compat shim (signature probing for async_generate kwargs)
   __main__.py              # Entry point
   main.py                  # Worker dispatch
   args.py                  # Config parsing (ServerArgs vs SimpleNamespace)

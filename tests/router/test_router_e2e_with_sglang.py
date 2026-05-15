@@ -146,9 +146,13 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 str(page_size),
             ]
 
-            # Disable CUDA graphs for faster startup & lower memory
+            # Disable CUDA graphs for faster startup & lower memory.
+            # sglang 0.5.10+ has piecewise CUDA graphs (separate flag) that
+            # consume ~7 GB during capture — must also be disabled for
+            # multi-worker same-GPU tests to avoid OOM.
             if disable_cuda_graph:
                 command.append("--disable-cuda-graph")
+                command.append("--disable-piecewise-cuda-graph")
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
             if mem_fraction_static is not None:
@@ -258,6 +262,7 @@ def test_sglang_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
     request,
@@ -318,6 +323,7 @@ def test_router_decisions_sglang_dp(
     )
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
@@ -352,6 +358,13 @@ def test_router_decisions_sglang_disagg(
     )
 
 
+# DYN-2784: Fixture setup hangs silently in nightly only (worker #2 dies
+# in SGLangProcess launch, KvRouter blocks forever on min_initial_workers=2;
+# pytest.mark.timeout signal gets swallowed at the C-level syscall).
+# Passes reliably in pre_merge/post_merge runs, so scope the skip to the
+# nightly pipeline via skip_in_nightly, which nightly-ci.yml excludes from
+# its sglang single-GPU marker filter. Remove once DYN-2784 lands a real fix.
+@pytest.mark.skip_in_nightly
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize(

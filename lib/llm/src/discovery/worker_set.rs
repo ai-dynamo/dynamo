@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use crate::{
     discovery::KvWorkerMonitor,
-    kv_router::KvRouter,
+    kv_router::{KvRouter, PrefillRouter},
     model_card::ModelDeploymentCard,
     types::{
         generic::tensor::TensorStreamingEngine,
@@ -51,6 +51,10 @@ pub struct WorkerSet {
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
+    /// Prefill router for disaggregated serving. Stored here so the watcher can
+    /// deactivate it when all prefill workers die, and reactivate when they rejoin.
+    pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
+
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
@@ -71,6 +75,7 @@ impl WorkerSet {
             tensor_engine: None,
             kv_router: None,
             worker_monitor: None,
+            prefill_router: None,
             instance_count_rx: None,
         }
     }
@@ -151,6 +156,16 @@ impl WorkerSet {
     /// Must be called before the WorkerSet is wrapped in Arc.
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
         self.instance_count_rx = Some(rx);
+    }
+
+    /// Whether this WorkerSet can serve requests. Delegates to the prefill router
+    /// if one exists; otherwise always returns true.
+    /// When the prefill router is deactivated and enforce_disagg is set, this returns
+    /// false, causing the model to be hidden from /v1/models and requests to be rejected.
+    pub fn can_serve_requests(&self) -> bool {
+        self.prefill_router
+            .as_ref()
+            .is_none_or(|pr| pr.can_serve_requests())
     }
 }
 

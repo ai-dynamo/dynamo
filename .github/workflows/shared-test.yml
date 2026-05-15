@@ -1,0 +1,205 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Shared Local GPU and CPU Test
+
+on:
+  workflow_call:
+    inputs:
+      test_suite_name:
+        description: 'Test suite name (vllm, sglang, trtllm)'
+        required: true
+        type: string
+      test_type:
+        description: 'Test type (e.g. single-gpu, multi-gpu)'
+        required: true
+        type: string
+      amd_runner:
+        description: 'Runner to execute tests on (amd64 only)'
+        required: true
+        type: string
+      target_tag_plain:
+        description: 'Plain runtime image tag prefix from the build workflow'
+        required: true
+        type: string
+      cuda_version:
+        description: 'CUDA versions to test as a JSON array'
+        required: true
+        type: string
+      platform:
+        description: 'Target platforms to test as a JSON array'
+        required: true
+        type: string
+      enable_coverage:
+        description: 'Enable coverage collection (true/false)'
+        required: false
+        type: string
+        default: 'false'
+      run_sanity_check:
+        description: 'Whether to run sanity check on the runtime image before executing tests'
+        required: false
+        type: boolean
+        default: true
+      run_cpu_only_tests:
+        description: 'Whether to run CPU-only tests'
+        required: false
+        type: boolean
+        default: false
+      cpu_only_test_markers:
+        description: 'CPU-only pytest markers'
+        required: false
+        type: string
+      cpu_only_test_timeout_minutes:
+        description: 'Timeout in minutes for CPU tests'
+        required: false
+        type: number
+        default: 10
+      cpu_parallel_mode:
+        description: 'pytest-xdist mode for CPU-only tests: auto, none/0, or a worker count'
+        required: false
+        type: string
+        default: 'auto'
+      run_gpu_tests:
+        description: 'Whether to run GPU tests'
+        required: false
+        type: boolean
+        default: true
+      gpu_test_markers:
+        description: 'GPU pytest markers. Selects the full GPU pool. When run_gpu_parallel_tests=true, profiled tests run in the parallel stage and are excluded from the sequential stage by appending "and not profiled_vram_gib".'
+        required: false
+        type: string
+      gpu_test_timeout_minutes:
+        description: 'Timeout in minutes for each GPU test stage (parallel and sequential each get this budget)'
+        required: false
+        type: number
+        default: 30
+      run_gpu_parallel_tests:
+        description: 'Whether to run the GPU-parallel stage (VRAM-aware concurrent subprocesses) before the sequential stage. Tests carrying @pytest.mark.profiled_vram_gib(N) within gpu_test_markers run here; the sequential stage runs the rest.'
+        required: false
+        type: boolean
+        default: false
+      gpu_parallel_max_vram_gib:
+        description: 'Per-test VRAM budget in GiB for the parallel stage. Caps which profiled tests are admitted and feeds the orchestrator scheduler (tests/utils/pytest_parallel_gpu.py).'
+        required: false
+        type: string
+        default: ''
+      source_ref:
+        description: 'Git ref/SHA to checkout and to resolve image tags against. Empty = caller SHA (github.sha).'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      HF_TOKEN:
+        required: false
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(inputs.platform) }}
+        cuda_version: ${{ fromJson(inputs.cuda_version) }}
+    name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}-test
+      env:
+        # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+        # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+        # USER here sidesteps two symptoms of that mismatch:
+        #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+        #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    permissions:
+      contents: read
+    services:
+      minio:
+        image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_VOLUMES: /tmp/minio-data
+          MINIO_CONSOLE_ADDRESS: ':9001'
+        ports:
+          - 9000:9000
+          - 9001:9001
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      - name: Run Sanity Check on Runtime Image
+        if: ${{ inputs.run_sanity_check }}
+        shell: bash
+        # Run from the container's baked-in workspace, not the GHA checkout,
+        # so the sanity check reflects what the image actually ships.
+        working-directory: /workspace
+        run: |
+          set +e
+          python ./deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+
+      - name: Run CPU-only tests (parallelized)
+        if: ${{ inputs.run_cpu_only_tests }}
+        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          pytest_marks: ${{ inputs.cpu_only_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_cpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: ${{ inputs.cpu_parallel_mode }}
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'false'
+      - name: Run GPU tests (parallel)
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          pytest_marks: ${{ inputs.gpu_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu_parallel"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
+          # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
+          parallel_mode: 'auto'
+          max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'true'
+      - name: Run GPU tests (sequential)
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        # !cancelled() so a parallel-stage failure doesn't hide sequential results.
+        if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          # When the parallel stage runs, exclude profiled tests here so they don't run twice.
+          pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'true'

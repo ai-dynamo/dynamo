@@ -32,12 +32,6 @@ from typing import Any
 
 import numpy as np
 
-from dynamo.planner.core.perf_model import DecodeRegressionModel, PrefillRegressionModel
-from dynamo.planner.monitoring.perf_metrics import (
-    _convert_decode_profiling,
-    _convert_prefill_profiling,
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -61,6 +55,15 @@ def convert_profile_results_to_npz(
     Returns:
         Path to the generated NPZ file.
     """
+    from dynamo.planner.core.perf_model import (
+        DecodeRegressionModel,
+        PrefillRegressionModel,
+    )
+    from dynamo.planner.monitoring.perf_metrics import (
+        _convert_decode_profiling,
+        _convert_prefill_profiling,
+    )
+
     profile_results_dir = str(Path(profile_results_dir).resolve())
     output_path = Path(output_path)
 

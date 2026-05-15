@@ -28,7 +28,7 @@ keywords.workspace = true
 anyhow = { workspace = true }
 dynamo-protocols = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
