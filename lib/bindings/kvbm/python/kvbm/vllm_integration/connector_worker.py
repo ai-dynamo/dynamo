@@ -124,6 +124,11 @@ class KvConnectorWorker:
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
+        # Get SYCL queue pointer for cross-context Ze copies
+        sycl_queue_ptr = None
+        if self.device_type == "xpu":
+            sycl_queue_ptr = torch.xpu.current_stream(self.device_id).sycl_queue
+
         # Register with connector using ordered data
         self._connector.register_kv_caches(
             num_device_blocks,
@@ -133,6 +138,7 @@ class KvConnectorWorker:
             self.device_type,
             ordered_kv_caches,
             raw_event_handles,
+            sycl_queue_ptr=sycl_queue_ptr,
         )
 
     def bind_connector_metadata(self, data: bytes) -> None:

@@ -125,10 +125,21 @@ async fn perform_allocation_and_build_handler(
     };
     let backend = DeviceBackend::from_str(&worker_config.device_type)
         .map_err(|e| anyhow::anyhow!(e))?;
+    let device_stream = {
+        let allocator = DeviceAllocator::new_with_backend(device_id, backend)?;
+        let ctx = allocator.ctx();
+        if let Some(sycl_queue_ptr) = worker_config.sycl_queue_ptr {
+            tracing::info!("Creating Ze stream with foreign context from sycl_queue_ptr=0x{:x}", sycl_queue_ptr);
+            ctx.new_stream_with_foreign_context(sycl_queue_ptr)?
+        } else {
+            tracing::info!("Creating device stream without foreign context (sycl_queue_ptr=None)");
+            ctx.new_stream()?
+        }
+    };
     let transfer_context = Arc::new(
         TransferContext::new(
             Arc::new(Some(agent)),
-            DeviceAllocator::new_with_backend(device_id, backend)?.ctx().new_stream()?,
+            device_stream,
             Handle::current(),
             Some(pool_config),
         )
@@ -421,6 +432,9 @@ pub struct KvbmWorkerConfig {
 
     #[builder(default = "String::from(\"tcp://127.0.0.1:56002\")")]
     leader_ack_url: String,
+
+    #[builder(default = "None")]
+    sycl_queue_ptr: Option<u64>,
 }
 
 impl KvbmWorkerConfig {

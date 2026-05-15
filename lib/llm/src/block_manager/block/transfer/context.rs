@@ -181,6 +181,7 @@ pub enum DeviceStream {
 /// to the concrete backend and calling its `new_stream()` method.
 pub trait DeviceContextExt {
     fn new_stream(&self) -> anyhow::Result<DeviceStream>;
+    fn new_stream_with_foreign_context(&self, sycl_queue_ptr: u64) -> anyhow::Result<DeviceStream>;
 }
 
 impl DeviceContextExt for DeviceContext {
@@ -198,6 +199,19 @@ impl DeviceContextExt for DeviceContext {
                     .expect("BackendType::Ze but downcast to Arc<ZeContext> failed");
                 Ok(DeviceStream::Ze(ze_ctx.new_stream()?))
             }
+        }
+    }
+
+    fn new_stream_with_foreign_context(&self, sycl_queue_ptr: u64) -> anyhow::Result<DeviceStream> {
+        match self.backend_type() {
+            BackendType::Ze => {
+                let ze_ctx = self.backend.as_any()
+                    .downcast_ref::<Arc<ZeContext>>()
+                    .expect("BackendType::Ze but downcast to Arc<ZeContext> failed");
+                let foreign_ctx = unsafe { dynamo_memory::ze::get_ze_context_from_sycl_queue(sycl_queue_ptr) };
+                Ok(DeviceStream::Ze(ze_ctx.new_stream_with_foreign_context(foreign_ctx)?))
+            }
+            _ => anyhow::bail!("new_stream_with_foreign_context only supported for Ze backend"),
         }
     }
 }

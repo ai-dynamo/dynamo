@@ -228,12 +228,15 @@ where
     }
 
     let first_src = sources[0].block_data();
+    let first_dst = destinations[0].block_data_mut();
     tracing::info!(
-        "ZE copy_blocks_with_customized_kernel: sources.len()={}, num_layers={}, num_outer_dims={}, first_layer_view_size={} bytes",
+        "ZE copy_blocks_with_customized_kernel: sources.len()={}, num_layers={}, num_outer_dims={}, first_layer_view_size={} bytes, src=0x{:x}, dst=0x{:x}",
         sources.len(),
         first_src.num_layers(),
         first_src.num_outer_dims(),
-        first_src.layer_view(0, 0).map(|v| v.size()).unwrap_or(0)
+        first_src.layer_view(0, 0).map(|v| v.size()).unwrap_or(0),
+        first_src.layer_view(0, 0).map(|v| unsafe { v.as_ptr() as usize }).unwrap_or(0),
+        first_dst.layer_view_mut(0, 0).map(|mut v| unsafe { v.as_mut_ptr() as usize }).unwrap_or(0)
     );
 
     let mut list = queue.create_command_list().map_err(|e| {
@@ -242,6 +245,12 @@ where
             e
         ))
     })?;
+
+    let foreign_ctx = queue.foreign_src_context();
+    tracing::info!(
+        "ZE copy_blocks_with_customized_kernel: foreign_src_context={:?}",
+        foreign_ctx.map(|p| format!("0x{:x}", p as usize))
+    );
 
     for (src, dst) in sources.iter().zip(destinations.iter_mut()) {
         let src_data = src.block_data();
@@ -258,17 +267,20 @@ where
             }
 
             unsafe {
-                tracing::debug!(
-                    "ZE copy_blocks_with_customized_kernel contiguous: src=0x{:x}, dst=0x{:x}, size={}",
-                    src_view.as_ptr() as usize,
-                    dst_view.as_mut_ptr() as usize,
-                    src_view.size()
-                );
-                list.append_memcpy(
-                    dst_view.as_mut_ptr() as *mut c_void,
-                    src_view.as_ptr() as *const c_void,
-                    src_view.size(),
-                )
+                if let Some(src_ctx) = foreign_ctx {
+                    list.append_memcpy_from_context(
+                        dst_view.as_mut_ptr() as *mut c_void,
+                        src_ctx,
+                        src_view.as_ptr() as *const c_void,
+                        src_view.size(),
+                    )
+                } else {
+                    list.append_memcpy(
+                        dst_view.as_mut_ptr() as *mut c_void,
+                        src_view.as_ptr() as *const c_void,
+                        src_view.size(),
+                    )
+                }
                 .map_err(|e| {
                     TransferError::ExecutionError(format!(
                         "ZE custom batch append_memcpy (contiguous) failed: {:?}",
@@ -292,19 +304,20 @@ where
                     }
 
                     unsafe {
-                        tracing::debug!(
-                            "ZE copy_blocks_with_customized_kernel layered: layer={}, outer={}, src=0x{:x}, dst=0x{:x}, size={}",
-                            layer_idx,
-                            outer_idx,
-                            src_view.as_ptr() as usize,
-                            dst_view.as_mut_ptr() as usize,
-                            src_view.size()
-                        );
-                        list.append_memcpy(
-                            dst_view.as_mut_ptr() as *mut c_void,
-                            src_view.as_ptr() as *const c_void,
-                            src_view.size(),
-                        )
+                        if let Some(src_ctx) = foreign_ctx {
+                            list.append_memcpy_from_context(
+                                dst_view.as_mut_ptr() as *mut c_void,
+                                src_ctx,
+                                src_view.as_ptr() as *const c_void,
+                                src_view.size(),
+                            )
+                        } else {
+                            list.append_memcpy(
+                                dst_view.as_mut_ptr() as *mut c_void,
+                                src_view.as_ptr() as *const c_void,
+                                src_view.size(),
+                            )
+                        }
                         .map_err(|e| {
                             TransferError::ExecutionError(format!(
                                 "ZE custom batch append_memcpy (layered) failed: {:?}",

@@ -11,7 +11,7 @@
 
 use crate::{StorageError, pinned::StorageBackendOps};
 
-pub use level_zero::{Event as ZeEvent, EventPool as ZeEventPool, ZE_EVENT_SCOPE_FLAG_HOST, sync_sycl_event};
+pub use level_zero::{Event as ZeEvent, EventPool as ZeEventPool, ZE_EVENT_SCOPE_FLAG_HOST, sync_sycl_event, ze_context_handle_t, get_ze_context_from_sycl_queue};
 use level_zero::{self, CommandList, CommandQueue, Context, Device, Driver, EventPool};
 use std::{
     collections::HashMap,
@@ -118,6 +118,12 @@ impl ZeContext {
     pub fn new_stream(&self) -> Result<Arc<ZeCommandQueue>, ZeError> {
         ZeCommandQueue::new(self.context.clone(), self.device.clone())
     }
+
+    /// Create a new command queue using a foreign context handle from SYCL.
+    /// This allows sharing command queues between Level Zero and SYCL runtimes.
+    pub fn new_stream_with_foreign_context(&self, foreign_ctx: ze_context_handle_t) -> Result<Arc<ZeCommandQueue>, ZeError> {
+        ZeCommandQueue::new_with_foreign_context(self.context.clone(), self.device.clone(), foreign_ctx)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +136,7 @@ pub struct ZeCommandQueue {
     context: Arc<Context>,
     device: Device,
     event_pool: Arc<EventPool>,
+    foreign_src_context: Option<ze_context_handle_t>,
 }
 
 // SAFETY:
@@ -141,6 +148,31 @@ unsafe impl Sync for ZeCommandQueue {}
 
 impl ZeCommandQueue {
     fn new(context: Arc<Context>, device: Device) -> Result<Arc<Self>, ZeError> {
+        Self::new_inner(context, device, None)
+    }
+
+    fn new_with_foreign_context(context: Arc<Context>, device: Device, foreign_ctx: ze_context_handle_t) -> Result<Arc<Self>, ZeError> {
+        // Create a Context wrapper around PyTorch's context handle.
+        // Use PyTorch's context for the command queue and command list so that
+        // device memory allocated by PyTorch is directly accessible.
+        let foreign_context = unsafe { context.from_raw_handle(foreign_ctx) };
+        let foreign_context = Arc::new(foreign_context);
+        let handle = foreign_context
+            .create_copy_command_queue(&device)
+            .map_err(ZeError::from)?;
+        let event_pool = foreign_context
+            .create_event_pool(&[device.clone()], 1, 0)
+            .map_err(ZeError::from)?;
+        Ok(Arc::new(Self {
+            handle,
+            context: foreign_context,
+            device,
+            event_pool: Arc::new(event_pool),
+            foreign_src_context: Some(foreign_ctx),
+        }))
+    }
+
+    fn new_inner(context: Arc<Context>, device: Device, foreign_src_context: Option<ze_context_handle_t>) -> Result<Arc<Self>, ZeError> {
         let handle = context
             .create_copy_command_queue(&device)
             .map_err(ZeError::from)?;
@@ -152,6 +184,7 @@ impl ZeCommandQueue {
             context,
             device,
             event_pool: Arc::new(event_pool),
+            foreign_src_context,
         }))
     }
 
@@ -180,6 +213,11 @@ impl ZeCommandQueue {
     /// Get the event pool.
     pub fn event_pool(&self) -> &Arc<EventPool> {
         &self.event_pool
+    }
+
+    /// Get the foreign source context handle for cross-context copies.
+    pub fn foreign_src_context(&self) -> Option<ze_context_handle_t> {
+        self.foreign_src_context
     }
 }
 

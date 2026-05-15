@@ -38,6 +38,7 @@ pub trait Worker: Send + Sync {
         device_layout_type: Option<LayoutType>,
         host_layout_type: Option<LayoutType>,
         disk_layout_type: Option<LayoutType>,
+        sycl_queue_ptr: Option<u64>,
     ) -> anyhow::Result<()>;
 
     fn bind_connector_metadata(&mut self, metadata: Vec<u8>) -> anyhow::Result<()>;
@@ -138,6 +139,7 @@ impl Worker for KvConnectorWorker {
         device_layout_type: Option<LayoutType>,
         host_layout_type: Option<LayoutType>,
         disk_layout_type: Option<LayoutType>,
+        sycl_queue_ptr: Option<u64>,
     ) -> anyhow::Result<()> {
         if self.kvbm_worker.get().is_some() {
             tracing::warn!("kvbm worker already registered");
@@ -215,6 +217,7 @@ impl Worker for KvConnectorWorker {
             .disk_layout_type(disk_layout_type.unwrap_or(LayoutType::FullyContiguous))
             .leader_pub_url(get_leader_zmq_pub_url())
             .leader_ack_url(get_leader_zmq_ack_url())
+            .sycl_queue_ptr(sycl_queue_ptr)
             .build()?;
 
         let worker = get_current_tokio_handle().block_on(async move {
@@ -493,7 +496,7 @@ impl PyKvConnectorWorker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, device_type, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
+    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, device_type, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None, sycl_queue_ptr=None))]
     pub fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
@@ -506,6 +509,7 @@ impl PyKvConnectorWorker {
         device_layout_type: Option<PyLayoutType>,
         host_layout_type: Option<PyLayoutType>,
         disk_layout_type: Option<PyLayoutType>,
+        sycl_queue_ptr: Option<u64>,
     ) -> PyResult<()> {
         // Convert Python tensors to Rust VllmTensor objects
         let mut rust_kv_caches = Vec::new();
@@ -526,6 +530,7 @@ impl PyKvConnectorWorker {
                 device_layout_type.map(|py_layout| py_layout.into()),
                 host_layout_type.map(|py_layout| py_layout.into()),
                 disk_layout_type.map(|py_layout| py_layout.into()),
+                sycl_queue_ptr,
             )
             .map_err(to_pyerr)
     }
