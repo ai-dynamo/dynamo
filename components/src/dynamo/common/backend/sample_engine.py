@@ -188,7 +188,9 @@ class SampleLLMEngine(LLMEngine):
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
         # Canary probes bypass cross-worker coordination — run as aggregated.
-        if self.disaggregation_mode == DisaggregationMode.DECODE and not is_probe(request):
+        if self.disaggregation_mode == DisaggregationMode.DECODE and not is_probe(
+            request
+        ):
             require_prefill_result(request, self.disaggregation_mode)
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             enforce_prefill_max_tokens(request)

@@ -585,7 +585,9 @@ class SglangLLMEngine(LLMEngine):
             try:
                 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
             except ImportError:
-                logger.warning("FAKE_BOOTSTRAP_HOST unavailable; disabling disagg canary")
+                logger.warning(
+                    "FAKE_BOOTSTRAP_HOST unavailable; disabling disagg canary"
+                )
                 return None
             bootstrap_port = (
                 getattr(self.server_args, "disaggregation_bootstrap_port", None) or 0

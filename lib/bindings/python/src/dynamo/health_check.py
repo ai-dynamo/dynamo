@@ -13,10 +13,15 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-# Single source of truth for the canary marker, defined in
-# `lib/backend-common/src/engine.rs` and exposed via the PyO3 binding so
-# Python and Rust can't drift.
-from dynamo._core.backend import HEALTH_CHECK_KEY
+# Single source of truth for the canary marker is `HEALTH_CHECK_KEY` in
+# `lib/backend-common/src/engine.rs`, re-exported via the PyO3 binding.
+# The literal fallback keeps `import dynamo.health_check` working in
+# environments that haven't rebuilt `_core` yet (CI pre-commit, stale
+# editable installs); the const must match the Rust definition.
+try:
+    from dynamo._core.backend import HEALTH_CHECK_KEY
+except ImportError:
+    HEALTH_CHECK_KEY = "_HEALTH_CHECK"
 
 logger = logging.getLogger(__name__)
 
