@@ -198,6 +198,11 @@ pub struct Worker {
     state: LifecycleState,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
+    /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
+    /// `engine.start()` succeeds; observed in `cleanup_once` and the drain
+    /// step. Always present once `start()` returns Ok, independent of
+    /// whether the engine returned a component publisher.
+    lifecycle: Option<crate::metrics::LifecycleGauges>,
 }
 
 impl Worker {
@@ -207,6 +212,7 @@ impl Worker {
             config,
             state: LifecycleState::Init,
             publishers: None,
+            lifecycle: None,
         }
     }
 
@@ -384,19 +390,25 @@ impl Worker {
             "engine.start() complete"
         );
 
-        // Engine builds its EngineMetrics once and shares the handle with
-        // register_prometheus and setup_component_metrics. Ordering:
-        // register_prometheus runs first so engines have a chance to add
-        // vendor-registry callbacks; component-metrics setup follows.
+        // Engine builds its EngineMetrics once. `setup_metrics` is the
+        // single hook for both foreign-registry expfmt callbacks (side-
+        // effect on engine_metrics) and the structured component publisher
+        // (returned in MetricsBindings).
         let engine_metrics =
             crate::metrics::EngineMetrics::with_engine_config(endpoint.clone(), &engine_config);
-        self.engine.register_prometheus(&engine_metrics).await?;
+
+        // Framework-owned cleanup/drain gauges — always emitted, regardless
+        // of engine opt-in. Populated by Worker during shutdown.
+        // (`model_load_time_seconds` is set Python-side from the unified
+        // bridge for parity with the legacy entry points.)
+        let lifecycle = crate::metrics::LifecycleGauges::new(&engine_metrics)?;
 
         self.setup_publishing(
             &component,
             &engine_config,
             &engine_metrics,
             model_load_time_seconds,
+            lifecycle,
         )
         .await?;
 
@@ -426,23 +438,28 @@ impl Worker {
         engine_config: &EngineConfig,
         engine_metrics: &crate::metrics::EngineMetrics,
         model_load_time_seconds: f64,
+        lifecycle: crate::metrics::LifecycleGauges,
     ) -> Result<(), DynamoError> {
-        if !self.config.enable_kv_routing {
-            tracing::debug!("enable_kv_routing=false; skipping kv/component publishers");
-            return Ok(());
-        }
-        let kv_sources = self.engine.kv_event_sources().await?;
-        let ctx = crate::engine::ComponentMetricsCtx {
+        let ctx = crate::engine::MetricsCtx {
             model: &engine_config.model,
             component: &self.config.component,
             model_load_time_seconds,
             metrics: engine_metrics,
         };
-        let component_publisher = self.engine.setup_component_metrics(ctx).await?;
+        let bindings = self.engine.setup_metrics(ctx).await?;
+        let component_publisher = bindings.component;
+
+        if !self.config.enable_kv_routing {
+            tracing::debug!("enable_kv_routing=false; skipping kv/component publishers");
+            self.lifecycle = Some(lifecycle);
+            return Ok(());
+        }
+        let kv_sources = self.engine.kv_event_sources().await?;
         if kv_sources.is_empty() && component_publisher.is_none() {
             tracing::debug!(
                 "engine returned no KV sources / component publisher; KV-aware routing disabled"
             );
+            self.lifecycle = Some(lifecycle);
             return Ok(());
         }
         let enable_local_indexer = self.config.effective_enable_local_indexer();
@@ -462,6 +479,7 @@ impl Worker {
         )
         .await?;
         self.publishers = Some(handles);
+        self.lifecycle = Some(lifecycle);
         Ok(())
     }
 
@@ -523,14 +541,11 @@ impl Worker {
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
         }
         let cleanup_elapsed = cleanup_start.elapsed().as_secs_f64();
-        // Record cleanup latency on dynamo_component_cleanup_time_seconds
-        // BEFORE the publisher Arc gets dropped on shutdown below. The gauge
-        // is operator-useful when scraped in the brief window between
-        // cleanup-complete and pod-terminate.
-        if let Some(handles) = self.publishers.as_ref()
-            && let Some(publisher) = handles.component_publisher.as_ref()
-        {
-            publisher.set_cleanup_time(cleanup_elapsed);
+        // Record cleanup latency on dynamo_component_cleanup_time_seconds.
+        // The gauge is operator-useful when scraped in the brief window
+        // between cleanup-complete and pod-terminate.
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.observe_cleanup_time(cleanup_elapsed);
         }
         // Stop publisher metric loops AFTER engine.cleanup so the engine's
         // last metric snapshots get published. Then drop the handles so the
@@ -663,10 +678,8 @@ impl Worker {
             tracing::warn!(error = %e, "engine drain failed");
         }
         let drain_elapsed = drain_start.elapsed().as_secs_f64();
-        if let Some(handles) = self.publishers.as_ref()
-            && let Some(publisher) = handles.component_publisher.as_ref()
-        {
-            publisher.set_drain_time(drain_elapsed);
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.observe_drain_time(drain_elapsed);
         }
 
         self.cleanup_once().await;

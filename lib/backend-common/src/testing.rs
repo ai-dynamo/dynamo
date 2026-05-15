@@ -73,10 +73,9 @@ pub enum ConformanceFailure {
     CleanupWithoutStartFailed(String),
     KvEventSourcesFailed(String),
     KvEventSourcesNotIdempotent,
-    ComponentMetricsFailed(String),
+    SetupMetricsFailed(String),
     ComponentMetricsNotIdempotent,
     ComponentSnapshotTooSlow { took: Duration },
-    RegisterPrometheusFailed(String),
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -117,7 +116,7 @@ impl std::fmt::Display for ConformanceFailure {
                 "kv_event_sources() returned different dp_rank set on a second call \
                  (the descriptor list must be stable for the engine's lifetime)"
             ),
-            ComponentMetricsFailed(m) => write!(f, "setup_component_metrics() failed: {m}"),
+            SetupMetricsFailed(m) => write!(f, "setup_metrics() failed: {m}"),
             ComponentMetricsNotIdempotent => write!(
                 f,
                 "ComponentMetricsPublisher.sources() returned different dp_rank set \
@@ -128,7 +127,6 @@ impl std::fmt::Display for ConformanceFailure {
                 "ComponentMetricsSource.snapshot took {took:?} (must be a cheap field \
                  read, < 1 ms; an engine-internal call would land in the 10s of ms)"
             ),
-            RegisterPrometheusFailed(m) => write!(f, "register_prometheus() failed: {m}"),
         }
     }
 }
@@ -156,21 +154,15 @@ where
     }
 
     // 2. KV-aware-routing source descriptors satisfy their contracts:
-    //    - kv_event_sources / metrics_sources don't error
-    //    - rank sets are stable across repeated calls
-    //    - SnapshotSource.snapshot is a cheap field read (< 1 ms)
+    //    - kv_event_sources doesn't error; rank set is stable across calls
+    //    - setup_metrics doesn't error against a synthetic EngineMetrics
+    //    - returned ComponentMetricsPublisher (if any) has a stable rank set
+    //      and snapshot fns within the 1 ms cheap-read ceiling
     //
     //    Run before generate() to match Worker's actual call order
-    //    (setup_kv_aware_publishers happens between start() and serve).
+    //    (publishers wire up between start() and serve).
     check_kv_event_sources(&engine).await?;
-    check_component_metrics(&engine).await?;
-
-    // 3. register_prometheus runs without error against a synthetic
-    //    EngineMetrics handle. Same ordering rationale as above — Worker
-    //    invokes this between setup_kv_aware_publishers and serve, so
-    //    engines that wire metric handles consumed by generate() rely on
-    //    register_prometheus having already run.
-    check_register_prometheus(&engine).await?;
+    check_setup_metrics(&engine).await?;
 
     // 4. A plain generate() yields a well-formed stream ending in a terminal chunk.
     check_single_generate(&engine, &config.model).await?;
@@ -309,20 +301,20 @@ async fn check_kv_event_sources<E: LLMEngine>(engine: &E) -> Result<(), Conforma
     Ok(())
 }
 
-async fn check_component_metrics<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
+async fn check_setup_metrics<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
     let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
-    let ctx = crate::engine::ComponentMetricsCtx {
+    let ctx = crate::engine::MetricsCtx {
         model: "test-model",
         component: "test",
         model_load_time_seconds: 0.0,
         metrics: &metrics,
     };
-    let publisher = engine
-        .setup_component_metrics(ctx)
+    let bindings = engine
+        .setup_metrics(ctx)
         .await
-        .map_err(|e| ComponentMetricsFailed(e.to_string()))?;
+        .map_err(|e| SetupMetricsFailed(e.to_string()))?;
     // Engines that opt out are allowed.
-    let Some(publisher) = publisher else {
+    let Some(publisher) = bindings.component else {
         return Ok(());
     };
     let ranks_a: Vec<u32> = publisher.sources().iter().map(|s| s.dp_rank).collect();
@@ -347,15 +339,6 @@ async fn check_component_metrics<E: LLMEngine>(engine: &E) -> Result<(), Conform
             return Err(ComponentSnapshotTooSlow { took });
         }
     }
-    Ok(())
-}
-
-async fn check_register_prometheus<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
-    let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
-    engine
-        .register_prometheus(&metrics)
-        .await
-        .map_err(|e| RegisterPrometheusFailed(e.to_string()))?;
     Ok(())
 }
 
@@ -413,9 +396,8 @@ mod tests {
     use futures::stream::BoxStream;
 
     /// Minimal engine that opts out of everything except `start`/`cleanup`
-    /// and a custom `setup_component_metrics`. Other trait methods that
-    /// `check_component_metrics` doesn't touch are stubbed with
-    /// `unreachable!`.
+    /// and a custom `setup_metrics`. Other trait methods that
+    /// `check_setup_metrics` doesn't touch are stubbed with `unreachable!`.
     struct ConfigurableMetricsEngine {
         publisher: Option<Arc<dyn ComponentMetricsPublisher>>,
     }
@@ -441,11 +423,13 @@ mod tests {
         async fn cleanup(&self) -> Result<(), DynamoError> {
             Ok(())
         }
-        async fn setup_component_metrics(
+        async fn setup_metrics(
             &self,
-            _ctx: crate::engine::ComponentMetricsCtx<'_>,
-        ) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError> {
-            Ok(self.publisher.clone())
+            _ctx: crate::engine::MetricsCtx<'_>,
+        ) -> Result<crate::engine::MetricsBindings, DynamoError> {
+            Ok(crate::engine::MetricsBindings {
+                component: self.publisher.clone(),
+            })
         }
     }
 
@@ -467,7 +451,7 @@ mod tests {
     }
 
     /// Engines that haven't sampled yet return `None` from snapshot fns —
-    /// must NOT trigger ComponentMetricsFailed. The conformance kit only
+    /// must NOT trigger SetupMetricsFailed. The conformance kit only
     /// asserts cheap-call latency and idempotent rank set.
     #[tokio::test]
     async fn check_component_metrics_accepts_none_snapshot() {
@@ -478,16 +462,16 @@ mod tests {
         let engine = ConfigurableMetricsEngine {
             publisher: Some(publisher),
         };
-        let result = check_component_metrics(&engine).await;
+        let result = check_setup_metrics(&engine).await;
         assert!(result.is_ok(), "None snapshot should pass: {:?}", result);
     }
 
     /// Engines that opt out entirely (returning `None` from
-    /// `setup_component_metrics`) are also acceptable.
+    /// `setup_metrics`'s component slot) are also acceptable.
     #[tokio::test]
     async fn check_component_metrics_accepts_no_publisher() {
         let engine = ConfigurableMetricsEngine { publisher: None };
-        let result = check_component_metrics(&engine).await;
+        let result = check_setup_metrics(&engine).await;
         assert!(result.is_ok(), "no publisher should pass: {:?}", result);
     }
 
@@ -507,6 +491,6 @@ mod tests {
         let engine = ConfigurableMetricsEngine {
             publisher: Some(publisher),
         };
-        assert!(check_component_metrics(&engine).await.is_ok());
+        assert!(check_setup_metrics(&engine).await.is_ok());
     }
 }

@@ -19,12 +19,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, ComponentMetricsCtx, ComponentMetricsPublisher,
-    ComponentMetricsSource, ComponentSnapshot, ComponentSnapshotFn,
-    DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
-    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, OnPublisherReady,
-    PreprocessedRequest, RuntimeConfig as RsRuntimeConfig, Worker as RsWorker,
-    WorkerConfig as RsWorkerConfig,
+    AsyncEngineContext, BackendError, ComponentMetricsPublisher, ComponentMetricsSource,
+    ComponentSnapshot, ComponentSnapshotFn, DisaggregationMode as RsDisaggregationMode,
+    DynamoError, EngineConfig as RsEngineConfig, ErrorType, KvEventSource as RsKvEventSource,
+    LLMEngine, LLMEngineOutput, MetricsBindings, MetricsCtx, OnPublisherReady, PreprocessedRequest,
+    RuntimeConfig as RsRuntimeConfig, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
@@ -714,7 +713,25 @@ impl LLMEngine for PyLLMEngine {
         .map_err(py_err_to_dynamo)
     }
 
-    async fn register_prometheus(
+    async fn setup_metrics(
+        &self,
+        ctx: MetricsCtx<'_>,
+    ) -> Result<MetricsBindings, DynamoError> {
+        // Step 1: call Python's `register_prometheus` for vendor-registry
+        // bridging (side effect on ctx.metrics; nothing flows back). Engines
+        // that don't override the ABC default no-op return immediately.
+        self.call_python_register_prometheus(ctx.metrics).await?;
+
+        // Step 2: build the component publisher from the engine's snapshot
+        // sources. Empty list opts out (component = None).
+        let component = self.build_component_publisher(ctx).await?;
+
+        Ok(MetricsBindings { component })
+    }
+}
+
+impl PyLLMEngine {
+    async fn call_python_register_prometheus(
         &self,
         metrics: &dynamo_backend_common::EngineMetrics,
     ) -> Result<(), DynamoError> {
@@ -744,9 +761,9 @@ impl LLMEngine for PyLLMEngine {
         Ok(())
     }
 
-    async fn setup_component_metrics(
+    async fn build_component_publisher(
         &self,
-        ctx: ComponentMetricsCtx<'_>,
+        ctx: MetricsCtx<'_>,
     ) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError> {
         let engine = self.engine.clone();
         let model = ctx.model.to_string();
@@ -756,20 +773,13 @@ impl LLMEngine for PyLLMEngine {
 
         let join = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, BridgeError> {
-                // 1. Ask engine for source descriptors. Engines that opt out
-                //    return an empty list and we return None to the framework.
-                let bound = engine.bind(py);
-                let py_sources_obj = bound
-                    .call_method0("component_metrics_sources")
-                    .map_err(|e| BridgeError::new(BridgeStage::GetSources, e))?;
-                let py_sources = py_sources_obj
-                    .downcast::<pyo3::types::PyList>()
-                    .map_err(|e| BridgeError::new(BridgeStage::GetSources, e.into()))?;
-                if py_sources.is_empty() {
-                    return Ok(None);
-                }
-
-                // 2. Construct gauges + registry via the framework-only helper.
+                // 1. Construct LLMBackendMetrics + a dedicated registry,
+                //    UNCONDITIONALLY. This is what guarantees that
+                //    `dynamo_component_model_load_time_seconds` (and the
+                //    KV gauge SHAPES) show up in /metrics regardless of
+                //    whether the engine returned snapshot sources.
+                //    Framework lifecycle gauges (cleanup/drain) live
+                //    Rust-side and aren't tied to this construction.
                 let metrics_mod = py
                     .import("dynamo.common.backend._internal_metrics")
                     .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?;
@@ -788,8 +798,42 @@ impl LLMEngine for PyLLMEngine {
                     .map_err(|e| BridgeError::new(BridgeStage::BuildGauges, e))?
                     .unbind();
 
-                // 3. Seed zeros for each rank so the gauges show up in the
-                //    very first /metrics scrape. Set model_load_time once.
+                // 2. Set model_load_time once (parity with legacy entry points).
+                gauges
+                    .bind(py)
+                    .call_method1("set_model_load_time", (load_time,))
+                    .map_err(|e| BridgeError::new(BridgeStage::SetLoadTime, e))?;
+
+                // 3. Wire the registry as a /metrics callback against the
+                //    shared EngineMetrics handle. Happens BEFORE we look at
+                //    engine sources so model_load_time emits even if the
+                //    engine opts out of per-rank gauges.
+                let py_metrics = Py::new(py, py_metrics_state)
+                    .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
+                metrics_mod
+                    .call_method1(
+                        "register_engine_registry",
+                        (py_metrics.clone_ref(py), registry),
+                    )
+                    .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
+
+                // 4. Ask engine for source descriptors. Empty list means
+                //    the engine has no per-rank KV gauges to expose; the
+                //    framework still emits lifecycle + model_load_time
+                //    gauges from steps 1-3 above.
+                let bound = engine.bind(py);
+                let py_sources_obj = bound
+                    .call_method0("component_metrics_sources")
+                    .map_err(|e| BridgeError::new(BridgeStage::GetSources, e))?;
+                let py_sources = py_sources_obj
+                    .downcast::<pyo3::types::PyList>()
+                    .map_err(|e| BridgeError::new(BridgeStage::GetSources, e.into()))?;
+                if py_sources.is_empty() {
+                    return Ok(None);
+                }
+
+                // 5. Seed zeros for each rank so the per-rank gauges show
+                //    up in the very first /metrics scrape.
                 for item in py_sources.iter() {
                     let dp_rank: u32 = item
                         .getattr("dp_rank")
@@ -805,23 +849,8 @@ impl LLMEngine for PyLLMEngine {
                         .call_method1("set_gpu_cache_usage", (rank_str, 0.0f64))
                         .map_err(|e| BridgeError::new(BridgeStage::SeedZeros, e))?;
                 }
-                gauges
-                    .bind(py)
-                    .call_method1("set_model_load_time", (load_time,))
-                    .map_err(|e| BridgeError::new(BridgeStage::SetLoadTime, e))?;
 
-                // 4. Wire the registry as a /metrics callback against the
-                //    shared EngineMetrics handle.
-                let py_metrics = Py::new(py, py_metrics_state)
-                    .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
-                metrics_mod
-                    .call_method1(
-                        "register_engine_registry",
-                        (py_metrics.clone_ref(py), registry),
-                    )
-                    .map_err(|e| BridgeError::new(BridgeStage::RegisterCallback, e))?;
-
-                // 5. Wrap each Python snapshot fn as a Rust closure.
+                // 6. Wrap each Python snapshot fn as a Rust closure.
                 let sources_cache: Vec<ComponentMetricsSource> = py_sources
                     .iter()
                     .map(|item| build_rust_source(&item))
@@ -843,7 +872,7 @@ impl LLMEngine for PyLLMEngine {
             Err(join_err) => Err(DynamoError::builder()
                 .error_type(ErrorType::Backend(BackendError::Unknown))
                 .message(format!(
-                    "setup_component_metrics spawn_blocking join failed: {join_err}"
+                    "setup_metrics spawn_blocking join failed: {join_err}"
                 ))
                 .build()),
         }
@@ -894,10 +923,7 @@ impl From<BridgeError> for DynamoError {
     fn from(e: BridgeError) -> Self {
         DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::Unknown))
-            .message(format!(
-                "setup_component_metrics[{}]: {}",
-                e.stage, e.inner
-            ))
+            .message(format!("setup_metrics[{}]: {}", e.stage, e.inner))
             .build()
     }
 }
@@ -936,22 +962,6 @@ impl ComponentMetricsPublisher for PyComponentMetricsPublisher {
                 && !self.update_failed_logged.swap(true, Ordering::Relaxed)
             {
                 tracing::warn!(error = %e, "component gauge update failed; suppressing further");
-            }
-        });
-    }
-    fn set_cleanup_time(&self, seconds: f64) {
-        self.set_lifecycle_gauge("set_cleanup_time", seconds);
-    }
-    fn set_drain_time(&self, seconds: f64) {
-        self.set_lifecycle_gauge("set_drain_time", seconds);
-    }
-}
-
-impl PyComponentMetricsPublisher {
-    fn set_lifecycle_gauge(&self, method: &'static str, seconds: f64) {
-        Python::with_gil(|py| {
-            if let Err(e) = self.gauges.bind(py).call_method1(method, (seconds,)) {
-                tracing::warn!(error = %e, method, "lifecycle gauge update failed");
             }
         });
     }

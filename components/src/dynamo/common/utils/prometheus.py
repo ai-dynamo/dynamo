@@ -22,7 +22,6 @@ from dynamo._core import Endpoint
 from dynamo.prometheus_names import (
     kvstats,
     labels,
-    lifecycle,
     model_info,
     name_prefix,
 )
@@ -335,13 +334,18 @@ def get_prometheus_expfmt(
 
 
 class LLMBackendMetrics:
-    """Prometheus metrics for LLM backends with `dynamo_component_` prefix.
+    """Engine-side gauges in the `dynamo_component_` namespace.
+
+    Lifecycle gauges that the framework times (cleanup, drain) live
+    Rust-side via `dynamo_backend_common::LifecycleGauges` — they emit
+    regardless of engine opt-in. `model_load_time_seconds` stays here for
+    parity with the legacy entry points (both legacy `main.py` and the
+    unified bridge populate it).
 
     Usage:
         metrics = LLMBackendMetrics(registry, model_name="Qwen/Qwen3-0.6B", component_name="backend")
         metrics.set_total_blocks("0", 1000)
         metrics.set_gpu_cache_usage("0", 0.75)
-        metrics.set_model_load_time(5.2)
     """
 
     def __init__(
@@ -350,7 +354,7 @@ class LLMBackendMetrics:
         model_name: str = "",
         component_name: str = "",
     ) -> None:
-        """Create all Dynamo component gauges."""
+        """Create per-rank engine gauges plus `model_load_time_seconds`."""
         from prometheus_client import Gauge
 
         self.total_blocks = Gauge(
@@ -377,25 +381,6 @@ class LLMBackendMetrics:
         self.model_load_time = Gauge(
             f"{name_prefix.COMPONENT}_{model_info.LOAD_TIME_SECONDS}",
             "Model load time in seconds.",
-            labelnames=[labels.MODEL, labels.COMPONENT],
-            registry=registry,
-            multiprocess_mode="max",
-        )
-        self.cleanup_time = Gauge(
-            f"{name_prefix.COMPONENT}_{lifecycle.CLEANUP_TIME_SECONDS}",
-            "Time spent releasing engine resources during shutdown. "
-            "Set by the framework once after engine.cleanup() returns; "
-            "must be scraped before pod termination completes.",
-            labelnames=[labels.MODEL, labels.COMPONENT],
-            registry=registry,
-            multiprocess_mode="max",
-        )
-        self.drain_time = Gauge(
-            f"{name_prefix.COMPONENT}_{lifecycle.DRAIN_TIME_SECONDS}",
-            "Time spent draining in-flight work before cleanup (prefill "
-            "workers polling-until-idle on NIXL transfers). Set by the "
-            "framework once after engine.drain() returns; stays at 0 for "
-            "engines without a drain hook.",
             labelnames=[labels.MODEL, labels.COMPONENT],
             registry=registry,
             multiprocess_mode="max",
@@ -432,16 +417,6 @@ class LLMBackendMetrics:
 
     def set_model_load_time(self, value: float) -> None:
         self.model_load_time.labels(
-            **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
-        ).set(value)
-
-    def set_cleanup_time(self, value: float) -> None:
-        self.cleanup_time.labels(
-            **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
-        ).set(value)
-
-    def set_drain_time(self, value: float) -> None:
-        self.drain_time.labels(
             **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
         ).set(value)
 

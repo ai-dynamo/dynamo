@@ -12,13 +12,13 @@ Python-shaped request/response wrappers.
 ## Engine Lifecycle
 
 ```
-construct -> start(worker_id) -> register_prometheus -> setup_component_metrics -> generate/abort -> drain -> cleanup
-    |               |                     |                      |                       |              |        |
-parse args,    start engine,        wire Prometheus         build gauges +           serve requests pre-cleanup shutdown,
-return engine  return metadata      (optional)              poll task (optional)     (concurrent)   drain       release
+construct -> start(worker_id) -> setup_metrics -> generate/abort -> drain -> cleanup
+    |               |                  |                |             |        |
+parse args,    start engine,    wire Prometheus    serve requests pre-cleanup shutdown,
+return engine  return metadata  (optional)         (concurrent)   drain       release
 ```
 
-The trait has seven methods. `from_args` is NOT on the trait — each
+The trait has six methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -29,17 +29,19 @@ opt-out and lets `run.rs` stay non-generic.
   the lifecycle. `worker_id` is an opaque runtime-allocated identifier;
   most engines ignore it. Backends needing a stable cluster-wide key
   (e.g. TRT-LLM's `disagg_machine_id` snowflake) derive from it.
-- `register_prometheus(&self, &EngineMetrics) -> Result<(), DynamoError>` —
-  optional, default no-op. Engine bridges a foreign Prometheus registry
-  into the runtime's `/metrics` output via `metrics.add_expfmt_callback`.
-  Failures abort startup; `cleanup` runs on the partial engine state.
-  The handle must not be retained past this method's return.
-- `setup_component_metrics(&self, ctx: ComponentMetricsCtx<'_>) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError>` —
-  optional, default `None` (opts out). Returns a publisher that owns
-  the engine's `dynamo_component_*` gauges and exposes one snapshot
-  source per dp_rank. `Worker` runs one poll task per source feeding
-  both the gauges and the router-input signal. See **KV-aware Routing
-  & Component Metrics** below.
+- `setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError>` —
+  optional, default returns empty `MetricsBindings`. Single hook for
+  both foreign-registry expfmt bridging (side effect on `ctx.metrics`)
+  AND the engine-side `dynamo_component_*` publisher (returned in
+  `MetricsBindings::component`). See **KV-aware Routing & Component
+  Metrics** below for the publisher contract.
+
+  Framework-owned lifecycle gauges
+  (`dynamo_component_{cleanup_time_seconds,drain_time_seconds}`) are
+  emitted by `Worker` independent of this method — they do NOT
+  require the engine to return a publisher. The Worker constructs
+  `LifecycleGauges` after `engine.start()` succeeds and observes
+  during shutdown.
 - `generate(&self, request, ctx: GenerateContext) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>`
   — streaming inference. `GenerateContext` derefs to
   `dyn AsyncEngineContext` (`ctx.stopped()`, `ctx.is_stopped()`,
@@ -305,10 +307,10 @@ engines would spawn a polling thread inside `on_ready`. See
 
 ### `ComponentMetricsPublisher`
 
-`setup_component_metrics(ctx)` receives a `ComponentMetricsCtx` carrying
-`model`, `component`, `model_load_time_seconds`, and a borrowed
-`EngineMetrics` handle. The engine constructs (or wraps) gauges, seeds
-initial values, and returns an `Arc<dyn ComponentMetricsPublisher>`:
+`setup_metrics(ctx)` receives a `MetricsCtx` carrying `model`,
+`component`, `model_load_time_seconds`, and a borrowed `EngineMetrics`
+handle. The engine constructs (or wraps) gauges, seeds initial values,
+and returns a `MetricsBindings { component: Option<Arc<dyn ComponentMetricsPublisher>> }`:
 
 ```rust
 pub trait ComponentMetricsPublisher: Send + Sync {
@@ -316,6 +318,12 @@ pub trait ComponentMetricsPublisher: Send + Sync {
     fn update(&self, snapshot: &ComponentSnapshot);
 }
 ```
+
+The trait is intentionally narrow: per-rank engine gauges only.
+Framework-owned lifecycle gauges (cleanup_time, drain_time) live on
+`Worker::lifecycle: LifecycleGauges` and emit independently —
+removing one of the architectural smells where engine opt-out used to
+hide framework observability.
 
 Each `ComponentMetricsSource.snapshot` MUST be a cheap field read — the
 conformance kit enforces a 1 ms ceiling (`ComponentSnapshotTooSlow`).
@@ -333,12 +341,16 @@ One source of truth for both consumers — `/metrics` scrape and the
 KV router score the same `ComponentSnapshot`.
 
 For Python engines, the PyO3 bridge in `lib/bindings/python/rust/backend.rs`
-implements `setup_component_metrics`: it calls
-`dynamo.common.backend.metrics.make_component_metrics` to build the
-gauges, seeds zeros for each rank, sets `model_load_time`, registers
-the registry as a `/metrics` callback, and returns a
-`PyComponentMetricsPublisher` whose `update` calls into Python under
-the GIL. The Python engine only implements `component_metrics_sources()`.
+implements `setup_metrics`. It calls
+`dynamo.common.backend._internal_metrics.make_component_metrics` to
+build the gauges UNCONDITIONALLY (so `model_load_time_seconds` always
+emits, regardless of whether the engine returned snapshot sources),
+sets `model_load_time`, and registers the registry as a `/metrics`
+callback. THEN it asks the engine for `component_metrics_sources()`;
+if non-empty, it seeds per-rank zeros and returns a
+`PyComponentMetricsPublisher`. Python engines keep two methods —
+`register_prometheus` and `component_metrics_sources` — the Rust trait
+unifies them.
 
 ### Conformance
 

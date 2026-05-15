@@ -28,6 +28,7 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+prometheus = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

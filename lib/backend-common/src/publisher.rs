@@ -21,14 +21,14 @@ const METRICS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Live publisher handles owned by `Worker` for the lifetime of serving.
 /// `kv_publishers` and `metrics_publishers` are kept alive solely so their
-/// `Drop` impls run on shutdown. `component_publisher` is reached from
-/// `Worker::cleanup_once` / `Worker::drain` to record lifecycle gauges.
+/// `Drop` impls run on shutdown. Lifecycle gauges (cleanup_time, drain_time)
+/// are NOT here — `Worker` owns those independently via
+/// [`crate::metrics::LifecycleGauges`].
 pub(crate) struct PublisherHandles {
     #[allow(dead_code)]
     kv_publishers: Vec<Arc<KvEventPublisher>>,
     #[allow(dead_code)]
     metrics_publishers: Vec<Arc<WorkerMetricsPublisher>>,
-    pub(crate) component_publisher: Option<Arc<dyn ComponentMetricsPublisher>>,
     metrics_task: Option<JoinHandle<()>>,
     cancel: CancellationToken,
 }
@@ -204,13 +204,11 @@ pub(crate) async fn setup_publishers(
         Vec::new()
     };
     let cancel = CancellationToken::new();
-    let component_publisher_for_handles = component_publisher.clone();
     let (metrics_publishers, metrics_task) =
         setup_metrics_publishers(component, component_publisher, cancel.clone()).await?;
     Ok(PublisherHandles {
         kv_publishers,
         metrics_publishers,
-        component_publisher: component_publisher_for_handles,
         metrics_task,
         cancel,
     })
@@ -228,8 +226,6 @@ mod tests {
     struct RecordingPublisher {
         sources: Vec<ComponentMetricsSource>,
         updates: Arc<Mutex<Vec<ComponentSnapshot>>>,
-        cleanup_time: Arc<Mutex<Option<f64>>>,
-        drain_time: Arc<Mutex<Option<f64>>>,
     }
 
     impl ComponentMetricsPublisher for RecordingPublisher {
@@ -238,12 +234,6 @@ mod tests {
         }
         fn update(&self, snapshot: &ComponentSnapshot) {
             self.updates.lock().unwrap().push(*snapshot);
-        }
-        fn set_cleanup_time(&self, seconds: f64) {
-            *self.cleanup_time.lock().unwrap() = Some(seconds);
-        }
-        fn set_drain_time(&self, seconds: f64) {
-            *self.drain_time.lock().unwrap() = Some(seconds);
         }
     }
 
@@ -275,8 +265,6 @@ mod tests {
         let component_pub: Arc<dyn ComponentMetricsPublisher> = Arc::new(RecordingPublisher {
             sources: vec![source.clone()],
             updates: updates.clone(),
-            cleanup_time: Arc::new(Mutex::new(None)),
-            drain_time: Arc::new(Mutex::new(None)),
         });
 
         let pairs = vec![(router_pub.clone(), source)];
@@ -305,8 +293,6 @@ mod tests {
         let component_pub: Arc<dyn ComponentMetricsPublisher> = Arc::new(RecordingPublisher {
             sources: vec![source.clone()],
             updates: updates.clone(),
-            cleanup_time: Arc::new(Mutex::new(None)),
-            drain_time: Arc::new(Mutex::new(None)),
         });
 
         let pairs = vec![(router_pub, source)];
@@ -315,25 +301,6 @@ mod tests {
 
         assert!(updates.lock().unwrap().is_empty(), "no update on None");
         assert!(warned.is_empty());
-    }
-
-    /// Default trait impls are no-op; `RecordingPublisher` overrides them so
-    /// `Worker::cleanup_once` / drain can hand the elapsed time to whoever
-    /// owns the gauges. Both setters are independent: setting one doesn't
-    /// touch the other.
-    #[test]
-    fn lifecycle_setters_record_independently() {
-        let publisher = RecordingPublisher {
-            sources: vec![],
-            updates: Arc::new(Mutex::new(Vec::new())),
-            cleanup_time: Arc::new(Mutex::new(None)),
-            drain_time: Arc::new(Mutex::new(None)),
-        };
-        publisher.set_drain_time(0.25);
-        assert_eq!(*publisher.drain_time.lock().unwrap(), Some(0.25));
-        assert_eq!(*publisher.cleanup_time.lock().unwrap(), None);
-        publisher.set_cleanup_time(1.5);
-        assert_eq!(*publisher.cleanup_time.lock().unwrap(), Some(1.5));
     }
 
     /// `PublisherHandles::shutdown` cancels the shared token and awaits the
@@ -356,7 +323,6 @@ mod tests {
         let mut handles = PublisherHandles {
             kv_publishers: Vec::new(),
             metrics_publishers: Vec::new(),
-            component_publisher: None,
             metrics_task: Some(task),
             cancel,
         };
@@ -377,7 +343,6 @@ mod tests {
         let mut handles = PublisherHandles {
             kv_publishers: Vec::new(),
             metrics_publishers: Vec::new(),
-            component_publisher: None,
             metrics_task: Some(task),
             cancel,
         };

@@ -261,32 +261,32 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// Register Prometheus instruments or scrape callbacks. Called once
-    /// by `Worker` after [`start`](LLMEngine::start) succeeds; default
-    /// no-op. See [`EngineMetrics`](crate::metrics::EngineMetrics) for
-    /// the handle's surface. Do not retain `metrics` past return.
-    /// Errors abort startup; `cleanup` runs on the partial state.
-    async fn register_prometheus(
-        &self,
-        _metrics: &crate::metrics::EngineMetrics,
-    ) -> Result<(), DynamoError> {
-        Ok(())
-    }
-
-    /// Hand `Worker` an opaque publisher that owns the engine's
-    /// `dynamo_component_*` gauges and exposes one snapshot source per
-    /// dp_rank. Returning `None` opts the engine out — neither gauges
-    /// nor the router-input signal are emitted.
+    /// Wire up Prometheus surfaces. Called once by `Worker` after
+    /// [`start`](LLMEngine::start) succeeds. Default returns an empty
+    /// [`MetricsBindings`] (no engine-side gauges, no foreign callbacks).
     ///
-    /// Called once after [`start`](LLMEngine::start) succeeds. The
-    /// framework drives one poll task per source at a fixed interval;
-    /// each tick reads the snapshot fn and calls
-    /// [`ComponentMetricsPublisher::update`].
-    async fn setup_component_metrics(
+    /// Two side-effects an engine can produce here:
+    /// 1. Bridge a vendor-prefixed registry (`vllm:*`, `sglang:*`,
+    ///    `trtllm_*`, `lmcache:*`) into the runtime's `/metrics` output
+    ///    via [`EngineMetrics::add_expfmt_callback`](crate::metrics::EngineMetrics::add_expfmt_callback)
+    ///    on `ctx.metrics`. Side-effect only — nothing flows back through
+    ///    the return value.
+    /// 2. Return a [`ComponentMetricsPublisher`] in
+    ///    [`MetricsBindings::component`] to expose `dynamo_component_*`
+    ///    KV / cache gauges plus the router-input signal.
+    ///
+    /// Framework-owned lifecycle gauges
+    /// (`dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds}`)
+    /// are emitted by `Worker` independent of this method — they do NOT
+    /// require the engine to return a publisher.
+    ///
+    /// Errors abort startup; `cleanup` runs on the partial state. Do not
+    /// retain `ctx.metrics` past return.
+    async fn setup_metrics(
         &self,
-        _ctx: ComponentMetricsCtx<'_>,
-    ) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError> {
-        Ok(None)
+        _ctx: MetricsCtx<'_>,
+    ) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings::default())
     }
 }
 
@@ -343,10 +343,18 @@ pub struct ComponentSnapshot {
     pub kv_total_blocks: u64,
     /// Fractional cache usage, 0.0..1.0.
     pub gpu_cache_usage: f32,
-    /// Fractional prefix cache hit rate, 0.0..1.0. Portable across
-    /// engines — each backend computes from its native counters. `None`
-    /// when the engine hasn't observed any requests yet (avoids
-    /// reporting a misleading 0.0).
+    /// Fractional prefix cache hit rate, 0.0..1.0.
+    ///
+    /// Tri-state:
+    /// - `Some(x)`: engine measured a hit rate this interval (publish as gauge).
+    /// - `None`: no data yet OR engine has no prefix cache. The
+    ///   gauge is NOT updated — distinguishes "0% hits" (which is a
+    ///   legitimate measurement) from "we never measured."
+    ///
+    /// Each backend computes from its native counters
+    /// (vLLM: `PrefixCacheStats.hits/queries`,
+    ///  SGLang: `kv_metrics.cache_hit_rate_perc`,
+    ///  TRT-LLM: `kv_stats["cacheHitRate"]`).
     pub kv_cache_hit_rate: Option<f32>,
     pub dp_rank: u32,
 }
@@ -378,23 +386,28 @@ pub trait ComponentMetricsPublisher: Send + Sync {
     fn sources(&self) -> Vec<ComponentMetricsSource>;
     /// Apply `snapshot` to wherever gauges live.
     fn update(&self, snapshot: &ComponentSnapshot);
-    /// Record total cleanup latency on `dynamo_component_cleanup_time_seconds`.
-    /// `Worker` brackets `engine.cleanup()` and calls this exactly once
-    /// per worker lifetime. Default no-op for publishers that don't
-    /// expose the gauge.
-    fn set_cleanup_time(&self, _seconds: f64) {}
-    /// Record drain latency on `dynamo_component_drain_time_seconds`.
-    /// `Worker` brackets `engine.drain()` and calls this exactly once
-    /// per worker lifetime. Default no-op.
-    fn set_drain_time(&self, _seconds: f64) {}
 }
 
-/// Context handed to [`LLMEngine::setup_component_metrics`].
-pub struct ComponentMetricsCtx<'a> {
+/// Context handed to [`LLMEngine::setup_metrics`].
+pub struct MetricsCtx<'a> {
     pub model: &'a str,
     pub component: &'a str,
     pub model_load_time_seconds: f64,
+    /// Use this to bridge a vendor-prefixed Prometheus registry into the
+    /// runtime's `/metrics` output via `add_expfmt_callback`. Do NOT
+    /// retain past the call's return.
     pub metrics: &'a crate::metrics::EngineMetrics,
+}
+
+/// What an engine returns from [`LLMEngine::setup_metrics`].
+///
+/// `component` is the only structured surface: an opaque publisher
+/// owning the engine's `dynamo_component_*` gauges plus snapshot
+/// sources. Foreign-registry expfmt callbacks are wired as a side
+/// effect on `ctx.metrics` — they don't flow through this struct.
+#[derive(Default)]
+pub struct MetricsBindings {
+    pub component: Option<Arc<dyn ComponentMetricsPublisher>>,
 }
 
 /// Non-terminal chunk constructor. Terminal chunks come from upstream

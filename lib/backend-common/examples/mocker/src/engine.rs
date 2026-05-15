@@ -24,10 +24,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, CommonArgs, ComponentMetricsCtx, ComponentMetricsPublisher,
+    AsyncEngineContext, BackendError, CommonArgs, ComponentMetricsPublisher,
     ComponentMetricsSource, ComponentSnapshot, DisaggregationMode, DynamoError, EngineConfig,
     ErrorType, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    PreprocessedRequest, WorkerConfig, chunk, usage,
+    MetricsBindings, MetricsCtx, PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -507,13 +507,15 @@ impl LLMEngine for MockerBackend {
         }])
     }
 
-    async fn setup_component_metrics(
+    async fn setup_metrics(
         &self,
-        _ctx: ComponentMetricsCtx<'_>,
-    ) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError> {
-        Ok(Some(Arc::new(MockerComponentMetrics {
-            kv_used_blocks: self.kv_used_blocks.clone(),
-        })))
+        _ctx: MetricsCtx<'_>,
+    ) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings {
+            component: Some(Arc::new(MockerComponentMetrics {
+                kv_used_blocks: self.kv_used_blocks.clone(),
+            })),
+        })
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

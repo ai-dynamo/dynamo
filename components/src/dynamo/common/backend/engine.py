@@ -214,14 +214,26 @@ class LLMEngine(ABC):
         return []
 
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
-        """Default no-op. See :mod:`dynamo.common.backend.metrics` for
-        helpers. Do not retain ``metrics`` past return."""
+        """Bridge a vendor-prefixed Prometheus registry into the runtime's
+        ``/metrics`` output via :func:`metrics.add_expfmt_callback`. Default
+        no-op. See :mod:`dynamo.common.backend.metrics` for helpers. Do not
+        retain ``metrics`` past return.
+
+        Framework-owned lifecycle gauges
+        (``dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds}``)
+        are emitted by the framework independently — they do NOT require
+        the engine to implement this method."""
 
     def component_metrics_sources(self) -> list[ComponentMetricsSource]:
         """One :class:`ComponentMetricsSource` per data-parallel rank.
         Each entry's ``snapshot`` fn returns the latest
         :class:`ComponentSnapshot` for that rank (cheap field read, < 1 ms).
-        Default empty list opts the engine out of component metrics.
+        Default empty list opts the engine out of per-rank gauges; lifecycle
+        gauges still emit.
+
+        ``ComponentSnapshot.kv_cache_hit_rate`` is tri-state:
+        ``None`` means "no data yet" or "no prefix cache" (gauge skipped),
+        ``0.0`` is a legitimate measurement (zero hits).
 
         ``Worker`` invokes the snapshot fns on a fixed interval, feeds the
         result through both the router-input signal and the

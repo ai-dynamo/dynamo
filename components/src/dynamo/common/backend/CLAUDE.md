@@ -13,6 +13,12 @@ from_args -> start -> register_prometheus -> component_metrics_sources -> genera
   config     metadata                            component_* + router                     release resources
 ```
 
+(On the Rust trait side, `register_prometheus` and
+`component_metrics_sources` collapse into one `setup_metrics(ctx) ->
+MetricsBindings` method. The PyO3 bridge calls Python's two methods
+and assembles the bindings — Python engine authors keep the
+two-method API.)
+
 1. `from_args(argv)` -- classmethod factory. Parses CLI args, returns
    `(engine, WorkerConfig)`. Engine is NOT started yet.
 2. `start()` -- starts the engine, returns `EngineConfig`. After this returns
@@ -20,12 +26,17 @@ from_args -> start -> register_prometheus -> component_metrics_sources -> genera
 3. `register_prometheus(metrics)` -- bridge a vendor-prefixed registry
    (`vllm:`, `sglang:`, `trtllm_`, `lmcache:`) into the runtime's
    `/metrics` output. Optional, default no-op. The engine receives a
-   slim `EngineMetrics` capability handle. The `dynamo_component_*`
-   gauges are framework-owned — see `component_metrics_sources()`.
+   slim `EngineMetrics` capability handle. Framework-owned lifecycle
+   gauges (`cleanup_time_seconds`, `drain_time_seconds`,
+   `model_load_time_seconds`) emit regardless of what this method does.
 4. `component_metrics_sources()` -- one `ComponentMetricsSource` per
-   data-parallel rank. Default empty list opts out. Framework polls
-   each source's snapshot fn on a fixed interval and drives both the
+   data-parallel rank. Default empty list opts out of per-rank gauges
+   (lifecycle gauges still emit). Framework polls each source's
+   snapshot fn on a fixed interval and drives both the
    `dynamo_component_*` gauges and the router-input load signal.
+   `ComponentSnapshot.kv_cache_hit_rate` is tri-state: `None` means
+   "no data yet" or "no prefix cache" (gauge skipped); `0.0` is a
+   legitimate zero-hit measurement.
 5. `generate(request, context)` -- streaming inference, called concurrently.
 6. `abort(context)` -- cancel an in-flight request (optional, default no-op).
 7. `drain()` -- backend-side drain before cleanup (optional, default no-op).

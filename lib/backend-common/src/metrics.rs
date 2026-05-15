@@ -1,32 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! [`EngineMetrics`] — slim metrics-only handle for [`LLMEngine`] authors.
+//! [`EngineMetrics`] — slim metrics-only handle for [`LLMEngine`] authors,
+//! plus [`LifecycleGauges`] — framework-owned gauges emitted independently
+//! of engine opt-in (cleanup_time, drain_time, model_load_time).
 //!
 //! `Worker` constructs an `EngineMetrics` from the endpoint's
 //! [`MetricsHierarchy`] and hands it to the engine via
-//! [`LLMEngine::register_prometheus`]. Engines never see the full `Endpoint`
-//! — only the surface needed to bridge a foreign registry into the runtime's
+//! [`LLMEngine::setup_metrics`]. Engines never see the full `Endpoint` —
+//! only the surface needed to bridge a foreign registry into the runtime's
 //! `/metrics` output via [`EngineMetrics::add_expfmt_callback`].
-//!
-//! Native Rust `create_*` (with model labels merged in) is intentionally not
-//! exposed here yet — `dynamo_runtime::metrics::create_metric` injects only
-//! hierarchy labels (`dynamo_namespace`, `dynamo_component`,
-//! `dynamo_endpoint`, `worker_id`). When a Rust engine needs to emit
-//! native metrics labelled with `model`/`model_name`, add label-aware
-//! `create_*` wrappers on `EngineMetrics` that merge in `auto_labels`
-//! at construction time.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_runtime::metrics::{
-    MetricsHierarchy, PrometheusExpositionFormatCallback, prometheus_names::labels,
+    MetricsHierarchy, PrometheusExpositionFormatCallback, create_metric,
+    prometheus_names::labels,
 };
 
 use crate::engine::EngineConfig;
+use crate::error::{BackendError, DynamoError, ErrorType};
 
-/// Metrics handle passed to [`LLMEngine::register_prometheus`].
+/// Metrics handle passed to [`LLMEngine::setup_metrics`].
 /// Not `Clone` — engines should retain returned instruments, not this object.
 pub struct EngineMetrics {
     hierarchy: Arc<dyn MetricsHierarchy>,
@@ -83,6 +79,69 @@ impl EngineMetrics {
             .add_expfmt_callback(callback);
     }
 }
+
+/// Framework-owned lifecycle gauges. Emitted by `Worker` independently of
+/// whether the engine returned a [`crate::engine::ComponentMetricsPublisher`]
+/// — operators always see cleanup/drain timing in `/metrics` regardless of
+/// engine opt-in. The gauge names land in the `dynamo_component_*`
+/// namespace via the runtime's `build_component_metric_name`.
+///
+/// Note: `model_load_time_seconds` is NOT here — it lives in the Python
+/// `LLMBackendMetrics` for parity with the legacy entry points (both
+/// legacy `main.py` and the unified bridge populate it).
+pub struct LifecycleGauges {
+    cleanup_time_seconds: prometheus::Gauge,
+    drain_time_seconds: prometheus::Gauge,
+}
+
+impl LifecycleGauges {
+    /// Construct + register both gauges against the runtime
+    /// `MetricsRegistry`.
+    pub fn new(metrics: &EngineMetrics) -> Result<Self, DynamoError> {
+        let labels: Vec<(&str, &str)> = metrics
+            .auto_labels()
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let hierarchy = metrics.hierarchy().as_ref();
+        let build = |name: &str, help: &str| {
+            create_metric::<prometheus::Gauge, _>(hierarchy, name, help, &labels, None, None)
+                .map_err(|e| {
+                    DynamoError::builder()
+                        .error_type(ErrorType::Backend(BackendError::Unknown))
+                        .message(format!("lifecycle gauge create {name}: {e}"))
+                        .build()
+                })
+        };
+        let cleanup = build(
+            "cleanup_time_seconds",
+            "Time spent releasing engine resources during shutdown. Set \
+             by the framework once after engine.cleanup() returns.",
+        )?;
+        let drain = build(
+            "drain_time_seconds",
+            "Time spent draining in-flight work before cleanup. Stays at \
+             0 for engines without a drain hook.",
+        )?;
+        Ok(Self {
+            cleanup_time_seconds: cleanup,
+            drain_time_seconds: drain,
+        })
+    }
+
+    /// Record cleanup latency. `Worker` calls this exactly once during
+    /// shutdown after `engine.cleanup()` returns.
+    pub fn observe_cleanup_time(&self, seconds: f64) {
+        self.cleanup_time_seconds.set(seconds);
+    }
+
+    /// Record drain latency. `Worker` calls this exactly once during
+    /// graceful shutdown after `engine.drain()` returns.
+    pub fn observe_drain_time(&self, seconds: f64) {
+        self.drain_time_seconds.set(seconds);
+    }
+}
+
 
 /// Standalone hierarchy for tests — no parent, no DRT, no connection_id.
 #[cfg(any(test, feature = "testing"))]
