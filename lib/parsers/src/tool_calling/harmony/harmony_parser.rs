@@ -349,10 +349,11 @@ pub async fn parse_tool_calls_harmony_complete(
             if let Some(Text(text)) = message.content.first() {
                 final_text = Some(text.text.clone());
             }
-        } else if channel == Some("commentary") && recipient.is_empty() {
-            if let Some(Text(text)) = message.content.first() {
-                commentary_text = Some(text.text.clone());
-            }
+        } else if channel == Some("commentary")
+            && recipient.is_empty()
+            && let Some(Text(text)) = message.content.first()
+        {
+            commentary_text = Some(text.text.clone());
         }
     }
     let normal_text = final_text
