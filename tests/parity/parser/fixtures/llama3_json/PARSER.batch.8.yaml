@@ -29,8 +29,14 @@ cases:
           arguments:
             location: NYC
         normal_text: ''
+        reason: vLLM llama3_json drops leading normal_text before the python_tag token
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+        reason: preserves whitespace before python_tag in normal_text
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -46,7 +52,12 @@ cases:
         normal_text: ''
       vllm: *id002
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: Let me know if you need more.
+        reason: preserves trailing text after parsed JSON object
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L128
@@ -67,8 +78,14 @@ cases:
           arguments:
             location: NYC
         normal_text: ''
+        reason: vLLM llama3_json drops leading normal_text before the python_tag token
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather. Let me know if you need more.
+        reason: preserves leading normal_text and trailing text around parsed JSON object
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -95,5 +112,14 @@ cases:
           arguments:
             location: LA
         normal_text: ''
+        reason: vLLM llama3_json drops leading normal_text before the python_tag token
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: 'I will check the weather. '
+        reason: uses next JSON object recovery and drops interstitial text between parsed calls

@@ -68,6 +68,14 @@ _ap.add_argument(
     ),
 )
 _ap.add_argument(
+    "--family",
+    action="append",
+    help=(
+        "Limit capture to one parser family. May be repeated. Useful when "
+        "refreshing a newly wired peer without rewriting the full fixture corpus."
+    ),
+)
+_ap.add_argument(
     "--merge",
     action="store_true",
     help=(
@@ -96,6 +104,7 @@ _args = _ap.parse_args()
 IMPL = _args.impl
 MERGE_MODE = _args.merge
 OVERWRITE = _args.overwrite_if_exists
+FAMILY_FILTER = set(_args.family or [])
 
 if OVERWRITE and not MERGE_MODE:
     _ap.error("--overwrite-if-exists requires --merge")
@@ -292,6 +301,8 @@ def merge_into_fixtures(
     for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text(encoding="utf-8"))
         family = doc["family"]
+        if FAMILY_FILTER and family not in FAMILY_FILTER:
+            continue
         cases = doc.get("cases") or {}
         changed = False
         for case_id, case in cases.items():
@@ -345,6 +356,8 @@ def main() -> int:
     for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text())
         family = doc["family"]
+        if FAMILY_FILTER and family not in FAMILY_FILTER:
+            continue
         for case_id, case in doc["cases"].items():
             n_total += 1
             key = f"{family}/{case_id}"

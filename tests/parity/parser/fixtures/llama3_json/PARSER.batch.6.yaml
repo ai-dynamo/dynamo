@@ -21,8 +21,7 @@ cases:
           arguments: {}
         normal_text: ''
       vllm: *id001
-      sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+      sglang: *id001
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
@@ -36,8 +35,7 @@ cases:
           arguments: {}
         normal_text: ''
       vllm: *id003
-      sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+      sglang: *id003
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
@@ -52,4 +50,8 @@ cases:
         calls: []
         normal_text: '<|python_tag|>{"name": "get_time"}'
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+        reason: treats missing arguments key as an empty argument object

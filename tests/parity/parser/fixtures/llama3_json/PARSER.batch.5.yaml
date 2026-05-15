@@ -24,7 +24,9 @@ cases:
         calls: []
         normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}'
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}'
+        reason: impl-defined recovery contract; strips python_tag before returning incomplete action text
   PARSER.batch.5.c:
     description: Truncation deeper inside arguments JSON (vs .a which truncates at the closing brace)
     ref: dynamo
@@ -39,7 +41,9 @@ cases:
         calls: []
         normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"loc'
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"loc'
+        reason: impl-defined recovery contract; strips python_tag before returning incomplete action text
   PARSER.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)
     ref: dynamo
@@ -55,7 +59,13 @@ cases:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!{"name": "get_weather",
+          "arguments": {"location": "New York"}'
+        reason: impl-defined recovery contract; strips python_tag and preserves malformed trailing JSON after first recovered call
       vllm:
         calls: []
         normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<|python_tag|>{"name":
@@ -75,7 +85,13 @@ cases:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!{"name": "get_weather",
+          "arguments": {"location": "New York'
+        reason: impl-defined recovery contract; strips python_tag and preserves malformed trailing JSON after first recovered call
       vllm:
         calls: []
         normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<|python_tag|>{"name":

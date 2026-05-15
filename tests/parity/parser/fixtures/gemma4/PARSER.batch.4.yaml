@@ -23,9 +23,11 @@ cases:
       vllm:
         calls: []
         normal_text: <|tool_call>nonsense<tool_call|>
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
       sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+        calls: []
+        normal_text: <|tool_call>nonsense<tool_call|>
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
   PARSER.batch.4.b:
     description: Missing close brace in body
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L572
@@ -39,9 +41,14 @@ cases:
       vllm:
         calls: []
         normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|><tool_call|>
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
       sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+        reason: accepts missing close brace before closing sentinel
   PARSER.batch.4.c:
     description: No call:name prefix
     ref: dynamo
@@ -55,9 +62,11 @@ cases:
       vllm:
         calls: []
         normal_text: <|tool_call>{location:<|"|>NYC<|"|>}<tool_call|>
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
       sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+        calls: []
+        normal_text: <|tool_call>{location:<|"|>NYC<|"|>}<tool_call|>
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
   PARSER.batch.4.d:
     description: Mismatched sentinels
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L252
@@ -71,6 +80,8 @@ cases:
       vllm:
         calls: []
         normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
       sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path

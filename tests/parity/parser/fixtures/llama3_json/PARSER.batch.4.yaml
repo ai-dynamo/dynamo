@@ -24,7 +24,9 @@ cases:
         calls: []
         normal_text: <|python_tag|>not even json
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls: []
+        normal_text: not even json
+        reason: impl-defined recovery contract; strips python_tag before returning malformed action text
   PARSER.batch.4.b:
     description: Missing close brace
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L66
@@ -39,7 +41,9 @@ cases:
         calls: []
         normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"'
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"'
+        reason: impl-defined recovery contract; strips python_tag before returning malformed action text
   PARSER.batch.4.c:
     description: Missing name key
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L234
@@ -47,11 +51,10 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
+      dynamo: &id002
         calls: []
         normal_text: ''
       vllm:
         calls: []
         normal_text: '<|python_tag|>{"arguments": {"location": "NYC"}}'
-      sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+      sglang: *id002

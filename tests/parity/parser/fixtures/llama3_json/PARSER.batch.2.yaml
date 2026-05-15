@@ -35,8 +35,7 @@ cases:
             timezone: EST
         normal_text: ''
       vllm: *id001
-      sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+      sglang: *id001
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -66,7 +65,15 @@ cases:
         normal_text: ''
         reason: vLLM llama3_json drops leading normal_text before the python_tag token
       sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both: Done.'
+        reason: preserves trailing text after final parsed JSON object
   PARSER.batch.2.d:
     description: Same-name twice (semicolon-separated)
     ref: dynamo
@@ -86,5 +93,4 @@ cases:
             location: LA
         normal_text: ''
       vllm: *id004
-      sglang:
-        unavailable: SGLang has no detector for family='llama3_json'
+      sglang: *id004

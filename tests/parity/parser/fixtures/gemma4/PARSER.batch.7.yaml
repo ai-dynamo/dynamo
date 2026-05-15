@@ -29,8 +29,7 @@ cases:
             first_class: true
         normal_text: ''
       vllm: *id001
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      sglang: *id001
   PARSER.batch.7.b:
     description: Unicode in value
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L630
@@ -50,8 +49,7 @@ cases:
             location: Tōkyō central
         normal_text: ''
       vllm: *id002
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      sglang: *id002
   PARSER.batch.7.c:
     description: Schema mismatch — string value where schema declares integer
     ref: dynamo
@@ -71,8 +69,7 @@ cases:
             celsius: '20'
         normal_text: ''
       vllm: *id003
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      sglang: *id003
   PARSER.batch.7.d:
     description: Nested object + array (existing)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L179
@@ -99,5 +96,4 @@ cases:
               nested: true
         normal_text: ''
       vllm: *id004
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      sglang: *id004

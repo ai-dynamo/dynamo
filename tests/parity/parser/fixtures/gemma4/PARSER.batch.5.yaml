@@ -23,9 +23,11 @@ cases:
       vllm:
         calls: []
         normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
       sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
   PARSER.batch.5.b:
     description: Closing <tool_call|> without matching <|tool_call> open
     ref: dynamo
@@ -39,9 +41,11 @@ cases:
       vllm:
         calls: []
         normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
       sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+        calls: []
+        normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
   PARSER.batch.5.c:
     description: Truncation mid-argument value
     ref: dynamo
@@ -55,9 +59,11 @@ cases:
       vllm:
         calls: []
         normal_text: <|tool_call>call:get_weather{location:<|"|>N
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
       sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>N
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
   PARSER.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)
     ref: dynamo
@@ -66,15 +72,14 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_d
+      dynamo: &id002
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      vllm: *d_5_d
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      vllm: *id002
+      sglang: *id002
   PARSER.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -83,12 +88,11 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_e
+      dynamo: &id003
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      vllm: *d_5_e
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      vllm: *id003
+      sglang: *id003

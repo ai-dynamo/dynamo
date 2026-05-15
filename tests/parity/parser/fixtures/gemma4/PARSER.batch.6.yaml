@@ -21,8 +21,7 @@ cases:
           arguments: {}
         normal_text: ''
       vllm: *id001
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      sglang: *id001
   PARSER.batch.6.b:
     description: Whitespace inside empty {}
     ref: dynamo
@@ -36,8 +35,7 @@ cases:
           arguments: {}
         normal_text: ''
       vllm: *id003
-      sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+      sglang: *id003
   PARSER.batch.6.c:
     description: No body (just call:name)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L280
@@ -51,6 +49,8 @@ cases:
       vllm:
         calls: []
         normal_text: <|tool_call>call:get_time<tool_call|>
-        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
       sglang:
-        unavailable: SGLang has no detector for family='gemma4'
+        calls: []
+        normal_text: <|tool_call>call:get_time<tool_call|>
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
