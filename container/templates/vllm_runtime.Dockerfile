@@ -100,8 +100,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     NIXL_VERSION="${NIXL_REF#v}"; \
     uv pip install --system --force-reinstall --no-deps \
         "nixl==${NIXL_VERSION}" \
-        "nixl-cu12==${NIXL_VERSION}" \
-        "nixl-cu13==${NIXL_VERSION}"
+        "nixl-cu${CUDA_MAJOR}==${NIXL_VERSION}"
 
 # Find upstream's CUDA-versioned NIXL and libcudart libs and expose them at
 # stable paths. CUDA 12 and CUDA 13 package the runtime under different
