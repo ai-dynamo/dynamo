@@ -409,7 +409,7 @@ impl KvPushRouter {
             "Routing to specified worker"
         );
 
-        if !routing_constraints.is_empty() {
+        if routing_constraints.has_hard_constraints() {
             let configs = self.chooser.workers_with_configs.borrow();
             match configs.get(&pinned_worker_id) {
                 Some(config)
