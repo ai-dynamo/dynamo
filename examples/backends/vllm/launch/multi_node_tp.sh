@@ -22,8 +22,7 @@
 set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-# Cleanup: see common/launch_utils.sh::dynamo_reap_and_exit
-trap '_rc=$?; echo "Cleaning up..."; dynamo_reap_and_exit "$_rc"' EXIT
+trap dynamo_exit_trap EXIT
 
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TP="${TENSOR_PARALLEL_SIZE:-16}"

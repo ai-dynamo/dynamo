@@ -85,6 +85,14 @@ dynamo_reap_and_exit() {
     exit "$_rc"
 }
 
+# EXIT-trap helper for scripts that don't use wait_any_exit. Captures the
+# script's exit status before `echo` clobbers $?, then runs cleanup.
+dynamo_exit_trap() {
+    local _rc=$?
+    echo "Cleaning up..."
+    dynamo_reap_and_exit "$_rc"
+}
+
 wait_any_exit() {
     trap 'dynamo_reap_and_exit 0' TERM INT
     if ! jobs -p | grep -q .; then
@@ -96,7 +104,9 @@ wait_any_exit() {
     wait -n || _rc=$?
     echo "A background process exited with code $_rc"
     # Re-arm the signal trap as a backstop for signals arriving while
-    # the synchronous call below is reaping.
+    # the synchronous call below is reaping. Double quotes bake in the
+    # current _rc value (local goes out of scope when bash exits).
+    # shellcheck disable=SC2064  # intentional expand-at-set-time
     trap "dynamo_reap_and_exit $_rc" TERM INT
     dynamo_reap_and_exit "$_rc"
 }
