@@ -569,6 +569,11 @@ pub fn run_mocker_trace_replay(
     let replay_mode = replay_mode.to_owned();
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        if replay_mode == "online" && router_mode.is_session_aware() {
+            anyhow::bail!(
+                "session-aware replay router modes are only supported for offline aggregated replay"
+            );
+        }
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
             && replay_concurrency.is_none()
         {
@@ -740,6 +745,11 @@ pub fn run_mocker_synthetic_trace_replay(
     };
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        if replay_mode == "online" && router_mode.is_session_aware() {
+            anyhow::bail!(
+                "session-aware replay router modes are only supported for offline aggregated replay"
+            );
+        }
         let use_workload = turns_per_session > 1
             || shared_prefix_ratio > 0.0
             || num_prefix_groups > 0
@@ -1044,10 +1054,10 @@ fn load_replay_prefill_load_estimator(
     router_config: Option<&KvRouterConfig>,
     aic_perf_config: Option<&AicPerfConfig>,
 ) -> PyResult<Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>> {
-    if router_mode != dynamo_mocker::replay::ReplayRouterMode::KvRouter {
+    if !router_mode.uses_kv_router() {
         if aic_perf_config.is_some() {
             return Err(PyException::new_err(
-                "aic_perf_config requires router_mode='kv_router'",
+                "aic_perf_config requires router_mode='kv_router' or 'kv_router_sticky_session_proxy'",
             ));
         }
         return Ok(None);
@@ -1094,9 +1104,13 @@ fn parse_replay_router_mode(
 ) -> PyResult<dynamo_mocker::replay::ReplayRouterMode> {
     match router_mode {
         "round_robin" => Ok(dynamo_mocker::replay::ReplayRouterMode::RoundRobin),
+        "sticky_session" => Ok(dynamo_mocker::replay::ReplayRouterMode::StickySession),
         "kv_router" => Ok(dynamo_mocker::replay::ReplayRouterMode::KvRouter),
+        "kv_router_sticky_session_proxy" => {
+            Ok(dynamo_mocker::replay::ReplayRouterMode::KvRouterStickySessionProxy)
+        }
         other => Err(PyException::new_err(format!(
-            "router_mode must be either 'round_robin' or 'kv_router', got '{}'",
+            "router_mode must be one of 'round_robin', 'sticky_session', 'kv_router', or 'kv_router_sticky_session_proxy', got '{}'",
             other
         ))),
     }

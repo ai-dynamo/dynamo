@@ -130,6 +130,9 @@ impl DisaggRuntime {
         let progress = ReplayProgress::new(admission.total_requests(), "offline disagg replay");
         let (prefill_router, decode_router) = match router_mode {
             ReplayRouterMode::RoundRobin => (None, None),
+            ReplayRouterMode::StickySession | ReplayRouterMode::KvRouterStickySessionProxy => {
+                bail!("offline disagg replay does not support session-aware replay router modes")
+            }
             ReplayRouterMode::KvRouter => {
                 let prefill_router_config =
                     derive_prefill_router_config(&config.prefill_args, router_config.clone());
@@ -365,7 +368,7 @@ impl DisaggRuntime {
             .decode_router
             .as_mut()
             .expect("decode router presence checked above")
-            .on_request_arrival(&request, None, self.now_ms)?
+            .on_request_arrival(&request, None, None, self.now_ms)?
             .admissions;
         self.record_router_pending();
         self.dispatch_decode_admissions(admissions)?;
@@ -401,7 +404,7 @@ impl DisaggRuntime {
             .prefill_router
             .as_mut()
             .expect("prefill router presence checked above")
-            .on_request_arrival(&queued_request, replay_hashes, self.now_ms)?
+            .on_request_arrival(&queued_request, replay_hashes, None, self.now_ms)?
             .admissions;
         self.record_router_pending();
         self.dispatch_prefill_admissions(admissions)?;

@@ -124,8 +124,47 @@ impl SyncReplayIndexer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfflineReplayOverlapMode {
+    ExactKvIndexer,
+    StickySessionProxy,
+}
+
+pub(crate) struct OfflineStickySessionRouter {
+    session_workers: HashMap<String, usize>,
+    next_worker_idx: usize,
+    num_workers: usize,
+}
+
+impl OfflineStickySessionRouter {
+    pub(crate) fn new(num_workers: usize) -> Self {
+        Self {
+            session_workers: HashMap::new(),
+            next_worker_idx: 0,
+            num_workers,
+        }
+    }
+
+    pub(crate) fn select_worker(&mut self, session_id: Option<&str>) -> usize {
+        if let Some(session_id) = session_id
+            && let Some(worker_idx) = self.session_workers.get(session_id)
+        {
+            return *worker_idx;
+        }
+
+        let worker_idx = self.next_worker_idx;
+        self.next_worker_idx = (self.next_worker_idx + 1) % self.num_workers.max(1);
+        if let Some(session_id) = session_id {
+            self.session_workers
+                .insert(session_id.to_string(), worker_idx);
+        }
+        worker_idx
+    }
+}
+
 struct PendingRequest {
     uuid: Uuid,
+    session_id: Option<String>,
     token_seq: Option<Vec<SequenceHash>>,
     isl_tokens: usize,
     overlaps: OverlapScores,
@@ -211,6 +250,7 @@ impl PartialOrd for QueueEntry {
 pub(crate) struct OfflineReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
+    overlap_mode: OfflineReplayOverlapMode,
     queue_threshold: Option<f64>,
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
@@ -220,6 +260,7 @@ pub(crate) struct OfflineReplayRouter {
     pending: BinaryHeap<QueueEntry>,
     next_enqueue_seq: u64,
     indexer: SyncReplayIndexer,
+    session_workers: HashMap<String, WorkerId>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
 }
@@ -230,6 +271,37 @@ impl OfflineReplayRouter {
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
+    ) -> Result<Self> {
+        Self::new_with_overlap_mode(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            OfflineReplayOverlapMode::ExactKvIndexer,
+        )
+    }
+
+    pub(crate) fn new_sticky_session_proxy(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+    ) -> Result<Self> {
+        Self::new_with_overlap_mode(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            OfflineReplayOverlapMode::StickySessionProxy,
+        )
+    }
+
+    fn new_with_overlap_mode(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+        overlap_mode: OfflineReplayOverlapMode,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
         let worker_config_template = replay_worker_config(args);
@@ -242,6 +314,7 @@ impl OfflineReplayRouter {
         Ok(Self {
             config,
             block_size: args.block_size as u32,
+            overlap_mode,
             queue_threshold,
             worker_config_template,
             workers_with_configs,
@@ -251,6 +324,7 @@ impl OfflineReplayRouter {
             pending: BinaryHeap::new(),
             next_enqueue_seq: 0,
             indexer: SyncReplayIndexer::new(args.block_size as u32),
+            session_workers: HashMap::new(),
             prefill_load_estimator,
             // This is only a base Instant for converting replay `now_ms` values into
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
@@ -263,9 +337,10 @@ impl OfflineReplayRouter {
         &mut self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<&str>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending = self.build_pending_request(request, replay_hashes)?;
+        let pending = self.build_pending_request(request, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
         let should_queue = self
             .queue_threshold
@@ -459,11 +534,51 @@ impl OfflineReplayRouter {
         &self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<&str>,
     ) -> Result<PendingRequest> {
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
-        let (overlaps, token_seq) = match replay_hashes {
+        let session_id = session_id.map(str::to_string);
+        let (overlaps, token_seq) =
+            self.overlaps_and_token_seq(request, replay_hashes, &session_id);
+
+        Ok(PendingRequest {
+            uuid,
+            session_id,
+            token_seq,
+            isl_tokens: request.tokens.len(),
+            overlaps,
+            track_prefill_tokens: self.config.router_track_prefill_tokens,
+            expected_output_tokens: Some(
+                u32::try_from(request.max_output_tokens)
+                    .context("max_output_tokens does not fit into u32")?,
+            ),
+        })
+    }
+
+    fn overlaps_and_token_seq(
+        &self,
+        request: &DirectRequest,
+        replay_hashes: Option<ReplayRequestHashes>,
+        session_id: &Option<String>,
+    ) -> (OverlapScores, Option<Vec<SequenceHash>>) {
+        let (exact_overlaps, token_seq) = self.exact_overlaps_and_token_seq(request, replay_hashes);
+        match self.overlap_mode {
+            OfflineReplayOverlapMode::ExactKvIndexer => (exact_overlaps, token_seq),
+            OfflineReplayOverlapMode::StickySessionProxy => (
+                self.sticky_session_proxy_overlaps(request, session_id),
+                token_seq,
+            ),
+        }
+    }
+
+    fn exact_overlaps_and_token_seq(
+        &self,
+        request: &DirectRequest,
+        replay_hashes: Option<ReplayRequestHashes>,
+    ) -> (OverlapScores, Option<Vec<SequenceHash>>) {
+        match replay_hashes {
             Some(replay_hashes) => {
                 let overlaps = self
                     .indexer
@@ -494,19 +609,36 @@ impl OfflineReplayRouter {
                 );
                 (overlaps, token_seq)
             }
-        };
+        }
+    }
 
-        Ok(PendingRequest {
-            uuid,
-            token_seq,
-            isl_tokens: request.tokens.len(),
-            overlaps,
-            track_prefill_tokens: self.config.router_track_prefill_tokens,
-            expected_output_tokens: Some(
-                u32::try_from(request.max_output_tokens)
-                    .context("max_output_tokens does not fit into u32")?,
-            ),
-        })
+    fn sticky_session_proxy_overlaps(
+        &self,
+        request: &DirectRequest,
+        session_id: &Option<String>,
+    ) -> OverlapScores {
+        let mut overlaps = OverlapScores::new();
+        let Some(session_id) = session_id else {
+            return overlaps;
+        };
+        let Some(worker_id) = self.session_workers.get(session_id) else {
+            return overlaps;
+        };
+        let full_blocks = request.tokens.len() / self.block_size as usize;
+        let Ok(full_blocks) = u32::try_from(full_blocks) else {
+            tracing::warn!(
+                session_id,
+                "sticky session proxy overlap block count does not fit into u32"
+            );
+            return overlaps;
+        };
+        if full_blocks == 0 {
+            return overlaps;
+        }
+        overlaps
+            .scores
+            .insert(WorkerWithDpRank::from_worker_id(*worker_id), full_blocks);
+        overlaps
     }
 
     fn admit_request(
@@ -551,6 +683,12 @@ impl OfflineReplayRouter {
         )?;
         let worker_idx = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
+        if self.overlap_mode == OfflineReplayOverlapMode::StickySessionProxy
+            && let Some(session_id) = &request.session_id
+        {
+            self.session_workers
+                .insert(session_id.clone(), selection.worker.worker_id);
+        }
         let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
@@ -676,7 +814,9 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{OfflineReplayRouter, SyncReplayIndexer, WorkerAdmission};
+    use super::{
+        OfflineReplayRouter, OfflineStickySessionRouter, SyncReplayIndexer, WorkerAdmission,
+    };
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
 
@@ -740,6 +880,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sticky_session_router_pins_session_after_first_assignment() {
+        let mut router = OfflineStickySessionRouter::new(2);
+
+        assert_eq!(router.select_worker(Some("session-a")), 0);
+        assert_eq!(router.select_worker(Some("session-b")), 1);
+        assert_eq!(router.select_worker(Some("session-a")), 0);
+    }
+
+    #[test]
+    fn sticky_session_proxy_reports_full_session_overlap_after_first_turn() {
+        let mut router =
+            OfflineReplayRouter::new_sticky_session_proxy(&replay_args(), None, None, 2).unwrap();
+
+        let first = router
+            .on_request_arrival(&request(1, 7), None, Some("session-a"), 0.0)
+            .unwrap();
+        assert_eq!(first.admissions.len(), 1);
+        assert_eq!(first.admissions[0].overlap_blocks, 0);
+        router
+            .on_prefill_completed(Uuid::from_u128(1), 1.0)
+            .unwrap();
+        router
+            .on_request_completed(Uuid::from_u128(1), 1.0)
+            .unwrap();
+
+        let second = router
+            .on_request_arrival(&request(2, 8), None, Some("session-a"), 1.0)
+            .unwrap();
+        assert_eq!(second.admissions.len(), 1);
+        assert_eq!(second.admissions[0].overlap_blocks, 1);
+        assert_eq!(
+            second.admissions[0].worker_idx,
+            first.admissions[0].worker_idx
+        );
+    }
+
     fn store_event(
         worker_id: WorkerId,
         event_id: u64,
@@ -791,7 +968,7 @@ mod tests {
         .unwrap();
 
         let effects = router
-            .on_request_arrival(&request(1, 7), None, 0.0)
+            .on_request_arrival(&request(1, 7), None, None, 0.0)
             .unwrap();
         assert_eq!(effects.admissions.len(), 1);
         assert_eq!(
@@ -815,12 +992,12 @@ mod tests {
                 .unwrap();
 
         let first = router
-            .on_request_arrival(&request(1, 7), None, 0.0)
+            .on_request_arrival(&request(1, 7), None, None, 0.0)
             .unwrap();
         assert_eq!(first.admissions.len(), 1);
 
         let second = router
-            .on_request_arrival(&request(2, 8), None, 0.0)
+            .on_request_arrival(&request(2, 8), None, None, 0.0)
             .unwrap();
         assert!(second.admissions.is_empty());
         assert_eq!(router.pending_count(), 1);
@@ -840,18 +1017,22 @@ mod tests {
         let mut fresh =
             OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
                 .unwrap();
-        fresh.on_request_arrival(&request(1, 7), None, 0.0).unwrap();
-        fresh.on_request_arrival(&request(2, 8), None, 0.0).unwrap();
+        fresh
+            .on_request_arrival(&request(1, 7), None, None, 0.0)
+            .unwrap();
+        fresh
+            .on_request_arrival(&request(2, 8), None, None, 0.0)
+            .unwrap();
 
         let mut scaled =
             OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 2)
                 .unwrap();
         scaled.remove_worker(1).unwrap();
         scaled
-            .on_request_arrival(&request(1, 7), None, 0.0)
+            .on_request_arrival(&request(1, 7), None, None, 0.0)
             .unwrap();
         scaled
-            .on_request_arrival(&request(2, 8), None, 0.0)
+            .on_request_arrival(&request(2, 8), None, None, 0.0)
             .unwrap();
 
         assert_eq!(scaled.pending_count(), fresh.pending_count());
@@ -881,7 +1062,7 @@ mod tests {
         router.add_worker(3).unwrap();
 
         let effects = router
-            .on_request_arrival(&request(1, 7), None, 0.0)
+            .on_request_arrival(&request(1, 7), None, None, 0.0)
             .unwrap();
         assert_eq!(
             effects.admissions,
@@ -901,10 +1082,10 @@ mod tests {
                 .unwrap();
 
         router
-            .on_request_arrival(&request(1, 7), None, 0.0)
+            .on_request_arrival(&request(1, 7), None, None, 0.0)
             .unwrap();
         router
-            .on_request_arrival(&request(2, 8), None, 0.0)
+            .on_request_arrival(&request(2, 8), None, None, 0.0)
             .unwrap();
         assert_eq!(
             router.debug_snapshot(0.0).active_tokens_by_worker,
@@ -927,10 +1108,10 @@ mod tests {
                 .unwrap();
 
         router
-            .on_request_arrival(&request(1, 7), None, 0.0)
+            .on_request_arrival(&request(1, 7), None, None, 0.0)
             .unwrap();
         router
-            .on_request_arrival(&request(2, 8), None, 0.0)
+            .on_request_arrival(&request(2, 8), None, None, 0.0)
             .unwrap();
         assert_eq!(router.pending_count(), 1);
 

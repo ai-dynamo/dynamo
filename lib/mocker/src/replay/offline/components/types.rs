@@ -69,6 +69,7 @@ pub(crate) struct RouterEffects {
 pub(in crate::replay::offline) struct ReadyArrival {
     pub(in crate::replay::offline) request: DirectRequest,
     pub(in crate::replay::offline) arrival_time_ms: f64,
+    pub(in crate::replay::offline) session_id: Option<String>,
     pub(in crate::replay::offline) replay_hashes: Option<ReplayRequestHashes>,
 }
 

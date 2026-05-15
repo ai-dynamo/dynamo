@@ -414,7 +414,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--router-mode",
-        choices=("round_robin", "kv_router"),
+        choices=(
+            "round_robin",
+            "sticky_session",
+            "kv_router",
+            "kv_router_sticky_session_proxy",
+        ),
         default="round_robin",
     )
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)

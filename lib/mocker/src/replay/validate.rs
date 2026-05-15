@@ -63,7 +63,7 @@ fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -
 }
 
 fn validate_offline_router_mode(router_mode: ReplayRouterMode, num_workers: usize) -> Result<()> {
-    if router_mode != ReplayRouterMode::KvRouter {
+    if !router_mode.uses_kv_router() {
         return Ok(());
     }
     if num_workers > 1 {
@@ -156,18 +156,27 @@ fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Resul
 
 pub(super) fn validate_offline_disagg_replay_args(
     config: &OfflineDisaggReplayConfig,
-    _router_mode: ReplayRouterMode,
+    router_mode: ReplayRouterMode,
 ) -> Result<()> {
+    validate_disagg_router_mode(router_mode)?;
     validate_disagg_args(config, "trace replay")
 }
 
 pub(super) fn validate_offline_disagg_concurrency_args(
     config: &OfflineDisaggReplayConfig,
     max_in_flight: usize,
-    _router_mode: ReplayRouterMode,
+    router_mode: ReplayRouterMode,
 ) -> Result<()> {
     if max_in_flight == 0 {
         bail!("concurrency replay requires max_in_flight >= 1");
     }
+    validate_disagg_router_mode(router_mode)?;
     validate_disagg_args(config, "concurrency replay")
+}
+
+fn validate_disagg_router_mode(router_mode: ReplayRouterMode) -> Result<()> {
+    if router_mode.is_session_aware() {
+        bail!("offline disagg replay does not support session-aware replay router modes");
+    }
+    Ok(())
 }

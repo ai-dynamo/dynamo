@@ -8,9 +8,9 @@ mod types;
 
 pub(in crate::replay::offline) use admission::AdmissionQueue;
 pub(in crate::replay::offline) use engine::EngineComponent;
-pub(crate) use router::OfflineReplayRouter;
 #[cfg(test)]
 pub(crate) use router::OfflineRouterSnapshot;
+pub(crate) use router::{OfflineReplayRouter, OfflineStickySessionRouter};
 pub(in crate::replay) use types::ReplayMode;
 pub use types::TrafficStats;
 pub(in crate::replay::offline) use types::{

@@ -318,8 +318,16 @@ impl ReplayRouter {
         num_workers: usize,
     ) -> Self {
         match mode {
-            ReplayRouterMode::RoundRobin => Self::RoundRobin(RoundRobinRouter::default()),
+            ReplayRouterMode::RoundRobin | ReplayRouterMode::StickySession => {
+                Self::RoundRobin(RoundRobinRouter::default())
+            }
             ReplayRouterMode::KvRouter => Self::Kv(KvReplayRouter::new(
+                args,
+                router_config,
+                prefill_load_estimator,
+                num_workers,
+            )),
+            ReplayRouterMode::KvRouterStickySessionProxy => Self::Kv(KvReplayRouter::new(
                 args,
                 router_config,
                 prefill_load_estimator,

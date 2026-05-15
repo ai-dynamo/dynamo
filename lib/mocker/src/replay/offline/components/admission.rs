@@ -87,6 +87,7 @@ impl AdmissionQueue {
                     ready.push(ReadyArrival {
                         request,
                         arrival_time_ms,
+                        session_id: None,
                         replay_hashes: None,
                     });
                 }
@@ -98,6 +99,7 @@ impl AdmissionQueue {
                 .map(|ready| ReadyArrival {
                     request: ready.request,
                     arrival_time_ms: ready.scheduled_ready_at_ms,
+                    session_id: Some(ready.session_id),
                     replay_hashes: ready.replay_hashes,
                 })
                 .collect()),
@@ -111,6 +113,7 @@ impl AdmissionQueue {
                     ready.push(ReadyArrival {
                         request,
                         arrival_time_ms: now_ms,
+                        session_id: None,
                         replay_hashes: None,
                     });
                     simulated_in_flight += 1;
@@ -128,6 +131,7 @@ impl AdmissionQueue {
                     .map(|ready| ReadyArrival {
                         request: ready.request,
                         arrival_time_ms: now_ms,
+                        session_id: Some(ready.session_id),
                         replay_hashes: ready.replay_hashes,
                     })
                     .collect())

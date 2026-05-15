@@ -29,7 +29,25 @@ pub use collector::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
     RoundRobin,
+    StickySession,
     KvRouter,
+    KvRouterStickySessionProxy,
+}
+
+impl ReplayRouterMode {
+    pub fn uses_kv_router(self) -> bool {
+        matches!(
+            self,
+            ReplayRouterMode::KvRouter | ReplayRouterMode::KvRouterStickySessionProxy
+        )
+    }
+
+    pub fn is_session_aware(self) -> bool {
+        matches!(
+            self,
+            ReplayRouterMode::StickySession | ReplayRouterMode::KvRouterStickySessionProxy
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -17,7 +17,8 @@ use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
+        OfflineStickySessionRouter, ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats,
+        WorkerAdmission,
     },
     state::AggRequestState,
 };
@@ -70,6 +71,7 @@ pub(in crate::replay) struct AggRuntime {
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
     router: Option<OfflineReplayRouter>,
+    sticky_router: Option<OfflineStickySessionRouter>,
     progress: ReplayProgress,
     stats: AggRuntimeStats,
     /// Forward pass metrics accumulated between planner ticks.
@@ -135,15 +137,25 @@ impl AggRuntime {
         let args = args.clone().normalized()?;
         let progress = ReplayProgress::new(admission.total_requests(), "offline replay");
         let router = match router_mode {
-            ReplayRouterMode::RoundRobin => None,
+            ReplayRouterMode::RoundRobin | ReplayRouterMode::StickySession => None,
             ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(
                 &args,
                 router_config,
                 prefill_load_estimator,
                 num_workers,
             )?),
+            ReplayRouterMode::KvRouterStickySessionProxy => {
+                Some(OfflineReplayRouter::new_sticky_session_proxy(
+                    &args,
+                    router_config,
+                    prefill_load_estimator,
+                    num_workers,
+                )?)
+            }
         };
-        let capture_kv_events = router.is_some();
+        let sticky_router = (router_mode == ReplayRouterMode::StickySession)
+            .then(|| OfflineStickySessionRouter::new(num_workers));
+        let capture_kv_events = router_mode == ReplayRouterMode::KvRouter;
         let mut engine = EngineComponent::new(
             SimulationWorkerStage::Aggregated,
             EnginePassMode::Visible,
@@ -169,6 +181,7 @@ impl AggRuntime {
             collector: TraceCollector::default(),
             events: BinaryHeap::new(),
             router,
+            sticky_router,
             progress,
             #[cfg(test)]
             stats: AggRuntimeStats::default(),
@@ -282,6 +295,7 @@ impl AggRuntime {
         &mut self,
         mut request: DirectRequest,
         arrival_time_ms: f64,
+        session_id: Option<String>,
         replay_hashes: Option<ReplayRequestHashes>,
     ) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
@@ -297,6 +311,15 @@ impl AggRuntime {
             request.max_output_tokens,
         );
 
+        if let Some(sticky_router) = &mut self.sticky_router {
+            self.requests.insert(
+                uuid,
+                AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
+            );
+            let worker_idx = sticky_router.select_worker(session_id.as_deref());
+            self.dispatch_to_worker(request, uuid, worker_idx)?;
+            return Ok(uuid);
+        }
         if self.router.is_none() {
             self.requests.insert(
                 uuid,
@@ -309,7 +332,7 @@ impl AggRuntime {
         let admissions = {
             let router = self.router.as_mut().expect("router presence checked above");
             router
-                .on_request_arrival(&request, replay_hashes, self.now_ms)?
+                .on_request_arrival(&request, replay_hashes, session_id.as_deref(), self.now_ms)?
                 .admissions
         };
         self.requests
@@ -487,7 +510,12 @@ impl AggRuntime {
             .admission
             .drain_ready(self.now_ms, self.cluster_in_flight())?
         {
-            self.assign_request(ready.request, ready.arrival_time_ms, ready.replay_hashes)?;
+            self.assign_request(
+                ready.request,
+                ready.arrival_time_ms,
+                ready.session_id,
+                ready.replay_hashes,
+            )?;
             released_any = true;
         }
         Ok(released_any)
@@ -936,6 +964,20 @@ mod tests {
             .map(|uuid| collector.snapshot(*uuid).unwrap().input_length)
             .collect::<Vec<_>>();
         assert_eq!(dispatch_input_lengths, vec![64, 128, 192]);
+    }
+
+    #[test]
+    fn test_sticky_session_router_pins_follow_up_turn_to_original_worker() {
+        let args = fast_router_args();
+        let (_, stats) = run_concurrency_workload_multi_collect_with_stats(
+            &args,
+            multiturn_trace(),
+            2,
+            2,
+            ReplayRouterMode::StickySession,
+        );
+
+        assert_eq!(stats.dispatch_history, vec![0, 1, 0]);
     }
 
     #[test]
