@@ -66,9 +66,6 @@ vllm:
     runtime_image_tag: 24.04
     vllm_ref: v0.16.0
   flashinf_ref: v0.6.8.post1
-  # Keep aligned with the LMCache version preinstalled by the upstream
-  # vllm/vllm-openai runtime image so CUDA 13 can rebuild the same release.
-  lmcache_ref: 0.4.4
   vllm_omni_ref: "v0.20.0"
   # vLLM runtime NIXL is upgraded from the upstream vllm/vllm-openai image so
   # nixl_sys stubs can find libnixl_capi.so. Keep this in sync with the KVBM

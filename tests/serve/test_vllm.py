@@ -50,12 +50,13 @@ def _is_aarch64() -> bool:
     return arch in ("aarch64", "arm64")
 
 
-def _xfail_lmcache_aarch64_container():
+def _xfail_lmcache_upstream_container():
     return pytest.mark.xfail(
-        _is_aarch64(),
+        _is_cuda13() or _is_aarch64(),
         reason=(
-            "LMCache does not publish aarch64 wheels yet; the CUDA 13 x86_64 "
-            "container rebuilds LMCache from source instead"
+            "LMCache is provided by the upstream vLLM image. The CUDA 13 image "
+            "ships LMCache c_ops linked against libcudart.so.12, and LMCache "
+            "does not publish aarch64 wheels yet."
         ),
         strict=False,
     )
@@ -203,7 +204,7 @@ vllm_configs = {
         marks=[
             pytest.mark.core,
             pytest.mark.lmcache,
-            _xfail_lmcache_aarch64_container(),
+            _xfail_lmcache_upstream_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -227,7 +228,7 @@ vllm_configs = {
         marks=[
             pytest.mark.core,
             pytest.mark.lmcache,
-            _xfail_lmcache_aarch64_container(),
+            _xfail_lmcache_upstream_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
