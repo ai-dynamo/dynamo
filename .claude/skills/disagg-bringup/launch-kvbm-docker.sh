@@ -92,7 +92,7 @@ echo "Hub started on port ${HUB_PORT}"
 sleep 3
 
 echo "=== Step 3: Launch prefill (GPU 0, port ${PREFILL_PORT}) ==="
-KVBM_PREFILL_CFG="{\"kv_connector\":\"DynamoConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_module_path\":\"kvbm.v2.vllm.schedulers.connector\",\"kv_connector_extra_config\":{\"leader\":{\"disagg\":{\"hub_url\":\"http://127.0.0.1:${HUB_PORT}\",\"role\":\"prefill\"},\"cache\":{\"host\":{\"cache_size_gb\":4.0}},\"tokio\":{\"worker_threads\":4}},\"worker\":{\"nixl\":{\"backends\":{\"UCX\":{},\"POSIX\":{}}},\"tokio\":{\"worker_threads\":4}}}}"
+KVBM_PREFILL_CFG="{\"kv_connector\":\"DynamoConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_module_path\":\"kvbm.v2.vllm.schedulers.connector\",\"kv_connector_extra_config\":{\"leader\":{\"disagg\":{\"hub_url\":\"http://127.0.0.1:${HUB_PORT}\",\"role\":\"prefill\"},\"cache\":{\"host\":{\"cache_size_gb\":4.0}},\"tokio\":{\"worker_threads\":4}},\"worker\":{\"nixl\":{\"backends\":{\"POSIX\":{}}},\"tokio\":{\"worker_threads\":4}}}}"
 docker exec -d \
   -e PYTHONPATH="${PYTHONPATH_KVBM}" \
   -e HF_HOME=/scratch/hf_cache \
@@ -104,7 +104,7 @@ echo "Prefill started on GPU 0, port ${PREFILL_PORT}"
 sleep 3
 
 echo "=== Step 4: Launch decode (GPU 1, port ${DECODE_PORT}) ==="
-KVBM_DECODE_CFG="{\"kv_connector\":\"DynamoConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_module_path\":\"kvbm.v2.vllm.schedulers.connector\",\"kv_connector_extra_config\":{\"leader\":{\"disagg\":{\"hub_url\":\"http://127.0.0.1:${HUB_PORT}\",\"role\":\"decode\"},\"cache\":{\"host\":{\"cache_size_gb\":4.0}},\"tokio\":{\"worker_threads\":4}},\"worker\":{\"nixl\":{\"backends\":{\"UCX\":{},\"POSIX\":{}}},\"tokio\":{\"worker_threads\":4}}}}"
+KVBM_DECODE_CFG="{\"kv_connector\":\"DynamoConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_module_path\":\"kvbm.v2.vllm.schedulers.connector\",\"kv_connector_extra_config\":{\"leader\":{\"disagg\":{\"hub_url\":\"http://127.0.0.1:${HUB_PORT}\",\"role\":\"decode\"},\"cache\":{\"host\":{\"cache_size_gb\":4.0}},\"tokio\":{\"worker_threads\":4}},\"worker\":{\"nixl\":{\"backends\":{\"POSIX\":{}}},\"tokio\":{\"worker_threads\":4}}}}"
 docker exec -d \
   -e PYTHONPATH="${PYTHONPATH_KVBM}" \
   -e HF_HOME=/scratch/hf_cache \
