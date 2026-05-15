@@ -140,11 +140,8 @@ cases:
             sql: SELECT value WHERE note has brace } and bracket ]
         normal_text: ''
       vllm:
-        calls:
-        - name: run_query
-          arguments:
-            sql: SELECT value WHERE note has brace } and bracket ]
-        normal_text: ''
+        reason: vLLM Phi-4 splits on the closing bracket inside the argument string, then drops the call when JSON parsing fails.
+        calls: []
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.11.c:
@@ -166,11 +163,8 @@ cases:
             sql: literal functools marker[] stays text
         normal_text: ''
       vllm:
-        calls:
-        - name: run_query
-          arguments:
-            sql: literal functools marker[] stays text
-        normal_text: ''
+        reason: vLLM Phi-4 splits on the marker-like bracket inside the argument string, then drops the call when JSON parsing fails.
+        calls: []
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.12.a:
@@ -240,14 +234,8 @@ cases:
             timezone: EST
         normal_text: ''
       vllm:
-        calls:
-        - name: run_query
-          arguments:
-            sql: SELECT value WHERE note has brace } and bracket ]
-        - name: get_time
-          arguments:
-            timezone: EST
-        normal_text: ''
+        reason: vLLM Phi-4 splits on the closing bracket inside the first argument string, then drops all calls when JSON parsing fails.
+        calls: []
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.13.a:

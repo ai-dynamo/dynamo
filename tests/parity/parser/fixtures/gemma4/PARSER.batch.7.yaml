@@ -131,6 +131,7 @@ cases:
               empty: {}
         normal_text: ''
       vllm:
+        reason: vLLM parses Gemma-style bare null as JSON null; Dynamo and SGLang keep the token as the string 'null'.
         calls:
         - name: process_data
           arguments:
@@ -148,7 +149,7 @@ cases:
                 - 6
               flags:
                 enabled: true
-                retry: null
+                retry: 'null'
               empty: {}
         normal_text: ''
       sglang:
