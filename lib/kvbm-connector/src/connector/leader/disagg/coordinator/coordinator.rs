@@ -23,11 +23,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
 use futures::StreamExt;
-use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillParams, RemotePrefillRequest};
 use kvbm_engine::disagg::session::{
     AvailabilityDelta, CommitDelta, CommittedBlock, Session, SessionFactory,
 };
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
+use kvbm_protocols::disagg::{DISAGG_PROTOCOL_VERSION, RemotePrefillParams, RemotePrefillRequest};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 

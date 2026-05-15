@@ -64,13 +64,13 @@ use kvbm_connector::connector::leader::disagg::{
     AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, DecodeDisaggLeader,
     PrefillDisaggLeader,
 };
-use kvbm_disagg_protocol::{
-    DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
-};
 use kvbm_engine::disagg::session::MockSessionFactory;
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::manager::BlockManager;
+use kvbm_protocols::disagg::{
+    DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
+};
 
 const COMPUTED_BLOCKS: usize = 0;
 const LOCAL_BLOCKS: usize = 2;

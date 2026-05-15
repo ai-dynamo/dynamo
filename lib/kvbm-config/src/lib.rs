@@ -126,8 +126,8 @@ pub struct KvbmConfig {
     #[serde(default)]
     pub disagg: Option<DisaggConfig>,
 
-    /// Local axum control-plane configuration. Default is `enabled = false`
-    /// — the connector relies on velo handlers + the hub's HTTP proxy.
+    /// Leader control-plane module configuration. `core` + `transfer` are
+    /// always on; `dev` / `test` are opt-in and both default to `false`.
     #[validate(nested)]
     #[serde(default)]
     pub control: ControlConfig,
@@ -694,17 +694,11 @@ mod tests {
     #[test]
     fn test_control_default_is_disabled() {
         temp_env::with_vars_unset(
-            vec![
-                "KVBM_CONFIG_PATH",
-                "KVBM_CONTROL_ENABLED",
-                "KVBM_CONTROL_BIND_ADDR",
-                "KVBM_CONTROL_PORT",
-            ],
+            vec!["KVBM_CONFIG_PATH", "KVBM_CONTROL_DEV", "KVBM_CONTROL_TEST"],
             || {
                 let cfg = KvbmConfig::from_env().unwrap();
-                assert!(!cfg.control.enabled);
-                assert_eq!(cfg.control.bind_addr, "0.0.0.0");
-                assert_eq!(cfg.control.port, 9999);
+                assert!(!cfg.control.dev);
+                assert!(!cfg.control.test);
             },
         );
     }
@@ -713,15 +707,13 @@ mod tests {
     fn test_control_env_vars_apply() {
         temp_env::with_vars(
             vec![
-                ("KVBM_CONTROL_ENABLED", Some("true")),
-                ("KVBM_CONTROL_BIND_ADDR", Some("127.0.0.1")),
-                ("KVBM_CONTROL_PORT", Some("19999")),
+                ("KVBM_CONTROL_DEV", Some("true")),
+                ("KVBM_CONTROL_TEST", Some("true")),
             ],
             || {
                 let cfg = KvbmConfig::from_env().unwrap();
-                assert!(cfg.control.enabled);
-                assert_eq!(cfg.control.bind_addr, "127.0.0.1");
-                assert_eq!(cfg.control.port, 19999);
+                assert!(cfg.control.dev);
+                assert!(cfg.control.test);
             },
         );
     }
@@ -729,24 +721,20 @@ mod tests {
     #[test]
     fn test_control_via_json_leader_profile() {
         temp_env::with_vars_unset(
-            vec![
-                "KVBM_CONFIG_PATH",
-                "KVBM_CONTROL_ENABLED",
-                "KVBM_CONTROL_PORT",
-            ],
+            vec!["KVBM_CONFIG_PATH", "KVBM_CONTROL_DEV", "KVBM_CONTROL_TEST"],
             || {
                 let json = r#"{
                     "leader": {
-                        "control": { "enabled": true, "port": 12345 }
+                        "control": { "dev": true }
                     }
                 }"#;
                 let cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
-                assert!(cfg.control.enabled);
-                assert_eq!(cfg.control.port, 12345);
-                // Worker profile gets the default (disabled) since `control` was
-                // declared only under `leader`.
+                assert!(cfg.control.dev);
+                assert!(!cfg.control.test);
+                // Worker profile gets the default (all-disabled) since `control`
+                // was declared only under `leader`.
                 let wcfg = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
-                assert!(!wcfg.control.enabled);
+                assert!(!wcfg.control.dev);
             },
         );
     }

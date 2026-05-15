@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests for the hub's HTTP→velo proxy
-//! (`ConnectorControlManager`).
+//! (`ControlPlaneManager`).
 //!
 //! Stands up a hub plus a fake velo "connector" peer that registers a
 //! `kvbm.connector.leader.reset` handler returning canned
@@ -15,10 +15,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use kvbm_control_protocol::{
+use kvbm_hub::{ControlPlaneManager, HubServer};
+use kvbm_protocols::control::{
     ControlError, ControlReply, RESET_HANDLER, ResetRequest, ResetResponse, Tier, TierError,
 };
-use kvbm_hub::{ConnectorControlManager, HubServer};
 use velo::Handler;
 use velo::transports::tcp::TcpTransportBuilder;
 
@@ -45,7 +45,7 @@ async fn new_velo() -> Arc<velo::Velo> {
 
 async fn start_hub_with_proxy() -> HubServer {
     let transport = new_velo_transport();
-    let proxy: Arc<ConnectorControlManager> = Arc::new(ConnectorControlManager::new());
+    let proxy: Arc<ControlPlaneManager> = Arc::new(ControlPlaneManager::new());
     kvbm_hub::create_server_builder()
         .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
         .discovery_port(0)
@@ -283,7 +283,7 @@ async fn proxy_unknown_instance_returns_404() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proxy_discovery_only_returns_503() {
     // Hub WITHOUT a velo transport.
-    let proxy: Arc<ConnectorControlManager> = Arc::new(ConnectorControlManager::new());
+    let proxy: Arc<ControlPlaneManager> = Arc::new(ControlPlaneManager::new());
     let server = kvbm_hub::create_server_builder()
         .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
         .discovery_port(0)

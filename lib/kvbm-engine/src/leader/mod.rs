@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod accessor;
+pub mod control;
+mod describe_map;
 pub mod dispatch;
 mod instance;
 mod onboarding;
@@ -13,6 +15,7 @@ mod types;
 pub mod velo;
 
 pub use accessor::{BlockAccessor, PolicyContext, TieredBlock};
+pub use control::{ControlModule, ControlPlane, ControlPlaneBuilder};
 pub use instance::InstanceLeader;
 pub use onboarding::*;
 pub use session::{

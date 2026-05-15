@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 use futures::{FutureExt, future::BoxFuture};
-use kvbm_disagg_protocol::RemotePrefillRequest;
 use kvbm_hub::ConditionalDisaggClient;
+use kvbm_protocols::disagg::RemotePrefillRequest;
 use std::sync::Arc;
 
 pub trait RemotePrefillQueue: Send + Sync {

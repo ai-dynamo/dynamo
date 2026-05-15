@@ -5,7 +5,7 @@
 
 use derive_builder::Builder;
 use dynamo_tokens::{Tokens, compute_hash_v2};
-use kvbm_disagg_protocol::{RemotePrefillParams, TransferParams};
+use kvbm_protocols::disagg::{RemotePrefillParams, TransferParams};
 use serde::Serialize;
 
 /// Metadata for KVBM request integration.

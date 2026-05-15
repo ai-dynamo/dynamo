@@ -17,10 +17,10 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use kvbm_common::LogicalLayoutHandle;
-use kvbm_disagg_protocol::TransferParams;
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock, MutableBlock};
 use kvbm_physical::TransferOptions;
+use kvbm_protocols::disagg::TransferParams;
 
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request, SlotMatchSplit};

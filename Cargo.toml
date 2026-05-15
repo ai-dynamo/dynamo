@@ -13,14 +13,13 @@ members = [
     "lib/kvbm-common",
     "lib/kvbm-config",
     "lib/kvbm-connector",
-    "lib/kvbm-control-protocol",
-    "lib/kvbm-disagg-protocol",
     "lib/kvbm-engine",
     "lib/kvbm-hub",
     "lib/kvbm-kernels",
     "lib/kvbm-logical",
     "lib/kvbm-observability",
     "lib/kvbm-physical",
+    "lib/kvbm-protocols",
     "lib/protocols",
     "lib/parsers",
     "lib/bench",
@@ -56,13 +55,12 @@ fastokens = { version = "0.1.0" }
 # kvbm
 kvbm-common = { path = "lib/kvbm-common", version = "1.1.0" }
 kvbm-config = { path = "lib/kvbm-config", version = "1.1.0" }
-kvbm-control-protocol = { path = "lib/kvbm-control-protocol", version = "0.1.0" }
-kvbm-disagg-protocol = { path = "lib/kvbm-disagg-protocol", version = "0.1.0" }
 kvbm-engine = { path = "lib/kvbm-engine", version = "1.1.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.1.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.1.0" }
 kvbm-observability = { path = "lib/kvbm-observability", version = "1.0.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.1.0" }
+kvbm-protocols = { path = "lib/kvbm-protocols", version = "0.1.0" }
 kvbm-connector = { path = "lib/kvbm-connector", version = "0.1.0" }
 kvbm-hub = { path = "lib/kvbm-hub", version = "1.1.0" }
 

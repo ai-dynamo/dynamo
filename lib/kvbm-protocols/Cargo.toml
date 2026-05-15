@@ -2,17 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "kvbm-disagg-protocol"
+name = "kvbm-protocols"
 version = "0.1.0"
 edition.workspace = true
-description = "Shared protocol types for KVBM conditional disaggregation."
+description = "Shared KVBM wire protocols: conditional disaggregation and the public leader control plane."
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 keywords.workspace = true
 
+[features]
+default = []
+# Exposes `control::client` — the public velo client for the leader control
+# plane. Gated so pure wire-type consumers (e.g. kvbm-hub's proxy) don't pull
+# in the full velo transport unless they actually make calls.
+client = ["dep:velo", "dep:bytes"]
+
 [dependencies]
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -20,6 +28,8 @@ uuid = { workspace = true }
 
 kvbm-common = { workspace = true }
 velo-ext = { workspace = true }
+velo = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 
 [dev-dependencies]
 rmp-serde = { workspace = true }

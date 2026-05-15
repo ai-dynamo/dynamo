@@ -39,8 +39,8 @@ use dashmap::DashMap;
 use anyhow::{Result, anyhow};
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use kvbm_disagg_protocol::SessionEndpoint;
 use kvbm_logical::blocks::{ImmutableBlock, MutableBlock};
+use kvbm_protocols::disagg::SessionEndpoint;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 

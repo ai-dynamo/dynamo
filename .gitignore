@@ -107,9 +107,11 @@ TensorRT-LLM
 
 # The Linux kernel generates core dump files when a process crashes (receives signals
 # like SIGSEGV, SIGABRT, SIGBUS, etc.). The Linux container's /proc/sys/kernel/core_pattern
-# determines the filename (typically core or core.<pid>)
+# determines the filename (typically core or core.<pid>). Anchored to the repo root so
+# the pattern does not silently swallow source files named `core.rs` / `core.toml` in
+# nested module paths.
 /core
-core.*
+/core.*
 
 # Ruler Generated Files
 /.cursor/instructions.md

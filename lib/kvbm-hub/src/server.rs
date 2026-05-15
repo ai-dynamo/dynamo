@@ -294,11 +294,17 @@ impl HubServerBuilder {
             None
         };
 
+        // Create the master shutdown token *before* attaching managers so
+        // they can fork child tokens for any background work they spawn
+        // during attach (refresh tasks, watchers).
+        let cancel = CancellationToken::new();
+
         // Attach every manager now that the registry and (optional) Velo
         // are ready.
         let ctx = HubContext {
             velo: velo.clone(),
             registry: registry.clone(),
+            cancel: cancel.child_token(),
         };
         for (key, mgr) in &managers {
             mgr.attach(ctx.clone())
@@ -335,8 +341,6 @@ impl HubServerBuilder {
         let control_local = control_listener
             .local_addr()
             .context("control local_addr")?;
-
-        let cancel = CancellationToken::new();
 
         let reaper_task = registry.clone().spawn_liveness_task(cancel.child_token());
 
@@ -732,6 +736,16 @@ async fn register_instance(
             state.fan_out_unregister(instance_id);
             return Err(err);
         }
+    }
+
+    // Notify every manager that an instance has fully registered. Unlike the
+    // feature-keyed `on_register` loop above, this fan-out fires for every
+    // manager regardless of declared features — it is the discovery hook
+    // (e.g. control-plane manager queries `list_modules` from here). Errors
+    // here MUST NOT roll back registration; managers handle their own
+    // retry/backoff internally.
+    for mgr in state.managers.values() {
+        mgr.on_register_any(instance_id, &peer).await;
     }
 
     // Proactively inform the hub's Velo about this peer so outbound sends

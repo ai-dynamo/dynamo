@@ -12,13 +12,14 @@ use std::sync::Arc;
 
 use axum::Router;
 use futures::future::BoxFuture;
-use velo_ext::InstanceId;
+use tokio_util::sync::CancellationToken;
+use velo_ext::{InstanceId, PeerInfo};
 
 use crate::protocol::{Feature, FeatureKey};
 use crate::registry::PeerRegistry;
 
 pub mod conditional_disagg;
-pub mod connector_control;
+pub mod control_plane;
 
 /// Context handed to a [`FeatureManager`] at hub startup so it can stash any
 /// references it needs (e.g. the hub's Velo handle for active messaging).
@@ -29,6 +30,10 @@ pub struct HubContext {
     pub velo: Option<Arc<velo::Velo>>,
     /// The shared registry backing peer discovery.
     pub registry: Arc<dyn PeerRegistry>,
+    /// Child of the hub's master shutdown token. Managers spawning background
+    /// work (refresh tasks, watchers) should hang it off this so they exit on
+    /// hub shutdown. Existing managers may ignore it.
+    pub cancel: CancellationToken,
 }
 
 impl std::fmt::Debug for HubContext {
@@ -85,6 +90,23 @@ pub trait FeatureManager: Send + Sync + 'static {
         instance_id: InstanceId,
         feature: &'a Feature,
     ) -> BoxFuture<'a, Result<(), FeatureError>>;
+
+    /// Called once per successful `register_instance` for *every* attached
+    /// manager, regardless of which [`Feature`] payloads the client declared.
+    /// Default no-op — managers opt in to discover post-registration state
+    /// (e.g. query the leader's control plane).
+    ///
+    /// **Errors here MUST NOT roll back base registration.** The leader may
+    /// be briefly unreachable for follow-up control queries; that is not a
+    /// registration failure. Implementations return `()` and handle their own
+    /// retry/backoff internally.
+    fn on_register_any<'a>(
+        &'a self,
+        _instance_id: InstanceId,
+        _peer: &'a PeerInfo,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
 
     /// Called when an instance leaves the registry — either explicitly via
     /// HTTP `DELETE` or implicitly via TTL reaper. Must be idempotent.

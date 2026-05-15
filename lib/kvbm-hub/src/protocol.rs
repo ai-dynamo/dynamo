@@ -12,9 +12,9 @@
 
 /// Remote-prefill request payload carried by the hub's CD queue.
 ///
-/// The payload shape is owned by `kvbm-disagg-protocol`; the hub owns only
+/// The payload shape is owned by `kvbm-protocols (disagg)`; the hub owns only
 /// the queue transport, queue name, and feature registration surface.
-pub use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest as PrefillRequest};
+pub use kvbm_protocols::disagg::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest as PrefillRequest};
 use serde::{Deserialize, Serialize};
 use velo_ext::{InstanceId, PeerInfo, WorkerId};
 
@@ -78,6 +78,22 @@ pub mod paths {
 
     /// `GET` connector health (one-shot velo probe + last-heartbeat info).
     pub const CONNECTOR_HEALTH: &str = "/v1/instances/{instance_id}/health";
+
+    /// `GET` the set of control-plane modules enabled on this instance.
+    /// Body: `{ "modules": [..], "cached": bool, "age_secs": u64 }`. Cache is
+    /// populated on register and refreshed every 60s; `?force=true` triggers
+    /// an inline re-fetch.
+    pub const INSTANCE_MODULES: &str = "/v1/instances/{instance_id}/modules";
+
+    /// Describe an instance.
+    ///
+    /// - `GET`: returns the cached `InstanceDescription`. `503 describe_pending`
+    ///   if the leader has not yet pushed and `?force=true` was not set.
+    ///   `?force=true` triggers a fallback pull via the velo
+    ///   `describe_instance` handler.
+    /// - `POST`: accepts an [`InstanceDescription`] body (push from the leader);
+    ///   the hub stores it in its describe cache.
+    pub const INSTANCE_DESCRIBE: &str = "/v1/instances/{instance_id}/describe";
 }
 
 /// Velo-queue name used by the ConditionalDisagg feature to move prefill
@@ -250,6 +266,11 @@ pub fn instance_heartbeat(id: InstanceId) -> String {
 /// Path helper: format [`paths::INSTANCE_PROBE`] with a concrete id.
 pub fn instance_probe(id: InstanceId) -> String {
     format!("/v1/instances/{id}/probe")
+}
+
+/// Path helper: format [`paths::INSTANCE_DESCRIBE`] with a concrete id.
+pub fn instance_describe(id: InstanceId) -> String {
+    format!("/v1/instances/{id}/describe")
 }
 
 #[cfg(test)]

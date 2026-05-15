@@ -426,6 +426,12 @@ impl ConnectorLeader {
             )
             .with_cached_worker_metadata(worker_metadata);
 
+        // Stamp the disaggregation role onto the leader so `describe()` can
+        // surface it. Standalone leaders (no disagg config) carry `None`.
+        if let Some(disagg_cfg) = self.runtime.config().disagg.as_ref() {
+            leader_builder = leader_builder.role(disagg_cfg.role);
+        }
+
         // Stamp ParallelismDescriptors on per-worker metadata exported to
         // peer leaders, so cross-parallelism dispatch is informed (AB-1a).
         // Skip if num_heads is absent — leader falls back to the symmetric
@@ -467,6 +473,24 @@ impl ConnectorLeader {
 
         // Wrap in Arc for the engine builder and parallel_worker access
         let leader = Arc::new(leader);
+
+        // Register the public leader control plane. `core` + `transfer` are
+        // always on; `dev` / `test` are opt-in via `control.{dev,test}`. The
+        // `transfer` module reads the disagg `SessionFactory` lazily from a
+        // cell populated further below, once CD wiring builds the factory.
+        let control_cfg = &self.runtime.config().control;
+        let control_plane = leader
+            .register_control_plane(control_cfg.dev, control_cfg.test)
+            .context("registering leader control plane")?;
+        tracing::debug!(
+            dev = control_cfg.dev,
+            test = control_cfg.test,
+            "Leader control plane registered"
+        );
+
+        // Surface the enabled module set on the leader so `describe()` can
+        // report it without having to re-traverse the control plane object.
+        leader.set_modules(control_plane.enabled_modules().to_vec());
 
         // Build OffloadEngine with config-driven policies
         tracing::debug!("Building OffloadEngine");
@@ -647,53 +671,10 @@ impl ConnectorLeader {
         let workers = self.init.lock().clone();
         let _ = self.workers.set(Arc::new(workers));
 
-        // Register velo control-plane handlers on the leader's messenger.
-        // These are the canonical transport for connector control; the
-        // hub's HTTP→velo proxy and any direct-velo callers reach the
-        // leader through these handlers regardless of whether the local
-        // axum is enabled.
-        super::velo_control::register_handlers(self.runtime.messenger(), self.clone())
-            .context("registering connector-leader velo control handlers")?;
-        tracing::info!("Registered connector-leader velo control handlers");
-
-        // Start the local axum control server only when explicitly enabled.
-        // Default: disabled — control operations reach the connector via
-        // velo handlers + the hub's HTTP→velo proxy.
-        let control_cfg = self.runtime.config().control.clone();
-        if control_cfg.enabled {
-            tracing::debug!(
-                bind_addr = %control_cfg.bind_addr,
-                port = control_cfg.port,
-                "Starting local axum control server"
-            );
-            match super::control::start_control_server(
-                self.clone(),
-                self.runtime.tokio(),
-                &control_cfg,
-            )
-            .await
-            {
-                Ok(shutdown_tx) => {
-                    let _ = self.control_server_shutdown.set(shutdown_tx);
-                    tracing::info!(
-                        bind_addr = %control_cfg.bind_addr,
-                        port = control_cfg.port,
-                        "Local axum control server listening"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to start local axum control server: {}. Continuing without it.",
-                        e
-                    );
-                }
-            }
-        } else {
-            tracing::debug!(
-                "Local axum control server disabled (control.enabled=false); \
-                 control operations available via velo handlers and hub proxy"
-            );
-        }
+        // The connector-leader control plane lives on the engine — it was
+        // registered above via `leader.register_control_plane(...)`. The
+        // hub's HTTP→velo proxy reaches it through the same handler-name
+        // strings, so nothing on the hub side changes.
 
         // Log the instance_id for distributed discovery
         // Operators can use this ID with the /register_leader endpoint on other instances
@@ -766,6 +747,10 @@ impl ConnectorLeader {
                 tokio_handle.clone(),
                 Arc::clone(&peer_resolver) as Arc<dyn kvbm_engine::disagg::session::PeerResolver>,
             );
+
+            // Hand the factory to the engine control plane's `transfer`
+            // module (registered earlier with an empty cell). Idempotent.
+            leader.set_session_factory(Arc::clone(&session_factory));
 
             // Construct the role-specific concrete leader (and, for
             // prefill, its coordinator).  We hold concrete `Arc<...>`
@@ -875,6 +860,76 @@ impl ConnectorLeader {
             );
             self.set_cd_api(dispatcher)
                 .context("install CD dispatcher")?;
+
+            // Phase C — push the leader's `InstanceDescription` to the hub.
+            //
+            // 1. Inject `hub_instance_id` (if the hub registered with a velo
+            //    participant — discovery-only hubs return `None`).
+            // 2. Inject `config_blob` so `describe.config` surfaces the
+            //    leader's `KvbmConfig`.
+            // 3. Spawn a task that briefly waits for workers to stamp their
+            //    layouts (500 ms cheat; replace with a stamping-ready signal
+            //    in a follow-up), then calls `leader.describe()` and POSTs
+            //    the result. Failures fall back to the hub's pull path.
+            if let Some(hub_id) = hub_velo_id {
+                leader.set_hub_instance_id(hub_id);
+            }
+            match serde_json::to_value(self.runtime.config()) {
+                Ok(blob) => {
+                    leader.set_config_blob(blob);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e,
+                        "failed to serialise KvbmConfig for describe push; \
+                         continuing without config in describe");
+                }
+            }
+            {
+                let hub = Arc::clone(&hub);
+                let leader = Arc::clone(&leader);
+                let instance_id = self.runtime.messenger().instance_id();
+                self.runtime.tokio().spawn(async move {
+                    // Brief settle wait — give workers a chance to stamp
+                    // before the first push so the initial snapshot isn't
+                    // empty. If they're slow, an incomplete payload still
+                    // ships and the operator can force a refresh later via
+                    // `?force=true`.
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    // Bound `describe()` so an unresponsive worker doesn't
+                    // hang the push task forever. The hub's fallback pull
+                    // path covers any leader that loses this race.
+                    let describe = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        leader.describe(),
+                    )
+                    .await;
+                    match describe {
+                        Ok(Ok(payload)) => {
+                            if let Err(e) = hub.push_describe(instance_id, &payload).await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "initial describe push failed; hub can pull via ?force=true"
+                                );
+                            } else {
+                                tracing::info!(
+                                    instance = %instance_id,
+                                    workers = payload.workers.len(),
+                                    "describe pushed to hub"
+                                );
+                            }
+                        }
+                        Ok(Err(e)) => tracing::warn!(
+                            error = %e,
+                            "leader.describe() failed; hub describe will stay pending until \
+                             a forced pull"
+                        ),
+                        Err(_) => tracing::warn!(
+                            "leader.describe() timed out after 5s; hub describe will stay \
+                             pending until a forced pull"
+                        ),
+                    }
+                });
+            }
         }
 
         Ok(())

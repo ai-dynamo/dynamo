@@ -281,6 +281,40 @@ impl HubClient {
         self.guard.get().is_some()
     }
 
+    /// Push an [`InstanceDescription`] for `instance_id` to the hub's describe
+    /// cache. Used by the leader-side connector after `set_config_blob` and
+    /// (where applicable) `set_hub_instance_id` have populated the leader's
+    /// describe inputs.
+    ///
+    /// **Steady-state path.** The hub stores the pushed payload; subsequent
+    /// `GET /v1/instances/{id}/describe` requests serve from the cache without
+    /// the hub initiating a velo round-trip. The hub falls back to pulling via
+    /// the [`DESCRIBE_INSTANCE_HANDLER`] velo handler only when the cache is
+    /// cold and an operator explicitly forces it.
+    ///
+    /// [`InstanceDescription`]: kvbm_protocols::control::InstanceDescription
+    /// [`DESCRIBE_INSTANCE_HANDLER`]: kvbm_protocols::control::DESCRIBE_INSTANCE_HANDLER
+    pub async fn push_describe(
+        &self,
+        instance_id: InstanceId,
+        payload: &kvbm_protocols::control::InstanceDescription,
+    ) -> Result<()> {
+        let url = self.control_url(&protocol::instance_describe(instance_id))?;
+        let resp = self
+            .http
+            .post(url)
+            .json(payload)
+            .send()
+            .await
+            .with_context(|| format!("POST /v1/instances/{instance_id}/describe"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("push_describe rejected ({status}): {body}");
+        }
+        Ok(())
+    }
+
     /// Send a control-plane heartbeat for the registered instance over HTTP.
     ///
     /// Returns an error if no instance has been registered on this client.
