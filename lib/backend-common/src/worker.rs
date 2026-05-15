@@ -1529,6 +1529,38 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // stamp_canary_marker
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn stamp_canary_marker_injects_into_object() {
+        let stamped = stamp_canary_marker(serde_json::json!({"token_ids": [1]})).unwrap();
+        assert_eq!(
+            stamped[crate::engine::HEALTH_CHECK_KEY],
+            serde_json::json!(true)
+        );
+        assert_eq!(stamped["token_ids"], serde_json::json!([1]));
+    }
+
+    #[test]
+    fn stamp_canary_marker_rejects_non_object() {
+        assert!(stamp_canary_marker(serde_json::json!([1, 2, 3])).is_none());
+        assert!(stamp_canary_marker(serde_json::json!(42)).is_none());
+    }
+
+    #[test]
+    fn stamp_canary_marker_overrides_falsy_marker() {
+        // An operator can't disarm the marker by setting it false in their override.
+        let stamped =
+            stamp_canary_marker(serde_json::json!({crate::engine::HEALTH_CHECK_KEY: false}))
+                .unwrap();
+        assert_eq!(
+            stamped[crate::engine::HEALTH_CHECK_KEY],
+            serde_json::json!(true)
+        );
+    }
+
+    // -------------------------------------------------------------------
     // graceful_shutdown_timeout env-var parsing
     // -------------------------------------------------------------------
 

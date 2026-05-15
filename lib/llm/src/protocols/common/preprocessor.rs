@@ -124,7 +124,13 @@ pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalDat
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
 pub struct PreprocessedRequest {
-    /// ID of the model to use
+    /// ID of the model to use.
+    ///
+    /// `serde(default)` so canary payloads from the runtime's
+    /// `HealthCheckManager` deserialize without carrying a model name —
+    /// real traffic always has this set by the preprocessor; only the
+    /// in-process canary path is allowed to omit it.
+    #[serde(default)]
     pub model: String,
 
     /// Type of prompt
@@ -147,21 +153,25 @@ pub struct PreprocessedRequest {
     pub mm_routing_info: Option<MmRoutingInfo>,
 
     /// StopConditions are conditions that the inference engine will use to stop generation.
+    #[serde(default)]
     pub stop_conditions: StopConditions,
 
     /// SamplingOptions directs the inference engine to use sampling instead of greedy decoding.
     /// More documentation on how and on the order in which sampling options are applied
     /// are needed.
+    #[serde(default)]
     pub sampling_options: SamplingOptions,
 
     /// OutputOptions are options that control the output of the inference engine such as whether
     /// to return log probabilities, or whether to skip special tokens in output.
+    #[serde(default)]
     pub output_options: OutputOptions,
 
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.
     /// TODO - refactor this to a better location
     #[builder(default)]
+    #[serde(default)]
     pub eos_token_ids: Vec<TokenIdType>,
 
     /// The computed checksum of the Model Deployment Card (MDC).
@@ -170,6 +180,7 @@ pub struct PreprocessedRequest {
 
     /// User requested annotations for the request
     #[builder(default)]
+    #[serde(default)]
     pub annotations: Vec<String>,
 
     /// Routing hints for worker targeting (backend_instance_id, prefill/decode worker IDs, dp_rank)
@@ -342,5 +353,22 @@ mod tests {
         assert!(probe.contains("\"_HEALTH_CHECK\":true"), "got: {probe}");
         let back: PreprocessedRequest = serde_json::from_str(&probe).unwrap();
         assert!(back.is_probe);
+    }
+
+    /// Canary payloads carry only engine-relevant fields. All other required
+    /// fields (`model`, `stop_conditions`, `sampling_options`, etc.) must
+    /// pick up `serde(default)` so the runtime's `JsonProbeAdapter` can
+    /// deserialize without rewriting the JSON. Regression guard against the
+    /// "missing field" failures the smoke tests hit.
+    #[test]
+    fn minimal_canary_payload_deserializes() {
+        let req: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1],
+            "_HEALTH_CHECK": true,
+        }))
+        .unwrap();
+        assert_eq!(req.token_ids, vec![1]);
+        assert!(req.is_probe);
+        assert_eq!(req.model, "");
     }
 }
