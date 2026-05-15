@@ -264,4 +264,83 @@ mod tests {
             .expect("expfmt");
         assert!(text.contains("# external metric"));
     }
+
+    /// Multi-level test hierarchy. Mirrors production's
+    /// [drt, namespace, component, endpoint] chain so
+    /// `compute_auto_labels` emits dynamo_namespace / dynamo_component /
+    /// dynamo_endpoint — the entries that collide with `create_metric`'s
+    /// auto-injection if `LifecycleGauges::new` doesn't filter them out.
+    struct NamedHierarchy {
+        registry: dynamo_runtime::metrics::MetricsRegistry,
+        name: String,
+        parents: Vec<NamedHierarchy>,
+    }
+
+    impl MetricsHierarchy for NamedHierarchy {
+        fn basename(&self) -> String {
+            self.name.clone()
+        }
+        fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+            self.parents
+                .iter()
+                .map(|p| p as &dyn MetricsHierarchy)
+                .collect()
+        }
+        fn get_metrics_registry(&self) -> &dynamo_runtime::metrics::MetricsRegistry {
+            &self.registry
+        }
+    }
+
+    fn leaf(name: &str) -> NamedHierarchy {
+        NamedHierarchy {
+            registry: Default::default(),
+            name: name.to_string(),
+            parents: Vec::new(),
+        }
+    }
+
+    /// Regression: `LifecycleGauges::new` must filter auto-injected
+    /// hierarchy labels out of `metrics.auto_labels()` before handing to
+    /// `create_metric` — otherwise `create_metric` rejects with "Label
+    /// already auto-added" and the gauges silently fail to register.
+    #[test]
+    fn lifecycle_gauges_register_and_observe() {
+        let endpoint = NamedHierarchy {
+            registry: Default::default(),
+            name: "generate".to_string(),
+            parents: vec![leaf("drt"), leaf("dyn"), leaf("backend")],
+        };
+        let config = EngineConfig {
+            model: "test-model".to_string(),
+            ..Default::default()
+        };
+        let metrics = EngineMetrics::with_engine_config(endpoint, &config);
+        // Sanity: auto_labels contains the entries that would collide with
+        // create_metric's auto-injection.
+        let auto = metrics.auto_labels();
+        assert_eq!(auto.get(labels::NAMESPACE).map(String::as_str), Some("dyn"));
+        assert_eq!(auto.get(labels::COMPONENT).map(String::as_str), Some("backend"));
+        assert_eq!(auto.get(labels::ENDPOINT).map(String::as_str), Some("generate"));
+
+        let lifecycle = LifecycleGauges::new(&metrics).expect("construct lifecycle gauges");
+        lifecycle.observe_cleanup_time(1.5);
+        lifecycle.observe_drain_time(0.25);
+
+        let text = metrics
+            .hierarchy()
+            .get_metrics_registry()
+            .prometheus_expfmt_combined()
+            .expect("expfmt");
+        assert!(
+            text.contains("dynamo_component_cleanup_time_seconds"),
+            "cleanup gauge missing from /metrics: {text}"
+        );
+        assert!(
+            text.contains("dynamo_component_drain_time_seconds"),
+            "drain gauge missing from /metrics: {text}"
+        );
+        // The observed values must round-trip through the scrape.
+        assert!(text.contains(" 1.5"), "cleanup value missing: {text}");
+        assert!(text.contains(" 0.25"), "drain value missing: {text}");
+    }
 }

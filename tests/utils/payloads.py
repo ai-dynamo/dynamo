@@ -1020,6 +1020,40 @@ class MetricsPayload(BasePayload):
                     f"SUCCESS: Found {name} = {float(value):.2f}s"
                 ),
             ),
+            # Framework-owned lifecycle gauge (Rust-side LifecycleGauges).
+            # Registered at Worker setup, observed at shutdown — while the
+            # worker is serving, the value is 0. The "name appears" check
+            # is what catches the regression where the gauge silently
+            # fails to register against the runtime's MetricsRegistry.
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.lifecycle.CLEANUP_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.lifecycle.DRAIN_TIME_SECONDS}",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) >= 0,
+                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
+                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+            ),
+            # Engine-side hit-rate gauge (Python LLMBackendMetrics). Has
+            # no data rows until the engine populates per-rank values, so
+            # check HELP-line presence via multiline. Catches the bridge
+            # regression where LLMBackendMetrics construction is gated on
+            # the engine returning per-rank sources.
+            MetricCheck(
+                name=f"{prefix}_{prometheus_names.kvstats.KV_CACHE_HIT_RATE}",
+                pattern=lambda name: rf"^# HELP {name}\b",
+                validator=lambda matches: len(matches) >= 1,
+                error_msg=lambda name, matches: (
+                    f"{name} HELP line missing — gauge not registered"
+                ),
+                success_msg=lambda name, matches: f"SUCCESS: {name} registered",
+                multiline=True,
+            ),
         ]
 
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
