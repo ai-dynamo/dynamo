@@ -26,6 +26,8 @@ spec:
       labels:
         app: kimi-k25-agg-kv-eagle-bench
     spec:
+      # Requires an untainted CPU/spare node so the bench pod doesn't share a node with
+      # GPU workers. If no spare node is available on your setup, remove the affinity block below.
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
