@@ -29,8 +29,6 @@ worth testing.
 
 That is the motivation for DynoSim: a Dynamo digital twin.
 
-[placeholder: confirm exact public wording for "digital twin"]
-
 In this post, a digital twin means a workload-driven discrete-event simulation
 of the Dynamo serving stack: engine schedulers, forward-pass timing, KV and cache
 behavior, routers, autoscaling, and workload traces. The goal is not a purely
