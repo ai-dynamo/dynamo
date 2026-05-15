@@ -304,7 +304,10 @@ def _is_planner_scalable_worker_service(
 
     inferred_type = _infer_subcomponent_from_service_name(service_name)
     if inferred_type is not None:
-        return inferred_type in target_subcomponents
+        if inferred_type in target_subcomponents:
+            service_config["subComponentType"] = inferred_type
+            return True
+        return False
 
     # Some agg templates have one generic worker name and no subComponentType.
     # Mark it as decode so the Kubernetes planner can rediscover the target.

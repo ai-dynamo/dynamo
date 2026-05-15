@@ -605,7 +605,9 @@ class TestAssembleFinalConfig:
 
         services = dgd_config["spec"]["services"]
         assert services["VllmPrefillWorker"]["scalingAdapter"] == {"enabled": True}
+        assert services["VllmPrefillWorker"]["subComponentType"] == "prefill"
         assert "scalingAdapter" not in services["VllmDecodeWorker"]
+        assert "subComponentType" not in services["VllmDecodeWorker"]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
