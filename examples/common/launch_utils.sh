@@ -65,28 +65,23 @@ EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit
 #   python -m dynamo.vllm --model "$MODEL" &
 #   wait_any_exit
 
-# Reaps tracked background jobs before exit so children don't reparent as
-# zombies under a non-reaping subreaper (pytest in CI containers). The test
-# harness's pgid liveness check otherwise burns 8s on those zombies — see
-# _terminate_process_group in tests/utils/managed_process.py.
+# Signals the pgid, reaps tracked jobs, then exits with the given code.
+# Without explicit reaping, children reparent as zombies under a non-reaping
+# subreaper (pytest in CI), and the harness's pgid liveness check
+# (_terminate_process_group in managed_process.py) burns 8s on them.
 dynamo_reap_and_exit() {
     local _rc=${1:-0}
-    # Shield bash from its own SIGTERM/SIGINT before signaling the pgid.
-    # Without this, `kill -TERM 0` boomerangs onto bash and re-enters this
-    # trap. `trap ''` only changes bash's disposition; already-running
-    # children keep their default signal handling.
+    # Shield bash from its own pgid TERM/INT; otherwise the kill below
+    # boomerangs and re-enters this trap.
     trap '' TERM INT
     if [[ -n "$(jobs -p)" ]]; then
-        # Signal the entire process group so grandchildren (subprocesses
-        # spawned by tracked jobs) get TERM too, not just direct children.
-        kill -TERM 0 2>/dev/null || true
+        kill -TERM 0 2>/dev/null || true  # whole pgid, including grandchildren
     fi
     wait 2>/dev/null || true
     exit "$_rc"
 }
 
-# EXIT-trap helper for scripts that don't use wait_any_exit. Captures the
-# script's exit status before `echo` clobbers $?, then runs cleanup.
+# EXIT-trap helper; captures $? before echo clobbers it.
 dynamo_exit_trap() {
     local _rc=$?
     echo "Cleaning up..."
@@ -103,9 +98,7 @@ wait_any_exit() {
     local _rc=0
     wait -n || _rc=$?
     echo "A background process exited with code $_rc"
-    # Re-arm the signal trap as a backstop for signals arriving while
-    # the synchronous call below is reaping. Double quotes bake in the
-    # current _rc value (local goes out of scope when bash exits).
+    # Backstop signal trap; double quotes bake _rc in before it goes out of scope.
     # shellcheck disable=SC2064  # intentional expand-at-set-time
     trap "dynamo_reap_and_exit $_rc" TERM INT
     dynamo_reap_and_exit "$_rc"
