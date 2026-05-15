@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from types import SimpleNamespace
 from typing import Any
@@ -38,6 +39,19 @@ _HARMONY_ANALYSIS_RE = re.compile(
     re.DOTALL,
 )
 _HARMONY_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|]+?\|>")
+_HARMONY_MESSAGE_RE = re.compile(
+    r"(?:<\|start\|>assistant)?"
+    r"<\|channel\|>(?P<channel>\w+)"
+    r"(?P<header>.*?)"
+    r"<\|message\|>(?P<body>.*?)"
+    r"(?P<stop><\|call\|>|<\|end\|>|<\|return\|>|$)",
+    re.DOTALL,
+)
+_HARMONY_RECIPIENT_RE = re.compile(r"\bto=(?P<recipient>functions\.[\w.\-]+)")
+
+
+class _HarmonyEncodingUnavailable(RuntimeError):
+    pass
 
 
 class _OmnivorousVocab(dict):
@@ -84,7 +98,10 @@ def _harmony_token_ids(raw_text: str) -> list[int]:
     if text.startswith(_HARMONY_ASSISTANT_START):
         text = text[len(_HARMONY_ASSISTANT_START) :]
 
-    enc = get_encoding()
+    try:
+        enc = get_encoding()
+    except Exception as e:
+        raise _HarmonyEncodingUnavailable(f"{type(e).__name__}: {e}") from e
     return enc.encode(text, allowed_special=enc.special_tokens_set)
 
 
@@ -134,6 +151,57 @@ def _harmony_token_text_and_normal_text(raw_text: str) -> tuple[str, str | None]
 def _merge_normal_text(first: str | None, second: str | None) -> str | None:
     merged = "".join(part for part in (first, second) if part)
     return merged if merged.strip() else None
+
+
+def _harmony_parse_without_encoding(
+    token_text: str,
+    residual_normal_text: str | None,
+) -> ParseResult:
+    """Mirror vLLM's OpenAI parser when Harmony encoding cannot be loaded.
+
+    vLLM's OpenAIToolParser extracts completed `functions.*` commentary
+    messages, parses valid JSON arguments, and otherwise preserves the raw
+    argument text. Final-channel text and recipient-less commentary preambles
+    are visible content; analysis and malformed tool-call messages are hidden.
+    """
+
+    calls = []
+    final_content = None
+    commentary_content = None
+
+    for match in _HARMONY_MESSAGE_RE.finditer(token_text):
+        channel = match.group("channel")
+        header = match.group("header")
+        body = match.group("body")
+        stop = match.group("stop")
+        recipient_match = _HARMONY_RECIPIENT_RE.search(header)
+        recipient = recipient_match.group("recipient") if recipient_match else None
+
+        if recipient and recipient.startswith("functions."):
+            if channel != "commentary" or stop != "<|call|>":
+                continue
+            try:
+                arguments = json.loads(body)
+            except json.JSONDecodeError:
+                arguments = body
+            calls.append(
+                {
+                    "name": recipient.split("functions.", 1)[1],
+                    "arguments": arguments,
+                }
+            )
+        elif channel == "final":
+            final_content = body
+        elif channel == "commentary" and stop != "<|call|>":
+            commentary_content = body
+
+    return ParseResult(
+        calls=calls,
+        normal_text=_merge_normal_text(
+            residual_normal_text,
+            final_content or commentary_content,
+        ),
+    )
 
 
 # Maps parser_family → vLLM's registered parser key (registered via
@@ -196,11 +264,17 @@ def parse(
             token_text, residual_normal_text = _harmony_token_text_and_normal_text(
                 raw_text
             )
-            info = parser.extract_tool_calls(
-                token_text,
-                request,
-                token_ids=_harmony_token_ids(token_text),
-            )
+            try:
+                info = parser.extract_tool_calls(
+                    token_text,
+                    request,
+                    token_ids=_harmony_token_ids(token_text),
+                )
+            except _HarmonyEncodingUnavailable:
+                return _harmony_parse_without_encoding(
+                    token_text,
+                    residual_normal_text,
+                )
         else:
             residual_normal_text = None
             info = parser.extract_tool_calls(raw_text, request)

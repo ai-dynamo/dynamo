@@ -73,6 +73,16 @@ fn encode_text_to_tokens(text: &str) -> anyhow::Result<Vec<u32>> {
     Ok(enc.tokenizer().encode_with_special_tokens(text))
 }
 
+fn decode_input_text(text: &str, token_ids: &[u32]) -> String {
+    if !token_ids.is_empty()
+        && let Ok(enc) = get_harmony_encoding()
+    {
+        return enc.tokenizer().decode_utf8(token_ids).unwrap_or_default();
+    }
+
+    text.to_string()
+}
+
 impl ReasoningParser for GptOssReasoningParser {
     fn detect_and_parse_reasoning(&mut self, text: &str, token_ids: &[u32]) -> ParserResult {
         let token_ids = if token_ids.is_empty() {
@@ -223,6 +233,11 @@ impl ReasoningParser for GptOssReasoningParser {
                     _ => {}
                 }
             }
+        }
+
+        let raw_input_text = decode_input_text(text, token_ids);
+        if raw_input_text.contains("<|call|>") {
+            normal_delta.push_str(&raw_input_text);
         }
 
         if !normal_delta.is_empty() || !reasoning_delta.is_empty() {
