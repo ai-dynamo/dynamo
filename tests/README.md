@@ -100,6 +100,10 @@ dynamo/
 | Deployment         | Deployment validation                 | `tests/deploy/`                               |
 | Benchmark          | Performance/load                      | `benchmarks/`                                 |
 
+### Test Oracles
+
+Logs are diagnostics, not functional or semantic oracles. Do not make pass/fail assertions by scraping debug or info log lines; assert behavior through API responses, structured response fields, metrics, or test helper APIs.
+
 ---
 
 ## Test Marking: How to Mark Tests
