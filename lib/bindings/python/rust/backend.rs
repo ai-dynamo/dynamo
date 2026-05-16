@@ -85,7 +85,14 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
 // Capability — mirror of `dynamo_backend_common::schema::Capability`.
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "dynamo._core.backend", name = "Capability", eq, eq_int, hash, frozen)]
+#[pyclass(
+    module = "dynamo._core.backend",
+    name = "Capability",
+    eq,
+    eq_int,
+    hash,
+    frozen
+)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Capability {
     PromptEmbeds = 1,
