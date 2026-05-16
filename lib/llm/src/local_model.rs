@@ -256,6 +256,12 @@ impl LocalModelBuilder {
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
 
+        // Pick up a stable routing id from the environment (HOSTNAME on K8s StatefulSets,
+        // or the DYN_STABLE_ROUTING_ID override). No-op if the caller already supplied one
+        // or neither env var is set. Published in etcd so routing layers can keep cache
+        // assignments stable across worker restarts.
+        self.runtime_config.populate_stable_routing_id_from_env();
+
         let template = self
             .template_file
             .as_deref()
