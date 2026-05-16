@@ -48,8 +48,8 @@ use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
-        NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
-        NvCreateChatCompletionStreamResponse,
+        INTERNAL_PRESERVE_OMITTED_MAX_TOKENS, NvCreateChatCompletionRequest,
+        NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
     },
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -1577,9 +1577,9 @@ async fn responses(
     check_ready(&state)?;
 
     // Apply template values if present. When no template and no client-supplied
-    // max_output_tokens, leave it as None for response echoing; the Responses
-    // to Chat conversion applies a bounded internal generation cap before the
-    // request reaches a backend.
+    // max_output_tokens, leave it as None for response echoing and let the
+    // backend adapter compute the dynamic generation cap from its effective
+    // prompt length.
     if let Some(template) = template {
         if request.inner.model.as_deref().unwrap_or("").is_empty() {
             request.inner.model = Some(template.model.clone());
@@ -1665,6 +1665,12 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    if response_params.max_output_tokens.is_none() {
+        chat_request.unsupported_fields.insert(
+            INTERNAL_PRESERVE_OMITTED_MAX_TOKENS.to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
 
     // Always use internal streaming for aggregation.
     // Set stream_options.include_usage so the backend sends token counts in the final chunk.
