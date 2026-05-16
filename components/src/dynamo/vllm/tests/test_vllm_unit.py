@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from dynamo.vllm.args import (
+    _arg_was_provided,
     _connector_to_kv_transfer_json,
     _is_routable,
     _uses_dynamo_connector,
@@ -382,6 +383,11 @@ def test_logprobs_mode_underscore_flag_is_tracked(mock_vllm_cli):
     config = parse_args()
 
     assert config.logprobs_mode_explicitly_set is True
+
+
+def test_arg_was_provided_accepts_underscore_alias():
+    assert _arg_was_provided(["--logprobs_mode", "raw_logprobs"], "--logprobs-mode")
+    assert _arg_was_provided(["--logprobs_mode=raw_logprobs"], "--logprobs-mode")
 
 
 # --disaggregation-mode tests

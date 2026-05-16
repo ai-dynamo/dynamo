@@ -127,7 +127,8 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
 
 def _arg_was_provided(argv: list[str], option: str) -> bool:
-    aliases = {option, option.replace("-", "_")}
+    normalized = option[:2] + option[2:].replace("-", "_")
+    aliases = {option, normalized}
     return any(
         arg in aliases or any(arg.startswith(f"{alias}=") for alias in aliases)
         for arg in argv
