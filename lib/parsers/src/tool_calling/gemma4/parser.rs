@@ -70,34 +70,30 @@ pub fn find_tool_call_end_position_gemma4(chunk: &str) -> Option<usize> {
 
 /// Parse a Gemma 4 model response into structured tool calls + leftover text.
 ///
-/// Returns `(parsed_tool_calls, normal_text_content)`. Text outside any
-/// `<|tool_call>call:NAME{...}<tool_call|>` match is returned as `normal_text`.
-/// When a tool call is truncated (start marker present but no `}<tool_call|>`
-/// terminator — typically because the model hit `max_tokens` mid-call), the
-/// regex finds no match and the raw bytes after the start marker are echoed
-/// back as `normal_text` so the caller can detect the truncation and surface
-/// it to the user.
+/// Returns `(parsed_tool_calls, normal_text_content)`. `normal_text` is the
+/// text BEFORE the first `<|tool_call>` start marker, trimmed of whitespace.
+/// Text between calls, after the last call, and truncated-incomplete-call
+/// tails are all dropped — matching upstream vLLM
+/// (`vllm/tool_parsers/gemma4_tool_parser.py::extract_tool_calls`) which
+/// computes `content = model_output[:content_end].strip()` where
+/// `content_end = model_output.find(self.tool_call_start_token)`.
 ///
-/// Mirrors upstream's `extract_tool_calls` in `vllm/tool_parsers/
-/// gemma4_tool_parser.py`, which uses `tool_call_regex.findall(model_output)`
-/// directly. The `}<tool_call|>` adjacency requirement in the regex means
-/// embedded `<tool_call|>` literals inside string-typed args (e.g. a
-/// `description` field documenting the tool-call format) don't truncate the
-/// match prematurely.
+/// Per `tests/parity/README.md`: vLLM and SGLang both drop trailing text
+/// after the wrapper across XML-style families; this aligns Dynamo to that
+/// behavior. Cases: PARSER.batch.{2.c, 8.b, 8.c, 8.d}.
+///
+/// The `}<tool_call|>` adjacency requirement in the regex means embedded
+/// `<tool_call|>` literals inside string-typed args (e.g. a `description`
+/// field documenting the tool-call format) don't truncate the match
+/// prematurely.
 pub fn try_tool_call_parse_gemma4(
     message: &str,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let regex = tool_call_regex();
     let mut calls = Vec::new();
-    let mut normal_parts = Vec::new();
-    let mut cursor = 0;
 
     for caps in regex.captures_iter(message) {
-        let whole = caps.get(0).expect("capture 0 always present");
-        normal_parts.push(&message[cursor..whole.start()]);
-        cursor = whole.end();
-
         let name = caps
             .name("name")
             .map(|m| m.as_str().to_string())
@@ -136,20 +132,66 @@ pub fn try_tool_call_parse_gemma4(
         });
     }
 
-    // Anything after the last complete match — including a truncated
-    // `<|tool_call>call:...` with no closing `}<tool_call|>` — is returned to
-    // the caller as `normal_text` so model truncation is visible rather than
-    // silently swallowed.
-    normal_parts.push(&message[cursor..]);
-
-    let normal_text = normal_parts.join("").trim().to_string();
-    let normal_content = if normal_text.is_empty() {
-        Some(String::new())
+    // No-leak contract for `normal_text`:
+    //   - Success path (≥1 call extracted): prefix BEFORE the first
+    //     `<|tool_call>` start marker — mirrors vLLM's
+    //     `content = model_output[:content_end].strip()`. Inter-call,
+    //     trailing, and truncation tails after a successful call are dropped.
+    //   - Recovery path (zero calls extracted): if the message contains ANY
+    //     gemma4 markup token (`<|tool_call>`, `<tool_call|>`, `<|"|>`),
+    //     return empty — Dynamo intentionally diverges from vLLM's
+    //     exception-fallback (which echoes raw bytes) so tool-call markup
+    //     never leaks into normal_text on malformed / truncated / orphan-
+    //     close / no-body inputs. Cases flagged by the parity chart's `↯`:
+    //     PARSER.batch.{4.a, 4.b, 4.c, 4.d, 5.a, 5.b, 5.c, 6.c}.
+    //   - Plain-text path (zero calls AND no markup): return the message
+    //     as-is.
+    let has_markup = message.contains(TOOL_CALL_START)
+        || message.contains(TOOL_CALL_END)
+        || message.contains(STRING_DELIM);
+    let normal_text = if calls.is_empty() {
+        if has_markup {
+            // Recovery: malformed/truncated/orphan-close/no-body shapes.
+            // Suppress the whole message so tool-call markup doesn't leak.
+            let preview: String = message.chars().take(120).collect();
+            tracing::warn!(
+                why = "no_calls_with_markup",
+                stripped_bytes = message.len(),
+                has_start = message.contains(TOOL_CALL_START),
+                has_end = message.contains(TOOL_CALL_END),
+                has_string_delim = message.contains(STRING_DELIM),
+                "gemma4 strip (recovery): zero calls extracted but gemma4 markup present (<|tool_call>, <tool_call|>, <|\"|>); suppressing entire message to prevent leak into normal_text. preview={:?}",
+                preview
+            );
+            String::new()
+        } else {
+            // No markup at all → plain text passes through unchanged. No strip.
+            message.trim().to_string()
+        }
     } else {
-        Some(normal_text)
+        // Success: prefix-only contract — drop everything from the first
+        // `<|tool_call>` onward (inter-call text, trailing narration,
+        // truncation tails). Mirrors vLLM's
+        // `content = model_output[:content_end].strip()`.
+        match message.find(TOOL_CALL_START) {
+            Some(idx) => {
+                let stripped = &message[idx..];
+                let preview: String = stripped.chars().take(120).collect();
+                tracing::debug!(
+                    why = "prefix_only_contract",
+                    n_calls = calls.len(),
+                    kept_prefix_bytes = idx,
+                    stripped_bytes = stripped.len(),
+                    "gemma4 strip (success): kept prefix before first <|tool_call>; dropped parsed-call(s) + any inter-call / trailing narration. preview={:?}",
+                    preview
+                );
+                message[..idx].trim().to_string()
+            }
+            None => String::new(),
+        }
     };
 
-    Ok((calls, normal_content))
+    Ok((calls, Some(normal_text)))
 }
 
 // ---------------------------------------------------------------------------
@@ -505,12 +547,12 @@ mod tests {
         assert_eq!(normal, Some(String::new()));
     }
 
-    #[test] // PARSER.batch.8 — surrounding normal text preserved
+    #[test] // PARSER.batch.8.c — prefix narration preserved, trailing dropped (matches vLLM)
     fn parse_with_surrounding_text() {
         let input = r#"Sure thing. <|tool_call>call:f{x:1}<tool_call|> All set."#;
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(normal, Some("Sure thing.  All set.".to_string()));
+        assert_eq!(normal, Some("Sure thing.".to_string()));
     }
 
     #[test] // PARSER.batch.3 — no tool calls at all
@@ -520,8 +562,8 @@ mod tests {
         assert_eq!(normal, Some("just plain prose here".to_string()));
     }
 
-    #[test] // PARSER.batch.5 — complete prior calls survive; truncated tail is echoed
-    fn truncated_tail_echoed_complete_prior_survives() {
+    #[test] // PARSER.batch.5 — complete prior call survives; truncated tail dropped (matches vLLM)
+    fn truncated_tail_dropped_complete_prior_survives() {
         let input = concat!(
             "<|tool_call>call:complete{x:1}<tool_call|>",
             "<|tool_call>call:partial{y:<|\"|>incomp", // no end marker
@@ -529,14 +571,10 @@ mod tests {
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "complete");
-        // Truncated bytes are surfaced rather than silently dropped — matches
-        // upstream `vllm.tool_parsers.gemma4_tool_parser.extract_tool_calls`
-        // when no complete tool call could be parsed past the start marker.
-        let normal = normal.unwrap();
-        assert!(
-            normal.contains("<|tool_call>call:partial"),
-            "expected truncated bytes echoed in normal_text, got: {normal:?}"
-        );
+        // vLLM computes content as text BEFORE the first start marker; here that
+        // is empty (message starts with `<|tool_call>`), so normal_text is "".
+        // The truncated tail bytes are dropped, not echoed.
+        assert_eq!(normal, Some(String::new()));
     }
 
     #[test] // PARSER.batch.4 — malformed args body falls back to empty object, call still emitted
@@ -694,16 +732,16 @@ mod tests {
         let _ = parse_args_object("x:nullable").unwrap_err();
     }
 
-    #[test] // PARSER.batch.5 — missing end-marker, raw bytes echoed (upstream test_incomplete_tool_call)
-    fn incomplete_tool_call_echoes_raw_bytes() {
+    #[test] // PARSER.batch.5 — missing end-marker, markup suppressed (no-leak contract)
+    fn incomplete_tool_call_suppresses_markup() {
         let input = "<|tool_call>call:foo{x:1";
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 0);
-        let normal = normal.unwrap();
-        assert!(
-            normal.contains("<|tool_call>call:foo"),
-            "expected raw bytes echoed; got: {normal:?}"
-        );
+        // No calls extracted → return the prefix BEFORE the first `<|tool_call>`
+        // start marker (here: empty). Dynamo intentionally diverges from vLLM's
+        // exception fallback (which echoes the raw bytes) so tool-call markup
+        // never leaks into normal_text on the recovery path.
+        assert_eq!(normal, Some(String::new()));
     }
 
     #[test] // PARSER.batch.7 — `<tool_call|>` literal inside a string-typed argument

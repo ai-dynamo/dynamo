@@ -62,6 +62,10 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.kv_connector_protocols import (
+    KvConnectorProtocol,
+    make_kv_connector_protocol,
+)
 
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
@@ -263,7 +267,7 @@ class LoRAInfo:
 
 
 def _compute_mm_uuids(
-    multi_modal_data: Dict[str, Any] | None
+    multi_modal_data: Dict[str, Any] | None,
 ) -> Dict[str, list[str]] | None:
     """
     Compute multi_modal_uuids from multi_modal_data.
@@ -2620,22 +2624,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params, self.model_max_len
         )
 
-        # Configure for prefill-only mode with remote decode
+        # One protocol instance per request; carries per-request state
+        # (e.g. Mooncake's transfer_id) into the response loop below.
+        kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
+            self.engine_client.vllm_config
+        )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
-        sampling_params.extra_args["kv_transfer_params"] = {
-            "do_remote_decode": True,
-        }
-        sampling_params_defaults = {
-            "do_remote_prefill": False,
-            "remote_engine_id": None,
-            "remote_block_ids": None,
-            "remote_host": None,
-            "remote_port": None,
-        }
-        # Add only missing keys
-        for k, v in sampling_params_defaults.items():
-            sampling_params.extra_args["kv_transfer_params"].setdefault(k, v)
+        sampling_params.extra_args[
+            "kv_transfer_params"
+        ] = kv_protocol.prefill_request_kv_transfer_params()
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -2692,10 +2690,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 embedding_params = self._build_embedding_params(
                     multi_modal_data or {}, res.prompt_token_ids
                 )
+
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
-                        res.kv_transfer_params,
+                        kv_protocol.decode_request_kv_transfer_params(res),
                         embedding_params,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(

@@ -19,23 +19,43 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
+from collections.abc import Mapping
 from typing import cast
 
 import pytest
 import pytest_asyncio
 
+from tests.utils.gpu_args import build_gpu_mem_args
+
 MODEL_ID = "Qwen/Qwen3-0.6B"
-_BASE_ARGV = [
-    "--model",
-    MODEL_ID,
-    "--gpu-memory-utilization",
-    "0.3",
-    "--max-model-len",
-    "1024",
-    "--max-num-seqs",
-    "4",
-    "--enforce-eager",
-]
+
+
+def _env_with_requested_kv_bytes(request: pytest.FixtureRequest) -> dict[str, str]:
+    env = os.environ.copy()
+    if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in env:
+        kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+        if kv_mark:
+            env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(int(kv_mark.args[0]))
+    return env
+
+
+def _base_argv(env: Mapping[str, str]) -> list[str]:
+    gpu_mem_args = build_gpu_mem_args("build_vllm_gpu_mem_args", env=env)
+    if not gpu_mem_args:
+        gpu_mem_args = ["--gpu-memory-utilization", "0.3"]
+
+    return [
+        "--model",
+        MODEL_ID,
+        *gpu_mem_args,
+        "--max-model-len",
+        "1024",
+        "--max-num-seqs",
+        "4",
+        "--enforce-eager",
+    ]
+
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="module"),
@@ -43,7 +63,6 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.unified,
     pytest.mark.gpu_1,
-    pytest.mark.pre_merge,
     pytest.mark.timeout(300),
     pytest.mark.skipif(
         importlib.util.find_spec("vllm") is None,
@@ -69,14 +88,16 @@ class _FakeContext:
         await asyncio.Event().wait()
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def started_engine():
+@pytest_asyncio.fixture(loop_scope="module")
+async def started_engine(request):
     # Use vLLM's default spawn for the EngineCore subprocess (set by
     # VllmLLMEngine.start). Fork would inherit pytest's filterwarnings=error
     # and crash the child on transitive flashinfer DeprecationWarnings.
     from dynamo.vllm.llm_engine import VllmLLMEngine
 
-    engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
+    engine, _ = await VllmLLMEngine.from_args(
+        _base_argv(_env_with_requested_kv_bytes(request))
+    )
     try:
         # Worker_id 0 is fine for tests — the engine doesn't use it.
         engine_config = await engine.start(0)
@@ -85,7 +106,28 @@ async def started_engine():
         await engine.cleanup()
 
 
-async def test_start_populates_registration_metadata(started_engine):
+@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(3.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
+@pytest.mark.timeout(900)
+async def test_vllm_engine_all(request, started_engine):
+    """Run the real-engine VllmLLMEngine checks under one profiled startup."""
+    await _check_start_populates_registration_metadata(started_engine)
+    await _check_generate_streams_chunks_with_coherent_final_usage(started_engine)
+    await _check_abort_and_cleanup_are_safe_before_start(request)
+    await _check_abort_unknown_request_on_running_engine(started_engine)
+    await _check_from_args_propagates_disaggregation_mode_to_worker_config(
+        request, "agg", "AGGREGATED"
+    )
+    await _check_from_args_propagates_disaggregation_mode_to_worker_config(
+        request, "prefill", "PREFILL"
+    )
+    await _check_from_args_propagates_disaggregation_mode_to_worker_config(
+        request, "decode", "DECODE"
+    )
+
+
+async def _check_start_populates_registration_metadata(started_engine):
     """``start`` must surface non-None values for the fields the Rust
     registration path reads — if any of them come back None, the model
     appears in /v1/models but fails to actually serve."""
@@ -97,7 +139,7 @@ async def test_start_populates_registration_metadata(started_engine):
     assert cfg.max_num_batched_tokens and cfg.max_num_batched_tokens > 0
 
 
-async def test_generate_streams_chunks_with_coherent_final_usage(started_engine):
+async def _check_generate_streams_chunks_with_coherent_final_usage(started_engine):
     """Every chunk must carry ``token_ids``; the final chunk must also carry
     ``finish_reason`` and a ``completion_usage`` whose totals add up."""
     engine, _ = started_engine
@@ -124,35 +166,29 @@ async def test_generate_streams_chunks_with_coherent_final_usage(started_engine)
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
 
 
-async def test_abort_and_cleanup_are_safe_before_start():
+async def _check_abort_and_cleanup_are_safe_before_start(request):
     """Worker may call ``abort`` / ``cleanup`` on any failure path.  Neither
     must raise on a just-constructed engine, and ``cleanup`` must be
     idempotent."""
     from dynamo.vllm.llm_engine import VllmLLMEngine
 
-    engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
+    engine, _ = await VllmLLMEngine.from_args(
+        _base_argv(_env_with_requested_kv_bytes(request))
+    )
     await engine.abort(cast(object, _FakeContext()))  # type: ignore[arg-type]
     await engine.cleanup()
     await engine.cleanup()
 
 
-async def test_abort_unknown_request_on_running_engine(started_engine):
+async def _check_abort_unknown_request_on_running_engine(started_engine):
     """vLLM's ``AsyncLLM.abort`` is a best-effort lookup.  Aborting a request
     id the engine has never seen must not raise."""
     engine, _ = started_engine
     await engine.abort(cast(object, _FakeContext("never-submitted")))  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize(
-    "mode_arg, expected",
-    [
-        ("agg", "AGGREGATED"),
-        ("prefill", "PREFILL"),
-        ("decode", "DECODE"),
-    ],
-)
-async def test_from_args_propagates_disaggregation_mode_to_worker_config(
-    mode_arg, expected
+async def _check_from_args_propagates_disaggregation_mode_to_worker_config(
+    request, mode_arg, expected
 ):
     """``--disaggregation-mode`` must flow from CLI through to the
     ``WorkerConfig`` the unified Worker sees, and onto the engine instance
@@ -171,7 +207,12 @@ async def test_from_args_propagates_disaggregation_mode_to_worker_config(
         ]
 
     engine, worker_config = await VllmLLMEngine.from_args(
-        [*_BASE_ARGV, "--disaggregation-mode", mode_arg, *extra_args]
+        [
+            *_base_argv(_env_with_requested_kv_bytes(request)),
+            "--disaggregation-mode",
+            mode_arg,
+            *extra_args,
+        ]
     )
     try:
         expected_mode = getattr(DisaggregationMode, expected)
