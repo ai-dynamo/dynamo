@@ -27,6 +27,7 @@ from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
 from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
+from tensorrt_llm.metrics import MetricsCollector
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
@@ -146,6 +147,12 @@ class TrtllmLLMEngine(LLMEngine):
         # Written by `_metrics_poll_loop`, read by snapshot lambdas under the
         # GIL. Per-rank key-level writes are GIL-serialized.
         self._latest_metrics: dict[int, Metrics] = {}
+        # Upstream tensorrt_llm.metrics.MetricsCollector instance fed from
+        # `_metrics_poll_loop`. The legacy worker wires log_iteration_stats
+        # via publisher.py; the unified path has no equivalent hook, so the
+        # engine owns instantiation here. None when publish_events_and_metrics
+        # is disabled or when the installed tensorrt_llm lacks the collector.
+        self._metrics_collector: Optional[MetricsCollector] = None
         # Per-rank hashes of partial blocks; their later "removed" events
         # must not reach the router (which never saw them stored). Scoping
         # by rank prevents a partial block on one rank from suppressing a
@@ -269,6 +276,22 @@ class TrtllmLLMEngine(LLMEngine):
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
         if self._kv_routing_enabled():
+            # Mirrors `workers/llm_worker.py:529` for the unified path.
+            # The legacy `engine_args` already sets `enable_iter_perf_stats`
+            # and `return_perf_metrics` to `publish_events_and_metrics`,
+            # so the engine is producing iteration snapshots; this collector
+            # is what turns those snapshots into Prometheus gauges.
+            try:
+                self._metrics_collector = MetricsCollector(
+                    {
+                        "model_name": self.served_model_name or self.model_name,
+                        "engine_type": "trtllm",
+                    }
+                )
+                logger.info("TensorRT-LLM MetricsCollector initialized")
+            except Exception as e:
+                logger.warning("Failed to initialize MetricsCollector: %s", e)
+                self._metrics_collector = None
             self._metrics_thread = threading.Thread(
                 target=self._metrics_poll_loop,
                 daemon=True,
@@ -354,11 +377,21 @@ class TrtllmLLMEngine(LLMEngine):
             # Per-rank latest snapshot. Stats from different ranks are
             # interleaved; keep the freshest per `attentionDpRank`.
             for snap in snaps:
-                kv_used = snap.get("kvCacheStats", {}).get("usedNumBlocks")
-                if kv_used is None:
-                    continue
                 rank = int(snap.get("attentionDpRank", 0))
-                self._latest_metrics[rank] = Metrics(kv_used_blocks=int(kv_used))
+                kv_used = snap.get("kvCacheStats", {}).get("usedNumBlocks")
+                if kv_used is not None:
+                    self._latest_metrics[rank] = Metrics(kv_used_blocks=int(kv_used))
+                # Drive upstream Prometheus collector with the same snapshot.
+                # Mirrors the legacy publisher.py path; under attention-DP,
+                # later ranks overwrite earlier within a tick — same behavior
+                # as upstream trtllm-serve's openai_server.py:1067.
+                if self._metrics_collector is not None and hasattr(
+                    self._metrics_collector, "log_iteration_stats"
+                ):
+                    try:
+                        self._metrics_collector.log_iteration_stats(snap)
+                    except Exception as e:
+                        logger.debug("trtllm log_iteration_stats raised: %s", e)
 
     def _kv_events_poll_loop(self) -> None:
         assert self._engine is not None
