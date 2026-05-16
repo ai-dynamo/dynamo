@@ -66,6 +66,13 @@ cases:
           </parameter>
           </function>
           </tool_call>
+        reason: |-
+          SGLang's qwen3_coder detector gates parsing on the opening
+          <tool_call> sentinel (`if tool_call_start_token not in text: return
+          normal_text=text`); a bare </tool_call> close with a valid <function>
+          body short-circuits to zero calls and the full text as normal_text.
+          Dynamo/vLLM tolerate the missing open and extract the <function> body
+          per impl-defined recovery contract (see PARSER_CASES.md).
   PARSER.batch.5.c:
     description: Truncation mid-parameter value
     ref: dynamo
@@ -124,6 +131,11 @@ cases:
             location: Boston
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: |-
+          SGLang's non-streaming path uses `re.compile(r"<tool_call>(.*?)</tool_call>")`
+          which requires a matching </tool_call> close; an unterminated trailing
+          <tool_call> (even with a complete <function> body) is silently dropped.
+          Dynamo/vLLM recover the trailing call and emit it.
   PARSER.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -161,3 +173,8 @@ cases:
             location: Boston
         normal_text: |
           I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: |-
+          Same root cause as 5.d: SGLang's `<tool_call>(.*?)</tool_call>` regex
+          requires the closing sentinel, so the trailing call truncated mid-arg
+          value is dropped. Dynamo/vLLM recover the partial value
+          (location='New York') and emit the call.
