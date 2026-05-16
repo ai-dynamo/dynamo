@@ -99,8 +99,9 @@ class PrometheusAPIClient:
         metrics_source: str = "frontend",
         bearer_token: Optional[str] = None,
     ):
-        headers = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else None
-        self.prom = PrometheusConnect(url=url, disable_ssl=True, headers=headers)
+        self.prom = PrometheusConnect(url=url, disable_ssl=True)
+        if bearer_token:
+            self.prom._session.headers["Authorization"] = f"Bearer {bearer_token}"
         self.dynamo_namespace = dynamo_namespace
         self.metrics_source = metrics_source  # "frontend" | "router"
 
