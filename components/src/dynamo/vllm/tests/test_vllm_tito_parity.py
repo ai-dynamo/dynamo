@@ -234,6 +234,25 @@ class TestEngineDataAccumulation:
         )
         assert token_ids[1] == [20]
 
+    def test_engine_data_preserves_prompt_logprobs(self):
+        from dynamo.vllm.handlers import (
+            _accumulate_engine_data,
+            _attach_prompt_logprobs_engine_data,
+        )
+
+        final = {
+            "index": 0,
+            "token_ids": [11],
+            "finish_reason": "stop",
+        }
+        payload = [None, {"42": {"logprob": -0.5, "rank": 1}}]
+
+        _attach_prompt_logprobs_engine_data(final, payload)
+        _accumulate_engine_data(final, [1, 2], {}, {})
+
+        assert final["engine_data"]["prompt_logprobs"] == payload
+        assert final["engine_data"]["completion_token_ids"] == [11]
+
 
 class TestSkipSpecialTokens:
     """Verify skip_special_tokens from output_options flows to SamplingParams."""
