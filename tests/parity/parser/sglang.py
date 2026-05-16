@@ -121,11 +121,12 @@ def _build_tools(tools: list[dict[str, Any]] | None) -> list[Any] | None:
         return None
     return [
         SimpleNamespace(
+            type="function",
             function=SimpleNamespace(
                 name=(t["function"] if "function" in t else t)["name"],
                 parameters=(t["function"] if "function" in t else t).get("parameters"),
                 strict=False,
-            )
+            ),
         )
         for t in tools
     ]

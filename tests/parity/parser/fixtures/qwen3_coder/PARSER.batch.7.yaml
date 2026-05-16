@@ -42,14 +42,7 @@ cases:
             passengers: 2
         normal_text: ''
       vllm: *id001
-      sglang:
-        calls:
-        - name: book_flight
-          arguments:
-            destination: Paris
-            passengers: '2'
-            first_class: 'true'
-        normal_text: ''
+      sglang: *id001
   PARSER.batch.7.b:
     description: Unicode in parameter value
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L302
