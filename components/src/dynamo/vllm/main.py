@@ -44,7 +44,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import Config, _uses_dynamo_connector, parse_args
+from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
@@ -103,16 +103,6 @@ def run_dynamo_headless(config: Config) -> None:
 
     args = build_headless_namespace(config)
     run_headless(args)
-
-
-def configure_rl_logprobs_mode(config: Config) -> None:
-    if (
-        config.enable_rl
-        and not config.logprobs_mode_explicitly_set
-        and config.engine_args.logprobs_mode == "raw_logprobs"
-    ):
-        config.engine_args.logprobs_mode = "processed_logprobs"
-        logger.info("Defaulting logprobs_mode=processed_logprobs (--enable-rl active).")
 
 
 async def worker() -> None:
