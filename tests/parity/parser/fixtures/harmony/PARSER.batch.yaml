@@ -7,7 +7,8 @@ mode: batch
 cases:
   PARSER.batch.1:
     description: Single tool call (basic complete envelope)
-    model_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+    ref: "OpenAI Harmony receiving tool calls: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
+    model_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
     tools:
     - &id001
       name: get_weather
@@ -17,41 +18,45 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
+      dynamo: &d_1
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      vllm: *d_1
       sglang:
         calls: []
-        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
+        reason: "Less spec-correct parsing: SGLang leaks raw Harmony markup instead of extracting a valid '<|call|>'-terminated commentary tool call."
   PARSER.batch.3:
-    description: No tool call (plain text)
+    description: No tool call (bare text without final channel)
+    ref: "OpenAI Harmony channels/final output: https://developers.openai.com/cookbook/articles/openai-harmony#channels"
     model_text: Hello, how can I help you today?
     tools:
     - *id001
     expected:
-      dynamo: &id002
+      dynamo: &d_3
+        calls: []
+        normal_text: ''
+      vllm: *d_3
+      sglang:
         calls: []
         normal_text: Hello, how can I help you today?
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang: *id002
+        reason: "Less spec-correct fallback: bare text is not a valid Harmony assistant response because no final message was emitted. A valid response would be '<|channel|>final<|message|>Hello, how can I help you today?<|return|>'."
   PARSER.batch.9:
     description: Empty input
     model_text: ''
     tools:
     - *id001
     expected:
-      dynamo: &id003
+      dynamo: &d_9
         calls: []
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang: *id003
+        calls: []
+        normal_text: ''
+      sglang: *d_9
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
@@ -60,20 +65,31 @@ cases:
     - *id001
     expected:
       dynamo:
-        reason: "Dynamo leaks back-to-back same-name commentary blocks into normal_text instead of extracting both duplicate calls"
-        calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: ''
       sglang:
         calls:
-        - name: get_weather
-          arguments:
+        - arguments:
             location: NYC
-        - name: get_weather
-          arguments:
+          name: get_weather
+        - arguments:
             location: LA
+          name: get_weather
         normal_text: ''
   PARSER.batch.11:
     description: Separator-character case — n/a for this family's syntax
@@ -86,7 +102,7 @@ cases:
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
-    model_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}
+    model_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}<|call|>
     tools:
     - name: get_weather
       parameters:
@@ -102,8 +118,12 @@ cases:
             location: NYC
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
       sglang:
         calls: []
-        normal_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}
+        normal_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}<|call|>
         reason: SGLang treats an unknown harmony recipient as ordinary content rather than forwarding a tool call by default.
