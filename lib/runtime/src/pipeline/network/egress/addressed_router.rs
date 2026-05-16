@@ -280,9 +280,12 @@ where
         // thread or not doesn't resolve the CPU-bound issue under high load,
         // but `block_in_place` provides a sufficient workaround so the local tasks may
         // be picked up by other workers.
-        let data = if tokio::runtime::Handle::try_current()
-            .is_ok_and(|h| matches!(h.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread))
-        {
+        let data = if tokio::runtime::Handle::try_current().is_ok_and(|h| {
+            matches!(
+                h.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            )
+        }) {
             tokio::task::block_in_place(|| serde_json::to_vec(&request))
         } else {
             serde_json::to_vec(&request)
