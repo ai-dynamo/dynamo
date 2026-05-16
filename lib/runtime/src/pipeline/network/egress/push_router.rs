@@ -379,17 +379,7 @@ fn spawn_instance_removal_watcher(
 }
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    // Get network manager and create client (no mode checks!)
-    let manager = endpoint.drt().network_manager();
-    let req_client = manager.create_client()?;
-    let resp_transport = endpoint.drt().tcp_server().await?;
-
-    tracing::debug!(
-        transport = req_client.transport_name(),
-        "Creating AddressedPushRouter with request plane client"
-    );
-
-    AddressedPushRouter::new(req_client, resp_transport)
+    AddressedPushRouter::from_runtime_provider(endpoint).await
 }
 
 impl<T, U> PushRouter<T, U>
