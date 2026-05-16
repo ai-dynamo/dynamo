@@ -270,14 +270,16 @@ where
                 return Err(e.into());
             }
         };
-        // Issue #9466: long-context body serialization (~1.5 ms / request for
-        // 300 KB JSON) blocks every other task on the tokio worker. Mark this
-        // span as blocking so the runtime can move other pending work to a
-        // sibling worker. `block_in_place` only signals the scheduler — it
-        // doesn't transfer the task to the blocking pool — so the overhead
-        // for small bodies is one atomic flag set, not the 10-30 µs of
-        // `spawn_blocking`. Multi-thread runtime only; single-thread falls
-        // back to inline.
+        // Inspired by issue #9466: long-context body serialization
+        // (~1.5 ms / request for 300 KB JSON) blocks tasks assigned to this
+        // tokio worker. Mark this span as blocking so the runtime can move
+        // other pending work to other sibling workers. In contract to `spawn_blocking`,
+        // `block_in_place` only signals the scheduler so we are not paying for cost of
+        // transferring the task to the blocking pool.
+        // Note that serde_json::to_vec() is CPU work so that delegating to a different
+        // thread or not doesn't resolve the CPU-bound issue under high load,
+        // but `block_in_place` provides a sufficient workaround so the local tasks may
+        // be picked up by other workers.
         let data = if tokio::runtime::Handle::try_current()
             .is_ok_and(|h| matches!(h.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread))
         {
