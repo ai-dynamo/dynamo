@@ -1,43 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// jemalloc as the Rust global allocator. Issue #9466 traced FE saturation to
-// glibc malloc's per-arena mutex under tokenizer + bytes::Bytes drop churn;
-// jemalloc's per-thread tcaches sidestep the arena lock. Excluded on musl
-// (different libc, doesn't play well with tikv-jemalloc-sys's build) — see
-// the matching cfg in Cargo.toml.
-#[cfg(all(
-    feature = "jemalloc",
-    any(
-        all(target_os = "linux", not(target_env = "musl")),
-        target_os = "macos"
-    )
-))]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-// Default jemalloc tuning. tikv-jemalloc-sys prefixes jemalloc symbols
-// with `_rjem_`, so the export name must be `_rjem_malloc_conf` and the
-// runtime override env var is `_RJEM_MALLOC_CONF` (not `MALLOC_CONF`).
-// Larger tcache keeps mid-sized allocs lock-free; faster decay returns
-// dirty pages to the OS sooner. `narenas` left at the `4 * ncpu` default.
-#[cfg(all(
-    feature = "jemalloc",
-    any(
-        all(target_os = "linux", not(target_env = "musl")),
-        target_os = "macos"
-    )
-))]
-#[allow(non_upper_case_globals)]
-#[unsafe(export_name = "_rjem_malloc_conf")]
-pub static malloc_conf: Option<&'static core::ffi::CStr> = Some(
-    c"\
-tcache:true,\
-tcache_max:32768,\
-dirty_decay_ms:5000,\
-muzzy_decay_ms:5000",
-);
-
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;

@@ -75,9 +75,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         patchelf \
         git \
-        git-lfs && \
+        git-lfs \
+        libjemalloc2 && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
+
+# libjemalloc2 is installed above so `dynamo.frontend` can opt into jemalloc
+# via its own re-exec logic (see components/src/dynamo/frontend/__main__.py).
+# We deliberately do NOT set ENV LD_PRELOAD here — that would force jemalloc
+# on every process in the image (including build/install steps and unrelated
+# utilities). Letting the FE entry point decide keeps the activation scoped
+# and overridable per-process via DYN_NO_JEMALLOC=1.
 
 # Switch to dynamo user and create virtual environment
 USER dynamo
