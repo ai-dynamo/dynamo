@@ -784,10 +784,10 @@ where
             )
         };
 
-        // Check if all workers are busy (when fault detection is enabled).
+        // Check if the selected worker is busy (when fault detection is enabled).
         if self.fault_detection_enabled {
             let routing_instances = self.client.routing_instances();
-            let all_instances_busy = routing_instances.all_instances_busy();
+            let selected_worker_busy = routing_instances.is_busy(instance_id);
             let counts = routing_instances.counts();
             if tracing::enabled!(tracing::Level::DEBUG) {
                 tracing::debug!(
@@ -797,22 +797,23 @@ where
                     free_workers = counts.free,
                     busy_workers = counts.busy,
                     total_workers = counts.discovered,
-                    all_instances_busy,
+                    selected_worker_busy,
                     "checked worker busy state"
                 );
             }
-            if all_instances_busy {
+            if selected_worker_busy {
                 tracing::warn!(
                     instance_id,
+                    busy_workers = counts.busy,
                     total_workers = counts.discovered,
-                    "Rejecting request: all workers are busy"
+                    "Rejecting request: selected worker is busy"
                 );
                 let cause = PipelineError::ServiceOverloaded(
-                    "All workers are busy, please retry later".to_string(),
+                    "Selected worker is busy, please retry later".to_string(),
                 );
                 return Err(DynamoError::builder()
                     .error_type(ErrorType::ResourceExhausted)
-                    .message("All workers are busy, please retry later")
+                    .message("Selected worker is busy, please retry later")
                     .cause(cause)
                     .build()
                     .into());
@@ -1230,6 +1231,54 @@ mod tests {
 
         assert_eq!(router.select_next_worker(), None);
         assert_eq!(router.peek_next_worker(), None);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn selected_busy_worker_is_rejected_before_dispatch() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_selected_busy_worker_rejected".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_avail().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+        assert!(
+            client.instance_ids_avail().contains(&worker_id),
+            "worker should be routable before marking it busy"
+        );
+
+        client.set_busy_instances(&[worker_id]);
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let result = router.generate(SingleIn::new(42u64)).await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Selected worker is busy"),
+            "expected selected-worker busy rejection, got: {msg}"
+        );
 
         rt.shutdown();
     }

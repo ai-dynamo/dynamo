@@ -197,8 +197,8 @@ impl RoutingInstances {
         }
     }
 
-    pub(crate) fn all_instances_busy(&self) -> bool {
-        !self.discovered_ids.is_empty() && self.free_ids.is_empty()
+    pub(crate) fn is_busy(&self, instance_id: u64) -> bool {
+        self.busy_ids.contains(&instance_id)
     }
 
     fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
