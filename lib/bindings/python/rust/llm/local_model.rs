@@ -1,9 +1,54 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, HashSet};
+
 use super::*;
+use dynamo_kv_router::protocols::RoutingConstraints as RsRoutingConstraints;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+
+#[pyclass]
+#[derive(Clone, Debug, Default)]
+pub struct RoutingConstraints {
+    #[pyo3(get, set)]
+    pub required_taints: HashSet<String>,
+    #[pyo3(get, set)]
+    pub preferred_taints: HashMap<String, f32>,
+}
+
+#[pymethods]
+impl RoutingConstraints {
+    #[new]
+    #[pyo3(signature = (required_taints=None, preferred_taints=None))]
+    fn new(
+        required_taints: Option<HashSet<String>>,
+        preferred_taints: Option<HashMap<String, f32>>,
+    ) -> Self {
+        Self {
+            required_taints: required_taints.unwrap_or_default(),
+            preferred_taints: preferred_taints.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<RoutingConstraints> for RsRoutingConstraints {
+    fn from(value: RoutingConstraints) -> Self {
+        Self {
+            required_taints: value.required_taints,
+            preferred_taints: value.preferred_taints,
+        }
+    }
+}
+
+impl From<RsRoutingConstraints> for RoutingConstraints {
+    fn from(value: RsRoutingConstraints) -> Self {
+        Self {
+            required_taints: value.required_taints,
+            preferred_taints: value.preferred_taints,
+        }
+    }
+}
 
 #[pyclass]
 #[derive(Clone, Debug, Default)]
@@ -71,6 +116,11 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_enable_eagle(&mut self, enable_eagle: bool) {
         self.inner.enable_eagle = enable_eagle;
+    }
+
+    #[setter]
+    fn set_taints(&mut self, taints: HashSet<String>) {
+        self.inner.taints = taints;
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -181,5 +231,10 @@ impl ModelRuntimeConfig {
     #[getter]
     fn enable_eagle(&self) -> bool {
         self.inner.enable_eagle
+    }
+
+    #[getter]
+    fn taints(&self) -> HashSet<String> {
+        self.inner.taints.clone()
     }
 }
