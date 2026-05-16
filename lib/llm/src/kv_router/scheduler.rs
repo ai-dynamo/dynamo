@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::SharedCacheHits;
+use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
+pub use dynamo_kv_router::scheduling::overlap_refresh::{OverlapScoresRefresh, RefreshedOverlap};
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, PotentialLoad, SchedulingRequest, SchedulingResponse,
@@ -42,6 +43,7 @@ impl<Sel> KvScheduler<Sel>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
 {
+    #[expect(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
@@ -49,6 +51,7 @@ where
         selector: Sel,
         kv_router_config: &KvRouterConfig,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
@@ -85,6 +88,7 @@ where
             selector,
             policy,
             prefill_load_estimator,
+            overlap_scores_refresh,
             kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
             component.drt().child_token(),
@@ -144,12 +148,57 @@ where
         routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.schedule_with_block_hashes(
+            maybe_request_id,
+            isl_tokens,
+            token_seq,
+            None,
+            tier_overlap_blocks,
+            effective_overlap_blocks,
+            effective_cached_tokens,
+            router_config_override,
+            update_states,
+            lora_name,
+            priority_jump,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            shared_cache_hits,
+        )
+        .await
+    }
+
+    /// Like [`schedule`](Self::schedule) but forwards the block hashes used to compute the
+    /// initial overlap scores. Required to enable dequeue-time overlap refresh; ignored if
+    /// the scheduler was not constructed with an [`OverlapScoresRefresh`].
+    #[expect(clippy::too_many_arguments)]
+    pub async fn schedule_with_block_hashes(
+        &self,
+        maybe_request_id: Option<String>,
+        isl_tokens: usize,
+        token_seq: Option<Vec<SequenceHash>>,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+        tier_overlap_blocks: TierOverlapBlocks,
+        effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
+        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        shared_cache_hits: Option<SharedCacheHits>,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self
             .inner
-            .schedule(
+            .schedule_with_block_hashes(
                 maybe_request_id,
                 isl_tokens,
                 token_seq,
+                block_hashes,
                 tier_overlap_blocks,
                 effective_overlap_blocks,
                 effective_cached_tokens,
