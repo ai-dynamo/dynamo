@@ -101,8 +101,9 @@ class TestCacheSaltWiring:
 
     def test_cache_salt_attached_to_prompt(self):
         """When extra_args.nvext.cache_salt is set, the prompt dict gets it."""
-        from dynamo.vllm.handlers import _apply_nvext_cache_salt
         from vllm.inputs import TokensPrompt
+
+        from dynamo.vllm.handlers import _apply_nvext_cache_salt
 
         req = self._build_token_mode_request(cache_salt="step_42")
         prompt = TokensPrompt(prompt_token_ids=req["token_ids"])
@@ -112,8 +113,9 @@ class TestCacheSaltWiring:
 
     def test_no_cache_salt_when_absent(self):
         """When extra_args has no cache_salt, prompt should not gain the key."""
-        from dynamo.vllm.handlers import _apply_nvext_cache_salt
         from vllm.inputs import TokensPrompt
+
+        from dynamo.vllm.handlers import _apply_nvext_cache_salt
 
         req = self._build_token_mode_request()
         prompt = TokensPrompt(prompt_token_ids=req["token_ids"])
