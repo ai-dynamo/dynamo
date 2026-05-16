@@ -377,6 +377,18 @@ def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
         prompt["cache_salt"] = cache_salt
 
 
+def _prompt_token_ids_for_engine_data(
+    request: Dict[str, Any],
+    prompt: Any,
+) -> list[int]:
+    prompt_token_ids = (
+        prompt.get("prompt_token_ids")
+        if isinstance(prompt, dict)
+        else request.get("token_ids")
+    )
+    return list(prompt_token_ids or [])
+
+
 def _flatten_logprobs(
     log_probs: Any,
 ) -> Optional[list[float]]:
@@ -2667,7 +2679,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # back in engine_data so the client doesn't have to re-derive
                 # them from a request it might no longer hold.
                 request_prompt_token_ids = (
-                    list(request.get("token_ids") or []) if want_engine_data else None
+                    _prompt_token_ids_for_engine_data(request, prompt)
+                    if want_engine_data
+                    else None
                 )
                 accumulated_token_ids: dict[int, list[int]] = {}
                 accumulated_log_probs: dict[int, list[float]] = {}

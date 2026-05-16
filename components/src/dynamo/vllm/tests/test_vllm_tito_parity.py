@@ -14,6 +14,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.skipif(
         importlib.util.find_spec("vllm") is None,
@@ -183,6 +184,21 @@ class TestFlattenLogprobs:
 
 
 class TestEngineDataAccumulation:
+    def test_prompt_token_ids_come_from_built_prompt_when_available(self):
+        from dynamo.vllm.handlers import _prompt_token_ids_for_engine_data
+
+        request = {"token_ids": [1, 2, 3]}
+        prompt = {"prompt_token_ids": [1, 2, 99, 100]}
+
+        assert _prompt_token_ids_for_engine_data(request, prompt) == [1, 2, 99, 100]
+
+    def test_prompt_token_ids_fall_back_to_request_tokens(self):
+        from dynamo.vllm.handlers import _prompt_token_ids_for_engine_data
+
+        request = {"token_ids": [1, 2, 3]}
+
+        assert _prompt_token_ids_for_engine_data(request, "plain prompt") == [1, 2, 3]
+
     def test_accumulates_per_output_index(self):
         from dynamo.vllm.handlers import _accumulate_engine_data
 
