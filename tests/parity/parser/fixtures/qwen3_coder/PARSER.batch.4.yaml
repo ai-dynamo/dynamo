@@ -36,6 +36,12 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: |-
+          SGLang consumes the <tool_call>...</tool_call> wrapper into the parsed
+          region (normal_text=text[:start_idx_of_<tool_call>]) before scanning for
+          <function=...> bodies; when no body is found it emits zero calls and an
+          empty normal_text. Dynamo/vLLM preserve the unrecognized wrapper as
+          normal_text per impl-defined recovery contract (see PARSER_CASES.md).
   PARSER.batch.4.d:
     description: Missing </parameter> closing tag
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L729
