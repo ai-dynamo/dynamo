@@ -18,13 +18,13 @@ logic because get_kv_cache_spec_kind() was also introduced after 0.20.1.
 
 Signed-off-by: PeaBrane <yanrpei@gmail.com>
 ---
- vllm/v1/engine/core.py | 32 ++++++++++++++++++++++++++++++++
- 1 file changed, 32 insertions(+)
+ vllm/v1/engine/core.py | 59 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 59 insertions(+)
 
 diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
 --- a/vllm/v1/engine/core.py
 +++ b/vllm/v1/engine/core.py
-@@ -793,11 +793,43 @@
+@@ -793,11 +793,70 @@
          self,
          notification_type: EEPNotificationType,
          vllm_config: VllmConfig | None = None,
@@ -34,10 +34,47 @@ diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
 +    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
 +        """Return msgspec-serializable metadata for scheduler KV cache groups."""
 +        from vllm.v1.kv_cache_interface import (  # noqa: PLC0415
++            ChunkedLocalAttentionSpec,
++            CrossAttentionSpec,
++            EncoderOnlyAttentionSpec,
 +            FullAttentionSpec,
 +            MLAAttentionSpec,
++            MambaSpec,
 +            SinkFullAttentionSpec,
++            SlidingWindowMLASpec,
++            SlidingWindowSpec,
++            UniformTypeKVCacheSpecs,
 +        )
++
++        def _spec_kind(spec) -> str:
++            # UniformTypeKVCacheSpecs wraps multiple specs; propagate the kind
++            # only when all inner specs agree, otherwise fall back to "unknown".
++            if isinstance(spec, UniformTypeKVCacheSpecs):
++                inner = {_spec_kind(s) for s in spec.kv_cache_specs.values()}
++                return next(iter(inner)) if len(inner) == 1 else "unknown"
++            # Keep subclass checks before base classes so specialized specs
++            # keep their more precise kind (mirrors get_kv_cache_spec_kind in
++            # vllm main, PR #40984).
++            if isinstance(spec, SlidingWindowMLASpec):
++                return "sliding_window_mla"
++            if isinstance(spec, MLAAttentionSpec):
++                return "mla_attention"
++            if isinstance(spec, SinkFullAttentionSpec):
++                return "sink_full_attention"
++            if isinstance(spec, FullAttentionSpec):
++                return "full_attention"
++            if isinstance(spec, ChunkedLocalAttentionSpec):
++                return "chunked_local_attention"
++            if isinstance(spec, SlidingWindowSpec):
++                return "sliding_window"
++            if isinstance(spec, MambaSpec):
++                return "mamba"
++            if isinstance(spec, EncoderOnlyAttentionSpec):
++                return "encoder_only_attention"
++            if isinstance(spec, CrossAttentionSpec):
++                return "cross_attention"
++            return "unknown"
++
 +        kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
 +        if kv_cache_config is None:
 +            return []
@@ -45,19 +82,9 @@ diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
 +        metadata: list[dict[str, int | str | None]] = []
 +        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
 +            spec = group.kv_cache_spec
-+            # Check subclasses before their parent: both MLAAttentionSpec and
-+            # SinkFullAttentionSpec inherit from FullAttentionSpec.
-+            if isinstance(spec, SinkFullAttentionSpec):
-+                kind = "sink_full_attention"
-+            elif isinstance(spec, MLAAttentionSpec):
-+                kind = "mla_attention"
-+            elif isinstance(spec, FullAttentionSpec):
-+                kind = "full_attention"
-+            else:
-+                kind = type(spec).__name__.lower()
 +            metadata.append({
 +                "group_idx": group_idx,
-+                "kind": kind,
++                "kind": _spec_kind(spec),
 +                "block_size": spec.block_size,
 +                "sliding_window": getattr(spec, "sliding_window", None),
 +            })
