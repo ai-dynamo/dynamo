@@ -16,7 +16,6 @@ from unittest.mock import patch
 import pytest
 
 from dynamo.vllm.args import (
-    _arg_was_provided,
     _connector_to_kv_transfer_json,
     _is_routable,
     _uses_dynamo_connector,
@@ -334,22 +333,9 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     assert hasattr(ns, "tensor_parallel_size")
 
 
-def test_rl_logprobs_default_respects_explicit_override():
+def test_rl_logprobs_force_converts_raw_mode():
     config = SimpleNamespace(
         enable_rl=True,
-        logprobs_mode_explicitly_set=True,
-        engine_args=SimpleNamespace(logprobs_mode="raw_logprobs"),
-    )
-
-    configure_rl_logprobs_mode(config)
-
-    assert config.engine_args.logprobs_mode == "raw_logprobs"
-
-
-def test_rl_logprobs_default_applies_without_override():
-    config = SimpleNamespace(
-        enable_rl=True,
-        logprobs_mode_explicitly_set=False,
         engine_args=SimpleNamespace(logprobs_mode="raw_logprobs"),
     )
 
@@ -358,34 +344,31 @@ def test_rl_logprobs_default_applies_without_override():
     assert config.engine_args.logprobs_mode == "processed_logprobs"
 
 
-def test_logprobs_mode_flag_is_tracked(mock_vllm_cli):
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--logprobs-mode",
-        "raw_logprobs",
+def test_rl_logprobs_keeps_processed_mode():
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(logprobs_mode="processed_logprobs"),
     )
 
-    config = parse_args()
+    configure_rl_logprobs_mode(config)
 
-    assert config.logprobs_mode_explicitly_set is True
+    assert config.engine_args.logprobs_mode == "processed_logprobs"
 
 
-def test_logprobs_mode_underscore_flag_is_tracked(mock_vllm_cli):
-    mock_vllm_cli(
-        "--model",
-        "Qwen/Qwen3-0.6B",
-        "--logprobs_mode=raw_logprobs",
+def test_rl_logprobs_rejects_logits_modes():
+    config = SimpleNamespace(
+        enable_rl=True,
+        engine_args=SimpleNamespace(logprobs_mode="raw_logits"),
     )
 
+    with pytest.raises(ValueError, match="processed_logprobs"):
+        configure_rl_logprobs_mode(config)
+
+
+def test_parse_args_does_not_track_logprobs_mode_presence(mock_vllm_cli):
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
     config = parse_args()
-
-    assert config.logprobs_mode_explicitly_set is True
-
-
-def test_arg_was_provided_accepts_underscore_alias():
-    assert _arg_was_provided(["--logprobs_mode", "raw_logprobs"], "--logprobs-mode")
-    assert _arg_was_provided(["--logprobs_mode=raw_logprobs"], "--logprobs-mode")
+    assert not hasattr(config, "logprobs_mode_explicitly_set")
 
 
 def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
@@ -394,7 +377,6 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
 
     config = SimpleNamespace(
         enable_rl=True,
-        logprobs_mode_explicitly_set=False,
         engine_args=SimpleNamespace(
             logprobs_mode="raw_logprobs",
             served_model_name=["Qwen/Qwen3-0.6B"],

@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import socket
-import sys
 from typing import Any, Dict, Optional
 
 from vllm.distributed.kv_events import KVEventsConfig
@@ -52,7 +51,6 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
 
     # rest vLLM args
     engine_args: AsyncEngineArgs
-    logprobs_mode_explicitly_set: bool = False
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -74,7 +72,6 @@ def parse_args(argv: list[str] | None = None) -> Config:
     Returns:
         Config: Parsed configuration object.
     """
-    raw_argv = sys.argv[1:] if argv is None else argv
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
@@ -120,29 +117,23 @@ def parse_args(argv: list[str] | None = None) -> Config:
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
     dynamo_config.engine_args = engine_config
-    dynamo_config.logprobs_mode_explicitly_set = _arg_was_provided(
-        raw_argv, "--logprobs-mode"
-    )
     return dynamo_config
 
 
-def _arg_was_provided(argv: list[str], option: str) -> bool:
-    normalized = option[:2] + option[2:].replace("-", "_")
-    aliases = {option, normalized}
-    return any(
-        arg in aliases or any(arg.startswith(f"{alias}=") for alias in aliases)
-        for arg in argv
-    )
-
-
 def configure_rl_logprobs_mode(config: Config) -> None:
-    if (
-        config.enable_rl
-        and not config.logprobs_mode_explicitly_set
-        and config.engine_args.logprobs_mode == "raw_logprobs"
-    ):
+    if not config.enable_rl:
+        return
+
+    if config.engine_args.logprobs_mode == "raw_logprobs":
         config.engine_args.logprobs_mode = "processed_logprobs"
         logger.info("Defaulting logprobs_mode=processed_logprobs (--enable-rl active).")
+        return
+
+    if config.engine_args.logprobs_mode != "processed_logprobs":
+        raise ValueError(
+            "--enable-rl requires logprobs_mode=processed_logprobs; "
+            f"got {config.engine_args.logprobs_mode!r}."
+        )
 
 
 def cross_validate_config(
