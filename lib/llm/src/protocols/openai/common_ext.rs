@@ -135,14 +135,22 @@ pub trait CommonExtProvider {
     fn get_skip_special_tokens(&self) -> Option<bool>;
 
     /// Number of prompt logprobs to request from the engine.
-    fn get_prompt_logprobs_count(&self) -> Option<u32>;
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        None
+    }
 
     /// Whether the engine should decode generated tokens into text.
-    fn get_detokenize(&self) -> Option<bool>;
+    fn get_detokenize(&self) -> Option<bool> {
+        None
+    }
 
     /// Token ID constraints forwarded to compatible backends.
-    fn get_allowed_token_ids(&self) -> Option<Vec<TokenIdType>>;
-    fn get_bad_words_token_ids(&self) -> Option<Vec<Vec<TokenIdType>>>;
+    fn get_allowed_token_ids(&self) -> Option<Vec<TokenIdType>> {
+        None
+    }
+    fn get_bad_words_token_ids(&self) -> Option<Vec<Vec<TokenIdType>>> {
+        None
+    }
 }
 
 #[cfg(test)]

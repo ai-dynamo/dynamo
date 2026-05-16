@@ -381,6 +381,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
+        super::nvext::validate_completion_token_ids_single_choice(
+            self.inner.n,
+            self.nvext.as_ref(),
+        )?;
         // none for modalities
         // none for prediction
         // none for audio
@@ -579,6 +583,23 @@ mod tests {
             sampling_options.bad_words_token_ids,
             Some(vec![vec![12, 13]])
         );
+    }
+
+    #[test]
+    fn test_completion_token_ids_rejected_for_multi_choice() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "n": 2,
+            "nvext": {
+                "extra_fields": ["completion_token_ids"]
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
+        assert!(err.to_string().contains("completion_token_ids"));
     }
 
     #[test]

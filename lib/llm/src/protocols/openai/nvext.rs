@@ -351,6 +351,21 @@ impl NvExtResponseFieldSelection {
     }
 }
 
+pub(crate) fn validate_completion_token_ids_single_choice(
+    n: Option<u8>,
+    nvext: Option<&NvExt>,
+) -> anyhow::Result<()> {
+    let requested = nvext
+        .and_then(|ext| ext.extra_fields.as_ref())
+        .is_some_and(|fields| fields.iter().any(|field| field == "completion_token_ids"));
+
+    if requested && n.unwrap_or(1) > 1 {
+        anyhow::bail!("`nvext.extra_fields=[\"completion_token_ids\"]` requires `n` <= 1");
+    }
+
+    Ok(())
+}
+
 /// OpenAPI-facing schema for request routing constraints.
 ///
 /// Runtime serialization still uses `dynamo_kv_router::protocols::RoutingConstraints`;
