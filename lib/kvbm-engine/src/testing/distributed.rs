@@ -17,7 +17,7 @@ use crate::{
     worker::{DirectWorker, Worker},
 };
 use kvbm_logical::manager::BlockManager;
-use kvbm_physical::device::{DeviceBackend, DeviceBackendExt};
+use kvbm_physical::device::DeviceBackend;
 use kvbm_physical::manager::{LayoutHandle, TransferManager};
 use kvbm_physical::transfer::StorageKind;
 use kvbm_physical::{

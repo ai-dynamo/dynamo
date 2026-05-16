@@ -84,13 +84,11 @@ flowchart TD
     FALLBACK -- yes + hint>0  --> PUSH2[push FreeBlock ptr, hint]
     FALLBACK -- debug --> PANIC[panic via debug_assert!]
 
-    PUSH --> DRAIN
+    PUSH --> DRAIN{cached_bytes > release_threshold?}
     PUSH2 --> DRAIN
-    DRAIN{cached_bytes > release_threshold?}
     DRAIN -- yes --> PULL[drain_to threshold<br/>sycl::free the drained blocks]
-    DRAIN -- no --> DONE
+    DRAIN -- no --> DONE[return Ok]
     PULL --> DONE
-    DONE[return Ok]
 
     style LOOKUP fill:#4caf50,stroke:#2e7d32,color:#fff
     style DA fill:#ffca28,stroke:#f57f17
@@ -122,8 +120,9 @@ After the first mismatched round-trip the pool stops amortizing, and
 
 ### Drop semantics
 
-`Drop` gets `&mut self` so no lock is needed. `drain_to(0)` empties the
-free list and each block is returned via `sycl::free`. Blocks still in
+`Drop` uses `Mutex::get_mut()` (no lock needed because `&mut self`
+already proves exclusive access). `drain_to(0)` empties the free list
+and each block is returned via `sycl::free`. Blocks still in
 `active_allocs` are *not* freed — they are caller-owned pointers, and
 freeing them here would race a concurrent consumer.
 
@@ -142,7 +141,7 @@ pub trait PinnedAllocator: Send + Sync + 'static {
 }
 ```
 
-Two implementations live in `kvbm-physical`:
+Two implementations live in `dynamo-device`:
 
 - `CudaPinnedAllocator` — binds the CUDA context to the pinned worker
   thread, then calls `cuMemHostAlloc(DEVICEMAP)`.
@@ -163,17 +162,16 @@ flowchart LR
     NEW --> SEND
     REUSE --> SEND
     SEND["send AllocRequest(size, node, Arc dyn PinnedAllocator)"]
-    SEND --> WORKER{worker thread}
+    SEND --> W1
 
-    subgraph worker[NUMA-pinned worker]
+    subgraph worker[NUMA-pinned worker thread]
         W1[verify current NUMA node]
         W2[allocator.alloc_pinned size]
-        W3[first-touch each page<br/>write_volatile 1 byte per page]
+        W3[first-touch each page<br/>write_volatile 0 to one byte per system page]
         W4[return pointer]
         W1 --> W2 --> W3 --> W4
     end
 
-    WORKER --> W1
     W4 --> CALLER[caller receives pinned ptr]
 
     style NEW fill:#4caf50,stroke:#2e7d32,color:#fff
@@ -210,10 +208,17 @@ at process shutdown, since the pool is a `OnceLock` global.
 | Aspect | CUDA path | SYCL path |
 |---|---|---|
 | Allocator trait | `CudaPinnedAllocator: PinnedAllocator` | `SyclPinnedAllocator: PinnedAllocator` |
-| Thread binding needed before alloc | yes — `ctx.bind_to_thread()` | no |
+| Backend-specific thread binding before alloc | yes — `ctx.bind_to_thread()` so the cudarc context follows the worker thread | no — SYCL USM host allocation is context-scoped |
 | First-touch done in worker? | yes (shared logic in `NumaWorkerPool`) | yes (same code) |
 | PCI BDF source | `CU_DEVICE_ATTRIBUTE_PCI_{DOMAIN,BUS,DEVICE}_ID` | `SyclDevice::info().pci_address` |
 | NUMA node lookup | `/sys/bus/pci/devices/<bdf>/numa_node`, fallback `nvidia-smi topo` | same sysfs lookup, fallback `xpu-smi discovery` parsing |
+
+The "backend-specific thread binding" row is **not** about NUMA pinning
+— the NUMA worker thread itself is always pinned via
+`sched_setaffinity` regardless of backend. The row only refers to
+backend-runtime context binding (CUDA's per-thread current-context
+state); SYCL has no equivalent because allocations go through
+`SyclContext` directly.
 
 First-touch semantics are identical because the first-touch walk runs
 in `NumaWorkerPool` regardless of backend. The only backend-specific

@@ -14,7 +14,7 @@
 //! queues to this shared context.
 //!
 
-use crate::device::traits::*;
+use crate::traits::*;
 use anyhow::Result;
 use oneapi_rs::safe::{SyclContext, SyclDevice, SyclDeviceType, SyclEvent, SyclQueue};
 use std::collections::HashMap;
@@ -216,7 +216,7 @@ impl DeviceContextOps for SyclDeviceContext {
                 "SYCL stream creation failed for device {}: {}",
                 self.device_id, e
             ))?;
-        Ok(Box::new(SyclStreamWrapper {
+        Ok(Box::new(SyclDeviceStream {
             queue,
             device_id: self.device_id,
         }))
@@ -321,7 +321,7 @@ impl DeviceContextOps for SyclDeviceContext {
         }
         let pool = builder.build()?;
 
-        Ok(Box::new(SyclMemPoolWrapper {
+        Ok(Box::new(SyclDeviceMemPool {
             pool,
             buffers: Mutex::new(HashMap::new()),
             pending_frees: Mutex::new(Vec::new()),
@@ -362,26 +362,26 @@ impl dynamo_memory::PinnedAllocator for SyclPinnedAllocator {
 }
 
 // =====================================================================
-// SyclStreamWrapper — implements DeviceStreamOps
+// SyclDeviceStream — implements DeviceStreamOps
 // =====================================================================
 
-pub struct SyclStreamWrapper {
+pub struct SyclDeviceStream {
     queue: Arc<SyclQueue>,
     device_id: u32,
 }
 
-impl std::fmt::Debug for SyclStreamWrapper {
+impl std::fmt::Debug for SyclDeviceStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SyclStreamWrapper")
+        f.debug_struct("SyclDeviceStream")
             .field("device_id", &self.device_id)
             .finish()
     }
 }
 
-unsafe impl Send for SyclStreamWrapper {}
-unsafe impl Sync for SyclStreamWrapper {}
+unsafe impl Send for SyclDeviceStream {}
+unsafe impl Sync for SyclDeviceStream {}
 
-impl DeviceStreamOps for SyclStreamWrapper {
+impl DeviceStreamOps for SyclDeviceStream {
     fn batch_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], size: usize) -> Result<()> {
         assert_eq!(src_ptrs.len(), dst_ptrs.len(), "batch_copy: src/dst length mismatch");
 
@@ -488,7 +488,7 @@ impl DeviceStreamOps for SyclStreamWrapper {
     fn record_event(&self) -> Result<Box<dyn DeviceEventOps>> {
         let event = self.queue.submit_barrier()
             .map_err(|e| anyhow::anyhow!("SYCL record_event (barrier) failed: {}", e))?;
-        Ok(Box::new(SyclEventWrapper { event }))
+        Ok(Box::new(SyclDeviceEvent { event }))
     }
 
     fn synchronize(&self) -> Result<()> {
@@ -503,23 +503,23 @@ impl DeviceStreamOps for SyclStreamWrapper {
 }
 
 // =====================================================================
-// SyclEventWrapper — implements DeviceEventOps
+// SyclDeviceEvent — implements DeviceEventOps
 // =====================================================================
 
-pub struct SyclEventWrapper {
+pub struct SyclDeviceEvent {
     event: SyclEvent,
 }
 
-unsafe impl Send for SyclEventWrapper {}
-unsafe impl Sync for SyclEventWrapper {}
+unsafe impl Send for SyclDeviceEvent {}
+unsafe impl Sync for SyclDeviceEvent {}
 
-impl std::fmt::Debug for SyclEventWrapper {
+impl std::fmt::Debug for SyclDeviceEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SyclEventWrapper").finish()
+        f.debug_struct("SyclDeviceEvent").finish()
     }
 }
 
-impl DeviceEventOps for SyclEventWrapper {
+impl DeviceEventOps for SyclDeviceEvent {
     fn is_complete(&self) -> Result<bool> {
         self.event.is_complete()
             .map_err(|e| anyhow::anyhow!("SYCL event query failed: {}", e))
@@ -530,18 +530,20 @@ impl DeviceEventOps for SyclEventWrapper {
             .map_err(|e| anyhow::anyhow!("SYCL event synchronize failed: {}", e))
     }
 
-    fn record_on_stream(&self, stream_handle: u64) -> Result<()> {
+    fn record_on_stream(&self, stream: &dyn DeviceStreamOps) -> Result<()> {
+        let handle = stream.raw_handle()
+            .ok_or_else(|| anyhow::anyhow!("SYCL event: stream has no raw handle"))?;
         unsafe {
             oneapi_rs::sys::sycl_rs_event_record_on_queue(
                 self.event.handle,
-                stream_handle as *mut oneapi_rs::sys::sycl_rs_queue_t,
+                handle as *mut oneapi_rs::sys::sycl_rs_queue_t,
             ).result()
         }.map_err(|e| anyhow::anyhow!("SYCL event record_on_queue failed: {}", e))
     }
 }
 
 // =====================================================================
-// SyclMemPoolWrapper — implements DeviceMemPoolOps
+// SyclDeviceMemPool — implements DeviceMemPoolOps
 // =====================================================================
 
 /// Deferred free entry: pointer + event to wait on before actually freeing.
@@ -559,7 +561,7 @@ unsafe impl Send for PendingFree {}
 /// Bridges the `DeviceMemPoolOps` trait (which uses raw `u64` pointers) with
 /// the `SyclMemPool` API. An internal `HashMap` tracks active allocations
 /// by pointer so that buffers stay alive until explicitly freed back to the pool.
-pub struct SyclMemPoolWrapper {
+pub struct SyclDeviceMemPool {
     pool: dynamo_memory::SyclMemPool,
     /// Active allocations: device pointer → size.
     buffers: Mutex<HashMap<u64, usize>>,
@@ -567,18 +569,18 @@ pub struct SyclMemPoolWrapper {
     pending_frees: Mutex<Vec<PendingFree>>,
 }
 
-impl std::fmt::Debug for SyclMemPoolWrapper {
+impl std::fmt::Debug for SyclDeviceMemPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SyclMemPoolWrapper")
+        f.debug_struct("SyclDeviceMemPool")
             .field("pool_cached_bytes", &self.pool.cached_bytes())
             .finish()
     }
 }
 
-unsafe impl Send for SyclMemPoolWrapper {}
-unsafe impl Sync for SyclMemPoolWrapper {}
+unsafe impl Send for SyclDeviceMemPool {}
+unsafe impl Sync for SyclDeviceMemPool {}
 
-impl SyclMemPoolWrapper {
+impl SyclDeviceMemPool {
     /// Drain pending frees whose events have signaled, returning buffers to the
     /// pool's free-list so they can be reused by subsequent allocations.
     fn drain_completed_frees(&self) -> Result<()> {
@@ -599,7 +601,7 @@ impl SyclMemPoolWrapper {
     }
 }
 
-impl Drop for SyclMemPoolWrapper {
+impl Drop for SyclDeviceMemPool {
     fn drop(&mut self) {
         // Synchronize all pending frees so buffers are returned to the pool.
         if let Ok(mut pending) = self.pending_frees.lock() {
@@ -611,7 +613,7 @@ impl Drop for SyclMemPoolWrapper {
     }
 }
 
-impl DeviceMemPoolOps for SyclMemPoolWrapper {
+impl DeviceMemPoolOps for SyclDeviceMemPool {
     fn alloc_async(&self, size: usize, _stream: &dyn DeviceStreamOps) -> Result<u64> {
         // Drain completed pending frees so their buffers can be reused.
         self.drain_completed_frees()?;
@@ -629,7 +631,7 @@ impl DeviceMemPoolOps for SyclMemPoolWrapper {
             .lock()
             .map_err(|e| anyhow::anyhow!("buffer map poisoned: {}", e))?
             .remove(&ptr)
-            .ok_or_else(|| anyhow::anyhow!("SyclMemPoolWrapper: ptr {:#x} not found in buffer map", ptr))?;
+            .ok_or_else(|| anyhow::anyhow!("SyclDeviceMemPool: ptr {:#x} not found in buffer map", ptr))?;
 
         let event = match stream.record_event() {
             Ok(event) => event,

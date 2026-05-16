@@ -19,6 +19,7 @@ velo = { workspace = true }
 
 # Workspace deps
 dynamo-memory = { workspace = true }
+dynamo-device = { workspace = true }
 anyhow = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }

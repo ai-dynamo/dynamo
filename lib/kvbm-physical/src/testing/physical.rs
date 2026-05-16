@@ -13,7 +13,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::BlockId;
-use crate::device::{DeviceBackend, DeviceBackendExt, DeviceContext};
+use crate::device::{DeviceBackend, DeviceContext};
 use crate::{
     layout::{BlockDimension, LayoutConfig, PhysicalLayout},
     manager::{LayoutHandle, TransferManager},

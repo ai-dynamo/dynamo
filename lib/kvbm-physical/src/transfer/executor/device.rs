@@ -206,6 +206,9 @@ fn execute_fc_lw_vectorized(
     stream: &Arc<DeviceStream>,
     pool: &Arc<DeviceMemPool>,
 ) -> Result<()> {
+    // Bind device context to current thread before any device operations.
+    stream.bind_to_thread()?;
+
     let src_layout = src.layout();
     let nl = layers.len();
     let no = src_layout.outer_dim();

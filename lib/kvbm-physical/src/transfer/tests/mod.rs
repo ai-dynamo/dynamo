@@ -62,7 +62,7 @@ use super::{
 };
 use crate::{
     BlockId,
-    device::{DeviceBackend, DeviceBackendExt, DeviceContext},
+    device::{DeviceBackend, DeviceContext},
     layout::{
         BlockDimension, LayoutConfig,
         builder::{HasConfig, NoLayout, NoMemory, PhysicalLayoutBuilder},

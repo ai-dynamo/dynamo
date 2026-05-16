@@ -31,13 +31,14 @@ specific framework.
 
 | Crate | Responsibility | XPU/SYCL in scope? |
 |---|---|---|
-| `kvbm-common` | Shared primitives: `BlockId`, `SequenceHash`, `LogicalLayoutHandle` (G1/G2/G3/G4 tier enum), and the `DeviceBackend { Cuda, Sycl }` tag enum. No device deps. | Tag only — the `DeviceBackend` enum was promoted here so `dynamo-memory` and `kvbm-physical` share a single canonical type. Device-neutral: no FFI, no feature gates; runtime probes live on `DeviceBackendExt` in `kvbm-physical`. |
+| `kvbm-common` | Shared logical-tier vocabulary: `BlockId`, `SequenceHash`, `LogicalLayoutHandle` (G1/G2/G3/G4 tier enum). Pure data types, no device deps. | No — fully device-neutral. The `DeviceBackend` enum lives in `dynamo-device`, not here. |
 | `kvbm-config` | Static configuration for caches, discovery, NIXL, object storage, offload, onboard policies, tokio/rayon runtimes, messengers. Pure config structs. | No. |
 | `kvbm-logical` | Logical block lifecycle: registries, pools, sequence tracking, metrics, TinyLFU cache, pub/sub adapters, framework integrations. Works on logical handles; never touches devices directly. | No. |
 | `kvbm-consolidator` | Out-of-process aggregation/consolidation service. Reads event streams from KVBM workers via ZeroMQ (`tmq`), tracks events and hashes, emits to consumers. Operates on logical types (`BlockId`, `SequenceHash`) and serialized wire formats — never touches GPU memory. Deps: `kvbm-logical`, `dynamo-tokens`, `dynamo-kv-hashing`, `dynamo-kv-router`. | No. |
-| `dynamo-memory` (`lib/memory`) | `MemoryDescriptor`, `DeviceAllocator` / `PinnedAllocator` traits, `DeviceStorage` / `PinnedStorage`, `NumaWorkerPool`, `SyclMemPool`, `CudaMemPool`. Backend-agnostic storage layer — no device-SDK types in the public API. | **Yes** — houses `SyclMemPool`, SYCL-aware NUMA discovery, and the allocator traits that downstream device wrappers implement. |
+| `dynamo-memory` (`lib/memory`) | Backend-agnostic storage primitives: `MemoryDescriptor`, `DeviceAllocator` / `PinnedAllocator` traits, `DeviceStorage` / `PinnedStorage`, `NumaWorkerPool`, `CudaMemPool`, `SyclMemPool`, plus NUMA helpers (`get_numa_node_for_pci_address`, `subdivide_cpu_set_for_device`, `enumerate_nvml_gpus`). Tier-1 Dynamo crate: **does not depend on any `kvbm-*` crate**. Backend-aware NUMA/CPU-set dispatch lives in `dynamo-device`, not here. | **Yes** — houses `SyclMemPool`, SYCL-aware sysfs primitives, and the allocator traits that downstream device wrappers implement. |
+| `dynamo-device` (`lib/device`) | Backend-agnostic device-handle abstraction: `DeviceBackend` tag enum (with inherent `is_available`/`detect_backend`/`list_available` probes), the `DeviceContextOps` / `DeviceStreamOps` / `DeviceEventOps` / `DeviceMemPoolOps` trait surface, the `DeviceContext` / `DeviceStream` / `DeviceEvent` / `DeviceMemPool` trait-object wrappers, the `CudaDeviceContext` / `SyclDeviceContext` impls, and `topology::get_device_cpu_set(backend, pci_address)` for backend-aware CPU-set dispatch. Tier-1 Dynamo crate: **does not depend on any `kvbm-*` crate** (one pre-existing exception: `kvbm-kernels` for kernel launchers — the kernels crate is misnamed and would be `dynamo-kernels` under the strict naming convention). | **Yes** — the canonical home for the multi-backend abstraction. CUDA and SYCL both implement the trait surface here. Adding ROCm or other backends is a single-crate change. |
 | `kvbm-kernels` | CUDA and SYCL kernel launchers: `vectorized_copy`, `memcpy_batch`, `sycl_vectorized_copy`, `sycl_*_from_block`. Built from `.cu` via nvcc and `.cpp` via `icpx -fsycl`. | **Yes** — SYCL kernel sources and FFI wrappers live here. |
-| `kvbm-physical` | Device abstraction traits (`DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps`), the `DeviceBackendExt` extension trait (runtime `is_available` / `detect_backend` / `list_available` probes on the `kvbm-common` enum), CUDA and SYCL implementations, and `TransferManager` / `TransferContext` on top of them. | **Yes** — the core of the multi-backend layer; CUDA and SYCL both implement the trait surface here. |
+| `kvbm-physical` | KVBM-specific transfer subsystem: `TransferManager`, `TransferContext`, NIXL integration, layout/manager modules. Re-exports `dynamo_device as device` for backward compatibility, so `kvbm_physical::device::DeviceContext` continues to resolve. | **Yes** — the KVBM-side consumer of the multi-backend layer; transfer and NIXL routing are CUDA/SYCL-aware. |
 | `kvbm-engine` | Orchestrator: `InstanceLeader`, `PhysicalWorker`, `ReplicatedDataWorker`, sessions, offload pipeline, object tier (G4), `CollectiveOps` with NCCL and **oneCCL** implementations, `OneCclBootstrap`. | **Yes** — adds the `oneccl` feature and the XPU-aware layer-wise onboard path. |
 | `kvbm-py3` (`lib/bindings/kvbm`) | Python/FFI bindings consumed by external frameworks. Owns the vLLM connector and its backend-specific `event_sync_blocking` (CUDA / SYCL / fallback). | **Yes** — SYCL variant added alongside CUDA, mutually exclusive by feature. |
 
@@ -73,8 +74,8 @@ graph TB
     end
 
     subgraph v2["KVBM v2 (lib/)"]
-        subgraph topLayer["Framework-agnostic layer"]
-            Common["kvbm-common<br/>BlockId, SequenceHash<br/>LogicalLayoutHandle (G1..G4)<br/>DeviceBackend (Cuda / Sycl)"]
+        subgraph topLayer["Tier-2 KVBM-specific (kvbm-* crates)"]
+            Common["kvbm-common<br/>BlockId, SequenceHash<br/>LogicalLayoutHandle (G1..G4)"]
             Config["kvbm-config<br/>cache / offload / onboard<br/>discovery / messenger"]
             Logical["kvbm-logical<br/>registries, pools, sequences<br/>TinyLFU, metrics, pubsub"]
         end
@@ -83,17 +84,22 @@ graph TB
             Engine["kvbm-engine<br/>InstanceLeader, PhysicalWorker<br/>sessions, offload, G4 object tier<br/>CollectiveOps: NCCL + oneCCL"]
         end
 
-        subgraph physLayer["Device abstraction layer"]
-            Physical["kvbm-physical<br/>DeviceBackendExt probes<br/>Device{Context,Stream,Event,MemPool}Ops<br/>TransferManager, TransferContext"]
+        subgraph physLayer["KVBM transfer layer"]
+            Physical["kvbm-physical<br/>TransferManager, TransferContext<br/>NIXL integration<br/>(re-exports dynamo-device as 'device')"]
             Kernels["kvbm-kernels<br/>CUDA: vectorized_copy, memcpy_batch<br/>SYCL: sycl_vectorized_copy, sycl_*_from_block"]
         end
 
-        subgraph memLayer["Storage layer"]
-            Memory["dynamo-memory<br/>MemoryDescriptor<br/>DeviceAllocator / PinnedAllocator traits<br/>DeviceStorage / PinnedStorage<br/>NumaWorkerPool<br/>SyclMemPool / CudaMemPool"]
+        subgraph tier1Layer["Tier-1 Dynamo primitives (dynamo-* crates)"]
+            Device["dynamo-device<br/>DeviceBackend (Cuda / Sycl) + inherent probes<br/>Device{Context,Stream,Event,MemPool}Ops traits<br/>{Cuda,Sycl}DeviceContext impls<br/>topology::get_device_cpu_set"]
+            Memory["dynamo-memory<br/>MemoryDescriptor<br/>DeviceAllocator / PinnedAllocator traits<br/>DeviceStorage / PinnedStorage<br/>NumaWorkerPool, CudaMemPool, SyclMemPool<br/>get_numa_node_for_pci_address, enumerate_nvml_gpus"]
         end
 
         subgraph bindLayer["Bindings layer"]
             PyBind["kvbm-py3 (lib/bindings/kvbm)<br/>Python extension module<br/>vLLM connector, event_sync_blocking"]
+        end
+
+        subgraph connectorLayer["Connector layer (upstream — ryan/kvbm-connector-merge, not on this branch)"]
+            Connector["kvbm-connector<br/>vLLM worker glue<br/>(today reaches cudarc::CudaEvent directly;<br/>future XPU enablement routes through dynamo-device)"]
         end
     end
 
@@ -108,36 +114,47 @@ graph TB
     VLLM -- "Python FFI" --> PyBind
     SGL -. "future" .-> PyBind
 
-    %% Bindings → engine (the glue layer that orchestrates everything)
-    PyBind --> Engine
+    %% Bindings → connector → engine (connector is the glue layer that
+    %% orchestrates everything; on this branch the bindings still talk
+    %% to engine directly)
+    PyBind -. on this branch .-> Engine
+    PyBind -. upstream .-> Connector
+    Connector --> Engine
+    Connector -. uses (today: raw cudarc::CudaEvent;<br/>future: DeviceEvent via dynamo-device) .-> Device
 
-    %% Top layer dependencies
-    Logical --> Common
-    Logical --> Config
-    Config --> Common
+    %% kvbm-logical depends only on dynamo-tokens (no kvbm-common/config dep).
+    %% kvbm-config depends on dynamo-memory (no kvbm-common dep).
 
-    %% Engine depends on logical, physical, and top layer
+
+    %% Engine depends on logical, physical, dynamo-device (direct), and top layer
     Engine --> Logical
     Engine --> Physical
+    Engine --> Device
     Engine --> Common
     Engine --> Config
 
-    %% Physical layer
+    %% kvbm-physical sits above tier-1 Dynamo primitives
     Physical --> Memory
+    Physical --> Device
     Physical --> Common
     Physical --> Kernels
-    Memory --> Common
     Kernels -. optional .-> CUDA
     Kernels -. optional .-> SYCL
 
-    %% Memory layer — cudarc is unconditional (CudaMemPool + NUMA helpers),
-    %% oneapi-rs is optional behind the xpu-sycl feature (SyclMemPool).
+    %% dynamo-device owns the device abstraction; depends on dynamo-memory
+    %% for storage primitives (CudaMemPool / SyclMemPool / NUMA topology).
+    %% Crucially, dynamo-device does NOT depend on kvbm-common or any
+    %% other kvbm-* crate (one pre-existing exception: kvbm-kernels for
+    %% kernel launchers, flagged as a known wart).
+    Device --> Memory
+    Device -. cuda feature .-> CUDA
+    Device -. xpu-sycl feature .-> SYCL
+    Device -. via kvbm-kernels (pre-existing wart) ..-> Kernels
+
+    %% dynamo-memory is fully tier-1: no kvbm-* deps. cudarc is
+    %% unconditional (CudaMemPool); oneapi-rs is optional (SyclMemPool).
     Memory -. optional (xpu-sycl feature) .-> SYCL
     Memory --> CUDA
-
-    %% Device backends
-    Physical -. cuda feature .-> CUDA
-    Physical -. xpu-sycl feature .-> SYCL
 
     %% Collectives
     Engine -. nccl feature .-> NCCL
@@ -150,6 +167,7 @@ graph TB
     classDef kernels fill:#2196f3,stroke:#1565c0,color:#fff,stroke-width:2px
     classDef memory fill:#4caf50,stroke:#2e7d32,color:#fff,stroke-width:2px
     classDef bindings fill:#9e9e9e,stroke:#616161,color:#fff,stroke-width:2px
+    classDef connector fill:#bdbdbd,stroke:#424242,color:#000,stroke-width:2px,stroke-dasharray: 5 3
     classDef external fill:#fff9c4,stroke:#f57f17,color:#000,stroke-width:2px
     classDef hw fill:#cfd8dc,stroke:#37474f,color:#000,stroke-width:2px
 
@@ -159,6 +177,7 @@ graph TB
     class Kernels kernels
     class Memory memory
     class PyBind bindings
+    class Connector connector
     class VLLM,SGL external
     class CUDA,SYCL,NCCL,OneCCL hw
 ```
@@ -198,14 +217,15 @@ after XPU/SYCL enablement.
 
 | Area | Before (CUDA-only) | After (CUDA + XPU/SYCL) |
 |---|---|---|
-| **Backend selector** | Implicit — everything was CUDA. | `DeviceBackend::{Cuda, Sycl}` tag enum in `kvbm-common` (device-neutral, shared by `dynamo-memory` and `kvbm-physical`); runtime probes live on the `DeviceBackendExt` extension trait in `kvbm-physical` (`is_available` / `detect_backend` / `list_available`), guarded by `catch_unwind` so a missing `libcuda.so` / `libsycl.so` doesn't abort the process. `DeviceContext::new(backend, id)` dispatches to `CudaDeviceContext` or `SyclDeviceContext` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`. |
-| **Device context / stream / event** | Direct use of `cudarc::driver::{CudaContext, CudaStream, CudaEvent}`. | New traits `DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps` in `lib/kvbm-physical/src/device/traits.rs`. `CudaDeviceContext` and `SyclDeviceContext` both implement them (named to avoid shadowing `cudarc::driver::CudaContext` and `oneapi_rs::safe::SyclContext`); the transfer executor, notification loop, and pool wrappers talk to trait objects only. |
+| **Backend selector** | Implicit — everything was CUDA. | `DeviceBackend::{Cuda, Sycl}` tag enum in `dynamo-device`. Runtime probes (`is_available` / `detect_backend` / `list_available`) are inherent methods on the enum, guarded by `catch_unwind` so a missing `libcuda.so` / `libsycl.so` doesn't abort the process. `DeviceContext::new(backend, id)` dispatches to `CudaDeviceContext` or `SyclDeviceContext` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`. `dynamo-device` is a tier-1 Dynamo primitive: no `kvbm-*` deps, so non-KVBM consumers can use it directly. |
+| **Device context / stream / event** | Direct use of `cudarc::driver::{CudaContext, CudaStream, CudaEvent}`. | New traits `DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps` in `lib/device/src/traits.rs` (`dynamo-device`). `CudaDeviceContext` and `SyclDeviceContext` both implement them (named to avoid shadowing `cudarc::driver::CudaContext` and `oneapi_rs::safe::SyclContext`); the transfer executor, notification loop, and pool wrappers talk to trait objects only. `kvbm-physical` re-exports the crate as `kvbm_physical::device` for backward compatibility. |
 | **Copy API on streams** | Direction-named CUDA calls (`cudaMemcpyAsync` with explicit H2D/D2H kinds). | Pattern-based primitives on `DeviceStreamOps`: `batch_copy` (N DMAs, direction auto-detected), `memcpy_htod` / `memcpy_dtoh` (scalar uploads/downloads), `vectorized_copy` (kernel over pointer arrays). The executor picks between them based on op type, not direction. |
-| **`TransferStrategy` enum** | `CudaAsyncH2D`, `CudaAsyncD2H`, `CudaAsyncD2D`; `panic!` on `System ↔ Device`. | Two changes — (1) **rename** `CudaAsync*` → `Async*` since the backend-agnostic executor dispatches to either `CudaStreamWrapper` or `SyclStreamWrapper`; (2) **add** `BlockingH2D`, `BlockingD2H` that replace the upstream panic with an async copy + inline `device_stream.synchronize()`. Blocking variants apply on **both** backends because the motivating case (unpinned `System` memory degrading async copies to staged blocking behavior) affects CUDA and SYCL identically. See [`device_executor_flow.md`](./device_executor_flow.md#transferstrategy-vs-upstream--rename-and-additions) for the full before/after mapping. |
+| **Per-thread context binding** | `cuCtxSetCurrent` open-coded inline at every CUDA entry point in the executor. | Both `DeviceContextOps` and `DeviceStreamOps` expose `bind_to_thread()`, with a no-op default so SYCL (no per-thread current-context concept) inherits a free implementation. CUDA overrides on both: the context binding fires inside `allocate_device` / `allocate_pinned`, and the stream binding fires at the top of `execute_fc_lw_vectorized`. |
+| **`TransferStrategy` enum** | `CudaAsyncH2D`, `CudaAsyncD2H`, `CudaAsyncD2D`; `panic!` on `System ↔ Device`. | Two changes — (1) **rename** `CudaAsync*` → `Async*` since the backend-agnostic executor dispatches to either `CudaDeviceStream` or `SyclDeviceStream`; (2) **add** `BlockingH2D`, `BlockingD2H` that replace the upstream panic with an async copy + inline `device_stream.synchronize()`. Blocking variants apply on **both** backends because the motivating case (unpinned `System` memory degrading async copies to staged blocking behavior) affects CUDA and SYCL identically. See [`device_executor_flow.md`](./device_executor_flow.md#transferstrategy-vs-upstream--rename-and-additions) for the full before/after mapping. |
 | **Memory pool** | Native CUDA pool (`cuMemPoolCreate` / `cuMemAllocFromPoolAsync`). | Two pool implementations behind `DeviceMemPoolOps`: `CudaMemPool` (native API, stream-ordered) and `SyclMemPool` (software free-list over `sycl::malloc_device`, SYCL has no native pool API). `SyclMemPool`'s `PoolInner.active_allocs: HashMap<ptr, real_size>` keeps `cached_bytes` and `release_threshold` accurate when a best-fit returns a block larger than requested. |
-| **Device storage** | `DeviceStorage::new(size, device_id)` hard-coded to `cudarc::driver::result::malloc_sync`. | `DeviceStorage::new(size, Arc<dyn DeviceAllocator>)`. The new `DeviceAllocator` trait lives in `dynamo-memory` with *no* CUDA types, and `DeviceContext` in `kvbm-physical` bridges it to the selected backend. The same pattern rewired `PinnedStorage`. |
-| **Pinned host allocation** | `PinnedStorage` called `cuMemHostAlloc` inline. | A `PinnedAllocator` trait in `dynamo-memory` is called *on a NUMA-pinned worker thread* managed by `NumaWorkerPool` (one thread per NUMA node, global singleton). `CudaPinnedAllocator` / `SyclPinnedAllocator` in `kvbm-physical` provide the backend implementations; the worker first-touches pages after allocation so Linux binds them to the correct node. End-to-end validation via `move_pages(2)` is available for either backend through the `validate_numa_placement` binary — see [`sycl_pool_and_numa.md`](../../memory/docs/sycl_pool_and_numa.md#validating-first-touch-on-real-hardware) for the correct invocation on CUDA vs. XPU hosts (XPU requires the `xpu-sycl` feature at build time). |
-| **NUMA topology / PCI discovery** | CUDA-specific: PCI BDF pulled from `cuDeviceGet*` attributes. | Backend-agnostic. `DeviceContextOps::pci_bdf_address()` returns `"DDDD:BB:DD.F"` — CUDA queries `CU_DEVICE_ATTRIBUTE_PCI_*`; SYCL reads `SyclDevice::info()?.pci_address`. `dynamo_memory::numa` resolves NUMA nodes via sysfs (with `nvidia-smi` / `xpu-smi` fallbacks) and subdivides CPU sets fairly across *all* GPUs of the same vendor, using NVML for CUDA and a sysfs PCI scan for Intel (class `0x03xxxx`, vendor `0x8086`). |
+| **Device storage** | `DeviceStorage::new(size, device_id)` hard-coded to `cudarc::driver::result::malloc_sync`. | `DeviceStorage::new(size, Arc<dyn DeviceAllocator>)`. The new `DeviceAllocator` trait lives in `dynamo-memory` with *no* CUDA types; `DeviceContext` in `dynamo-device` implements it. The same pattern rewired `PinnedStorage`. |
+| **Pinned host allocation** | `PinnedStorage` called `cuMemHostAlloc` inline. | A `PinnedAllocator` trait in `dynamo-memory` is the per-backend FFI shim that `NumaWorkerPool` invokes from a NUMA-pinned worker thread (one thread per NUMA node, global singleton). `CudaPinnedAllocator` / `SyclPinnedAllocator` in `dynamo-device` provide the backend implementations; the worker first-touches pages after allocation so Linux binds them to the correct node. The NUMA-vs-fallback routing decision happens *upstream* of the trait, in `CudaDeviceContext::allocate_pinned` / `SyclDeviceContext::allocate_pinned`. End-to-end validation via `move_pages(2)` is available for either backend through the `validate_numa_placement` binary — see [`sycl_pool_and_numa.md`](../../memory/docs/sycl_pool_and_numa.md#validating-first-touch-on-real-hardware) for the correct invocation on CUDA vs. XPU hosts (XPU requires the `xpu-sycl` feature at build time). |
+| **NUMA topology / PCI discovery** | CUDA-specific: PCI BDF pulled from `cuDeviceGet*` attributes. | Backend-agnostic. `DeviceContextOps::pci_bdf_address()` returns `"DDDD:BB:DD.F"` — CUDA queries `CU_DEVICE_ATTRIBUTE_PCI_*`; SYCL reads `SyclDevice::info()?.pci_address`. NUMA-node lookup is split: `dynamo_memory::numa::get_numa_node_for_pci_address` resolves NUMA via sysfs with `nvidia-smi` / `xpu-smi` fallbacks (backend-agnostic; takes a PCI BDF string), while backend-aware CPU-set subdivision lives in `dynamo_device::topology::get_device_cpu_set(backend, pci)` — the latter dispatches per-backend GPU enumeration (NVML for CUDA, sysfs PCI scan for Intel `0x8086` class `0x03xxxx`) and calls back into `dynamo-memory`'s `subdivide_cpu_set_for_device` primitive for the actual splitting. |
 | **Event reuse** | Single-shot events — `CudaEvent::record(&stream)`. | New `DeviceEventOps::record_on_stream(stream_handle)` lets the same `DeviceEvent` be re-recorded on a later op. Required by `PhysicalWorker::execute_local_layerwise_onboard` in `kvbm-engine`, which records one event per layer on a shared H2D stream. |
 | **Kernels** | CUDA `.cu` sources compiled by nvcc in `kvbm-kernels`: `vectorized_copy`, `memcpy_batch`, optional permute kernels. | Same CUDA kernels, *plus* SYCL `.cpp` sources (`sycl/vectorized_copy_kernel.cpp`, `sycl/tensor_permute_kernel.cpp`) compiled by `icpx -fsycl` into `libkvbm_kernels_sycl.so` when `xpu-sycl` is enabled. FFI wrappers in `src/tensor_kernels_sycl.rs` expose them as `sycl_vectorized_copy`, `sycl_universal_from_block`, `sycl_block_from_universal`. SYCL kernels pass a `sycl::queue*` instead of a `cudaStream_t` and use byte-size element dispatch rather than dtype templates. |
 | **Collectives (`kvbm-engine`)** | NCCL only (`feature = "nccl"`, `cudarc::nccl`). | `CollectiveOps` trait is now implemented by `NcclCollectives` **and** `OneCclCollectives` (`feature = "oneccl"`, `oneapi-rs::ccl`). oneCCL supports both a from-scratch bootstrap (`OneCclBootstrap` — 8 B world_size + 256 B KVS address rendezvous) and borrowed handles from PyTorch / vLLM. Broadcasts use `ccl_rs_group_start/end` with a single `event_wait` on the last submitted op. |
@@ -243,7 +263,8 @@ and how components connect end-to-end. Each color is a single *layer of
 ownership*:
 
 - 🟩 **Green** — `dynamo-memory`: storage + allocator traits, NUMA worker pool, SYCL pool implementation.
-- 🟧 **Orange** — `kvbm-physical`: device abstraction traits + CUDA / SYCL wrappers.
+- 🟧 **Orange** — `dynamo-device`: device abstraction traits + CUDA / SYCL wrappers, backend tag enum, topology dispatch.
+- 🟥 **Red-orange** — `kvbm-physical`: KVBM transfer manager / context / executor (consumer of `dynamo-device`).
 - 🟦 **Blue** — `kvbm-kernels`: GPU kernel launchers (CUDA + SYCL).
 - 🟪 **Purple** — `kvbm-engine`: collective ops (NCCL + oneCCL) and workers that drive transfers.
 - Grey — `kvbm-py3` / vLLM binding layer.
@@ -267,24 +288,22 @@ graph TB
         OneCclImpl --> OneCclBS
     end
 
-    subgraph physical["kvbm-physical"]
-        TM["TransferManager<br/>TransferContext<br/>stream pools × 2"]
-        Exec["execute_device_transfer<br/>whole-block vs FC↔LW"]
+    subgraph device["dynamo-device (lib/device)"]
+        %% Trait + handle + Cuda/Sycl impls grouped per Ops surface
+        CtxOps["trait DeviceContextOps"]
         DC["DeviceContext"]
-        DS["DeviceStream"]
-        DE["DeviceEvent"]
-        DP["DeviceMemPool"]
         CudaCtx["CudaDeviceContext / Wrappers<br/>device/cuda/mod.rs"]
         SyclCtx["SyclDeviceContext / Wrappers<br/>device/sycl/mod.rs"]
-        CtxOps["trait DeviceContextOps"]
-        StrOps["trait DeviceStreamOps"]
-        EvOps["trait DeviceEventOps"]
-        PoolOps["trait DeviceMemPoolOps"]
 
-        TM --> DC
-        TM --> Exec
-        Exec --> DS
-        Exec --> DP
+        StrOps["trait DeviceStreamOps"]
+        DS["DeviceStream"]
+
+        EvOps["trait DeviceEventOps"]
+        DE["DeviceEvent"]
+
+        PoolOps["trait DeviceMemPoolOps"]
+        DP["DeviceMemPool"]
+
         DC -.-> CtxOps
         DS -.-> StrOps
         DE -.-> EvOps
@@ -297,6 +316,16 @@ graph TB
         SyclCtx -.implements.-> StrOps
         SyclCtx -.implements.-> EvOps
         SyclCtx -.implements.-> PoolOps
+    end
+
+    subgraph physical["kvbm-physical"]
+        TM["TransferManager<br/>TransferContext<br/>stream pools × 2"]
+        Exec["execute_device_transfer<br/>whole-block vs FC↔LW"]
+
+        TM --> DC
+        TM --> Exec
+        Exec --> DS
+        Exec --> DP
     end
 
     subgraph kernels["kvbm-kernels"]
@@ -326,8 +355,8 @@ graph TB
     PW --> TM
     PW -. uses .-> CollTrait
 
-    NcclImpl --> DS
-    OneCclImpl -. sycl::queue .-> DS
+    NcclImpl -. raw CudaStream .-> CudaCtx
+    OneCclImpl -. raw sycl::queue .-> SyclCtx
 
     CudaCtx -.implements.-> DAlloc
     SyclCtx -.implements.-> DAlloc
@@ -348,13 +377,15 @@ graph TB
     SyclCtx -. FFI .-> SyclKern
 
     classDef mem fill:#4caf50,stroke:#2e7d32,color:#fff,stroke-width:2px
+    classDef dev fill:#ff9800,stroke:#e65100,color:#fff,stroke-width:2px
     classDef phys fill:#ff6b35,stroke:#c44520,color:#fff,stroke-width:2px
     classDef kern fill:#2196f3,stroke:#1565c0,color:#fff,stroke-width:2px
     classDef eng fill:#9c27b0,stroke:#6a1b9a,color:#fff,stroke-width:2px
     classDef bind fill:#9e9e9e,stroke:#616161,color:#fff,stroke-width:2px
 
     class MD,DevS,PinS,DAlloc,PAlloc,NumaWP,SMPool,CMPool,CudaPinAlloc,SyclPinAlloc mem
-    class TM,Exec,DC,DS,DE,DP,CudaCtx,SyclCtx,CtxOps,StrOps,EvOps,PoolOps phys
+    class DC,DS,DE,DP,CudaCtx,SyclCtx,CtxOps,StrOps,EvOps,PoolOps dev
+    class TM,Exec phys
     class CudaKern,SyclKern kern
     class PW,CollTrait,NcclImpl,OneCclImpl,OneCclBS eng
     class PyConnector,EvSync bind
@@ -371,7 +402,7 @@ graph TB
    share the same direction pool; see `device_executor_flow.md` for the
    rationale.
 3. `batch_copy` / `vectorized_copy` go through `DeviceStreamOps`, which
-   dispatches to either `CudaStreamWrapper` or `SyclStreamWrapper`.
+   dispatches to either `CudaDeviceStream` or `SyclDeviceStream`.
 4. `vectorized_copy` implementations call into `kvbm-kernels`
    (`kvbm_kernels::vectorized_copy` for CUDA, `kvbm_kernels::sycl_vectorized_copy`
    for SYCL — the latter links against `libkvbm_kernels_sycl.so` built by
@@ -390,20 +421,14 @@ classDiagram
     direction TB
 
     class DeviceBackend {
-        <<enum, in kvbm-common>>
+        <<enum, in dynamo-device>>
         Cuda
         Sycl
         +name() &'static str
-    }
-
-    class DeviceBackendExt {
-        <<trait, in kvbm-physical>>
+        +is_available() bool
         +detect_backend() Result~Self~
         +list_available() Vec~Self~
-        +is_available() bool
     }
-
-    DeviceBackendExt ..|> DeviceBackend : impl for
 
     class DeviceContext {
         -backend: DeviceBackend
@@ -445,6 +470,7 @@ classDiagram
         +free_async(ptr, stream) Result
     }
 
+    %% --- Context group: trait + handle + Cuda/Sycl impls -----------------
     class DeviceContextOps {
         <<trait>>
         +device_id() u32
@@ -460,70 +486,13 @@ classDiagram
         +pci_bdf_address() Option~String~*
     }
 
-    class DeviceStreamOps {
-        <<trait>>
-        +batch_copy(src, dst, size) Result
-        +memcpy_htod(dst_device, src_host) Result
-        +memcpy_dtoh(src_device, dst_host) Result
-        +vectorized_copy(src_dev, dst_dev, chunk, count) Result
-        +record_event() Result~Box dyn DeviceEventOps~
-        +synchronize() Result
-        +raw_handle() Option~u64~*
-    }
-
-    class DeviceEventOps {
-        <<trait>>
-        +is_complete() Result~bool~
-        +synchronize() Result
-        +record_on_stream(stream_handle: u64) Result
-        +raw_handle() Option~u64~*
-    }
-
-    class DeviceMemPoolOps {
-        <<trait>>
-        +alloc_async(size, stream) Result~u64~
-        +free_async(ptr, stream) Result
-    }
-
-    class DeviceAllocator {
-        <<trait in dynamo-memory>>
-        +allocate_device(size) Result~u64~
-        +free_device(ptr) Result
-        +allocate_pinned(size) Result~u64~
-        +free_pinned(ptr) Result
-        +device_id() u32
-    }
-
     class CudaDeviceContext {
         <<cuda backend>>
-        +create_stream() CudaStreamWrapper
+        +create_stream() CudaDeviceStream
         +allocate_device()
         +allocate_pinned() NUMA-aware
-        +create_memory_pool() CudaMemPoolWrapper
+        +create_memory_pool() CudaDeviceMemPool
         +pci_bdf_address()
-    }
-
-    class CudaStreamWrapper {
-        <<cuda backend>>
-        +batch_copy()
-        +memcpy_htod()
-        +memcpy_dtoh()
-        +vectorized_copy() kernel via kvbm-kernels
-        +record_event() CudaEventWrapper
-    }
-
-    class CudaEventWrapper {
-        <<cuda backend>>
-        +is_complete()
-        +synchronize()
-        +record_on_stream()
-    }
-
-    class CudaMemPoolWrapper {
-        <<cuda backend>>
-        -pool: CudaMemPool
-        +alloc_async() stream-ordered
-        +free_async()
     }
 
     class SyclDeviceContext {
@@ -533,34 +502,100 @@ classDiagram
         +create_stream() fresh SyclQueue each call
         +allocate_device() tracked
         +allocate_pinned() NUMA-aware
-        +create_memory_pool() SyclMemPoolWrapper
+        +create_memory_pool() SyclDeviceMemPool
         +pci_bdf_address()
     }
 
-    class SyclStreamWrapper {
+    %% --- Stream group ----------------------------------------------------
+    class DeviceStreamOps {
+        <<trait>>
+        +bind_to_thread() Result*
+        +batch_copy(src, dst, size) Result
+        +memcpy_htod(dst_device, src_host) Result
+        +memcpy_dtoh(src_device, dst_host) Result
+        +vectorized_copy(src_dev, dst_dev, chunk, count) Result
+        +record_event() Result~Box dyn DeviceEventOps~
+        +synchronize() Result
+        +raw_handle() Option~u64~*
+    }
+
+    class CudaDeviceStream {
+        <<cuda backend>>
+        +bind_to_thread() cuCtxSetCurrent
+        +batch_copy()
+        +memcpy_htod()
+        +memcpy_dtoh()
+        +vectorized_copy() kernel via kvbm-kernels
+        +record_event() CudaDeviceEvent
+    }
+
+    class SyclDeviceStream {
         <<xpu backend>>
+        +bind_to_thread() inherits no-op
         +batch_copy()
         +memcpy_htod()
         +memcpy_dtoh()
         +vectorized_copy() SYCL kernel via kvbm-kernels
-        +record_event() SyclEventWrapper barrier
+        +record_event() SyclDeviceEvent barrier
     }
 
-    class SyclEventWrapper {
+    %% --- Event group -----------------------------------------------------
+    class DeviceEventOps {
+        <<trait>>
+        +is_complete() Result~bool~
+        +synchronize() Result
+        +record_on_stream(stream_handle: u64) Result
+        +raw_handle() Option~u64~*
+    }
+
+    class CudaDeviceEvent {
+        <<cuda backend>>
+        +is_complete()
+        +synchronize()
+        +record_on_stream()
+    }
+
+    class SyclDeviceEvent {
         <<xpu backend>>
         +is_complete()
         +synchronize()
         +record_on_stream()
     }
 
-    class SyclMemPoolWrapper {
+    %% --- MemPool group ---------------------------------------------------
+    class DeviceMemPoolOps {
+        <<trait>>
+        +alloc_async(size, stream) Result~u64~
+        +free_async(ptr, stream) Result
+    }
+
+    class CudaDeviceMemPool {
+        <<cuda backend>>
+        -pool: CudaMemPool
+        +alloc_async() stream-ordered
+        +free_async()
+    }
+
+    class SyclDeviceMemPool {
         <<xpu backend>>
         -pool: SyclMemPool
-        -pending_frees: Vec~PendingFree~
+        -buffers: Mutex~HashMap~u64, usize~~
+        -pending_frees: Mutex~Vec~PendingFree~~
         +alloc_async()
         +free_async() event-deferred
     }
 
+    %% --- Allocator (dynamo-memory consumer-tier trait) -------------------
+    class DeviceAllocator {
+        <<trait in dynamo-memory>>
+        +allocate_device(size) Result~u64~
+        +free_device(ptr) Result
+        +allocate_pinned(size) Result~u64~
+        +free_pinned(ptr) Result
+        +device_id() u32
+    }
+
+    %% Public-handle composition (handle owns Box<dyn Ops>)
     DeviceContext --> DeviceBackend : has
     DeviceContext *-- DeviceContextOps : ops
     DeviceContext ..> DeviceStream : creates
@@ -577,34 +612,38 @@ classDiagram
     DeviceMemPool --> DeviceBackend : has
     DeviceMemPool *-- DeviceMemPoolOps : ops
 
+    %% Trait factory relations (Ops creates Ops)
     DeviceContextOps ..> DeviceStreamOps : creates
     DeviceContextOps ..> DeviceMemPoolOps : creates
     DeviceStreamOps ..> DeviceEventOps : creates
 
+    %% Backend impls — grouped with their Ops trait above
     CudaDeviceContext ..|> DeviceContextOps : implements
-    CudaStreamWrapper ..|> DeviceStreamOps : implements
-    CudaEventWrapper ..|> DeviceEventOps : implements
-    CudaMemPoolWrapper ..|> DeviceMemPoolOps : implements
-
     SyclDeviceContext ..|> DeviceContextOps : implements
-    SyclStreamWrapper ..|> DeviceStreamOps : implements
-    SyclEventWrapper ..|> DeviceEventOps : implements
-    SyclMemPoolWrapper ..|> DeviceMemPoolOps : implements
+
+    CudaDeviceStream ..|> DeviceStreamOps : implements
+    SyclDeviceStream ..|> DeviceStreamOps : implements
+
+    CudaDeviceEvent ..|> DeviceEventOps : implements
+    SyclDeviceEvent ..|> DeviceEventOps : implements
+
+    CudaDeviceMemPool ..|> DeviceMemPoolOps : implements
+    SyclDeviceMemPool ..|> DeviceMemPoolOps : implements
 
     style DeviceAllocator fill:#4caf50,stroke:#2e7d32,color:#fff,stroke-width:3px
     style DeviceContext fill:#fff3e0,stroke:#ef6c00,stroke-width:3px
 
     style DeviceStreamOps fill:#ff6b35,stroke:#c44520,color:#fff,stroke-width:3px
     style DeviceStream fill:#ff8c5a,stroke:#c44520,color:#fff,stroke-width:2px
-    style CudaStreamWrapper fill:#ffb088,stroke:#c44520,stroke-width:2px
-    style SyclStreamWrapper fill:#ffb088,stroke:#c44520,stroke-width:2px
+    style CudaDeviceStream fill:#ffb088,stroke:#c44520,stroke-width:2px
+    style SyclDeviceStream fill:#ffb088,stroke:#c44520,stroke-width:2px
 
     style DeviceEventOps fill:#9c27b0,stroke:#6a1b9a,color:#fff,stroke-width:2px
 
     style DeviceMemPoolOps fill:#2196f3,stroke:#1565c0,color:#fff,stroke-width:3px
     style DeviceMemPool fill:#64b5f6,stroke:#1565c0,color:#fff,stroke-width:2px
-    style CudaMemPoolWrapper fill:#90caf9,stroke:#1565c0,stroke-width:2px
-    style SyclMemPoolWrapper fill:#90caf9,stroke:#1565c0,stroke-width:2px
+    style CudaDeviceMemPool fill:#90caf9,stroke:#1565c0,stroke-width:2px
+    style SyclDeviceMemPool fill:#90caf9,stroke:#1565c0,stroke-width:2px
 ```
 
 ## Memory layer (`dynamo-memory`)
@@ -620,6 +659,7 @@ memory additionally goes through a NUMA worker pool that owns a
 classDiagram
     direction TB
 
+    %% --- Storage descriptor group (dynamo-memory) ----------------------
     class MemoryDescriptor {
         <<trait>>
         +addr() usize
@@ -635,21 +675,6 @@ classDiagram
         Pinned
         Device(u32)
         Disk(u64)
-    }
-
-    class DeviceAllocator {
-        <<trait>>
-        +allocate_device(size) Result~u64~
-        +free_device(ptr) Result
-        +allocate_pinned(size) Result~u64~
-        +free_pinned(ptr) Result
-        +device_id() u32
-    }
-
-    class PinnedAllocator {
-        <<trait>>
-        +alloc_pinned(size) Result~*mut u8~
-        +free_pinned(ptr) Result
     }
 
     class DeviceStorage {
@@ -675,8 +700,42 @@ classDiagram
         +new(len) Result~Self~
     }
 
+    %% --- Allocator traits (dynamo-memory) + impls (dynamo-device) ------
+    class DeviceAllocator {
+        <<trait, dynamo-memory>>
+        +allocate_device(size) Result~u64~
+        +free_device(ptr) Result
+        +allocate_pinned(size) Result~u64~
+        +free_pinned(ptr) Result
+        +device_id() u32
+    }
+
+    class DeviceContext {
+        <<dynamo-device>>
+        implements DeviceAllocator
+    }
+
+    class PinnedAllocator {
+        <<trait, dynamo-memory>>
+        +alloc_pinned(size) Result~*mut u8~
+        +free_pinned(ptr) Result
+    }
+
+    class CudaPinnedAllocator {
+        <<dynamo-device>>
+        -context: Arc~cudarc::CudaContext~
+        +alloc_pinned() cuMemHostAlloc
+    }
+
+    class SyclPinnedAllocator {
+        <<dynamo-device>>
+        -context: Arc<SyclContext>
+        +alloc_pinned() sycl::malloc_host
+    }
+
+    %% --- NUMA worker pool group (dynamo-memory) ------------------------
     class NumaWorkerPool {
-        <<singleton>>
+        <<singleton, dynamo-memory>>
         +global() &static Self
         +allocate_pinned_for_gpu(size, pci_bdf, allocator) Result~Option~*mut u8~~
         +allocate_pinned_on_node(size, node, allocator) Result
@@ -686,6 +745,13 @@ classDiagram
         -node: NumaNode
         -thread: pinned via sched_setaffinity
         +allocate(size, allocator) Result
+    }
+
+    %% --- Device-side memory pools (dynamo-memory) ----------------------
+    class CudaMemPool {
+        -inner: Mutex~CUmemoryPool~
+        +alloc_async_raw(size, stream) Result
+        +free_async_raw(ptr, stream) Result
     }
 
     class SyclMemPool {
@@ -703,61 +769,42 @@ classDiagram
         -cached_bytes: usize
     }
 
-    class CudaMemPool {
-        -pool: CUmemoryPool
-        +alloc_async_raw(size, stream) Result
-        +free_async_raw(ptr, stream) Result
-    }
-
-    class CudaPinnedAllocator {
-        <<kvbm-physical>>
-        -context: cudarc::CudaContext
-        +alloc_pinned() cuMemHostAlloc
-    }
-
-    class SyclPinnedAllocator {
-        <<kvbm-physical>>
-        -context: Arc<SyclContext>
-        +alloc_pinned() sycl::malloc_host
-    }
-
-    class DeviceContext {
-        <<kvbm-physical>>
-        implements DeviceAllocator
-    }
-
+    %% --- Storage → MemoryDescriptor implements -------------------------
     SystemStorage ..|> MemoryDescriptor
     DiskStorage ..|> MemoryDescriptor
     DeviceStorage ..|> MemoryDescriptor
     PinnedStorage ..|> MemoryDescriptor
+    MemoryDescriptor ..> StorageKind : returns
 
+    %% --- Storage → DeviceAllocator (Arc dyn) ---------------------------
     DeviceStorage --> DeviceAllocator : Arc dyn
     PinnedStorage --> DeviceAllocator : Arc dyn
 
-    DeviceContext ..|> DeviceAllocator : bridges to kvbm-physical
+    %% --- Allocator impls (kept adjacent to their trait) ----------------
+    DeviceContext ..|> DeviceAllocator : implements
+    CudaPinnedAllocator ..|> PinnedAllocator : implements
+    SyclPinnedAllocator ..|> PinnedAllocator : implements
 
+    %% --- NUMA worker pool wiring ---------------------------------------
     NumaWorkerPool *-- NumaWorker : per-node
     NumaWorker --> PinnedAllocator : calls dyn
-
-    CudaPinnedAllocator ..|> PinnedAllocator
-    SyclPinnedAllocator ..|> PinnedAllocator
 
     DeviceContext ..> NumaWorkerPool : allocate_pinned
     DeviceContext ..> CudaPinnedAllocator : wraps
     DeviceContext ..> SyclPinnedAllocator : wraps
 
+    %% --- Memory pools ---------------------------------------------------
     SyclMemPool *-- PoolInner
-    DeviceContext ..> SyclMemPool : create_memory_pool
     DeviceContext ..> CudaMemPool : create_memory_pool
+    DeviceContext ..> SyclMemPool : create_memory_pool
 
-    StorageKind <.. MemoryDescriptor
-
+    %% --- Styling --------------------------------------------------------
+    style MemoryDescriptor fill:#66bb6a,stroke:#2e7d32,color:#fff,stroke-width:2px
     style DeviceAllocator fill:#4caf50,stroke:#2e7d32,color:#fff,stroke-width:3px
     style PinnedAllocator fill:#4caf50,stroke:#2e7d32,color:#fff,stroke-width:3px
-    style MemoryDescriptor fill:#66bb6a,stroke:#2e7d32,color:#fff,stroke-width:2px
     style NumaWorkerPool fill:#81c784,stroke:#2e7d32,color:#fff,stroke-width:2px
-    style SyclMemPool fill:#81c784,stroke:#2e7d32,color:#fff,stroke-width:2px
     style CudaMemPool fill:#81c784,stroke:#2e7d32,color:#fff,stroke-width:2px
+    style SyclMemPool fill:#81c784,stroke:#2e7d32,color:#fff,stroke-width:2px
     style DeviceContext fill:#ffb088,stroke:#c44520,stroke-width:3px,color:#000
     style CudaPinnedAllocator fill:#ffccbc,stroke:#c44520
     style SyclPinnedAllocator fill:#ffccbc,stroke:#c44520
@@ -767,10 +814,12 @@ Key points:
 
 - **`MemoryDescriptor`** is the only type-erasable trait — everything downstream
   (layouts, NIXL registration) handles `Arc<dyn MemoryDescriptor>`.
-- **`DeviceAllocator`** and **`PinnedAllocator`** are both backend-agnostic. The
-  `DeviceContext` in `kvbm-physical` implements `DeviceAllocator` directly, and
-  it *owns* small `CudaPinnedAllocator` / `SyclPinnedAllocator` structs that
-  implement `PinnedAllocator` for the NUMA worker pool.
+- **`DeviceAllocator`** and **`PinnedAllocator`** are both backend-agnostic
+  traits owned by `dynamo-memory`. The `DeviceContext` in `dynamo-device`
+  implements `DeviceAllocator` directly; small `CudaPinnedAllocator` /
+  `SyclPinnedAllocator` shim structs in `dynamo-device` implement
+  `PinnedAllocator` so the NUMA worker pool can dispatch backend-specific
+  FFI from a node-pinned thread.
 - **`NumaWorkerPool`** is a process-global singleton. It never does backend
   calls itself — it just hands a `PinnedAllocator` to a NUMA-pinned worker
   thread, which does the allocation and first-touches each page.
@@ -784,30 +833,34 @@ Key points:
 
 ### Backend selection
 
-`DeviceBackend` is a plain enum in `kvbm-common` (shared by `dynamo-memory`
-and `kvbm-physical`). Runtime availability probes live on the
-`DeviceBackendExt` extension trait in `kvbm-physical`, guarded by
-`catch_unwind` so a missing `libcuda.so` or `libsycl.so` does not abort the
-process.
+`DeviceBackend` lives in `dynamo-device` — a tier-1 Dynamo primitive
+crate that does not depend on any `kvbm-*` crate. Runtime availability
+probes are inherent methods on the enum (no extension trait), guarded
+by `catch_unwind` so a missing `libcuda.so` or `libsycl.so` does not
+abort the process.
 
 ```rust
-// kvbm-common
+// dynamo-device
 pub enum DeviceBackend { Cuda, Sycl }
 impl DeviceBackend {
     pub fn name(&self) -> &'static str;       // "CUDA" / "SYCL (XPU)"
+    pub fn is_available(&self) -> bool;       // catch_unwind FFI probe
+    pub fn detect_backend() -> Result<Self>;  // Cuda-first, then Sycl
+    pub fn list_available() -> Vec<Self>;
 }
-
-// kvbm-physical
-pub trait DeviceBackendExt: Sized {
-    fn is_available(&self) -> bool;
-    fn detect_backend() -> Result<Self>;      // Cuda-first, then Sycl
-    fn list_available() -> Vec<Self>;
-}
-impl DeviceBackendExt for DeviceBackend { /* catch_unwind probes */ }
 ```
 
-`DeviceContext::new(backend, device_id)` dispatches to `CudaDeviceContext::new` or
-`SyclDeviceContext::new` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`.
+`DeviceContext::new(backend, device_id)` dispatches to
+`CudaDeviceContext::new` or `SyclDeviceContext::new` behind
+`#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`.
+
+**Crate-tier rule.** `dynamo-*` crates are subsystem-agnostic
+primitives; `kvbm-*` crates depend on them, never the reverse. Adding
+ROCm or another backend is a single-crate change inside `dynamo-device`
+(append a `Rocm` variant, add a `rocm` Cargo feature, gate a `rocm`
+submodule with the FFI impl). KVBM downstreams (`kvbm-physical`,
+`kvbm-engine`, bindings) automatically gain the new backend through
+the existing trait surface.
 
 ### Copy API — pattern-based, not direction-based
 
@@ -858,10 +911,10 @@ stream-wait per-layer.
 `DeviceMemPoolOps::{alloc_async, free_async}` take a `&dyn DeviceStreamOps`
 for stream ordering.
 
-- **CUDA**: `CudaMemPoolWrapper` uses `cuMemAllocFromPoolAsync` /
+- **CUDA**: `CudaDeviceMemPool` uses `cuMemAllocFromPoolAsync` /
   `cuMemFreeAsync` with the raw `CUstream` handle — GPU-side ordering is
   implicit.
-- **SYCL**: SYCL has no native pool API. `SyclMemPoolWrapper` wraps
+- **SYCL**: SYCL has no native pool API. `SyclDeviceMemPool` wraps
   `dynamo_memory::SyclMemPool` (a software free-list over
   `sycl::malloc_device`). `free_async` defers the return-to-pool behind a
   recorded `DeviceEvent` via `pending_frees`; the deferred frees are drained
@@ -892,10 +945,10 @@ pub trait DeviceAllocator: Send + Sync + Debug {
 }
 ```
 
-`DeviceContext` in `kvbm-physical` implements this trait, and both
+`DeviceContext` in `dynamo-device` implements this trait, and both
 `DeviceStorage::new(size, Arc<dyn DeviceAllocator>)` and
 `PinnedStorage::new(size, Arc<dyn DeviceAllocator>)` accept it. This keeps
-backend-specific dependencies out of `dynamo-memory` while letting the
+backend-specific FFI out of `dynamo-memory`'s public API surface while letting the
 physical-layout builder allocate through whichever backend was selected at
 `TransferManager` construction time.
 
@@ -912,12 +965,13 @@ pub trait PinnedAllocator: Send + Sync + 'static {
 }
 ```
 
-`CudaPinnedAllocator` (in `device/cuda/mod.rs`) binds the CUDA context to the
-pinned worker thread before calling `cuMemHostAlloc`. `SyclPinnedAllocator`
-(in `device/sycl/mod.rs`) calls `context.malloc_host(size)` — allocation is
-context-scoped, so no queue or thread binding is needed. After the backend
-allocation returns, the worker writes
-one byte per page to force first-touch on the correct node.
+`CudaPinnedAllocator` (in `lib/device/src/cuda/mod.rs`, the `dynamo-device`
+crate) binds the CUDA context to the pinned worker thread before calling
+`cuMemHostAlloc`. `SyclPinnedAllocator` (in `lib/device/src/sycl/mod.rs`)
+calls `context.malloc_host(size)` — allocation is context-scoped, so no
+queue or thread binding is needed. After the backend allocation returns,
+the worker writes one byte per page to force first-touch on the correct
+node.
 
 ### Collectives
 
@@ -937,8 +991,8 @@ A parallel trait `CollectiveOps` lives in `kvbm-engine`:
 | `dynamo-memory` | `xpu-sycl` | Enables `SyclMemPool`, SYCL NUMA enumerators. Requires `oneapi-rs`. |
 | `kvbm-kernels` | `xpu-sycl` | Compiles SYCL `.cpp` sources via icpx and links `libkvbm_kernels_sycl.so`. |
 | `kvbm-kernels` | `xpu-sycl-permute` | Enables SYCL permute kernel re-exports (implies `xpu-sycl`). |
-| `kvbm-physical` | `cuda` (default) | Compiles `device/cuda`. Pulls in `kvbm-kernels`. |
-| `kvbm-physical` | `xpu-sycl` | Compiles `device/sycl`. Pulls in `kvbm-kernels/xpu-sycl`, `oneapi-rs`, and `dynamo-memory/xpu-sycl`. |
+| `kvbm-physical` | `cuda` (default) | Forwards to `dynamo-device/cuda`. Pulls in `kvbm-kernels`. |
+| `kvbm-physical` | `xpu-sycl` | Forwards to `dynamo-device/xpu-sycl`. Pulls in `kvbm-kernels/xpu-sycl`, `oneapi-rs`, and `dynamo-memory/xpu-sycl`. |
 | `kvbm-engine` | `nccl` | Compiles `collectives::nccl`. |
 | `kvbm-engine` | `oneccl` | Compiles `collectives::oneccl` + `oneccl_bootstrap`. |
 | `kvbm-py3` (bindings) | `cuda` / `xpu-sycl` | Selects which `event_sync_blocking` is emitted. Mutually exclusive. |

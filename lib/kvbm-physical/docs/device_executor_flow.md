@@ -2,7 +2,7 @@
 
 Step-by-step flow for the transfer executor that dispatches through the
 `DeviceContextOps` / `DeviceStreamOps` / `DeviceMemPoolOps` trait surface
-(defined in [`src/device/traits.rs`](../src/device/traits.rs)).
+(defined in [`lib/device/src/traits.rs`](../../device/src/traits.rs)).
 
 This document focuses on **what `device.rs` does at runtime**. For the
 architecture behind the traits and how XPU/SYCL fits in alongside CUDA,
@@ -28,14 +28,10 @@ flowchart TD
     START([execute_device_transfer]) --> V1[Validate layer count<br/>+ outer dim match]
     V1 --> V2[validate_layout_compatibility]
     V2 --> LR[Resolve layer_range<br/>default = 0..num_layers]
-    LR --> WB[whole_block = can_use_whole_block_transfer]
+    LR --> SET[Compute flags:<br/>caller_manages_sync = device_stream.is_some&#40;&#41;<br/>whole_block = can_use_whole_block_transfer&#40;&#41;<br/>is_d2h = AsyncD2H or BlockingD2H]
 
-    LR --> DIR{strategy == AsyncD2H<br/>or BlockingD2H?}
-    DIR --> IS_D2H[is_d2h = bool]
-    WB --> CMS0{caller-provided<br/>device_stream?}
-    IS_D2H --> CMS0
-
-    CMS0 -- yes --> USE_CALLER[Use caller stream<br/>caller_manages_sync = true]
+    SET --> CMS0{caller-provided<br/>device_stream?}
+    CMS0 -- yes --> USE_CALLER[Use caller stream]
     CMS0 -- no + is_d2h --> POOL_D2H[ctx.next_d2h_stream]
     CMS0 -- no + !is_d2h --> POOL_H2D[ctx.next_h2d_stream]
 
@@ -50,19 +46,28 @@ flowchart TD
     FN_WB --> BLK{Blocking strategy?<br/>BlockingH2D or BlockingD2H}
     FN_VEC --> BLK
 
+    %% Phase 1: blocking sync runs unconditionally (independent of caller_managed)
     BLK -- yes --> SYNC[device_stream.synchronize]
-    BLK -- no --> CMS1{caller_manages_sync?}
+    BLK -- no --> CMS1
+    SYNC --> CMS1
 
-    SYNC --> DONE_BLK([TransferCompleteNotification::completed])
-
+    %% Phase 2: caller_managed early-return runs after the optional sync,
+    %% so a "Blocking + caller-provided stream" path also exits here.
+    CMS1{caller_manages_sync?}
     CMS1 -- yes --> DONE_CMS([TransferCompleteNotification::completed])
-    CMS1 -- no --> EVT[device_stream.record_event]
+    CMS1 -- no --> ASY{Async* strategy?}
+
+    %% Phase 3: only the Async* branch records an event + registers.
+    %% Blocking* with no caller stream falls through to completed&#40;&#41;.
+    ASY -- yes --> EVT[device_stream.record_event]
     EVT --> REG([ctx.register_device_event<br/>→ TransferCompleteNotification])
+    ASY -- no --> DONE_BLK([TransferCompleteNotification::completed])
 
     style FN_WB fill:#4caf50,stroke:#2e7d32,color:#fff
     style FN_VEC fill:#ff6b35,stroke:#c44520,color:#fff
     style POOL_H2D fill:#90caf9,stroke:#1565c0
     style POOL_D2H fill:#90caf9,stroke:#1565c0
+    style SYNC fill:#fff176,stroke:#f9a825
 ```
 
 ### Stream pool selection
@@ -83,19 +88,29 @@ is determined by pointer addresses, not the pool label.
 
 On SYCL the pool is backed by round-robin `sycl::queue` slots. Every
 queue is built on the shared multi-device `SyclContext`
-(see `shared_sycl_context` in `src/device/sycl/mod.rs`). Pool width is
+(see `shared_sycl_context` in `lib/device/src/sycl/mod.rs`). Pool width is
 `TransferContext::num_streams` (default 4).
 
 ### Sync semantics
 
-1. If the caller provides a `device_stream`, the executor uses it and
-   returns `completed()` immediately (the caller owns synchronization).
-2. If the strategy is `BlockingH2D` / `BlockingD2H`, the executor calls
-   `device_stream.synchronize()` and returns `completed()`.
-3. Otherwise (`AsyncH2D` / `AsyncD2H` / `AsyncD2D`), the executor records
-   a `DeviceEvent` on the stream and hands it to
-   `ctx.register_device_event`, which returns a
+The executor runs three sequential phases after the copy is enqueued.
+Each phase is independent — the next phase always sees the side effects
+of the previous one.
+
+1. **Optional inline sync.** If the strategy is `BlockingH2D` /
+   `BlockingD2H`, call `device_stream.synchronize()`. This runs
+   regardless of whether the caller provided their own stream — a
+   `Blocking*` strategy always synchronizes inline before returning.
+2. **Caller-managed early exit.** If the caller provided their own
+   `device_stream`, return `TransferCompleteNotification::completed()`.
+   The caller owns synchronization for any further work; the executor
+   does not record an event on a caller-owned stream.
+3. **Async event registration.** Otherwise, if the strategy is
+   `AsyncH2D` / `AsyncD2H` / `AsyncD2D`, record a `DeviceEvent` on the
+   stream and hand it to `ctx.register_device_event`, which returns a
    `TransferCompleteNotification` that completes when the event fires.
+   For `Blocking*` strategies that reach this phase (no caller stream,
+   already synchronized in phase 1), return `completed()` directly.
 
 ---
 
@@ -138,7 +153,8 @@ bytes each.
 
 ```mermaid
 flowchart TD
-    START([execute_fc_lw_vectorized]) --> CALC["Compute:<br/>chunk_size = page × inner × dtype_width<br/>total_chunks = num_blocks × num_layers × outer_dim"]
+    START([execute_fc_lw_vectorized]) --> BIND["stream.bind_to_thread<br/>(CUDA: cuCtxSetCurrent; SYCL: no-op)"]
+    BIND --> CALC["Compute:<br/>chunk_size = page × inner × dtype_width<br/>total_chunks = num_blocks × num_layers × outer_dim"]
     CALC --> CHK{total_chunks == 0?}
     CHK -- yes --> DONE([return Ok])
     CHK -- no --> S1["<b>Step 1</b>: build host Vec of u64<br/>src_ptrs, dst_ptrs — one per (block, layer, outer)<br/>with size-match assert per chunk"]
@@ -158,6 +174,7 @@ flowchart TD
     S7 --> LOG[tracing::debug total_chunks + chunk_size]
     LOG --> DONE2([return Ok])
 
+    style BIND fill:#fff176,stroke:#f9a825
     style S1 fill:#e0e0e0,stroke:#757575
     style S2 fill:#64b5f6,stroke:#1565c0,color:#fff
     style S3 fill:#ff8c5a,stroke:#c44520,color:#fff
@@ -166,6 +183,13 @@ flowchart TD
     style S6 fill:#64b5f6,stroke:#1565c0,color:#fff
     style S7 fill:#fff176,stroke:#f9a825
 ```
+
+The `stream.bind_to_thread` prologue is required on CUDA so the worker
+thread's TLS slot points at the right context before any of the seven
+steps touches the driver. SYCL inherits a no-op default. The FC→FC
+path (`execute_whole_block_device`) does not call `bind_to_thread`
+today — only `execute_fc_lw_vectorized` does, matching the upstream
+CUDA executor's prologue.
 
 ### Why record an event before the kernel
 
@@ -181,11 +205,11 @@ uploads.
 
 | Step | CUDA | SYCL |
 |---|---|---|
-| 2. `pool.alloc_async` | `CudaMemPool::alloc_async_raw` using `cuMemAllocFromPoolAsync` on the raw `CUstream` | `SyclMemPoolWrapper::alloc_async` draws from a software free-list over `sycl::malloc_device`; tracks ptr→size in `active_allocs` |
+| 2. `pool.alloc_async` | `CudaMemPool::alloc_async_raw` using `cuMemAllocFromPoolAsync` on the raw `CUstream` | `SyclDeviceMemPool::alloc_async` draws from a software free-list over `sycl::malloc_device`; tracks ptr→size in `active_allocs` |
 | 3. `stream.memcpy_htod` | `cudarc::driver::result::memcpy_htod_async` | `queue.memcpy_raw_async` |
-| 4. `stream.record_event` | `stream.record_event(None)` | `queue.submit_barrier()` wrapped in `SyclEventWrapper` |
-| 5. `stream.vectorized_copy` | `kvbm_kernels::vectorized_copy` (`.cu` compiled by nvcc) | `kvbm_kernels::sycl_vectorized_copy` (`.cpp` compiled by `icpx -fsycl`) with the `sycl::queue*` handle |
-| 6. `pool.free_async` | `cuMemFreeAsync` stream-ordered | `SyclMemPoolWrapper` records the event and defers the return-to-pool until the event signals (`PendingFree` queue) |
+| 4. `stream.record_event` | `stream.record_event(None)` | `queue.submit_barrier()` wrapped in `SyclDeviceEvent` |
+| 5. `stream.vectorized_copy` | `kvbm_kernels::vectorized_copy` (`.cu` compiled by nvcc) | `kvbm_kernels::sycl_vectorized_copy` (`.cpp` compiled by `icpx -fsycl`) with the `sycl::queue*` handle. With the `xpu-sycl` feature **disabled**, the SYCL impl reads the device pointer arrays back to host and falls back to a `batch_copy` loop — slower, but lets the executor compile cleanly without `kvbm-kernels`'s SYCL launchers. |
+| 6. `pool.free_async` | `cuMemFreeAsync` stream-ordered | `SyclDeviceMemPool` records the event and defers the return-to-pool until the event signals (`PendingFree` queue) |
 | 7. `event.synchronize` | `cuEventSynchronize` | `sycl::event::wait` |
 
 ---
@@ -225,7 +249,7 @@ in two distinct ways:
 
 | Change | Upstream main | Branch | Rationale |
 |---|---|---|---|
-| **Rename** (no behavior change) | `CudaAsyncH2D`, `CudaAsyncD2H`, `CudaAsyncD2D` | `AsyncH2D`, `AsyncD2H`, `AsyncD2D` | These variants are dispatched by the backend-agnostic `device.rs`, which routes them to `CudaStreamWrapper` or `SyclStreamWrapper` through `DeviceStreamOps`. A `Cuda` prefix is misleading on the SYCL path, so the prefix is dropped. Behavior is identical — the rename is a pure find-and-replace. |
+| **Rename** (no behavior change) | `CudaAsyncH2D`, `CudaAsyncD2H`, `CudaAsyncD2D` | `AsyncH2D`, `AsyncD2H`, `AsyncD2D` | These variants are dispatched by the backend-agnostic `device.rs`, which routes them to `CudaDeviceStream` or `SyclDeviceStream` through `DeviceStreamOps`. A `Cuda` prefix is misleading on the SYCL path, so the prefix is dropped. Behavior is identical — the rename is a pure find-and-replace. |
 | **New variants** | — (panics on `System ↔ Device`) | `BlockingH2D`, `BlockingD2H` | Upstream `strategy.rs` returns `panic!("System to Device transfers are not supported")` for `System ↔ Device(_)`. The branch replaces that panic with the new `Blocking*` strategies, which run an async copy on the stream and then call `device_stream.synchronize()` before returning. Applies on **both** backends — the motivating case (unpinned `System` memory degrading async copies to staged blocking behavior) affects CUDA and SYCL identically, so hiding the variants behind `#[cfg]` would leave the upstream panic in place for CUDA consumers with no benefit. |
 
 Semantics summary:

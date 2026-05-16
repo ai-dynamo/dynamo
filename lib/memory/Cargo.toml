@@ -23,15 +23,22 @@ testing-nixl = []
 testing-xpu-sycl = ["xpu-sycl"]
 testing-all = ["testing-cuda", "testing-nixl", "testing-xpu-sycl"]
 
+# Production xpu-sycl gate — pulls SyclMemPool / SyclMemPoolBuilder via
+# the `pool::sycl` submodule. dynamo-memory keeps cudarc unconditionally
+# because `pool::cuda::CudaMemPool` is core production code; oneapi-rs
+# is opt-in because the SYCL pool is the only consumer.
 xpu-sycl = ["dep:oneapi-rs"]
 
 [dependencies]
 anyhow = { workspace = true }
+# `pool::cuda::CudaMemPool` is production code that uses cudarc directly
+# — dynamo-memory's storage-tier memory pools are the legitimate home
+# for SDK-specific pool primitives. This crate does NOT depend on any
+# `kvbm-*` crate; the dep-direction rule is `kvbm-* → dynamo-*`.
 cudarc = { workspace = true }
-kvbm-common = { workspace = true }
 oneapi-rs = { workspace = true, optional = true }
 nixl-sys = { version = "=0.10.1" }
-serde = { workspace = true}
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

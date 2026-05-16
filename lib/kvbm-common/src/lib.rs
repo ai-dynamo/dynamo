@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 
 pub type BlockId = usize;
 pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
@@ -26,42 +25,4 @@ pub enum LogicalLayoutHandle {
     /// Representation of Blocks held in an external service
     /// outside the control of the KVBM system.
     G4,
-}
-
-/// Device backend type selector.
-///
-/// storage layer (`dynamo-memory`) and the device layer (`kvbm-physical`)
-/// can reference a single canonical enum.
-///
-/// Runtime probes (`is_available`, `detect_backend`, `list_available`)
-/// live in `kvbm-physical`'s `DeviceBackendExt` trait because they must
-/// call into feature-gated backend modules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DeviceBackend {
-    /// NVIDIA CUDA backend.
-    Cuda,
-    /// SYCL backend (Intel XPU via SYCL).
-    Sycl,
-}
-
-impl DeviceBackend {
-    /// Human-readable name for logs and diagnostics.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Cuda => "CUDA",
-            Self::Sycl => "SYCL (XPU)",
-        }
-    }
-}
-
-impl FromStr for DeviceBackend {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "cuda" | "gpu" | "nvidia" => Ok(Self::Cuda),
-            "sycl" | "xpu" | "intel" => Ok(Self::Sycl),
-            _ => Err(format!("Unknown device backend: {s}")),
-        }
-    }
 }

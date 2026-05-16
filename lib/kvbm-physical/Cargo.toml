@@ -12,6 +12,11 @@ repository.workspace = true
 [dependencies]
 dynamo-config = { workspace = true }
 dynamo-memory = { workspace = true }
+# Device abstraction (DeviceContext / DeviceStream / DeviceEvent / DeviceMemPool
+# trait surface and CUDA / SYCL impls) is re-exported as `kvbm_physical::device`
+# from this crate's lib.rs. The `cuda` and `xpu-sycl` features below forward
+# to dynamo-device's matching features so backend selection is unchanged.
+dynamo-device = { workspace = true }
 libc = { workspace = true }
 kvbm-common = { workspace = true }
 kvbm-kernels = { workspace = true, optional = true }
@@ -21,7 +26,17 @@ aligned-vec = "0.6.4"
 anyhow = { workspace = true }
 bincode = { version = "2.0.0", features = ["serde", "derive"] }
 blake3 = { version = "1" }
+# cudarc is no longer used in `src/` (the device module moved to
+# `dynamo-device`), but is still used by:
+#   - bin/validate_numa_placement.rs (raw cudarc::driver::result::init)
+#   - examples/bench_transfer.rs (cudarc::driver::sys for device-name lookup)
+# The `nccl` feature is required by kvbm-engine's collectives via the
+# overall workspace nccl feature graph.
 cudarc = { workspace = true, features = ["nccl"] }
+# oneapi-rs is used directly by examples/bench_transfer.rs (SYCL device-name
+# lookup) and bin/validate_numa_placement.rs under the `xpu-sycl` feature.
+# The device module moved to `dynamo-device`, but these top-level binaries
+# still need oneapi-rs at the kvbm-physical level.
 oneapi-rs = { workspace = true, optional = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
@@ -36,13 +51,19 @@ validator = { workspace = true }
 
 [features]
 default = ["cuda"]
-cuda = ["dep:kvbm-kernels"]
+cuda = ["dep:kvbm-kernels", "dynamo-device/cuda"]
 collectives = []
 testing = []
 testing-kvbm = []
 testing-nixl-gds = []
 testing-xpu-sycl = ["xpu-sycl"]
-xpu-sycl = ["dep:kvbm-kernels", "kvbm-kernels/xpu-sycl", "dep:oneapi-rs", "dynamo-memory/xpu-sycl"]
+xpu-sycl = [
+    "dep:kvbm-kernels",
+    "dep:oneapi-rs",
+    "kvbm-kernels/xpu-sycl",
+    "dynamo-device/xpu-sycl",
+    "dynamo-memory/xpu-sycl",
+]
 
 [[bin]]
 name = "validate_numa_placement"

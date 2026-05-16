@@ -32,11 +32,6 @@ pub trait DeviceContextOps: Send + Sync + Debug {
     /// Free pinned host memory.
     fn free_pinned(&self, ptr: u64) -> Result<()>;
 
-    /// Bind context to current thread (if needed by the backend).
-    fn bind_to_thread(&self) -> Result<()> {
-        Ok(()) // Default: no-op
-    }
-
     /// Disable automatic event tracking (CUDA-specific optimization).
     ///
     /// # Safety
@@ -78,6 +73,11 @@ pub trait DeviceContextOps: Send + Sync + Debug {
 /// - `vectorized_copy`: N independent copies executed in parallel via a GPU kernel.
 ///   Pointer arrays are uploaded to device memory for kernel consumption.
 pub trait DeviceStreamOps: Send + Sync + Debug {
+    /// Bind the underlying device context to the calling thread.
+    fn bind_to_thread(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Batch copy: enqueue N independent memcpy operations, each of `size` bytes.
     ///
     /// Direction (H2D, D2H, D2D) is auto-detected from pointer addresses by
@@ -150,9 +150,9 @@ pub trait DeviceEventOps: Send + Sync + Debug {
 
     /// Re-record this event on a stream.
     /// The event object is reused — its inner state is overwritten with a new
-    /// marker at the current position on the stream identified by stream_handle.
+    /// marker at the current position on the given stream.
     /// Equivalent of cuEventRecord(event, stream).
-    fn record_on_stream(&self, stream_handle: u64) -> Result<()>;
+    fn record_on_stream(&self, stream: &dyn DeviceStreamOps) -> Result<()>;
 
     /// Get raw event handle for interop (optional).
     fn raw_handle(&self) -> Option<u64> {

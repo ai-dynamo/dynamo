@@ -275,7 +275,7 @@ impl TransferContext {
         let device_ctx = DeviceContext::new(device_backend, device_id)?;
 
         // Disable event tracking (no-op on non-CUDA backends)
-        unsafe { device_ctx.ops.disable_event_tracking()? };
+        unsafe { device_ctx.disable_event_tracking()? };
 
         // Create device memory pool
         let device_pool = Arc::new(

@@ -1,12 +1,28 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Device abstraction layer for multi-backend support.
+//! Backend-agnostic device handle traits and CUDA / SYCL implementations.
 //!
-//! This module provides a unified interface for different hardware backends
-//! (CUDA, SYCL/XPU) using the Static Enum + Trait Objects pattern.
+//! This crate provides the device-side counterpart to `dynamo-memory`'s
+//! storage-layer traits: the [`DeviceBackend`] tag enum, the
+//! `Device{Context,Stream,Event,MemPool}Ops` trait surface, the
+//! trait-object wrappers callers actually hold, and the concrete CUDA
+//! and SYCL implementations behind feature gates.
+//!
+//! `dynamo-device` is a tier-1 Dynamo primitive: it does not depend on
+//! any `kvbm-*` crate, so non-KVBM consumers (GMS, future profilers,
+//! etc.) can use it without pulling in subsystem code. KVBM crates
+//! depend on `dynamo-device`, never the reverse.
+//!
+//! Multi-backend dispatch uses the Static Enum + Trait Objects pattern:
+//! [`DeviceBackend`] is the runtime tag; the concrete implementations
+//! are constructed via [`DeviceContext::new`] and held as
+//! `Box<dyn DeviceContextOps>`.
 
 pub mod traits;
+pub mod topology;
+
+pub use topology::get_device_cpu_set;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
@@ -14,37 +30,44 @@ pub mod cuda;
 pub mod sycl;
 
 use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps};
 
-// `DeviceBackend` lives in `kvbm-common` so both the storage layer (`dynamo-memory`)
-// and device layer can reference the same enum. Runtime probes (feature-gated
-// `is_available` etc.) live on the `DeviceBackendExt` extension trait below because
-// they must call into the cuda / xpu-sycl submodules.
-pub use kvbm_common::DeviceBackend;
-
-/// Extension trait adding runtime probes to [`DeviceBackend`].
+/// Device backend type selector.
 ///
-/// Bring into scope with `use kvbm_physical::device::DeviceBackendExt;`
-/// at call sites that need `.is_available()` / `::detect_backend()` /
-/// `::list_available()`.
-pub trait DeviceBackendExt: Sized {
-    /// Return true if this backend is compiled in AND a device is
-    /// physically present.
-    fn is_available(&self) -> bool;
-
-    /// Auto-detect the best available device backend.
-    ///
-    /// Priority order: CUDA then SYCL (XPU).
-    fn detect_backend() -> Result<Self>;
-
-    /// List every backend that is both compiled in and physically
-    /// present on the current system.
-    fn list_available() -> Vec<Self>;
+/// Tag enum identifying which hardware backend a device handle targets.
+/// The runtime probes (`is_available`, `detect_backend`, `list_available`)
+/// are inherent methods below — they dispatch to feature-gated FFI in
+/// the `cuda` / `sycl` submodules of this crate.
+///
+/// # Adding a new backend
+///
+/// Adding e.g. ROCm is a single-crate change: append a `Rocm` variant,
+/// add a `rocm` Cargo feature, gate a `rocm` submodule with the FFI
+/// impl, and extend the inherent methods below. No other crate changes
+/// are required for the backend tag itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeviceBackend {
+    /// NVIDIA CUDA backend.
+    Cuda,
+    /// SYCL backend (Intel XPU via SYCL).
+    Sycl,
 }
 
-impl DeviceBackendExt for DeviceBackend {
-    fn is_available(&self) -> bool {
+impl DeviceBackend {
+    /// Human-readable name for logs and diagnostics.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Cuda => "CUDA",
+            Self::Sycl => "SYCL (XPU)",
+        }
+    }
+
+    /// Return true if this backend is compiled in AND a device is
+    /// physically present.
+    pub fn is_available(&self) -> bool {
         match self {
             Self::Cuda => {
                 #[cfg(feature = "cuda")]
@@ -61,7 +84,10 @@ impl DeviceBackendExt for DeviceBackend {
         }
     }
 
-    fn detect_backend() -> Result<Self> {
+    /// Auto-detect the best available device backend.
+    ///
+    /// Priority order: CUDA then SYCL (XPU).
+    pub fn detect_backend() -> Result<Self> {
         #[cfg(feature = "cuda")]
         {
             if Self::Cuda.is_available() {
@@ -79,7 +105,9 @@ impl DeviceBackendExt for DeviceBackend {
         bail!("No supported device backend available on this system")
     }
 
-    fn list_available() -> Vec<Self> {
+    /// List every backend that is both compiled in and physically
+    /// present on the current system.
+    pub fn list_available() -> Vec<Self> {
         let mut backends = Vec::new();
         #[cfg(feature = "cuda")]
         if Self::Cuda.is_available() {
@@ -93,11 +121,23 @@ impl DeviceBackendExt for DeviceBackend {
     }
 }
 
+impl FromStr for DeviceBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cuda" | "gpu" | "nvidia" => Ok(Self::Cuda),
+            "sycl" | "xpu" | "intel" => Ok(Self::Sycl),
+            _ => Err(format!("Unknown device backend: {s}")),
+        }
+    }
+}
+
 /// Unified device context holding polymorphic implementation.
 pub struct DeviceContext {
     backend: DeviceBackend,
     device_id: u32,
-    pub(crate) ops: Box<dyn DeviceContextOps>,
+    ops: Box<dyn DeviceContextOps>,
 }
 
 impl DeviceContext {
@@ -134,6 +174,16 @@ impl DeviceContext {
     /// Returns `None` if unavailable.
     pub fn pci_bdf_address(&self) -> Option<String> {
         self.ops.pci_bdf_address()
+    }
+
+    /// Disable per-stream event tracking on the underlying device context.
+    ///
+    /// # Safety
+    ///
+    /// Only safe when the caller manually manages event synchronization.
+    /// Mirrors [`DeviceContextOps::disable_event_tracking`].
+    pub unsafe fn disable_event_tracking(&self) -> Result<()> {
+        unsafe { self.ops.disable_event_tracking() }
     }
 
     pub fn create_stream(&self) -> Result<DeviceStream> {
@@ -174,9 +224,6 @@ impl DeviceContext {
     }
 }
 
-unsafe impl Send for DeviceContext {}
-unsafe impl Sync for DeviceContext {}
-
 impl std::fmt::Debug for DeviceContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeviceContext")
@@ -189,12 +236,16 @@ impl std::fmt::Debug for DeviceContext {
 /// Device stream wrapper.
 pub struct DeviceStream {
     backend: DeviceBackend,
-    pub ops: Box<dyn DeviceStreamOps>,
+    ops: Box<dyn DeviceStreamOps>,
 }
 
 impl DeviceStream {
     pub fn backend(&self) -> DeviceBackend {
         self.backend
+    }
+
+    pub fn bind_to_thread(&self) -> Result<()> {
+        self.ops.bind_to_thread()
     }
 
     pub fn batch_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], size: usize) -> Result<()> {
@@ -231,10 +282,6 @@ impl DeviceStream {
         self.ops.synchronize()
     }
 }
-
-unsafe impl Send for DeviceStream {}
-unsafe impl Sync for DeviceStream {}
-
 
 /// Synchronous device-to-host memcpy using the device abstraction.
 ///
@@ -273,7 +320,7 @@ impl std::fmt::Debug for DeviceStream {
 /// Device event wrapper.
 pub struct DeviceEvent {
     backend: DeviceBackend,
-    pub ops: Box<dyn DeviceEventOps>,
+    ops: Box<dyn DeviceEventOps>,
 }
 
 impl DeviceEvent {
@@ -291,14 +338,9 @@ impl DeviceEvent {
 
     /// Re-record this event on a stream.
     pub fn record_on(&self, stream: &DeviceStream) -> Result<()> {
-        let handle = stream.ops.raw_handle()
-            .ok_or_else(|| anyhow::anyhow!("stream has no raw handle"))?;
-        self.ops.record_on_stream(handle)
+        self.ops.record_on_stream(&*stream.ops)
     }
 }
-
-unsafe impl Send for DeviceEvent {}
-unsafe impl Sync for DeviceEvent {}
 
 impl std::fmt::Debug for DeviceEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -369,9 +411,6 @@ impl DeviceMemPool {
     }
 }
 
-unsafe impl Send for DeviceMemPool {}
-unsafe impl Sync for DeviceMemPool {}
-
 impl std::fmt::Debug for DeviceMemPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeviceMemPool")
@@ -382,7 +421,7 @@ impl std::fmt::Debug for DeviceMemPool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceBackend, DeviceBackendExt};
+    use super::DeviceBackend;
 
     #[test]
     fn test_detect_backend() {

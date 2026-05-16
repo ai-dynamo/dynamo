@@ -5,7 +5,7 @@
 //!
 //! Wraps cudarc types with the device abstraction traits.
 
-use crate::device::traits::*;
+use crate::traits::*;
 use anyhow::{Result, Context as _};
 use cudarc::driver::result as cuda_result;
 use cudarc::driver::sys::CUresult;
@@ -109,7 +109,7 @@ impl DeviceContextOps for CudaDeviceContext {
     fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
         let stream = self.context.new_stream()
             .context("Failed to create CUDA stream")?;
-        Ok(Box::new(CudaStreamWrapper { stream }))
+        Ok(Box::new(CudaDeviceStream { stream }))
     }
 
     fn allocate_device(&self, size: usize) -> Result<u64> {
@@ -181,11 +181,6 @@ impl DeviceContextOps for CudaDeviceContext {
         Ok(())
     }
 
-    fn bind_to_thread(&self) -> Result<()> {
-        self.context.bind_to_thread()
-            .context("Failed to bind CUDA context to thread")
-    }
-
     unsafe fn disable_event_tracking(&self) -> Result<()> {
         unsafe { self.context.disable_event_tracking(); }
         Ok(())
@@ -201,7 +196,7 @@ impl DeviceContextOps for CudaDeviceContext {
             builder = builder.release_threshold(threshold);
         }
         let pool = builder.build()?;
-        Ok(Box::new(CudaMemPoolWrapper { pool }))
+        Ok(Box::new(CudaDeviceMemPool { pool }))
     }
 
     fn raw_handle(&self) -> Option<u64> {
@@ -299,53 +294,60 @@ pub fn is_available() -> bool {
 }
 
 /// CUDA memory pool wrapper implementing DeviceMemPoolOps.
-pub struct CudaMemPoolWrapper {
+pub struct CudaDeviceMemPool {
     pool: CudaMemPool,
 }
 
-impl std::fmt::Debug for CudaMemPoolWrapper {
+impl std::fmt::Debug for CudaDeviceMemPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CudaMemPoolWrapper").finish()
+        f.debug_struct("CudaDeviceMemPool").finish()
     }
 }
 
-impl CudaMemPoolWrapper {
+impl CudaDeviceMemPool {
     /// Get the underlying CudaMemPool.
     pub fn inner(&self) -> &CudaMemPool {
         &self.pool
     }
 }
 
-impl DeviceMemPoolOps for CudaMemPoolWrapper {
+impl DeviceMemPoolOps for CudaDeviceMemPool {
     fn alloc_async(&self, size: usize, stream: &dyn DeviceStreamOps) -> Result<u64> {
         let raw_handle = stream.raw_handle()
             .ok_or_else(|| anyhow::anyhow!("Stream has no raw handle for pool allocation"))?;
-        // SAFETY: raw_handle returns a valid CUstream handle from CudaStreamWrapper
+        // SAFETY: raw_handle returns a valid CUstream handle from CudaDeviceStream
         unsafe { self.pool.alloc_async_raw(size, raw_handle as cudarc::driver::sys::CUstream) }
     }
 
     fn free_async(&self, ptr: u64, stream: &dyn DeviceStreamOps) -> Result<()> {
         let raw_handle = stream.raw_handle()
             .ok_or_else(|| anyhow::anyhow!("Stream has no raw handle for pool free"))?;
-        // SAFETY: raw_handle returns a valid CUstream handle from CudaStreamWrapper
+        // SAFETY: raw_handle returns a valid CUstream handle from CudaDeviceStream
         unsafe { self.pool.free_async_raw(ptr, raw_handle as cudarc::driver::sys::CUstream) }
     }
 }
 
 /// CUDA stream wrapper.
 #[derive(Debug)]
-pub struct CudaStreamWrapper {
+pub struct CudaDeviceStream {
     stream: Arc<cudarc::driver::CudaStream>,
 }
 
-impl CudaStreamWrapper {
+impl CudaDeviceStream {
     /// Get the underlying CUDA stream.
     pub fn inner(&self) -> &Arc<cudarc::driver::CudaStream> {
         &self.stream
     }
 }
 
-impl DeviceStreamOps for CudaStreamWrapper {
+impl DeviceStreamOps for CudaDeviceStream {
+    fn bind_to_thread(&self) -> Result<()> {
+        self.stream
+            .context()
+            .bind_to_thread()
+            .context("Failed to bind CUDA context to thread (stream)")
+    }
+
     fn batch_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], size: usize) -> Result<()> {
         assert_eq!(src_ptrs.len(), dst_ptrs.len(), "batch_copy: src/dst length mismatch");
         let num_copies = src_ptrs.len();
@@ -447,7 +449,7 @@ impl DeviceStreamOps for CudaStreamWrapper {
     fn record_event(&self) -> Result<Box<dyn DeviceEventOps>> {
         let event = self.stream.record_event(None)
             .context("Failed to record CUDA event")?;
-        Ok(Box::new(CudaEventWrapper { event }))
+        Ok(Box::new(CudaDeviceEvent { event }))
     }
 
     fn synchronize(&self) -> Result<()> {
@@ -463,11 +465,11 @@ impl DeviceStreamOps for CudaStreamWrapper {
 
 /// CUDA event wrapper.
 #[derive(Debug)]
-pub struct CudaEventWrapper {
+pub struct CudaDeviceEvent {
     pub event: cudarc::driver::CudaEvent,
 }
 
-impl DeviceEventOps for CudaEventWrapper {
+impl DeviceEventOps for CudaDeviceEvent {
     fn is_complete(&self) -> Result<bool> {
         unsafe {
             match cuda_result::event::query(self.event.cu_event()) {
@@ -485,11 +487,13 @@ impl DeviceEventOps for CudaEventWrapper {
     }
 
 
-    fn record_on_stream(&self, stream_handle: u64) -> Result<()> {
+    fn record_on_stream(&self, stream: &dyn DeviceStreamOps) -> Result<()> {
+        let handle = stream.raw_handle()
+            .ok_or_else(|| anyhow::anyhow!("CUDA event: stream has no raw handle"))?;
         unsafe {
             cuda_result::event::record(
                 self.event.cu_event(),
-                stream_handle as cudarc::driver::sys::CUstream,
+                handle as cudarc::driver::sys::CUstream,
             ).context("CUDA cuEventRecord failed")?;
         }
         Ok(())

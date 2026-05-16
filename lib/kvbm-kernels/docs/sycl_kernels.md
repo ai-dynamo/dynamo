@@ -14,7 +14,8 @@ abstraction in `kvbm-physical`, see
 lib/kvbm-kernels/
 ├── sycl/
 │   ├── vectorized_copy_kernel.cpp   # sycl_vectorized_copy launcher
-│   └── tensor_permute_kernel.cpp    # sycl_*_from_block launchers
+│   └── tensor_permute_kernel.cpp    # permute launchers
+│                                    # (sycl_universal_from_block + sycl_block_from_universal)
 ├── cuda/
 │   ├── tensor_kernels.cu            # CUDA kernels (unchanged)
 │   └── stubs.c                      # abort-on-call stubs when nvcc is absent
@@ -38,8 +39,10 @@ flowchart TD
     B -- yes --> C{icpx on PATH?}
     C -- yes --> D[icpx]
     C -- no --> E{ONEAPI_ROOT set?}
-    E -- yes --> F["$ONEAPI_ROOT/compiler/latest/bin/icpx"]
     E -- no --> PANIC[panic:<br/>icpx not found]
+    E -- yes --> F2{$ONEAPI_ROOT/compiler/latest/bin/icpx exists?}
+    F2 -- no --> PANIC2[panic:<br/>icpx not found at $ONEAPI_ROOT]
+    F2 -- yes --> F["$ONEAPI_ROOT/compiler/latest/bin/icpx"]
     D --> G[icpx -fsycl -shared -fPIC -O2<br/>-o libkvbm_kernels_sycl.so<br/>sycl/*.cpp]
     F --> G
     G --> H[rustc-link-search=OUT_DIR<br/>rustc-link-lib=dylib=kvbm_kernels_sycl<br/>rustc-link-lib=sycl<br/>rustc-link-lib=stdc++]
@@ -57,8 +60,9 @@ Notes:
 - The SYCL library is a single `.so` — `icpx` takes every `.cpp` in
   `sycl/` as one call. Adding a new kernel means adding a new `.cpp`
   alongside the existing two; `build.rs` discovers it automatically.
-- `cargo:rerun-if-changed=sycl/*` is declared so `cargo build`
-  incrementally rebuilds when a source file changes.
+- `build.rs` emits one `cargo:rerun-if-changed=<path>` per discovered
+  `.cpp` file (Cargo doesn't expand globs in `rerun-if-changed`), so
+  `cargo build` incrementally rebuilds when any SYCL source changes.
 
 ## `extern "C"` launcher ABI
 
@@ -70,8 +74,8 @@ Naming is aligned end-to-end: the `.so` is `libkvbm_kernels_sycl.so`,
 the C++ symbols are `kvbm_kernels_sycl_launch_*`, the Rust `extern "C"`
 declarations match, and the Rust public wrappers are `sycl_*`. The
 `xpu-sycl` Cargo feature is spelled the same across `kvbm-kernels`,
-`dynamo-memory`, `kvbm-physical`, and `kvbm-py3`, so every KVBM crate
-activates this code path with one consistent flag.
+`dynamo-memory`, `dynamo-device`, `kvbm-physical`, and `kvbm-py3`, so
+every KVBM crate activates this code path with one consistent flag.
 
 ```cpp
 extern "C" {
@@ -175,6 +179,12 @@ Both kernels:
 - Move `elem_size` bytes per work-item via `copy_element`, which
   specializes to `uint64_t` / `uint32_t` / `uint16_t` stores for
   `elem_size ∈ {8, 4, 2}` and falls back to a byte loop otherwise.
+- Share the same 65535-group cap as `vectorized_copy` via
+  `compute_grid_size`. With `total = num_blocks × nh × nl × no × nt × hd`
+  routinely above 65535 × 256 ≈ 16.7 M elements at production scale, the
+  inner `for (; thread_id < total; thread_id += stride)` loop strides
+  each work-item across multiple output elements. The cap is the same
+  upper bound mirrored from the CUDA kernel.
 
 Element-type dispatch is done by **byte size, not C++ templates**,
 because permute is pure data movement — no arithmetic on element
@@ -209,7 +219,11 @@ that propagates up through the executor.
 | `testing-xpu-sycl` | Enables `tests/sycl_kernel_roundtrip.rs` integration tests; requires a real XPU device |
 | `kvbench-xpu-sycl` | Enables the `kvbench_xpu_sycl.rs` example (pulls in `clap`, `oneapi-rs`, and `xpu-sycl-permute`) |
 
-Kernel dispatch from `kvbm-physical` crosses this FFI boundary only at
-the `kvbm_kernels::sycl_vectorized_copy` / `kvbm_kernels::sycl_*_from_block`
-call sites in `device/sycl/mod.rs`. See the device executor flow doc
-for the call sequence that wraps these launches.
+Kernel dispatch from the `dynamo-device` SYCL backend (consumed by
+`kvbm-physical`) crosses this FFI boundary through the
+`kvbm_kernels::sycl_vectorized_copy` call site in
+`lib/device/src/sycl/mod.rs`. The SYCL permute wrappers
+(`sycl_universal_from_block` / `sycl_block_from_universal`) are exported
+and covered by `tests/sycl_kernel_roundtrip.rs`, but are not currently on
+the production device-executor path. See the device executor flow doc for
+the call sequence that wraps the vectorized-copy launch.

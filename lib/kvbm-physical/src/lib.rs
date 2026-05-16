@@ -4,7 +4,13 @@
 pub mod layout;
 pub mod manager;
 pub mod transfer;
-pub mod device;
+
+// The device abstraction (DeviceContext, DeviceStream, DeviceEvent,
+// DeviceMemPool, the *Ops trait surface, and CUDA / SYCL impls) lives
+// in the standalone `dynamo-device` crate. Re-export it as `device` so
+// existing call sites that say `kvbm_physical::device::DeviceContext`
+// continue to compile.
+pub use dynamo_device as device;
 
 pub use manager::TransferManager;
 pub use transfer::{TransferConfig, TransferOptions};

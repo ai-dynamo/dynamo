@@ -46,7 +46,7 @@
 use std::process;
 use std::sync::Arc;
 
-use kvbm_physical::device::{DeviceBackend, DeviceBackendExt, DeviceContext};
+use kvbm_physical::device::{DeviceBackend, DeviceContext};
 
 /// Query the NUMA node of each page in a memory region using `move_pages(2)`.
 ///
