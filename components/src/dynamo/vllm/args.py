@@ -127,7 +127,11 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
 
 def _arg_was_provided(argv: list[str], option: str) -> bool:
-    return any(arg == option or arg.startswith(f"{option}=") for arg in argv)
+    aliases = {option, option.replace("-", "_")}
+    return any(
+        arg in aliases or any(arg.startswith(f"{alias}=") for alias in aliases)
+        for arg in argv
+    )
 
 
 def cross_validate_config(

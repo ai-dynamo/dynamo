@@ -371,6 +371,18 @@ def test_logprobs_mode_flag_is_tracked(mock_vllm_cli):
     assert config.logprobs_mode_explicitly_set is True
 
 
+def test_logprobs_mode_underscore_flag_is_tracked(mock_vllm_cli):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--logprobs_mode=raw_logprobs",
+    )
+
+    config = parse_args()
+
+    assert config.logprobs_mode_explicitly_set is True
+
+
 # --disaggregation-mode tests
 
 
