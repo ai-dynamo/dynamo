@@ -25,17 +25,15 @@ registry does not list a parser for your model.
 
 ## Troubleshooting
 
-If a tool call comes back wrong -- `tool_calls` is `null`, the arguments are
-malformed, or raw `<tool_call>` markers appear in `message.content` -- add
-`logprobs: true` to a single repro request to inspect the raw model output
-independent of any parser. See
-[Troubleshooting Tool Calls](troubleshooting.md).
+If a tool call comes back wrong, add `logprobs: true` to a single repro
+request and share the response. See
+[Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
+include when reporting an issue.
 
 ## See Also
 
-- [Troubleshooting Tool Calls](troubleshooting.md) -- use `logprobs` to
-  localize tool-call issues to the model, the parser configuration, or the
-  parser itself.
+- [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model
+  output with `logprobs` so tool-call issues can be localized.
 - [Reasoning](../reasoning/README.md) -- separate `reasoning_content` from
   assistant content for chain-of-thought models. Several models need both a
   tool-call parser and a reasoning parser configured together.

@@ -152,8 +152,7 @@ OpenAI-compatible `tool_calls` entries on the response:
 ```
 
 > [!TIP]
-> If `tool_calls` is `null`, the arguments look malformed, or raw
-> `<tool_call>` markers appear in `message.content`, add
-> `"logprobs": true` to a single repro request to see the raw model output
-> and localize the issue. See
-> [Troubleshooting Tool Calls](troubleshooting.md).
+> If a tool call comes back wrong, add `"logprobs": true` to a single repro
+> request and share the response. See
+> [Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
+> include when reporting an issue.

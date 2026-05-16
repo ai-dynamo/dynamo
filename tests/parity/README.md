@@ -4,16 +4,15 @@ Shared test infrastructure for diffing parser / preprocess / postprocess
 behavior across Dynamo, vLLM, and SGLang. Today only the parser stage
 is populated (`parser/`); other stages slot in as siblings as they land.
 
-> **Diagnosing customer-reported tool-call issues?** Before stepping into the
-> parity harness, point customers (or yourself) at
+> **Triaging a tool-call issue from a user?** Before stepping into the
+> parity harness, point them at
 > [docs/tool-calling/troubleshooting.md](../../docs/tool-calling/troubleshooting.md).
-> That page shows how to add `logprobs: true` to a single request,
-> reconstruct the raw stream from `bytes`, and localize the failure to one
-> of three causes: the
+> That page asks users to re-run with `logprobs: true` and share the
+> response, which carries the engine's raw token stream. With that captured
+> output, the failure usually localizes to one of three causes: the
 > **model** emitted bad tokens, the **parser was not configured**
 > (`--dyn-tool-call-parser` missing or wrong family), or the **parser** ran
-> and produced the wrong output. Only the third class lands here -- the
-> other two are resolved without touching parser source.
+> and produced the wrong output. Only the third class lands here.
 
 ## Layout
 
