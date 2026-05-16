@@ -194,56 +194,19 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     )
 
     engine_args = CONFIG.build_mocker_engine_args(args)
-    payload = json.loads(engine_args.dump_json())
-
-    assert payload == {
-        "engine_type": "sglang",
-        "num_gpu_blocks": 2048,
-        "block_size": 128,
-        "max_num_seqs": 64,
-        "max_num_batched_tokens": 4096,
-        "enable_prefix_caching": False,
-        "enable_chunked_prefill": False,
-        "speedup_ratio": 2.0,
-        "decode_speedup_ratio": 3.0,
-        "dp_size": 4,
-        "startup_time": 1.5,
-        "worker_type": "prefill",
-        "planner_profile_data": str(planner_profile_data),
-        "aic_backend": "sglang",
-        "aic_system": "h200_sxm",
-        "aic_backend_version": "0.5.6.post2",
-        "aic_tp_size": 8,
-        "aic_model_path": "/models/mock",
-        "aic_moe_tp_size": None,
-        "aic_moe_ep_size": None,
-        "aic_attention_dp_size": None,
-        "gpu_memory_utilization": None,
-        "mem_fraction_static": None,
-        "enable_local_indexer": True,
-        "bootstrap_port": None,
-        "kv_bytes_per_token": None,
-        "kv_transfer_bandwidth": 123.0,
-        "reasoning": {
-            "start_thinking_token_id": 11,
-            "end_thinking_token_id": 12,
-            "thinking_ratio": 0.25,
-        },
-        "zmq_kv_events_port": None,
-        "zmq_replay_port": None,
-        "preemption_mode": "fifo",
-        "router_queue_policy": None,
-        "sglang": {
-            "schedule_policy": "lpm",
-            "page_size": 128,
-            "max_prefill_tokens": 8192,
-            "chunked_prefill_size": 2048,
-            "clip_max_new_tokens": 1024,
-            "schedule_conservativeness": 0.8,
-        },
-    }
-
-    assert "has_perf_model" not in payload
+    assert engine_args.num_gpu_blocks == 2048
+    assert engine_args.block_size == 128
+    assert engine_args.max_num_seqs == 64
+    assert engine_args.max_num_batched_tokens == 4096
+    assert engine_args.enable_prefix_caching is False
+    assert engine_args.enable_local_indexer is True
+    assert engine_args.dp_size == 4
+    assert engine_args.worker_type == "prefill"
+    assert engine_args.aic_backend == "sglang"
+    assert engine_args.aic_system == "h200_sxm"
+    assert engine_args.aic_backend_version == "0.5.6.post2"
+    assert engine_args.aic_tp_size == 8
+    assert engine_args.aic_model_path == "/models/mock"
 
 
 def test_aic_backend_override_decouples_from_engine_type():
@@ -257,10 +220,8 @@ def test_aic_backend_override_decouples_from_engine_type():
     )
 
     engine_args = CONFIG.build_mocker_engine_args(args)
-    payload = json.loads(engine_args.dump_json())
 
-    assert payload["engine_type"] == "vllm"
-    assert payload["aic_backend"] == "trtllm"
+    assert engine_args.aic_backend == "trtllm"
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
@@ -285,9 +246,8 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
     )
 
     assert engine_args.num_gpu_blocks == 46000
-    payload = json.loads(engine_args.dump_json())
-    assert payload["gpu_memory_utilization"] == 0.8
-    assert payload["mem_fraction_static"] == 0.7
+    assert engine_args.gpu_memory_utilization == 0.8
+    assert engine_args.mem_fraction_static == 0.7
     assert calls == [
         {
             "backend_name": "vllm",

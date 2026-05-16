@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use crate::common::perf_model::PerfModel;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
@@ -328,7 +328,7 @@ pub struct SglangArgs {
 }
 
 /// Keeps omitted JSON fields distinct from explicit `null` so serde can replace
-/// the old hand-written parser without losing Python `dump_json()` round trips.
+/// the old hand-written parser without losing input-config semantics.
 #[derive(Debug, Clone, Default)]
 enum OptionalConfigValue<T> {
     #[default]
@@ -462,6 +462,7 @@ fn load_perf_model(path: &Path) -> Arc<PerfModel> {
 /// Configuration arguments for MockEngine
 #[derive(Debug, Clone, Serialize, Deserialize, Builder, Validate)]
 #[serde(try_from = "MockEngineArgsSerde")]
+#[validate(schema(function = "validate_mock_engine_args"))]
 #[builder(pattern = "owned", build_fn(public))]
 pub struct MockEngineArgs {
     /// Engine type: vLLM or SGLang simulation
@@ -667,6 +668,54 @@ pub struct MockEngineArgs {
     pub sglang: Option<SglangArgs>,
 }
 
+fn mock_engine_args_validation_error(code: &'static str, message: String) -> ValidationError {
+    let mut error = ValidationError::new(code);
+    error.message = Some(message.into());
+    error
+}
+
+fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationError> {
+    if args.block_size == 0 {
+        return Err(mock_engine_args_validation_error(
+            "block_size_zero",
+            "block_size must be greater than 0".to_string(),
+        ));
+    }
+
+    if args.engine_type != EngineType::Sglang {
+        return Ok(());
+    }
+
+    if let Some(page_size) = args.sglang.as_ref().and_then(|sglang| sglang.page_size)
+        && args.block_size != page_size
+    {
+        return Err(mock_engine_args_validation_error(
+            "sglang_block_size_page_size_mismatch",
+            format!(
+                "engine_type=sglang requires block_size and sglang.page_size to match when both are set, got block_size={} and sglang.page_size={page_size}",
+                args.block_size,
+            ),
+        ));
+    }
+
+    if let Some(chunked_prefill_size) = args
+        .sglang
+        .as_ref()
+        .and_then(|sglang| sglang.chunked_prefill_size)
+        && chunked_prefill_size % args.block_size != 0
+    {
+        return Err(mock_engine_args_validation_error(
+            "sglang_chunked_prefill_size_not_divisible_by_block_size",
+            format!(
+                "engine_type=sglang requires sglang.chunked_prefill_size to be divisible by block_size, got chunked_prefill_size={} and block_size={}",
+                chunked_prefill_size, args.block_size,
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
     type Error = String;
 
@@ -857,6 +906,12 @@ impl MockEngineArgs {
     }
 
     pub fn normalized(mut self) -> anyhow::Result<Self> {
+        self.materialize_defaults();
+        self.validate_config()?;
+        Ok(self)
+    }
+
+    fn materialize_defaults(&mut self) {
         match self.engine_type {
             EngineType::Vllm => {
                 if self.block_size == 0 {
@@ -872,39 +927,17 @@ impl MockEngineArgs {
                     (0, Some(page_size)) => {
                         self.block_size = page_size;
                     }
-                    (block_size, Some(page_size)) if block_size == page_size => {}
-                    (_, Some(page_size)) => {
-                        return Err(anyhow::anyhow!(
-                            "engine_type=sglang requires block_size and sglang.page_size to match when both are set, got block_size={} and sglang.page_size={page_size}",
-                            self.block_size,
-                        ));
-                    }
+                    (_, Some(_)) => {}
                     (_, None) => {}
                 }
             }
         }
+    }
 
-        if self.engine_type == EngineType::Sglang
-            && let Some(chunked_prefill_size) = self
-                .sglang
-                .as_ref()
-                .and_then(|sglang| sglang.chunked_prefill_size)
-            && chunked_prefill_size % self.block_size != 0
-        {
-            return Err(anyhow::anyhow!(
-                "engine_type=sglang requires sglang.chunked_prefill_size to be divisible by block_size, got chunked_prefill_size={} and block_size={}",
-                chunked_prefill_size,
-                self.block_size,
-            ));
-        }
-
+    fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
-        if self.block_size == 0 {
-            return Err(anyhow::anyhow!("block_size must be greater than 0"));
-        }
-
-        Ok(self)
+        Ok(())
     }
 
     pub fn is_prefill(&self) -> bool {

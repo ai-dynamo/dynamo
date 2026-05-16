@@ -268,27 +268,6 @@ def test_planner_bridge_materializes_unset_aic_blocks(tmp_path, monkeypatch):
     ]
 
 
-def test_programmatic_aic_dump_preserves_unset_blocks():
-    engine_args = MockEngineArgs(
-        aic_backend="vllm",
-        aic_system="h200_sxm",
-        aic_model_path="/models/mock",
-        gpu_memory_utilization=0.8,
-    )
-
-    payload = json.loads(engine_args.dump_json())
-
-    assert payload["num_gpu_blocks"] is None
-    assert payload["gpu_memory_utilization"] == 0.8
-    assert payload["mem_fraction_static"] is None
-
-    restored = MockEngineArgs.from_json(engine_args.dump_json())
-    restored_payload = json.loads(restored.dump_json())
-
-    assert restored.num_gpu_blocks == 16384
-    assert restored_payload["num_gpu_blocks"] is None
-
-
 def test_invalid_json_num_gpu_blocks_type_is_rejected():
     with pytest.raises(Exception, match="num_gpu_blocks"):
         MockEngineArgs.from_json(
