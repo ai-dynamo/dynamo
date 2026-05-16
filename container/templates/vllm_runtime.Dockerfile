@@ -41,9 +41,7 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
 {% endif %}
 ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
-ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:\
-    /usr/local/ucx/lib:/usr/local/ucx/lib/ucx:\
-    ${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% endif %}
