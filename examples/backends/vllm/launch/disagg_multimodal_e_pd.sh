@@ -77,6 +77,9 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E+PD ($GPU_
 echo "Starting frontend..."
 python -m dynamo.frontend &
 
+# Each worker needs its own system port when tests inject DYN_SYSTEM_PORT{1,2}.
+unset DYN_SYSTEM_PORT
+
 EXTRA_ARGS=""
 PD_GPU_MEM_ARGS=""
 
@@ -122,6 +125,7 @@ fi
 # The static peak is bounded by the model's fp16 weights (~14 GB), independent
 # of GPU size. So sizing for this script: encoder needs ~14 GB free per worker GPU.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --multimodal-encode-worker \
@@ -132,6 +136,7 @@ python -m dynamo.vllm \
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
 echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (${PD_GPU_MEM_ARGS})..."
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \

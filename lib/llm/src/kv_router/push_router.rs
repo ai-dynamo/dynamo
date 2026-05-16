@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
     metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
@@ -302,6 +302,9 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
+        let routing_constraints = routing
+            .and_then(|r| r.routing_constraints.clone())
+            .unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
@@ -318,6 +321,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     None,
                     allowed_worker_ids,
+                    routing_constraints.clone(),
                 )
                 .await?;
             let best_worker = selection.worker;
@@ -374,6 +378,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     Some(pinned_worker),
                     allowed_worker_ids,
+                    routing_constraints.clone(),
                 )
                 .await?;
             let best_worker = selection.worker;
@@ -403,6 +408,30 @@ impl KvPushRouter {
             ?phase,
             "Routing to specified worker"
         );
+
+        if routing_constraints.has_hard_constraints() {
+            let configs = self.chooser.workers_with_configs.borrow();
+            match configs.get(&pinned_worker_id) {
+                Some(config)
+                    if !routing_constraints.is_compatible_with_worker_taints(config.taints()) =>
+                {
+                    return Err(anyhow::anyhow!(
+                        "Pinned worker {} does not satisfy required taints {:?}; worker taints: {:?}",
+                        pinned_worker_id,
+                        routing_constraints.required_taints,
+                        config.taints()
+                    ));
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "Pinned worker {} could not be validated against required taints {:?} because worker config was unavailable",
+                        pinned_worker_id,
+                        routing_constraints.required_taints
+                    ));
+                }
+                _ => {}
+            }
+        }
 
         // Build a WorkerWithDpRank; use 0 as a fallback dp_rank when it
         // couldn't be resolved -- this is only used for the cache-hit

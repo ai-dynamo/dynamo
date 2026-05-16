@@ -1,23 +1,121 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 
+from dynamo.llm import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay
 
-from .replay_utils import (
-    AIC_PARITY_BACKENDS,
-    _aic_disagg_replay_args,
-    _aic_replay_args,
-    _run_aic_static_point,
-)
+AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
+AIC_PARITY_SYSTEM = "h200_sxm"
+AIC_PARITY_VERSIONS = {
+    "vllm": "0.19.0",
+    "sglang": "0.5.6.post2",
+}
+AIC_PARITY_BACKENDS = [
+    pytest.param("vllm", id="vllm"),
+    pytest.param("sglang", id="sglang"),
+]
 
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.planner,
 ]
+
+
+def _aic_replay_args(backend_name: str):
+    payload = {
+        "block_size": 512,
+        "enable_prefix_caching": True,
+        "enable_chunked_prefill": False,
+        "max_num_seqs": 16,
+        "max_num_batched_tokens": 65536,
+        "num_gpu_blocks": 100000,
+        "speedup_ratio": 1.0,
+        "aic_backend": backend_name,
+        "aic_system": AIC_PARITY_SYSTEM,
+        "aic_backend_version": AIC_PARITY_VERSIONS[backend_name],
+        "aic_tp_size": 1,
+        "aic_model_path": AIC_PARITY_MODEL,
+    }
+    if backend_name == "sglang":
+        payload["engine_type"] = "sglang"
+        payload["sglang"] = {
+            "page_size": 512,
+            "max_prefill_tokens": 65536,
+            "chunked_prefill_size": 65536,
+        }
+    return MockEngineArgs.from_json(json.dumps(payload))
+
+
+def _aic_disagg_replay_args(
+    backend_name: str,
+    *,
+    tp_size: int,
+    is_prefill: bool,
+    max_num_seqs: int,
+    max_num_batched_tokens: int,
+):
+    payload = {
+        "block_size": 512,
+        "enable_prefix_caching": False,
+        "enable_chunked_prefill": False,
+        "max_num_seqs": max_num_seqs,
+        "max_num_batched_tokens": max_num_batched_tokens,
+        "num_gpu_blocks": 50000,
+        "speedup_ratio": 1.0,
+        "aic_backend": backend_name,
+        "aic_system": AIC_PARITY_SYSTEM,
+        "aic_backend_version": AIC_PARITY_VERSIONS[backend_name],
+        "aic_tp_size": tp_size,
+        "aic_model_path": AIC_PARITY_MODEL,
+        "is_prefill": is_prefill,
+        "is_decode": not is_prefill,
+    }
+    if backend_name == "sglang":
+        payload["engine_type"] = "sglang"
+        payload["sglang"] = {
+            "page_size": 512,
+            "max_prefill_tokens": 65536,
+            "chunked_prefill_size": 65536,
+        }
+    return MockEngineArgs.from_json(json.dumps(payload))
+
+
+def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
+    aiconfigurator = pytest.importorskip("aiconfigurator")
+
+    database = aiconfigurator.sdk.perf_database.get_database(
+        system=AIC_PARITY_SYSTEM,
+        backend=backend_name,
+        version=AIC_PARITY_VERSIONS[backend_name],
+    )
+    backend = aiconfigurator.sdk.backends.factory.get_backend(backend_name)
+    model = aiconfigurator.sdk.models.get_model(
+        model_path=AIC_PARITY_MODEL,
+        model_config=aiconfigurator.sdk.config.ModelConfig(tp_size=1),
+        backend_name=backend_name,
+    )
+    session = aiconfigurator.sdk.inference_session.InferenceSession(
+        model, database, backend
+    )
+    summary = session.run_static(
+        runtime_config=aiconfigurator.sdk.config.RuntimeConfig(
+            batch_size=batch_size,
+            beam_width=1,
+            isl=isl,
+            osl=osl,
+            prefix=0,
+        ),
+        mode="static",
+        stride=32,
+    )
+    return summary.get_summary_df().to_dict(orient="records")[0]
 
 
 @pytest.mark.parametrize("backend_name", AIC_PARITY_BACKENDS)
