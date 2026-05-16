@@ -51,6 +51,16 @@ runs:
           # port because pod is not running. Current status=Pending"); because it's
           # backgrounded, the script continues, and the connectivity check later
           # fails with "connection refused" on 127.0.0.1:8443.
+          #
+          # Assumes the pod is already scheduled by the time we get here — true for
+          # all current callers (deploy-operator creates the StatefulSet upstream,
+          # and pods land near-instantly when CPU/GPU/memory requests fit a node).
+          # If a future caller hits "no matching resources found" exiting immediately,
+          # `kubectl wait --for=condition=ready` does not poll for resources to
+          # appear; remediate with one of:
+          #   - poll `kubectl get pod -l ... -o name` until non-empty, then wait
+          #   - `kubectl rollout status statefulset/${VCLUSTER_NAME}` first
+          #   - chain `kubectl wait --for=create pod ... ` then `--for=condition=ready` (kubectl >= 1.31)
           echo "Waiting for vCluster pod (app=vcluster,release=${VCLUSTER_NAME}) to be Ready (timeout 300s)..."
           kubectl wait --for=condition=ready pod \
             -l "app=vcluster,release=${VCLUSTER_NAME}" \
