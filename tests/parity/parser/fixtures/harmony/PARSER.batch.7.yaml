@@ -6,7 +6,7 @@ mode: batch
 cases:
   PARSER.batch.7.a:
     description: Standard scalar types
-    ref: dynamo
+    ref: "OpenAI Harmony receiving tool calls example starts completion at '<|channel|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.book_flight <|constrain|>json<|message|>{"destination":"Paris","passengers":2,"first_class":true}<|call|>
     tools:
     - name: book_flight
@@ -29,13 +29,20 @@ cases:
             first_class: true
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - name: book_flight
+          arguments:
+            destination: Paris
+            passengers: 2
+            first_class: true
+        normal_text: ''
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.book_flight <|constrain|>json<|message|>{"destination":"Paris","passengers":2,"first_class":true}<|call|>
+        reason: "Dynamo/vLLM are more spec-correct for completion-body parsing: the first assistant message may start at '<|channel|>'; SGLang requires a redundant '<|start|>assistant' prefix and leaks raw markup"
   PARSER.batch.7.b:
     description: Unicode + escaped chars
-    ref: dynamo
+    ref: "OpenAI Harmony receiving tool calls example starts completion at '<|channel|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"Tōkyō \"central\""}<|call|>
     tools:
     - name: get_weather
@@ -52,13 +59,18 @@ cases:
             location: Tōkyō "central"
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - name: get_weather
+          arguments:
+            location: Tōkyō "central"
+        normal_text: ''
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"Tōkyō \"central\""}<|call|>
+        reason: "Dynamo/vLLM are more spec-correct for completion-body parsing: the first assistant message may start at '<|channel|>'; SGLang requires a redundant '<|start|>assistant' prefix and leaks raw markup"
   PARSER.batch.7.c:
     description: Schema mismatch — string value where schema declares integer
-    ref: dynamo
+    ref: "OpenAI Harmony receiving tool calls example starts completion at '<|channel|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.set_temperature <|constrain|>json<|message|>{"celsius":"20"}<|call|>
     tools:
     - name: set_temperature
@@ -75,13 +87,18 @@ cases:
             celsius: '20'
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - name: set_temperature
+          arguments:
+            celsius: '20'
+        normal_text: ''
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.set_temperature <|constrain|>json<|message|>{"celsius":"20"}<|call|>
+        reason: "Dynamo/vLLM are more spec-correct for completion-body parsing: the first assistant message may start at '<|channel|>'; SGLang requires a redundant '<|start|>assistant' prefix and leaks raw markup"
   PARSER.batch.7.d:
     description: Nested object + array
-    ref: dynamo
+    ref: "OpenAI Harmony receiving tool calls example starts completion at '<|channel|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.process_data <|constrain|>json<|message|>{"items":[1,2,3],"config":{"nested":true}}<|call|>
     tools:
     - name: process_data
@@ -105,7 +122,17 @@ cases:
               nested: true
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - name: process_data
+          arguments:
+            items:
+            - 1
+            - 2
+            - 3
+            config:
+              nested: true
+        normal_text: ''
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.process_data <|constrain|>json<|message|>{"items":[1,2,3],"config":{"nested":true}}<|call|>
+        reason: "Dynamo/vLLM are more spec-correct for completion-body parsing: the first assistant message may start at '<|channel|>'; SGLang requires a redundant '<|start|>assistant' prefix and leaks raw markup"
