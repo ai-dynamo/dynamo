@@ -135,6 +135,16 @@ def _arg_was_provided(argv: list[str], option: str) -> bool:
     )
 
 
+def configure_rl_logprobs_mode(config: Config) -> None:
+    if (
+        config.enable_rl
+        and not config.logprobs_mode_explicitly_set
+        and config.engine_args.logprobs_mode == "raw_logprobs"
+    ):
+        config.engine_args.logprobs_mode = "processed_logprobs"
+        logger.info("Defaulting logprobs_mode=processed_logprobs (--enable-rl active).")
+
+
 def cross_validate_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:

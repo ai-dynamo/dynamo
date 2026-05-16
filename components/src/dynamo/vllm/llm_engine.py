@@ -41,7 +41,7 @@ from dynamo.common.backend.publisher import (
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
-from dynamo.vllm.args import parse_args
+from dynamo.vllm.args import configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
@@ -120,9 +120,15 @@ class _UnifiedStatLoggerFactory:
 
 
 class VllmLLMEngine(LLMEngine):
-    def __init__(self, engine_args, disaggregation_mode: DisaggregationMode):
+    def __init__(
+        self,
+        engine_args,
+        disaggregation_mode: DisaggregationMode,
+        enable_rl: bool = False,
+    ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
+        self.enable_rl = enable_rl
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -150,12 +156,14 @@ class VllmLLMEngine(LLMEngine):
                 config.engine_args.served_model_name
             ) = config.model
 
+        configure_rl_logprobs_mode(config)
+
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
         # is still the input union, so narrow it here for mypy (cast
         # rather than assert so `-O` builds don't drop the narrowing).
         mode = cast(DisaggregationMode, config.disaggregation_mode)
-        engine = cls(config.engine_args, mode)
+        engine = cls(config.engine_args, mode, enable_rl=config.enable_rl)
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
@@ -234,7 +242,10 @@ class VllmLLMEngine(LLMEngine):
 
         # TODO: remove dict() once build_sampling_params accepts GenerateRequest
         sampling_params = build_sampling_params(
-            dict(request), self._default_sampling_params, self._model_max_len
+            dict(request),
+            self._default_sampling_params,
+            self._model_max_len,
+            enable_rl=self.enable_rl,
         )
 
         # vLLM's KV transfer is internal to NixlConnector
