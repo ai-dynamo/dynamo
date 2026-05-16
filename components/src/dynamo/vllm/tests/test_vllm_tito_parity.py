@@ -137,7 +137,7 @@ class TestCacheSaltWiring:
 
 class TestTokenInSamplingDefaults:
     @staticmethod
-    def _build(extra_args=None):
+    def _build(extra_args=None, enable_rl=False, nvext=None):
         from dynamo.vllm.handlers import build_sampling_params
 
         req = {
@@ -148,7 +148,9 @@ class TestTokenInSamplingDefaults:
         }
         if extra_args is not None:
             req["extra_args"] = extra_args
-        return build_sampling_params(req, {"top_p": 0.5})
+        if nvext is not None:
+            req["nvext"] = nvext
+        return build_sampling_params(req, {"top_p": 0.5}, enable_rl=enable_rl)
 
     def test_metadata_extra_fields_keep_generation_defaults(self):
         sp = self._build({"nvext": {"extra_fields": ["timing", "worker_id"]}})
@@ -159,7 +161,15 @@ class TestTokenInSamplingDefaults:
         assert sp.top_p == pytest.approx(0.5)
 
     def test_token_in_marker_skips_generation_defaults(self):
-        sp = self._build({"nvext": {"token_in": True}})
+        sp = self._build({"nvext": {"token_in": True}}, enable_rl=True)
+        assert sp.top_p == pytest.approx(1.0)
+
+    def test_token_data_keeps_generation_defaults_when_rl_disabled(self):
+        sp = self._build(nvext={"token_data": [1, 2, 3]}, enable_rl=False)
+        assert sp.top_p == pytest.approx(0.5)
+
+    def test_token_data_skips_generation_defaults_when_rl_enabled(self):
+        sp = self._build(nvext={"token_data": [1, 2, 3]}, enable_rl=True)
         assert sp.top_p == pytest.approx(1.0)
 
 

@@ -490,6 +490,7 @@ def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None = None,
+    enable_rl: bool = False,
 ) -> SamplingParams:
     """
     Build SamplingParams from a PreprocessedRequest (internal protocol format).
@@ -505,11 +506,12 @@ def build_sampling_params(
     Returns:
         SamplingParams configured from the request
 
-    Token-in requests use vLLM's default sampling values instead of model
-    `generation_config.json` sampling overrides. Stop-token defaults from the
-    model config are still applied later.
+    RL token-in requests use vLLM's default sampling values instead of model
+    `generation_config.json` sampling overrides. Ordinary token-data requests
+    keep generation_config defaults for Gateway/backward-compatible traffic.
+    Stop-token defaults from the model config are still applied later.
     """
-    if _is_token_in_request(request):
+    if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.
         sampling_params = SamplingParams()
     else:
@@ -2561,7 +2563,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
-            request, self.default_sampling_params, self.model_max_len
+            request,
+            self.default_sampling_params,
+            self.model_max_len,
+            enable_rl=self.config.enable_rl,
         )
 
         if kv_params is not None:
@@ -2839,7 +2844,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Build sampling params from request using shared utility
         sampling_params = build_sampling_params(
-            request, self.default_sampling_params, self.model_max_len
+            request,
+            self.default_sampling_params,
+            self.model_max_len,
+            enable_rl=self.config.enable_rl,
         )
 
         # One protocol instance per request; carries per-request state
