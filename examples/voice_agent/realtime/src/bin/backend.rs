@@ -4,19 +4,20 @@
 use std::{env, net::SocketAddr, time::Duration};
 
 use anyhow::{Context, Result};
-use dynamo_llm::{
-    engines::TOKEN_ECHO_DELAY,
-    protocols::openai::chat_completions::{
-        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-    },
+use dynamo_protocols::types::realtime::{
+    RealtimeClientEvent, RealtimeResponseStatus, RealtimeServerEvent,
+    RealtimeServerEventResponseAudioDelta, RealtimeServerEventResponseAudioDone,
+    RealtimeServerEventResponseCreated, RealtimeServerEventResponseDone,
+    RealtimeServerEventSessionUpdated,
 };
-use dynamo_protocols::types::FinishReason;
 use dynamo_runtime::protocols::annotated::Annotated;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpStream, tcp::OwnedWriteHalf},
 };
-use voice_agent_realtime::last_user_text;
+use voice_agent_realtime::{
+    ECHO_AUDIO_DELTA_CHUNK_LEN, annotated_event, echo_response, unsupported_event,
+};
 
 #[derive(Debug)]
 struct Args {
@@ -61,7 +62,7 @@ fn print_help() {
 
 async fn write_chunk(
     writer: &mut OwnedWriteHalf,
-    chunk: &Annotated<NvCreateChatCompletionStreamResponse>,
+    chunk: &Annotated<RealtimeServerEvent>,
 ) -> Result<()> {
     let payload = serde_json::to_string(chunk).context("failed to serialize response chunk")?;
     writer
@@ -78,51 +79,116 @@ async fn write_chunk(
         .context("failed to flush response chunk")
 }
 
-async fn handle_request(
+async fn handle_event(
     writer: &mut OwnedWriteHalf,
-    req: NvCreateChatCompletionRequest,
-    request_index: u64,
+    event: RealtimeClientEvent,
+    session_id: &str,
+    frame: &mut u64,
 ) -> Result<()> {
-    let prompt = last_user_text(&req, request_index);
-    let mut deltas = req.response_generator(format!("backend-{request_index}"));
-    let mut id = 1u64;
+    match event {
+        RealtimeClientEvent::SessionUpdate(req) => {
+            *frame += 1;
+            write_chunk(
+                writer,
+                &annotated_event(
+                    *frame,
+                    RealtimeServerEvent::SessionUpdated(RealtimeServerEventSessionUpdated {
+                        event_id: format!("event_{session_id}_{frame}"),
+                        session: req.session,
+                    }),
+                ),
+            )
+            .await
+        }
+        RealtimeClientEvent::InputAudioBufferAppend(req) => {
+            let response_id = format!("resp_{session_id}_{frame}");
+            let item_id = format!("item_{session_id}_{frame}");
 
-    for c in prompt.chars() {
-        tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-        let response = deltas.create_choice(0, Some(c.to_string()), None, None);
-        write_chunk(
-            writer,
-            &Annotated {
-                id: Some(id.to_string()),
-                data: Some(response),
-                event: None,
-                comment: None,
-                error: None,
-            },
-        )
-        .await?;
-        id += 1;
+            *frame += 1;
+            write_chunk(
+                writer,
+                &annotated_event(
+                    *frame,
+                    RealtimeServerEvent::ResponseCreated(RealtimeServerEventResponseCreated {
+                        event_id: format!("event_{session_id}_{frame}"),
+                        response: echo_response(&response_id, RealtimeResponseStatus::InProgress),
+                    }),
+                ),
+            )
+            .await?;
+
+            let audio = req.audio.as_str();
+            let mut start = 0;
+            while start < audio.len() {
+                let mut end = (start + ECHO_AUDIO_DELTA_CHUNK_LEN).min(audio.len());
+                while !audio.is_char_boundary(end) {
+                    end -= 1;
+                }
+                *frame += 1;
+                write_chunk(
+                    writer,
+                    &annotated_event(
+                        *frame,
+                        RealtimeServerEvent::ResponseOutputAudioDelta(
+                            RealtimeServerEventResponseAudioDelta {
+                                event_id: format!("event_{session_id}_{frame}"),
+                                response_id: response_id.clone(),
+                                item_id: item_id.clone(),
+                                output_index: 0,
+                                content_index: 0,
+                                delta: audio[start..end].to_string(),
+                            },
+                        ),
+                    ),
+                )
+                .await?;
+                start = end;
+            }
+
+            *frame += 1;
+            write_chunk(
+                writer,
+                &annotated_event(
+                    *frame,
+                    RealtimeServerEvent::ResponseOutputAudioDone(
+                        RealtimeServerEventResponseAudioDone {
+                            event_id: format!("event_{session_id}_{frame}"),
+                            response_id: response_id.clone(),
+                            item_id: item_id.clone(),
+                            output_index: 0,
+                            content_index: 0,
+                        },
+                    ),
+                ),
+            )
+            .await?;
+
+            *frame += 1;
+            write_chunk(
+                writer,
+                &annotated_event(
+                    *frame,
+                    RealtimeServerEvent::ResponseDone(RealtimeServerEventResponseDone {
+                        event_id: format!("event_{session_id}_{frame}"),
+                        response: echo_response(&response_id, RealtimeResponseStatus::Completed),
+                    }),
+                ),
+            )
+            .await
+        }
+        other => {
+            *frame += 1;
+            write_chunk(writer, &unsupported_event(*frame, session_id, &other)).await
+        }
     }
-
-    let response = deltas.create_choice(0, None, Some(FinishReason::Stop), None);
-    write_chunk(
-        writer,
-        &Annotated {
-            id: Some(id.to_string()),
-            data: Some(response),
-            event: None,
-            comment: None,
-            error: None,
-        },
-    )
-    .await
 }
 
 async fn serve_connection(stream: TcpStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
-    let mut request_index = 0u64;
+    let session_id = "voice-agent-backend";
+    let mut frame = 0u64;
 
     loop {
         line.clear();
@@ -134,10 +200,9 @@ async fn serve_connection(stream: TcpStream) -> Result<()> {
             return Ok(());
         }
 
-        request_index += 1;
-        let req: NvCreateChatCompletionRequest =
+        let event: RealtimeClientEvent =
             serde_json::from_str(line.trim_end()).context("failed to parse request frame")?;
-        handle_request(&mut write_half, req, request_index).await?;
+        handle_event(&mut write_half, event, session_id, &mut frame).await?;
     }
 }
 

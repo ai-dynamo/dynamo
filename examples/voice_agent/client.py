@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Minimal WebSocket client for Dynamo's current experimental /v1/realtime endpoint."""
+"""Minimal WebSocket client for Dynamo's experimental /v1/realtime endpoint."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import sys
 from typing import Any
@@ -29,9 +30,13 @@ def parse_args() -> argparse.Namespace:
         help="Dynamo realtime WebSocket URL.",
     )
     parser.add_argument(
-        "--model", default="echo", help="Model name to send in the request."
+        "--model", default="echo", help="Realtime model name for session.update."
     )
-    parser.add_argument("--text", default="hello realtime", help="User text to send.")
+    parser.add_argument(
+        "--text",
+        default="hello realtime",
+        help="Text to base64-encode into input_audio_buffer.append for the echo backend.",
+    )
     parser.add_argument(
         "--timeout",
         type=float,
@@ -41,49 +46,67 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def extract_delta_text(message: dict[str, Any]) -> tuple[str, bool]:
-    data = message.get("data", message)
-    choices = data.get("choices") or []
-    text_parts: list[str] = []
-    finished = False
+async def recv_event(ws: Any, timeout: float) -> dict[str, Any]:
+    try:
+        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError("timed out waiting for a realtime event") from exc
 
-    for choice in choices:
-        delta = choice.get("delta") or {}
-        content = delta.get("content")
-        if isinstance(content, str):
-            text_parts.append(content)
-        if choice.get("finish_reason") == "stop":
-            finished = True
+    if isinstance(raw, bytes):
+        raise ValueError("Dynamo realtime endpoint should not send binary frames")
 
-    return "".join(text_parts), finished
+    event = json.loads(raw)
+    if event.get("type") == "error":
+        error = event.get("error") or {}
+        message = error.get("message") or event
+        raise RuntimeError(f"server error event: {message}")
+    return event
+
+
+async def expect_event(ws: Any, event_type: str, timeout: float) -> dict[str, Any]:
+    event = await recv_event(ws, timeout)
+    actual = event.get("type")
+    if actual != event_type:
+        raise RuntimeError(f"expected {event_type}, got {actual}: {event}")
+    return event
 
 
 async def run_client(args: argparse.Namespace) -> None:
-    request = {
-        "model": args.model,
-        "messages": [{"role": "user", "content": args.text}],
-    }
+    audio = base64.b64encode(args.text.encode("utf-8")).decode("ascii")
 
     async with websockets.connect(args.url) as ws:
-        await ws.send(json.dumps(request))
+        await expect_event(ws, "session.created", args.timeout)
 
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "session.update",
+                    "session": {"type": "realtime", "model": args.model},
+                }
+            )
+        )
+        await expect_event(ws, "session.updated", args.timeout)
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": audio,
+                }
+            )
+        )
+
+        echoed_audio = []
         while True:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=args.timeout)
-            except asyncio.TimeoutError as exc:
-                raise TimeoutError(
-                    f"timed out waiting for a frame from {args.url}"
-                ) from exc
-
-            if isinstance(raw, bytes):
-                continue
-
-            message = json.loads(raw)
-            delta, finished = extract_delta_text(message)
-            if delta:
-                print(delta, end="", flush=True)
-            if finished:
-                print()
+            event = await recv_event(ws, args.timeout)
+            event_type = event.get("type")
+            if event_type == "response.output_audio.delta":
+                echoed_audio.append(event.get("delta", ""))
+            elif event_type == "response.done":
+                decoded = base64.b64decode("".join(echoed_audio)).decode(
+                    "utf-8", errors="replace"
+                )
+                print(decoded)
                 return
 
 

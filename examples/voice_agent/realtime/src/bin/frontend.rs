@@ -13,11 +13,10 @@ use anyhow::{Context, Result};
 use async_stream::stream;
 use async_trait::async_trait;
 use dynamo_llm::{
-    http::service::{realtime, service_v2::HttpService},
-    protocols::openai::chat_completions::{
-        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-    },
+    endpoint_type::EndpointType, http::service::service_v2::HttpService,
+    types::RealtimeBidirectionalEngine,
 };
+use dynamo_protocols::types::realtime::{RealtimeClientEvent, RealtimeServerEvent};
 use dynamo_runtime::{
     CancellationToken,
     engine::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, ResponseStream},
@@ -33,7 +32,10 @@ use tokio::{
     },
     sync::{Mutex, MutexGuard, Notify},
 };
-use voice_agent_realtime::chunk_finished;
+use voice_agent_realtime::server_event_finishes_turn;
+
+const MODEL_NAME: &str = "echo";
+const NAMESPACE: &str = "voice-agent";
 
 #[derive(Debug)]
 struct Args {
@@ -188,17 +190,13 @@ struct BackendProxyEngine {
 }
 
 #[async_trait]
-impl
-    AsyncEngine<
-        ManyIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-        Error,
-    > for BackendProxyEngine
+impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEvent>>, Error>
+    for BackendProxyEngine
 {
     async fn generate(
         &self,
-        mut incoming: ManyIn<NvCreateChatCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        mut incoming: ManyIn<RealtimeClientEvent>,
+    ) -> Result<ManyOut<Annotated<RealtimeServerEvent>>, Error> {
         let ctx = incoming.context();
         let ctx_for_stream = ctx.clone();
         let bridge = self.bridge.clone();
@@ -206,7 +204,7 @@ impl
         let output = stream! {
             let ctx = ctx_for_stream;
 
-            while let Some(req) = incoming.next().await {
+            while let Some(event) = incoming.next().await {
                 if ctx.is_stopped() {
                     break;
                 }
@@ -218,7 +216,7 @@ impl
                     continue;
                 };
 
-                match serde_json::to_string(&req) {
+                match serde_json::to_string(&event) {
                     Ok(payload) => {
                         if let Err(err) = conn.writer.write_all(payload.as_bytes()).await {
                             tracing::warn!(%err, "failed to write request to realtime backend");
@@ -263,7 +261,7 @@ impl
                         }
                     }
 
-                    let chunk: Annotated<NvCreateChatCompletionStreamResponse> =
+                    let chunk: Annotated<RealtimeServerEvent> =
                         match serde_json::from_str(line.trim_end()) {
                             Ok(chunk) => chunk,
                             Err(err) => {
@@ -271,7 +269,7 @@ impl
                                 continue;
                             }
                         };
-                    let finished = chunk_finished(&chunk);
+                    let finished = server_event_finishes_turn(&chunk);
                     yield chunk;
                     if finished {
                         break;
@@ -296,16 +294,20 @@ async fn main() -> Result<()> {
     let backend_addr = args.backend_addr()?;
     let bridge = Arc::new(BackendBridge::default());
 
-    realtime::install_engine(BackendProxyEngine {
-        bridge: bridge.clone(),
-    })
-    .map_err(anyhow::Error::msg)?;
-
     let service = HttpService::builder()
         .host(args.host.clone())
         .port(args.port)
         .build()
         .context("failed to build HTTP service")?;
+
+    service.enable_model_endpoint(EndpointType::Realtime, true);
+    let engine: RealtimeBidirectionalEngine = Arc::new(BackendProxyEngine {
+        bridge: bridge.clone(),
+    });
+    service
+        .model_manager()
+        .add_realtime_model(MODEL_NAME, NAMESPACE, engine)
+        .context("failed to register realtime model")?;
 
     let cancel = CancellationToken::new();
     let http_handle = service.spawn(cancel.clone()).await;
@@ -315,9 +317,10 @@ async fn main() -> Result<()> {
         "Dynamo realtime frontend listening on http://{}:{}",
         args.host, args.port
     );
+    println!("Registered realtime model: {MODEL_NAME}");
     println!("Waiting for realtime backend on tcp://{backend_addr}");
     println!(
-        "Connect a client with: python examples/voice_agent/client.py --url ws://{}:{}/v1/realtime",
+        "Connect a client with: python examples/voice_agent/client.py --url ws://{}:{}/v1/realtime --model {MODEL_NAME}",
         args.host, args.port
     );
     println!("Press Ctrl-C to stop.");
