@@ -92,9 +92,9 @@ The `run.sh` script and rendering scripts are conveniences that simplify common 
 | **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) |
 | **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
 | **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
-| **Python Env** | system site-packages for vllm/sglang, venv (`/opt/dynamo/venv`) for trtllm | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) |
+| **Python Env** | system site-packages for vllm/trtllm/sglang | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages where the runtime image uses system Python) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages where the runtime image uses system Python) |
 
-**Note (SGLang)**: SGLang runtime uses system site-packages, but the `dev` and `local-dev` images create `/opt/dynamo/venv` with `--system-site-packages` for build tooling like `maturin` and `uv`.
+**Note (vLLM/TRT-LLM/SGLang)**: All three runtime images inherit upstream containers that solve their Python stack into system site-packages; Dynamo wheels install with `--system --no-deps` to avoid disturbing the upstream solve. The `dev`/`local-dev` images create `/opt/dynamo/venv` with `--system-site-packages` so build tooling like `maturin` and `uv` is available without re-solving the framework Python stack.
 
 ## Usage Guidelines
 

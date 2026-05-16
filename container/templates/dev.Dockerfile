@@ -216,9 +216,10 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
-{% elif framework == "vllm" %}
-# Reuse the stable symlink created by the upstream vLLM runtime stage so dev
-# builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
+{% elif framework == "vllm" or framework == "trtllm" %}
+# vllm/trtllm dev images inherit upstream containers that ship NIXL inside the
+# Python wheel; libnixl.so loads via the wheel's DT_RPATH, so these env vars
+# act only as a stable anchor that avoids hardcoding a CUDA-specific path.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
@@ -315,8 +316,8 @@ RUN mkdir -p /opt/dynamo/venv && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
-{% elif framework == "vllm" %}
-# vLLM inherits upstream's system Python solve; keep dev installs in our venv.
+{% elif framework == "vllm" or framework == "trtllm" %}
+# vllm/trtllm inherit upstream's system Python solve; keep dev installs in our venv.
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
     ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv
