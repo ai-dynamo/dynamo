@@ -153,11 +153,8 @@ pub async fn detect_and_parse_tool_call_with_recovery(
             }
             ParserConfig::Xml(c)
         }
-        ParserConfig::Glm47(c) => {
-            let mut c = c.clone();
-            c.allow_eof_recovery = true;
-            ParserConfig::Glm47(c)
-        }
+        // GLM-4.7 intentionally omitted: match upstream vLLM/SGLang behavior
+        // (drop the call when </tool_call> is missing).
         // Other parsers don't have an EOF-recovery flag — pass through.
         other => other.clone(),
     };

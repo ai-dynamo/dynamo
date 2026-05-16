@@ -26,6 +26,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaks the entire envelope into normal_text; SGLang extracts both calls"
         calls: []
         normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
           to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
@@ -33,14 +34,13 @@ cases:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: ''
-        reason: "Dynamo drops back-to-back commentary blocks; SGLang extracts them"
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -51,6 +51,7 @@ cases:
     - *id002
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaks the envelope (with surrounding narration) into normal_text; SGLang extracts both calls and preserves the narration"
         calls: []
         normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
           to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
@@ -58,12 +59,12 @@ cases:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: I need both.   Done.
   PARSER.batch.2.d:
     description: Same-name twice
@@ -75,6 +76,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaks the envelope into normal_text instead of extracting both same-name calls; SGLang extracts both"
         calls: []
         normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
           to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
@@ -82,10 +84,14 @@ cases:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_weather
+          arguments:
             location: LA
-          name: get_weather
         normal_text: ''
+  PARSER.batch.2.b:
+    description: Two back-to-back fence pairs — not applicable to this family
+    reason: |-
+      harmony's multi-call form is exercised by PARSER.batch.2.a / 2.c / 2.d; no back-to-back fence/wrapper pattern applies to this family's parser syntax.
