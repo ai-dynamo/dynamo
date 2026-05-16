@@ -424,7 +424,6 @@ mod tests {
             worker_trace_link: None,
             completion_usage: None,
             engine_data: None,
-            prompt_logprobs: None,
         })
     }
 

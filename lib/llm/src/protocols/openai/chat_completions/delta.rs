@@ -311,8 +311,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
-        // Move prompt logprobs before borrowing token IDs for nvext emission.
-        let prompt_logprobs_payload = delta.prompt_logprobs;
+        let prompt_logprobs_payload =
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
         let completion_token_ids_slice: &[u32] = &delta.token_ids;
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
@@ -471,7 +471,6 @@ mod tests {
             })),
             worker_trace_link: None,
             engine_data: None,
-            prompt_logprobs: None,
         }
     }
 
@@ -525,7 +524,6 @@ mod tests {
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
-            prompt_logprobs: None,
         }
     }
 
@@ -731,7 +729,6 @@ mod tests {
             disaggregated_params: None,
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
-            prompt_logprobs: None,
         };
 
         let response = generator

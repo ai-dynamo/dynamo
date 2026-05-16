@@ -352,15 +352,17 @@ impl NvExtResponseFieldSelection {
 }
 
 pub(crate) fn validate_completion_token_ids_single_choice(
-    n: Option<u8>,
+    total_choices: usize,
     nvext: Option<&NvExt>,
 ) -> anyhow::Result<()> {
     let requested = nvext
         .and_then(|ext| ext.extra_fields.as_ref())
         .is_some_and(|fields| fields.iter().any(|field| field == "completion_token_ids"));
 
-    if requested && n.unwrap_or(1) > 1 {
-        anyhow::bail!("`nvext.extra_fields=[\"completion_token_ids\"]` requires `n` <= 1");
+    if requested && total_choices > 1 {
+        anyhow::bail!(
+            "`nvext.extra_fields=[\"completion_token_ids\"]` requires exactly one generated choice"
+        );
     }
 
     Ok(())

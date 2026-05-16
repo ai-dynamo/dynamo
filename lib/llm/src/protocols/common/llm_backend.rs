@@ -136,10 +136,6 @@ pub struct BackendOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
-
-    /// Per-prompt-token top-k logprobs surfaced via `nvext.prompt_logprobs`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -213,10 +209,6 @@ pub struct LLMEngineOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
-
-    /// Per-prompt-token top-k logprobs, if supported by the engine adapter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
 impl LLMEngineOutput {
@@ -238,7 +230,6 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
-            prompt_logprobs: None,
         }
     }
 
@@ -260,7 +251,6 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
-            prompt_logprobs: None,
         }
     }
 
@@ -282,7 +272,6 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
-            prompt_logprobs: None,
         }
     }
 
@@ -304,9 +293,16 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
-            prompt_logprobs: None,
         }
     }
+}
+
+pub(crate) fn prompt_logprobs_from_engine_data(
+    engine_data: Option<&serde_json::Value>,
+) -> Option<PromptLogprobs> {
+    engine_data?
+        .get("prompt_logprobs")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 impl MaybeError for LLMEngineOutput {

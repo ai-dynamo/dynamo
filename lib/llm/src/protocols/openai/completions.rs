@@ -473,7 +473,7 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_top_p(self.inner.top_p)?;
         validate::validate_n(self.inner.n)?;
         super::nvext::validate_completion_token_ids_single_choice(
-            self.inner.n,
+            get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
         // none for stream
@@ -845,6 +845,23 @@ mod tests {
             serde_json::from_value(request_json).expect("Failed to deserialize request");
 
         let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
+        assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    #[test]
+    fn test_completion_token_ids_rejected_for_prompt_batch() {
+        let request_json = json!({
+            "model": "test-model",
+            "prompt": ["first", "second"],
+            "n": 1,
+            "nvext": {
+                "extra_fields": ["completion_token_ids"]
+            }
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("prompt batch token ids");
         assert!(err.to_string().contains("completion_token_ids"));
     }
 
