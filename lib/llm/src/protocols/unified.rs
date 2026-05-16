@@ -325,6 +325,10 @@ impl OpenAISamplingOptionsProvider for UnifiedRequest {
         self.inner.nvext.as_ref()
     }
 
+    fn get_sampling_passthrough(&self, key: &str) -> Option<&serde_json::Value> {
+        self.inner.unsupported_fields.get(key)
+    }
+
     fn get_seed(&self) -> Option<i64> {
         self.inner.inner.seed
     }

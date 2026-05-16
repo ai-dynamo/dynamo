@@ -343,6 +343,15 @@ pub struct SamplingOptions {
 
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,
+
+    /// Whether the backend engine should detokenize generated output.
+    pub detokenize: Option<bool>,
+
+    /// Restrict generation to this set of token IDs.
+    pub allowed_token_ids: Option<Vec<TokenIdType>>,
+
+    /// Suppress generation of these token ID sequences.
+    pub bad_words_token_ids: Option<Vec<Vec<TokenIdType>>>,
 }
 
 /// Guided Decoding Options

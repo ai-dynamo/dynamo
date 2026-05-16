@@ -296,13 +296,10 @@ class TestSkipSpecialTokens:
 
         req = {
             "token_ids": [1, 2, 3],
-            "sampling_options": {},
-            "extra_args": {
-                "sampling_options": {
-                    "allowed_token_ids": [10, 11],
-                    "bad_words_token_ids": [[12, 13]],
-                    "detokenize": True,
-                }
+            "sampling_options": {
+                "allowed_token_ids": [10, 11],
+                "bad_words_token_ids": [[12, 13]],
+                "detokenize": True,
             },
             "stop_conditions": {},
             "output_options": {},
