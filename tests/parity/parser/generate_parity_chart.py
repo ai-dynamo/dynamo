@@ -404,6 +404,7 @@ def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
             labels.setdefault(family, doc["model_label"])
         for cid, case in doc["cases"].items():
             sub = cid.replace("PARSER.batch.", "")
+            case["__family"] = family
             case["__fixture_path"] = rel
             case["__case_id"] = cid
             cases[(family, sub)] = case
@@ -558,7 +559,7 @@ def render_markdown(
 _IMPL_DISPLAY = {"dynamo": "Dynamo", "vllm": "vLLM", "sglang": "SGLang"}
 
 
-def _format_output_block_html(block) -> str:
+def _format_output_block_html(block, family: str | None = None) -> str:
     """HTML rendering of an `expected.<impl>` block for tooltips.
     Applies _colorize_xml to `normal_text` so raw model output the engine
     failed to parse shows the same tag coloring as the input."""
@@ -578,7 +579,7 @@ def _format_output_block_html(block) -> str:
         calls_line = html_lib.escape(f"calls=[{rendered}]")
     else:
         calls_line = "calls=[]"
-    nt_line = f"normal_text='{_colorize_xml(nt)}'"
+    nt_line = f"normal_text='{_colorize_markup(nt, family)}'"
     return f"{nt_line}\n{calls_line}"
 
 
@@ -628,6 +629,52 @@ _END_SUFFIXES = ("_end", "▁end")
 _HARMONY_TURN_OPEN = "start"
 _HARMONY_TURN_CLOSE = frozenset({"end", "return", "call"})
 _HARMONY_SECTION_MARKERS = frozenset({"channel", "constrain", "message"})
+_HARMONY_TOKEN_RE = re.compile(r"<\|([A-Za-z_]+)\|>")
+_HARMONY_SEGMENT_CLASS = {
+    "start": "tt-h-start",
+    "channel": "tt-h-channel",
+    "constrain": "tt-h-constrain",
+    "message": "tt-h-message",
+    "end": "tt-h-stop",
+    "return": "tt-h-stop",
+    "call": "tt-h-call",
+}
+
+
+def _colorize_harmony(text: str) -> str:
+    """Color Harmony's linear token segments as `<|token|>related-text`.
+
+    Harmony is not paired XML. Tokens such as `<|channel|>` and `<|message|>`
+    introduce the header/content span that follows, so each special token is
+    grouped with text up to the next Harmony token.
+    """
+    pieces: list[str] = []
+    last = 0
+    for m in _HARMONY_TOKEN_RE.finditer(text):
+        if m.start() > last:
+            pieces.append(html_lib.escape(text[last : m.start()]))
+        token_name = m.group(1)
+        if token_name in _HARMONY_TURN_CLOSE:
+            end = m.end()
+        else:
+            next_m = _HARMONY_TOKEN_RE.search(text, m.end())
+            end = next_m.start() if next_m else len(text)
+        cls = _HARMONY_SEGMENT_CLASS.get(token_name, "tt-h-other")
+        token = html_lib.escape(m.group(0))
+        related = html_lib.escape(text[m.end() : end])
+        pieces.append(
+            f'<span class="tt-h {cls}"><span class="tt-h-token">{token}</span>{related}</span>'
+        )
+        last = end
+    if last < len(text):
+        pieces.append(html_lib.escape(text[last:]))
+    return "".join(pieces)
+
+
+def _colorize_markup(text: str, family: str | None = None) -> str:
+    if family == "harmony" and _HARMONY_TOKEN_RE.search(text):
+        return _colorize_harmony(text)
+    return _colorize_xml(text)
 
 
 def _strip_suffix(s: str, suffixes: tuple[str, ...]) -> str | None:
@@ -756,11 +803,17 @@ def _build_tooltip_html(case: dict, dyn) -> str:
     if head:
         parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
 
+    ref = case.get("ref")
+    if isinstance(ref, str) and ref:
+        parts.append('<div class="ttip-section">Ref:</div>')
+        parts.append(f'<pre class="ttip-pre">{html_lib.escape(ref)}</pre>')
+
     model_text = case.get("model_text")
     if isinstance(model_text, str) and model_text:
+        family = case.get("__family")
         parts.append('<div class="ttip-section">Input:</div>')
         parts.append(
-            f"<pre class=\"ttip-pre\">input_text='{_colorize_xml(model_text)}'</pre>"
+            f"<pre class=\"ttip-pre\">input_text='{_colorize_markup(model_text, family)}'</pre>"
         )
 
     expected = case.get("expected") or {}
@@ -782,13 +835,15 @@ def _build_tooltip_html(case: dict, dyn) -> str:
 
     if all_parity:
         parts.append('<div class="ttip-section">All engines parity:</div>')
-        parts.append(f'<pre class="ttip-pre">{_format_output_block_html(dyn)}</pre>')
+        parts.append(
+            f'<pre class="ttip-pre">{_format_output_block_html(dyn, case.get("__family"))}</pre>'
+        )
     else:
         for impl in ("dynamo", "vllm", "sglang"):
             block = expected.get(impl)
             parts.append(f'<div class="ttip-section">{_IMPL_DISPLAY[impl]}:</div>')
             parts.append(
-                f'<pre class="ttip-pre">{_format_output_block_html(block)}</pre>'
+                f'<pre class="ttip-pre">{_format_output_block_html(block, case.get("__family"))}</pre>'
             )
 
     reasons = _tooltip_for(case, dyn) if isinstance(dyn, dict) else ""
@@ -1292,6 +1347,15 @@ td.parser:hover .ttip {
 .tt-c6 { color: #22d3ee; }
 .tt-c7 { color: #f87171; }
 .tt-orphan { background: #7f1d1d; color: #fecaca; padding: 0 2px; border-radius: 2px; }
+.tt-h { padding: 0 1px; border-radius: 2px; }
+.tt-h-token { font-weight: 700; }
+.tt-h-start { color: #fbbf24; }
+.tt-h-channel { color: #60a5fa; }
+.tt-h-constrain { color: #a78bfa; }
+.tt-h-message { color: #34d399; }
+.tt-h-call { color: #fb923c; }
+.tt-h-stop { color: #f87171; }
+.tt-h-other { color: #22d3ee; }
 """
 
 # Clamps `.ttip` into the viewport on hover. Pure CSS can't know each
@@ -1439,6 +1503,7 @@ def render_html(
     no_sglang: set[str],
     top_n: list[tuple[str, str]],
     others: list[tuple[str, str]],
+    family_filter: str | None = None,
 ) -> str:
     descriptions = _parse_subcase_descriptions()
     refs = _build_family_to_rust_ref()
@@ -1448,16 +1513,19 @@ def render_html(
     sub_headers = "".join(_subcase_header_html(sub, descriptions) for sub in sub_cases)
     n_cols = 2 + len(sub_cases)
 
-    body_rows: list[str] = [
-        f'<tr class="section"><td colspan="{n_cols}">Top-N models</td></tr>'
-    ]
+    body_rows: list[str] = []
+    if top_n:
+        body_rows.append(
+            f'<tr class="section"><td colspan="{n_cols}">Top-N models</td></tr>'
+        )
     for model, fam in top_n:
         body_rows.append(
             render_row_html(
                 model, fam, cases, sub_cases, refs, no_vllm, no_sglang, inheritance
             )
         )
-    body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
+    if others:
+        body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
     for model, fam in others:
         body_rows.append(
             render_row_html(
@@ -1477,6 +1545,16 @@ def render_html(
 
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
+    title = (
+        f"Dynamo {family_filter} parser parity chart"
+        if family_filter
+        else "Dynamo parser parity chart"
+    )
+    command = "python3 tests/parity/parser/generate_parity_chart.py --html"
+    output = "tests/parity/parser/PARITY.html"
+    if family_filter:
+        command += f" --family {family_filter}"
+        output = f"tests/parity/parser/PARITY.{family_filter}.html"
 
     sha = _commit_sha()
     if sha:
@@ -1490,13 +1568,14 @@ def render_html(
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
-        '<head><meta charset="utf-8"><title>Dynamo parser parity chart</title>'
+        f'<head><meta charset="utf-8"><title>{html_lib.escape(title)}</title>'
         f"<style>{_HTML_STYLE}</style></head>\n"
         "<body>\n"
-        "<h1>Dynamo parser parity chart</h1>\n"
-        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)}{sha_html}: '
-        f"<code>python3 tests/parity/parser/generate_parity_chart.py --html "
-        f"&gt; tests/parity/parser/PARITY.html</code></p>\n"
+        f"<h1>{html_lib.escape(title)}</h1>\n"
+        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)}{sha_html} '
+        f"from <code>tests/parity/parser/fixtures/**/PARSER.*.yaml</code>: "
+        f"<code>{html_lib.escape(command)} "
+        f"&gt; {html_lib.escape(output)}</code></p>\n"
         "<p>Parser column links to the family's Rust config / parser. "
         "Sub-case column headers link to "
         '<a href="../../../lib/parsers/PARSER_CASES.md">PARSER_CASES.md</a> '
@@ -1519,14 +1598,33 @@ def main():
         action="store_true",
         help="Emit HTML (clickable + tooltips) instead of Markdown.",
     )
+    p.add_argument(
+        "--family",
+        help="Render only one parser family, e.g. harmony.",
+    )
     args = p.parse_args()
 
     cases, labels = load_all_cases()
+    if args.family:
+        cases = {k: v for k, v in cases.items() if k[0] == args.family}
+        labels = {k: v for k, v in labels.items() if k == args.family}
+        if not cases:
+            raise SystemExit(f"no parser fixtures found for family={args.family!r}")
     sub_cases = _discover_sub_cases(cases)
     no_vllm, no_sglang = _derive_no_peer_sets(cases)
     top_n, others = _build_display_groups(cases, labels)
     if args.html:
-        print(render_html(cases, sub_cases, no_vllm, no_sglang, top_n, others))
+        print(
+            render_html(
+                cases,
+                sub_cases,
+                no_vllm,
+                no_sglang,
+                top_n,
+                others,
+                family_filter=args.family,
+            )
+        )
     else:
         print(render_markdown(cases, sub_cases, no_vllm, no_sglang, top_n, others))
 
