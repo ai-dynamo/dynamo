@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 import os
-import re
 import shutil
 import time
 from io import BytesIO
@@ -61,11 +60,6 @@ _SINGLE_IMAGE_FRESH_COLOR = (123, 45, 67)
 _DOUBLE_IMAGE_FRESH_COLOR = (89, 210, 34)
 _STAIRCASE_IMAGE_FRESH_COLOR = (17, 99, 201)
 _SWAP_ORDER_FRESH_COLORS = [(14, 141, 77), (211, 66, 101), (44, 91, 233)]
-# Contract with lib/llm/src/kv_router/push_router.rs "[ROUTING]" debug log.
-# Keep this parser in sync with the router log format.
-_ROUTING_RECORD_PATTERN = re.compile(
-    r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
-)
 
 
 def _check_ready(response) -> bool:
@@ -240,40 +234,20 @@ def _build_payload(
         "model": TRTLLM_MM_MODEL,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 1,
+        "nvext": {"extra_fields": ["timing"]},
     }
 
 
-def _extract_routing_records(log_text: str) -> list[tuple[int, int]]:
-    return [
-        (int(overlap), int(total))
-        for overlap, total in _ROUTING_RECORD_PATTERN.findall(log_text)
-    ]
-
-
-def _wait_for_new_routing_score(
-    router_proc: ManagedProcess,
-    start_offset: int,
-    pre_request_routing_count: int,
-    timeout_s: float = 120.0,
-) -> tuple[int, int, str]:
-    deadline = time.time() + timeout_s
-    last_segment = ""
-
-    while time.time() < deadline:
-        full_logs = router_proc.read_logs()
-        segment = full_logs[start_offset:]
-        last_segment = segment
-        records = _extract_routing_records(full_logs)
-        if len(records) >= pre_request_routing_count + 1:
-            overlap, total = records[-1]
-            return overlap, total, segment
-        time.sleep(1)
-
-    fallback_records = _extract_routing_records(last_segment)
-    if fallback_records:
-        overlap, total = fallback_records[-1]
-        return overlap, total, last_segment
-    return 0, 0, last_segment
+def _extract_timing_overlap(data: dict[str, Any], recent_logs: str) -> tuple[int, int]:
+    timing = (data.get("nvext") or {}).get("timing") or {}
+    overlap = timing.get("kv_overlap_blocks")
+    total = timing.get("kv_total_blocks")
+    assert overlap is not None and total is not None, (
+        "Expected router timing in response nvext, got "
+        f"nvext={data.get('nvext')}.\n"
+        f"Recent router logs:\n{recent_logs[-4000:]}"
+    )
+    return int(float(overlap) + 0.5), int(total)
 
 
 def _send_request_get_overlap(
@@ -282,10 +256,7 @@ def _send_request_get_overlap(
     payload: dict[str, Any],
     label: str,
 ) -> tuple[int, int, str]:
-    """Send one request and read the new routing overlap score."""
-    pre_request_logs = router_proc.read_logs()
-    start_offset = len(pre_request_logs)
-    pre_request_routing_count = len(_extract_routing_records(pre_request_logs))
+    """Send one request and read the router's semantic overlap score."""
     resp = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
@@ -295,12 +266,8 @@ def _send_request_get_overlap(
     data = resp.json()
     assert "choices" in data, f"Missing choices in response: {data}"
 
-    overlap, total, segment = _wait_for_new_routing_score(
-        router_proc=router_proc,
-        start_offset=start_offset,
-        pre_request_routing_count=pre_request_routing_count,
-        timeout_s=120,
-    )
+    recent_logs = router_proc.read_logs()
+    overlap, total = _extract_timing_overlap(data, recent_logs)
     print(f"[MM_ROUTER_E2E] {label}: current={overlap}/{total}")
 
     # Allow time for KV cache events to propagate from the TRT-LLM worker
@@ -309,7 +276,7 @@ def _send_request_get_overlap(
     # visible, causing spurious 0-overlap results.
     time.sleep(2)
 
-    return overlap, total, segment
+    return overlap, total, recent_logs
 
 
 @pytest.mark.timeout(1800)

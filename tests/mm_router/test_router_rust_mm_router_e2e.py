@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import base64
 import os
-import re
 import tempfile
 import threading
 import time
@@ -61,11 +60,6 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(18.7),
 ]
 
-# Format produced by lib/llm/src/kv_router/push_router.rs's [ROUTING] log.
-_ROUTING_RECORD_PATTERN = re.compile(
-    r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
-)
-
 
 def _check_ready(response) -> bool:
     try:
@@ -78,7 +72,6 @@ def _make_process_env(
     log_level: str = (
         "info,mm_routing=debug,"
         "dynamo_kv_router::scheduling=debug,"
-        # The [ROUTING] log line we parse below lives here at debug level.
         "dynamo_llm::kv_router=debug"
     ),
     **extra,
@@ -221,28 +214,20 @@ def _build_payload(
         "model": VLLM_MM_MODEL,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 4,
+        "nvext": {"extra_fields": ["timing"]},
     }
 
 
-def _extract_routing_records(log_text: str) -> list[tuple[int, int]]:
-    return [
-        (int(overlap), int(total))
-        for overlap, total in _ROUTING_RECORD_PATTERN.findall(log_text)
-    ]
-
-
-def _wait_for_new_routing_score(
-    router_proc: ManagedProcess,
-    pre_request_records: int,
-    timeout_s: float = 25.0,
-) -> tuple[int, int]:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        records = _extract_routing_records(router_proc.read_logs())
-        if len(records) >= pre_request_records + 1:
-            return records[-1]
-        time.sleep(1)
-    return 0, 0
+def _extract_timing_overlap(data: dict[str, Any], recent_logs: str) -> tuple[int, int]:
+    timing = (data.get("nvext") or {}).get("timing") or {}
+    overlap = timing.get("kv_overlap_blocks")
+    total = timing.get("kv_total_blocks")
+    assert overlap is not None and total is not None, (
+        "Expected router timing in response nvext, got "
+        f"nvext={data.get('nvext')}.\n"
+        f"Recent frontend logs:\n{recent_logs[-4000:]}"
+    )
+    return int(float(overlap) + 0.5), int(total)
 
 
 def _send(
@@ -251,7 +236,6 @@ def _send(
     payload: dict[str, Any],
     label: str,
 ) -> tuple[int, int, dict[str, Any]]:
-    pre_count = len(_extract_routing_records(router_proc.read_logs()))
     resp = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
@@ -260,7 +244,8 @@ def _send(
     assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text}"
     data = resp.json()
     assert "choices" in data, f"missing choices in response: {data}"
-    overlap, total = _wait_for_new_routing_score(router_proc, pre_count)
+    recent_logs = router_proc.read_logs()
+    overlap, total = _extract_timing_overlap(data, recent_logs)
     print(
         f"[ROUTER_RUST_MM] {label}: overlap={overlap}/{total} usage={data.get('usage')}"
     )
