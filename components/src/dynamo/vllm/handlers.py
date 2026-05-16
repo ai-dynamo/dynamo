@@ -543,7 +543,12 @@ def build_sampling_params(
     sampling_params.detokenize = False
 
     # Handle guided_decoding - convert to StructuredOutputsParams
-    sampling_options = request.get("sampling_options", {})
+    sampling_options = dict(request.get("sampling_options") or {})
+    extra_args = request.get("extra_args") or {}
+    if isinstance(extra_args, dict):
+        passthrough_sampling_options = extra_args.get("sampling_options")
+        if isinstance(passthrough_sampling_options, dict):
+            sampling_options.update(passthrough_sampling_options)
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         sampling_params.structured_outputs = StructuredOutputsParams(
