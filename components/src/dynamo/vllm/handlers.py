@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import inspect
 import logging
 import os
@@ -485,6 +486,25 @@ def _accumulate_engine_data(
     if request_prompt_token_ids:
         engine_data["prompt_token_ids"] = list(request_prompt_token_ids)
     tok["engine_data"] = engine_data
+
+
+def _serialize_routed_experts(routed_experts: Any) -> Optional[Dict[str, Any]]:
+    if routed_experts is None:
+        return None
+
+    shape = getattr(routed_experts, "shape", None)
+    tobytes = getattr(routed_experts, "tobytes", None)
+    if shape is None or not callable(tobytes):
+        logger.warning(
+            "Unable to serialize routed_experts of type %s",
+            type(routed_experts).__name__,
+        )
+        return None
+
+    return {
+        "data": base64.b85encode(tobytes()).decode("ascii"),
+        "shape": [int(dim) for dim in shape],
+    }
 
 
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
@@ -2366,6 +2386,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
+            routed_experts_by_output: dict[int, Dict[str, Any]] = {}
             async for res in gen:
                 # res is vllm's RequestOutput
 
@@ -2410,6 +2431,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "index": output_idx,
                         "token_ids": token_ids,
                     }
+                    routed_experts = _serialize_routed_experts(
+                        getattr(output, "routed_experts", None)
+                    )
+                    if routed_experts is not None:
+                        routed_experts_by_output[output_idx] = routed_experts
 
                     # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
@@ -2434,6 +2460,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             _attach_prompt_logprobs_engine_data(
                                 out, _serialize_prompt_logprobs(res.prompt_logprobs)
                             )
+                        routed_experts = routed_experts_by_output.get(output_idx)
+                        if routed_experts is not None:
+                            disaggregated_params = dict(
+                                out.get("disaggregated_params") or {}
+                            )
+                            disaggregated_params["routed_experts"] = routed_experts
+                            out["disaggregated_params"] = disaggregated_params
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
