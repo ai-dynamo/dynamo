@@ -81,6 +81,7 @@ impl ContextMetadata {
         PyList::new(py, keys)?.call_method0("__iter__")
     }
 
+    #[pyo3(signature = (key, default=None))]
     fn get(&self, key: &str, default: Option<String>) -> Option<String> {
         self.inner
             .lock()
@@ -138,11 +139,7 @@ impl ContextMetadata {
     }
 
     fn copy<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyDict>> {
-        let snapshot = self
-            .inner
-            .lock()
-            .expect("metadata mutex poisoned")
-            .clone();
+        let snapshot = self.inner.lock().expect("metadata mutex poisoned").clone();
         let dict = PyDict::new(py);
         for (key, value) in snapshot {
             dict.set_item(key, value)?;

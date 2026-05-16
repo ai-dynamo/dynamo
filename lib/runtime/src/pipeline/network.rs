@@ -67,6 +67,35 @@ pub enum StreamType {
     Response,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RequestType {
+    SingleIn,
+    ManyIn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ResponseType {
+    SingleOut,
+    ManyOut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RequestControlMessage {
+    pub(crate) id: String,
+    pub(crate) request_type: RequestType,
+    pub(crate) response_type: ResponseType,
+    pub(crate) connection_info: ConnectionInfo,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
+    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
+    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
+    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) frontend_send_ts_ns: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlMessage {
@@ -371,33 +400,6 @@ where
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         self.transport_engine.generate(request).await
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RequestType {
-    SingleIn,
-    ManyIn,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ResponseType {
-    SingleOut,
-    ManyOut,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RequestControlMessage {
-    id: String,
-    request_type: RequestType,
-    response_type: ResponseType,
-    connection_info: ConnectionInfo,
-    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    frontend_send_ts_ns: Option<u64>,
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
