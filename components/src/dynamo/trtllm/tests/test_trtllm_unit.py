@@ -326,6 +326,7 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
 
 
 @pytest.mark.asyncio
+@pytest.mark.core
 async def test_user_kv_cache_config_preserved_with_publish_events(monkeypatch):
     """User-supplied kv_cache_config values survive the publish_events_and_metrics=True path.
 
@@ -371,6 +372,7 @@ async def test_user_kv_cache_config_preserved_with_publish_events(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.core
 async def test_user_kv_cache_config_preserved_without_publish_events(monkeypatch):
     """User-supplied kv_cache_config values survive when publish_events_and_metrics=False.
 
