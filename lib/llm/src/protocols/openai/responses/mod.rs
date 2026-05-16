@@ -37,15 +37,6 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
-/// Bounded generation budget used internally when a Responses request omits
-/// `max_output_tokens`.
-///
-/// The Responses wire response still echoes `max_output_tokens: null`; this
-/// default only prevents backends from interpreting an omitted cap as "generate
-/// to the full model context", which can exceed backend context accounting or
-/// make compliance/agent requests run far longer than intended.
-const DEFAULT_RESPONSES_MAX_OUTPUT_TOKENS: u32 = 4096;
-
 /// Request body for `POST /v1/responses`. Uses a plain
 /// `#[derive(Deserialize)]` — the relaxed input shapes are handled by
 /// Dynamo-owning the input chain in `dynamo_protocols::types::responses`
@@ -744,11 +735,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 model: resp.inner.model.unwrap_or_default(),
                 temperature: resp.inner.temperature,
                 top_p: resp.inner.top_p,
-                max_completion_tokens: Some(
-                    resp.inner
-                        .max_output_tokens
-                        .unwrap_or(DEFAULT_RESPONSES_MAX_OUTPUT_TOKENS),
-                ),
+                max_completion_tokens: resp.inner.max_output_tokens,
                 store: resp.inner.store,
                 parallel_tool_calls: resp.inner.parallel_tool_calls,
                 top_logprobs,
@@ -1206,16 +1193,13 @@ mod tests {
     }
 
     #[test]
-    fn test_into_chat_completion_defaults_omitted_max_output_tokens_for_backend() {
+    fn test_into_chat_completion_preserves_omitted_max_output_tokens() {
         let mut response_req = make_response_with_input("hi there");
         response_req.inner.max_output_tokens = None;
 
         let nv_req: NvCreateChatCompletionRequest = response_req.try_into().unwrap();
 
-        assert_eq!(
-            nv_req.inner.max_completion_tokens,
-            Some(DEFAULT_RESPONSES_MAX_OUTPUT_TOKENS)
-        );
+        assert_eq!(nv_req.inner.max_completion_tokens, None);
     }
 
     #[test]

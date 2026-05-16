@@ -63,7 +63,8 @@ use crate::protocols::{
     openai::{
         DeltaGeneratorExt,
         chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse, jail::JailedStream,
+            INTERNAL_PRESERVE_OMITTED_MAX_TOKENS, NvCreateChatCompletionRequest,
+            NvCreateChatCompletionStreamResponse, jail::JailedStream,
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -317,6 +318,14 @@ impl OpenAIPreprocessor {
         }
     }
 
+    fn preserve_omitted_max_tokens<R: NvExtProvider>(request: &R) -> bool {
+        request
+            .unsupported_fields()
+            .and_then(|fields| fields.get(INTERNAL_PRESERVE_OMITTED_MAX_TOKENS))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }
+
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
@@ -550,8 +559,13 @@ impl OpenAIPreprocessor {
 
         let mut preprocessed = builder.build()?;
 
-        // If omitted, allow generation up to the remaining context length.
-        if preprocessed.stop_conditions.max_tokens.is_none() && self.context_length > 0 {
+        // If omitted, allow generation up to the remaining context length. Responses requests
+        // preserve omission so backend adapters can compute the dynamic cap from their
+        // effective prompt length/tokenization.
+        if preprocessed.stop_conditions.max_tokens.is_none()
+            && self.context_length > 0
+            && !Self::preserve_omitted_max_tokens(request)
+        {
             let prompt_len = preprocessed.token_ids.len() as u32;
             preprocessed.stop_conditions.max_tokens =
                 Some(self.context_length.saturating_sub(prompt_len));
@@ -2966,6 +2980,27 @@ mod tests {
             extra_args["sampling_options"]["bad_words_token_ids"],
             serde_json::json!([[12, 13]])
         );
+    }
+
+    #[test]
+    fn test_internal_preserve_omitted_max_tokens_marker() {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }))
+            .unwrap();
+
+        assert!(!OpenAIPreprocessor::preserve_omitted_max_tokens(&request));
+        assert!(OpenAIPreprocessor::backend_extra_args(&request).is_none());
+
+        request.unsupported_fields.insert(
+            INTERNAL_PRESERVE_OMITTED_MAX_TOKENS.to_string(),
+            serde_json::Value::Bool(true),
+        );
+
+        assert!(OpenAIPreprocessor::preserve_omitted_max_tokens(&request));
+        assert!(OpenAIPreprocessor::backend_extra_args(&request).is_none());
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
