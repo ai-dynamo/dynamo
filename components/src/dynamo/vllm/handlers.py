@@ -305,9 +305,10 @@ def _serialize_prompt_logprobs(
     vLLM shape: ``list[dict[int, Logprob] | None]`` where ``Logprob`` has
     ``.logprob``, ``.rank``, ``.decoded_token`` attributes.
 
-    Output shape: ``list[dict[str, {"logprob": float, ...}] | None]`` —
-    matches ``LLMEngineOutput.prompt_logprobs`` so the Rust postprocessor
-    can surface it on ``NvExtResponse.prompt_logprobs``.
+    Output shape: ``list[dict[str, {"logprob": float, ...}] | None]``.
+    Workers carry it under ``engine_data.prompt_logprobs`` so the Rust
+    postprocessor can surface it on ``NvExtResponse.prompt_logprobs`` without
+    changing the public ``LLMEngineOutput`` struct shape.
 
     NOTE: token_id keys are emitted as **strings** (not ints) so that
     pythonize → serde → JSON survives the worker→frontend transport. JSON
@@ -336,6 +337,14 @@ def _serialize_prompt_logprobs(
                 converted[str(int(token_id))] = lp_dict
             result.append(converted)
     return result
+
+
+def _attach_prompt_logprobs_engine_data(
+    tok: Dict[str, Any], prompt_logprobs: list
+) -> None:
+    engine_data = tok.setdefault("engine_data", {})
+    if isinstance(engine_data, dict):
+        engine_data["prompt_logprobs"] = prompt_logprobs
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
@@ -460,10 +469,13 @@ def _accumulate_engine_data(
     if tok.get("finish_reason") is None:
         return
 
-    engine_data: Dict[str, Any] = {
-        "completion_token_ids": list(token_accumulator),
-        "finished": True,
-    }
+    engine_data: Dict[str, Any] = dict(tok.get("engine_data") or {})
+    engine_data.update(
+        {
+            "completion_token_ids": list(token_accumulator),
+            "finished": True,
+        }
+    )
     if logprob_accumulator:
         engine_data["completion_logprobs"] = list(logprob_accumulator)
     if request_prompt_token_ids:
@@ -2372,8 +2384,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             embedding_sequence_length=embedding_sequence_length,
                         )
                         if res.prompt_logprobs is not None:
-                            out["prompt_logprobs"] = _serialize_prompt_logprobs(
-                                res.prompt_logprobs
+                            _attach_prompt_logprobs_engine_data(
+                                out, _serialize_prompt_logprobs(res.prompt_logprobs)
                             )
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
