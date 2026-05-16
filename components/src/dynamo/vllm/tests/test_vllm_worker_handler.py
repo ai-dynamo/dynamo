@@ -8,10 +8,13 @@
 # Need to revisit the tests and update them to test the worker handlers.
 
 import asyncio
+import base64
 import json
 from collections import defaultdict
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -278,6 +281,61 @@ class TestReasoningParserForwarding:
 
         assert chunks == []
         assert calls == {"called": True}
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_emits_routed_experts_on_final_chunk(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        routed_experts = np.array([[[1]], [[2]]], dtype=np.int32)
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        routed_experts=None,
+                        finish_reason=None,
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11, 12],
+                        routed_experts=routed_experts,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=2),
+            "req-1",
+        ):
+            chunks.append(chunk)
+
+        assert [chunk["token_ids"] for chunk in chunks] == [[11], [12]]
+        assert "disaggregated_params" not in chunks[0]
+        routed = chunks[1]["disaggregated_params"]["routed_experts"]
+        assert routed["shape"] == [2, 1, 1]
+        decoded = np.frombuffer(base64.b85decode(routed["data"]), dtype=np.int32)
+        np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
 
 
 # ── Tests ────────────────────────────────────────────────────────────
