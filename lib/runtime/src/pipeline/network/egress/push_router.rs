@@ -438,7 +438,7 @@ where
     /// The rejection path is gated by `fault_detection_enabled` (true here);
     /// busy detection itself is driven by the monitor via `client.set_busy_instances(...)`.
     /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// `client.instance_ids_free()` returns all instances and the gate never rejects.
+    /// the routing snapshot reports at least one free instance and the gate never rejects.
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
@@ -488,15 +488,15 @@ where
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let instance_id = {
-            let instance_ids = self.client.instance_ids_avail();
-            let count = instance_ids.len();
+            let routing_instances = self.client.routing_instances();
+            let count = routing_instances.routable_ids().len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {}",
                     self.client.endpoint.id()
                 ));
             }
-            instance_ids[counter % count]
+            routing_instances.routable_ids()[counter % count]
         };
         tracing::trace!("round robin router selected {instance_id}");
 
@@ -507,8 +507,8 @@ where
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
-            let instance_ids = self.client.instance_ids_avail();
-            let count = instance_ids.len();
+            let routing_instances = self.client.routing_instances();
+            let count = routing_instances.routable_ids().len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {}",
@@ -516,7 +516,7 @@ where
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
-            instance_ids[counter % count]
+            routing_instances.routable_ids()[counter % count]
         };
         tracing::trace!("random router selected {instance_id}");
 
@@ -529,19 +529,14 @@ where
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_id = {
-            let instance_ids = self
-                .client
-                .instance_ids_avail()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>();
-            if instance_ids.is_empty() {
+            let routing_instances = self.client.routing_instances();
+            if routing_instances.routable_ids().is_empty() {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {}",
                     self.client.endpoint.id()
                 ));
             }
-            p2c_select_from(state.as_ref(), &instance_ids)
+            p2c_select_from(state.as_ref(), routing_instances.routable_ids())
         };
         state.increment(instance_id);
         let permit = OccupancyPermit::new(state, instance_id);
@@ -564,10 +559,13 @@ where
         // When fault detection is disabled, check the raw discovery list
         // (not filtered by report_instance_down) so transient failures
         // don't poison the instance for subsequent retries.
-        let found = if self.fault_detection_enabled {
-            self.client.instance_ids_avail().contains(&instance_id)
-        } else {
-            self.client.instance_ids().contains(&instance_id)
+        let found = {
+            if self.fault_detection_enabled {
+                let routing_instances = self.client.routing_instances();
+                routing_instances.routable_ids().contains(&instance_id)
+            } else {
+                self.client.instance_ids().contains(&instance_id)
+            }
         };
 
         if !found {
@@ -591,12 +589,7 @@ where
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self
-            .client
-            .instance_ids_avail()
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let instance_ids = self.client.routing_instances().routable_ids().to_vec();
 
         if instance_ids.is_empty() {
             return Err(anyhow::anyhow!(
@@ -662,12 +655,7 @@ where
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self
-            .client
-            .instance_ids_avail()
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let instance_ids = self.client.routing_instances().routable_ids().to_vec();
         let instance_id = state
             .select_exact_min_and_increment(&instance_ids)
             .await
@@ -696,8 +684,8 @@ where
     /// Increments round-robin counter if applicable.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn select_next_worker(&self) -> Option<u64> {
-        let instance_ids = self.client.instance_ids_avail();
-        let count = instance_ids.len();
+        let routing_instances = self.client.routing_instances();
+        let count = routing_instances.routable_ids().len();
         if count == 0 {
             return None;
         }
@@ -705,11 +693,11 @@ where
         match self.router_mode {
             RouterMode::RoundRobin => {
                 let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
-                Some(instance_ids[counter % count])
+                Some(routing_instances.routable_ids()[counter % count])
             }
             RouterMode::Random => {
                 let counter = rand::rng().random::<u64>() as usize;
-                Some(instance_ids[counter % count])
+                Some(routing_instances.routable_ids()[counter % count])
             }
             RouterMode::PowerOfTwoChoices
             | RouterMode::Direct
@@ -728,8 +716,8 @@ where
     /// Useful for checking if a worker is suitable before committing to it.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn peek_next_worker(&self) -> Option<u64> {
-        let instance_ids = self.client.instance_ids_avail();
-        let count = instance_ids.len();
+        let routing_instances = self.client.routing_instances();
+        let count = routing_instances.routable_ids().len();
         if count == 0 {
             return None;
         }
@@ -738,13 +726,13 @@ where
             RouterMode::RoundRobin => {
                 // Just peek at the current counter value without incrementing
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
-                Some(instance_ids[counter % count])
+                Some(routing_instances.routable_ids()[counter % count])
             }
             RouterMode::Random => {
                 // For random, peeking implies a fresh random selection since it's stateless.
                 // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
                 let counter = rand::rng().random::<u64>() as usize;
-                Some(instance_ids[counter % count])
+                Some(routing_instances.routable_ids()[counter % count])
             }
             RouterMode::PowerOfTwoChoices
             | RouterMode::Direct
@@ -798,36 +786,36 @@ where
 
         // Check if all workers are busy (when fault detection is enabled).
         if self.fault_detection_enabled {
-            let free_instances = self.client.instance_ids_free();
+            let routing_instances = self.client.routing_instances();
+            let all_instances_busy = routing_instances.all_instances_busy();
+            let counts = routing_instances.counts();
             if tracing::enabled!(tracing::Level::DEBUG) {
                 tracing::debug!(
                     request_id = %request_id,
                     instance_id,
                     router_mode = ?self.router_mode,
-                    free_workers = free_instances.len(),
-                    total_workers = self.client.instance_ids().len(),
+                    free_workers = counts.free,
+                    busy_workers = counts.busy,
+                    total_workers = counts.discovered,
+                    all_instances_busy,
                     "checked worker busy state"
                 );
             }
-            if free_instances.is_empty() {
-                // Check if we actually have any instances at all
-                let all_instances = self.client.instance_ids();
-                if !all_instances.is_empty() {
-                    tracing::warn!(
-                        instance_id,
-                        total_workers = all_instances.len(),
-                        "Rejecting request: all workers are busy"
-                    );
-                    let cause = PipelineError::ServiceOverloaded(
-                        "All workers are busy, please retry later".to_string(),
-                    );
-                    return Err(DynamoError::builder()
-                        .error_type(ErrorType::ResourceExhausted)
-                        .message("All workers are busy, please retry later")
-                        .cause(cause)
-                        .build()
-                        .into());
-                }
+            if all_instances_busy {
+                tracing::warn!(
+                    instance_id,
+                    total_workers = counts.discovered,
+                    "Rejecting request: all workers are busy"
+                );
+                let cause = PipelineError::ServiceOverloaded(
+                    "All workers are busy, please retry later".to_string(),
+                );
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("All workers are busy, please retry later")
+                    .cause(cause)
+                    .build()
+                    .into());
             }
         }
 
@@ -877,8 +865,12 @@ where
             } else {
                 // Instance vanished — pick a different one from the current
                 // availability list and retry the lookup once.
-                let avail = self.client.instance_ids_avail();
-                let fallback_id = avail.iter().copied().find(|&id| id != instance_id);
+                let routing_instances = self.client.routing_instances();
+                let fallback_id = routing_instances
+                    .routable_ids()
+                    .iter()
+                    .copied()
+                    .find(|&id| id != instance_id);
                 match fallback_id {
                     Some(id) => {
                         tracing::warn!(

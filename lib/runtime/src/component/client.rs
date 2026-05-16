@@ -145,6 +145,225 @@ impl EndpointDiscoverySource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RoutingInstanceCounts {
+    pub discovered: usize,
+    pub routable: usize,
+    pub busy: usize,
+    pub free: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RoutingInstances {
+    discovered_ids: Vec<u64>,
+    routable_ids: Vec<u64>,
+    busy_ids: HashSet<u64>,
+    free_ids: Vec<u64>,
+}
+
+impl RoutingInstances {
+    fn new(discovered_ids: Vec<u64>) -> Self {
+        Self::from_parts(discovered_ids.clone(), discovered_ids, HashSet::new())
+    }
+
+    fn from_parts(
+        discovered_ids: Vec<u64>,
+        routable_ids: Vec<u64>,
+        busy_ids: HashSet<u64>,
+    ) -> Self {
+        let free_ids = Self::derive_free_ids(&discovered_ids, &busy_ids);
+        Self {
+            discovered_ids,
+            routable_ids,
+            busy_ids,
+            free_ids,
+        }
+    }
+
+    pub(crate) fn discovered_ids(&self) -> &[u64] {
+        &self.discovered_ids
+    }
+
+    pub(crate) fn routable_ids(&self) -> &[u64] {
+        &self.routable_ids
+    }
+
+    pub(crate) fn counts(&self) -> RoutingInstanceCounts {
+        RoutingInstanceCounts {
+            discovered: self.discovered_ids.len(),
+            routable: self.routable_ids.len(),
+            busy: self.busy_ids.len(),
+            free: self.free_ids.len(),
+        }
+    }
+
+    pub(crate) fn all_instances_busy(&self) -> bool {
+        !self.discovered_ids.is_empty() && self.free_ids.is_empty()
+    }
+
+    fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
+        let old_discovered_ids = self.discovered_ids.iter().copied().collect::<HashSet<_>>();
+        let new_discovered_ids = discovered_ids.iter().copied().collect::<HashSet<_>>();
+        let mut busy_ids = self.busy_ids.clone();
+        busy_ids.retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
+
+        Self::from_parts(discovered_ids.clone(), discovered_ids, busy_ids)
+    }
+
+    fn report_instance_down(&self, instance_id: u64) -> Self {
+        let routable_ids = self
+            .routable_ids
+            .iter()
+            .copied()
+            .filter(|id| *id != instance_id)
+            .collect();
+
+        Self {
+            discovered_ids: self.discovered_ids.clone(),
+            routable_ids,
+            busy_ids: self.busy_ids.clone(),
+            free_ids: self.free_ids.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn override_routable_ids(&self, routable_ids: Vec<u64>) -> Self {
+        Self {
+            discovered_ids: self.discovered_ids.clone(),
+            routable_ids,
+            busy_ids: self.busy_ids.clone(),
+            free_ids: self.free_ids.clone(),
+        }
+    }
+
+    fn set_busy(&self, busy_ids: HashSet<u64>) -> Self {
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            busy_ids,
+        )
+    }
+
+    fn clear_busy_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
+        let mut busy_ids = self.busy_ids.clone();
+        busy_ids.retain(|id| !removed_ids.contains(id));
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            busy_ids,
+        )
+    }
+
+    fn derive_free_ids(discovered_ids: &[u64], busy_ids: &HashSet<u64>) -> Vec<u64> {
+        if busy_ids.is_empty() {
+            return discovered_ids.to_vec();
+        }
+
+        discovered_ids
+            .iter()
+            .copied()
+            .filter(|id| !busy_ids.contains(id))
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+struct RoutingInstancesState {
+    snapshot: ArcSwap<RoutingInstances>,
+    update_lock: StdMutex<()>,
+    instance_avail_tx: tokio::sync::watch::Sender<Vec<u64>>,
+    instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
+}
+
+impl RoutingInstancesState {
+    fn new(discovered_ids: Vec<u64>) -> Self {
+        let snapshot = RoutingInstances::new(discovered_ids);
+        let (instance_avail_tx, instance_avail_rx) =
+            tokio::sync::watch::channel(snapshot.routable_ids().to_vec());
+        Self {
+            snapshot: ArcSwap::from_pointee(snapshot),
+            update_lock: StdMutex::new(()),
+            instance_avail_tx,
+            instance_avail_rx,
+        }
+    }
+
+    fn snapshot(&self) -> arc_swap::Guard<Arc<RoutingInstances>> {
+        self.snapshot.load()
+    }
+
+    fn update(
+        &self,
+        update: impl FnOnce(&RoutingInstances) -> RoutingInstances,
+        publish_routable_ids: bool,
+    ) -> Arc<RoutingInstances> {
+        let _guard = self.update_lock.lock().unwrap();
+        let current = self.snapshot.load();
+        let next = Arc::new(update(&current));
+        self.snapshot.store(next.clone());
+        if publish_routable_ids {
+            self.publish_routable_ids(&next);
+        }
+        next
+    }
+
+    fn publish_routable_ids(&self, routing_instances: &RoutingInstances) {
+        let _ = self
+            .instance_avail_tx
+            .send(routing_instances.routable_ids().to_vec());
+    }
+
+    fn routable_ids(&self) -> Vec<u64> {
+        self.snapshot().routable_ids().to_vec()
+    }
+
+    #[cfg(test)]
+    fn free_ids(&self) -> Vec<u64> {
+        self.snapshot().free_ids.clone()
+    }
+
+    fn counts(&self) -> RoutingInstanceCounts {
+        self.snapshot().counts()
+    }
+
+    fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
+        self.instance_avail_rx.clone()
+    }
+
+    fn report_instance_down(&self, instance_id: u64) {
+        self.update(|current| current.report_instance_down(instance_id), true);
+    }
+
+    fn set_busy_instances(&self, busy_instance_ids: &[u64]) {
+        let busy_ids = busy_instance_ids.iter().copied().collect::<HashSet<_>>();
+        self.update(move |current| current.set_busy(busy_ids), false);
+    }
+
+    fn clear_busy_for_removed(&self, removed_instance_ids: &[u64]) {
+        if removed_instance_ids.is_empty() {
+            return;
+        }
+
+        let removed_ids = removed_instance_ids.iter().copied().collect::<HashSet<_>>();
+        self.update(
+            move |current| current.clear_busy_for_removed(&removed_ids),
+            false,
+        );
+    }
+
+    fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Arc<RoutingInstances> {
+        self.update(
+            move |current| current.reconcile_discovered(discovered_ids),
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    fn override_routable_ids(&self, ids: Vec<u64>) {
+        self.update(move |current| current.override_routable_ids(ids), true);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
@@ -153,14 +372,8 @@ pub struct Client {
     endpoint_discovery_source: Arc<EndpointDiscoverySource>,
     // These are the remotes I know about from watching key-value store
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
-    // These are the instance source ids less those reported as down from sending rpc
-    instance_avail: Arc<ArcSwap<Vec<u64>>>,
-    // These are the instance ids reported as busy (above threshold)
-    instance_busy: Arc<ArcSwap<HashSet<u64>>>,
-    // Watch sender for available instance IDs (for sending updates)
-    instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
-    // Watch receiver for available instance IDs (for cloning to external subscribers)
-    instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
+    // Immutable routing snapshot. Free IDs are derived from discovered IDs and busy IDs.
+    routing_instances: Arc<RoutingInstancesState>,
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
     reconcile_interval: Duration,
@@ -196,15 +409,11 @@ impl Client {
             .iter()
             .map(|instance| instance.id())
             .collect();
-        let (avail_tx, avail_rx) = tokio::sync::watch::channel(initial_ids.clone());
         let client = Client {
             endpoint: endpoint.clone(),
             endpoint_discovery_source,
             instance_source: instance_source.clone(),
-            instance_avail: Arc::new(ArcSwap::from_pointee(initial_ids.clone())),
-            instance_busy: Arc::new(ArcSwap::from_pointee(HashSet::new())),
-            instance_avail_tx: Arc::new(avail_tx),
-            instance_avail_rx: avail_rx,
+            routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
             reconcile_interval,
         };
         client.monitor_instance_source();
@@ -220,23 +429,26 @@ impl Client {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
 
-    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
-        self.instance_avail.load()
+    pub fn instance_ids_avail(&self) -> Vec<u64> {
+        self.routing_instances.routable_ids()
     }
 
-    pub fn instance_ids_free(&self) -> Vec<u64> {
-        let instance_ids = self.instance_ids();
-        let busy_ids = self.instance_busy.load();
+    #[cfg(test)]
+    pub(crate) fn instance_ids_free(&self) -> Vec<u64> {
+        self.routing_instances.free_ids()
+    }
 
-        instance_ids
-            .into_iter()
-            .filter(|id| !busy_ids.contains(id))
-            .collect()
+    pub(crate) fn routing_instances(&self) -> arc_swap::Guard<Arc<RoutingInstances>> {
+        self.routing_instances.snapshot()
+    }
+
+    pub fn routing_instance_counts(&self) -> RoutingInstanceCounts {
+        self.routing_instances.counts()
     }
 
     /// Get a watcher for available instance IDs
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
-        self.instance_avail_rx.clone()
+        self.routing_instances.instance_avail_watcher()
     }
 
     /// Subscribe to raw discovery events for this endpoint.
@@ -276,24 +488,18 @@ impl Client {
 
     /// Mark an instance as down/unavailable
     pub fn report_instance_down(&self, instance_id: u64) {
-        let filtered = self
-            .instance_ids_avail()
-            .iter()
-            .filter_map(|&id| if id == instance_id { None } else { Some(id) })
-            .collect::<Vec<_>>();
-        self.instance_avail.store(Arc::new(filtered.clone()));
-
-        // Notify watch channel subscribers about the change
-        let _ = self.instance_avail_tx.send(filtered);
-
+        self.routing_instances.report_instance_down(instance_id);
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
     /// Replace the set of busy instances reported by the worker monitor.
     pub fn set_busy_instances(&self, busy_instance_ids: &[u64]) {
-        self.instance_busy.store(Arc::new(
-            busy_instance_ids.iter().copied().collect::<HashSet<_>>(),
-        ));
+        self.routing_instances.set_busy_instances(busy_instance_ids);
+    }
+
+    pub fn clear_busy_instances_for_removed(&self, removed_instance_ids: &[u64]) {
+        self.routing_instances
+            .clear_busy_for_removed(removed_instance_ids);
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -316,7 +522,7 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
-                client.instance_avail.store(Arc::new(instance_ids.clone()));
+                let routing_instances = client.reconcile_discovered_instances(instance_ids);
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 let registry = client.endpoint.drt().routing_occupancy_states();
@@ -324,11 +530,8 @@ impl Client {
                     && let Some(weak) = registry.get(&client.endpoint)
                     && let Some(state) = weak.upgrade()
                 {
-                    state.retain(&instance_ids);
+                    state.retain(routing_instances.discovered_ids());
                 }
-
-                // Send update to watch channel subscribers
-                let _ = client.instance_avail_tx.send(instance_ids);
 
                 tokio::select! {
                     result = rx.changed() => {
@@ -349,11 +552,15 @@ impl Client {
         });
     }
 
-    /// Override `instance_avail` for testing. This allows creating an inconsistency
-    /// between `instance_ids_avail()` and `instances()` to simulate race conditions.
+    /// Override routable IDs for testing. This allows creating an inconsistency
+    /// between `instance_ids_avail()` and `instances()` to simulate downed workers.
     #[cfg(test)]
     pub(crate) fn override_instance_avail(&self, ids: Vec<u64>) {
-        self.instance_avail.store(Arc::new(ids));
+        self.routing_instances.override_routable_ids(ids);
+    }
+
+    fn reconcile_discovered_instances(&self, discovered_ids: Vec<u64>) -> Arc<RoutingInstances> {
+        self.routing_instances.reconcile_discovered(discovered_ids)
     }
 
     async fn get_or_create_dynamic_discovery_source(
@@ -469,13 +676,13 @@ mod tests {
 
         // For this test, we'll directly manipulate instance_avail and verify reconciliation
         // Store some test IDs
-        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+        client.override_instance_avail(vec![1, 2, 3]);
 
-        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+        assert_eq!(client.instance_ids_avail(), vec![1u64, 2, 3]);
 
         // Simulate report_instance_down removing instance 2
         client.report_instance_down(2);
-        assert_eq!(**client.instance_ids_avail(), vec![1u64, 3]);
+        assert_eq!(client.instance_ids_avail(), vec![1u64, 3]);
 
         // Wait for reconciliation interval + buffer
         // The monitor_instance_source will reset instance_avail to match instance_source
@@ -506,8 +713,8 @@ mod tests {
         let client = endpoint.client().await.unwrap();
 
         // Manually set up instance_avail with test instances
-        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
-        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+        client.override_instance_avail(vec![1, 2, 3]);
+        assert_eq!(client.instance_ids_avail(), vec![1u64, 2, 3]);
 
         // Report instance 2 as down
         client.report_instance_down(2);
@@ -573,6 +780,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_instance_reconciliation_prunes_removed_busy_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_removed_busy_cleanup".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        client.set_busy_instances(&[worker_id]);
+        assert_eq!(client.routing_instance_counts().busy, 1);
+        assert!(client.instance_ids_free().is_empty());
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        for _ in 0..10 {
+            if client.routing_instance_counts().busy == 0 {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(
+            client.routing_instance_counts().busy,
+            0,
+            "removed discovered workers should not remain in busy state"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn test_instance_ids_free_excludes_busy_new_instances() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -610,6 +859,43 @@ mod tests {
         rt.shutdown();
     }
 
+    #[tokio::test]
+    async fn test_discovery_add_updates_free_without_busy_publish() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_free_updates_on_discovery_add".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_free().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(
+            client.instance_ids_free(),
+            vec![worker_id],
+            "newly discovered non-busy workers should appear free without a busy update"
+        );
+
+        rt.shutdown();
+    }
+
     /// Test that instance_avail_watcher receives updates when instances change.
     #[tokio::test]
     async fn test_instance_avail_watcher() {
@@ -626,7 +912,7 @@ mod tests {
         let watcher = client.instance_avail_watcher();
 
         // Set initial instances
-        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+        client.override_instance_avail(vec![1, 2, 3]);
 
         // Report instance down - this should notify the watcher
         client.report_instance_down(2);
