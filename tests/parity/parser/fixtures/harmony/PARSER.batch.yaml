@@ -118,7 +118,11 @@ cases:
             location: NYC
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}<|call|>
