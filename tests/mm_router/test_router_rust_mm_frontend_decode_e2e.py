@@ -44,6 +44,7 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
+from tests.utils.router_nvext import require_router_kv_block_timing
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
@@ -214,18 +215,6 @@ def _build_payload(image_uris: list[str]) -> dict[str, Any]:
     }
 
 
-def _extract_timing_overlap(data: dict[str, Any], recent_logs: str) -> tuple[int, int]:
-    timing = (data.get("nvext") or {}).get("timing") or {}
-    overlap = timing.get("kv_overlap_blocks")
-    total = timing.get("kv_total_blocks")
-    assert overlap is not None and total is not None, (
-        "Expected router timing in response nvext, got "
-        f"nvext={data.get('nvext')}.\n"
-        f"Recent frontend logs:\n{recent_logs[-4000:]}"
-    )
-    return int(float(overlap) + 0.5), int(total)
-
-
 def _send(
     frontend_port: int,
     router_proc: ManagedProcess,
@@ -240,7 +229,12 @@ def _send(
     assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text}"
     data = resp.json()
     recent_logs = router_proc.read_logs()
-    overlap, total = _extract_timing_overlap(data, recent_logs)
+    overlap, total = require_router_kv_block_timing(
+        data,
+        context=label,
+        recent_logs=recent_logs,
+        log_label="frontend",
+    )
     print(f"[FED] {label}: overlap={overlap}/{total} usage={data.get('usage')}")
     time.sleep(1)
     return overlap, total, data
