@@ -24,7 +24,7 @@ cases:
           first_class:
             type: boolean
     expected:
-      dynamo: &d_7_a
+      dynamo: &id001
         calls:
         - name: book_flight
           arguments:
@@ -32,8 +32,8 @@ cases:
             passengers: 2
             first_class: true
         normal_text: ''
-      vllm: *d_7_a
-      sglang: *d_7_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.7.b:
     description: Unicode + escaped chars
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L302
@@ -50,14 +50,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_7_b
+      dynamo: &id002
         calls:
         - name: get_weather
           arguments:
             location: Tōkyō "central"
         normal_text: ''
-      vllm: *d_7_b
-      sglang: *d_7_b
+      vllm: *id002
+      sglang: *id002
   PARSER.batch.7.c:
     description: Schema mismatch — string value where schema declares integer
     ref: dynamo
@@ -74,14 +74,14 @@ cases:
           celsius:
             type: integer
     expected:
-      dynamo: &d_7_c
+      dynamo: &id003
         calls:
         - name: set_temperature
           arguments:
             celsius: '20'
         normal_text: ''
-      vllm: *d_7_c
-      sglang: *d_7_c
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.7.d:
     description: Nested object + array (existing)
     ref: dynamo
@@ -100,7 +100,7 @@ cases:
           config:
             type: object
     expected:
-      dynamo: &d_7_d
+      dynamo: &id004
         calls:
         - name: process_data
           arguments:
@@ -111,5 +111,5 @@ cases:
             config:
               nested: true
         normal_text: ''
-      vllm: *d_7_d
-      sglang: *d_7_d
+      vllm: *id004
+      sglang: *id004

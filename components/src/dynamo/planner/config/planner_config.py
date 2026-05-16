@@ -140,6 +140,16 @@ class PlannerConfig(BaseModel):
         ),
         exclude=True,
     )
+    metric_pulling_prometheus_token: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN"),
+        exclude=True,
+        description=(
+            "Optional bearer token sent as `Authorization: Bearer <token>` on "
+            "every PromQL request. Useful for hardened monitoring stacks "
+            "(OpenShift thanos-querier, OAuth-proxied Prometheus). Token is "
+            "read once at startup."
+        ),
+    )
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
@@ -236,6 +246,13 @@ class PlannerConfig(BaseModel):
             "Fixed filename for HTML diagnostics reports. "
             "When set, reports are written to report_output_dir/report_filename "
             "instead of the default timestamped name."
+        ),
+    )
+    report_write_gzip_log: bool = Field(
+        default=True,
+        description=(
+            "Write a compressed JSONL diagnostics log next to each HTML report. "
+            "The gzip sidecar uses the same report basename with .log.jsonl.gz."
         ),
     )
     live_dashboard_port: int = Field(

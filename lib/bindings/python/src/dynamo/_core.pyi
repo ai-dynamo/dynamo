@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -234,6 +235,17 @@ class Client:
 
         Returns:
             A list of instance IDs that are available for work
+        """
+        ...
+
+    async def wait_for_instance_by_runtime_data(
+            self,
+            key: str,
+            value: str,
+            timeout_s: float | None = None,
+        ) -> int:
+        """
+        Wait for exactly one instance whose MDC runtime_data contains the given string value.
         """
         ...
 
@@ -514,6 +526,7 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     enable_eagle: bool
+    taints: Set[str]
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -544,6 +557,26 @@ class ModelRuntimeConfig:
     def get_tensor_model_config(self) -> Any | None:
         """Get the tensor model configuration."""
         ...
+
+class RoutingConstraints:
+    """
+    Request-side routing constraints.
+
+    ``required_taints`` is a hard eligibility filter.
+    ``preferred_taints`` maps taint -> signed weight.
+    Positive weights prefer matching workers, negative weights avoid them,
+    and ``0.0`` is neutral. Matching weights are summed and squashed with
+    ``tanh``, so opposite preferences cancel before Dynamo converts the
+    bounded bias into a strictly positive score multiplier.
+    """
+    required_taints: Set[str]
+    preferred_taints: Dict[str, float]
+
+    def __init__(
+        self,
+        required_taints: Optional[Set[str]] = None,
+        preferred_taints: Optional[Dict[str, float]] = None,
+    ) -> None: ...
 
 class OverlapScores:
     """
@@ -764,7 +797,7 @@ class KvEventPublisher:
     def __init__(
         self,
         endpoint: Endpoint,
-        worker_id: int = 0,
+        worker_id: Optional[int] = None,
         kv_block_size: int = 0,
         dp_rank: int = 0,
         enable_local_indexer: bool = False,
@@ -781,7 +814,7 @@ class KvEventPublisher:
 
         Args:
             endpoint: The endpoint to extract component information from for event publishing
-            worker_id: The worker ID (unused, inferred from endpoint)
+            worker_id: Optional worker ID override. Use None to infer from endpoint.
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer
@@ -2010,6 +2043,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         multi_modal_data: Optional[JsonLike] = None,
         mm_routing_info: Optional[JsonLike] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -2038,6 +2072,7 @@ class KvRouter:
             mm_routing_info: Optional structured routing-only multimodal payload
                             (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
                             used by router selection without changing execution token_ids.
+            routing_constraints: Optional request routing constraints used to constrain or prefer tainted workers.
 
         Returns:
             An async iterator yielding generation responses
@@ -2071,6 +2106,7 @@ class KvRouter:
         update_indexer: bool = False,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2395,6 +2431,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
         ) -> None: ...
         @property
         def model(self) -> str: ...
@@ -2418,6 +2455,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def runtime_data(self) -> Dict[str, Any]: ...
 
     class RuntimeConfig:
         def __init__(
