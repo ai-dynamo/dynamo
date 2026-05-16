@@ -102,12 +102,12 @@ impl Drop for OccupancyPermit {
     }
 }
 
-/// Trait for monitoring worker load and determining busy state.
-/// Implementations can define custom load metrics and busy thresholds.
+/// Trait for monitoring worker load and determining overload state.
+/// Implementations can define custom load metrics and overload thresholds.
 #[async_trait]
 pub trait WorkerLoadMonitor: Send + Sync {
     /// Start background monitoring of worker load.
-    /// This should spawn background tasks that update the client's busy instances.
+    /// This should spawn background tasks that update the client's overloaded instances.
     async fn start_monitoring(&self) -> anyhow::Result<()>;
 }
 
@@ -387,7 +387,7 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
-    /// Create a new PushRouter without a worker load monitor (no busy detection)
+    /// Create a new PushRouter without a worker load monitor (no overload detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         Self::from_client_with_monitor(client, router_mode, None).await
     }
@@ -436,7 +436,7 @@ where
     /// Create a new PushRouter with an optional worker load monitor.
     ///
     /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// busy detection itself is driven by the monitor via `client.set_busy_instances(...)`.
+    /// overload detection itself is driven by the monitor via `client.set_overloaded_instances(...)`.
     /// If no thresholds are configured on the monitor (or no monitor is provided),
     /// the routing snapshot reports at least one free instance and the gate never rejects.
     pub async fn from_client_with_monitor(
@@ -784,10 +784,10 @@ where
             )
         };
 
-        // Check if the selected worker is busy (when fault detection is enabled).
+        // Check if the selected worker is overloaded (when fault detection is enabled).
         if self.fault_detection_enabled {
             let routing_instances = self.client.routing_instances();
-            let selected_worker_busy = routing_instances.is_busy(instance_id);
+            let selected_worker_overloaded = routing_instances.is_overloaded(instance_id);
             let counts = routing_instances.counts();
             if tracing::enabled!(tracing::Level::DEBUG) {
                 tracing::debug!(
@@ -795,25 +795,25 @@ where
                     instance_id,
                     router_mode = ?self.router_mode,
                     free_workers = counts.free,
-                    busy_workers = counts.busy,
+                    overloaded_workers = counts.overloaded,
                     total_workers = counts.discovered,
-                    selected_worker_busy,
-                    "checked worker busy state"
+                    selected_worker_overloaded,
+                    "checked worker overload state"
                 );
             }
-            if selected_worker_busy {
+            if selected_worker_overloaded {
                 tracing::warn!(
                     instance_id,
-                    busy_workers = counts.busy,
+                    overloaded_workers = counts.overloaded,
                     total_workers = counts.discovered,
-                    "Rejecting request: selected worker is busy"
+                    "Rejecting request: selected worker is overloaded"
                 );
                 let cause = PipelineError::ServiceOverloaded(
-                    "Selected worker is busy, please retry later".to_string(),
+                    "Selected worker is overloaded, please retry later".to_string(),
                 );
                 return Err(DynamoError::builder()
                     .error_type(ErrorType::ResourceExhausted)
-                    .message("Selected worker is busy, please retry later")
+                    .message("Selected worker is overloaded, please retry later")
                     .cause(cause)
                     .build()
                     .into());
@@ -1236,7 +1236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selected_busy_worker_is_rejected_before_dispatch() {
+    async fn selected_overloaded_worker_is_rejected_before_dispatch() {
         const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
         let rt = Runtime::from_current().unwrap();
@@ -1244,7 +1244,7 @@ mod tests {
             .await
             .unwrap();
         let ns = drt
-            .namespace("test_selected_busy_worker_rejected".to_string())
+            .namespace("test_selected_overloaded_worker_rejected".to_string())
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
@@ -1264,10 +1264,10 @@ mod tests {
         }
         assert!(
             client.instance_ids_avail().contains(&worker_id),
-            "worker should be routable before marking it busy"
+            "worker should be routable before marking it overloaded"
         );
 
-        client.set_busy_instances(&[worker_id]);
+        client.set_overloaded_instances(&[worker_id]);
         let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
             .await
             .unwrap();
@@ -1276,8 +1276,8 @@ mod tests {
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(
-            msg.contains("Selected worker is busy"),
-            "expected selected-worker busy rejection, got: {msg}"
+            msg.contains("Selected worker is overloaded"),
+            "expected selected-worker overload rejection, got: {msg}"
         );
 
         rt.shutdown();

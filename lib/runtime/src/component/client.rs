@@ -149,7 +149,8 @@ impl EndpointDiscoverySource {
 pub struct RoutingInstanceCounts {
     pub discovered: usize,
     pub routable: usize,
-    pub busy: usize,
+    pub overloaded: usize,
+    /// IDs not currently reported overloaded, derived from `discovered - overloaded`.
     pub free: usize,
 }
 
@@ -157,7 +158,7 @@ pub struct RoutingInstanceCounts {
 pub(crate) struct RoutingInstances {
     discovered_ids: Vec<u64>,
     routable_ids: Vec<u64>,
-    busy_ids: HashSet<u64>,
+    overloaded_ids: HashSet<u64>,
     free_ids: Vec<u64>,
 }
 
@@ -169,13 +170,13 @@ impl RoutingInstances {
     fn from_parts(
         discovered_ids: Vec<u64>,
         routable_ids: Vec<u64>,
-        busy_ids: HashSet<u64>,
+        overloaded_ids: HashSet<u64>,
     ) -> Self {
-        let free_ids = Self::derive_free_ids(&discovered_ids, &busy_ids);
+        let free_ids = Self::derive_free_ids(&discovered_ids, &overloaded_ids);
         Self {
             discovered_ids,
             routable_ids,
-            busy_ids,
+            overloaded_ids,
             free_ids,
         }
     }
@@ -192,22 +193,31 @@ impl RoutingInstances {
         RoutingInstanceCounts {
             discovered: self.discovered_ids.len(),
             routable: self.routable_ids.len(),
-            busy: self.busy_ids.len(),
+            overloaded: self.overloaded_ids.len(),
             free: self.free_ids.len(),
         }
     }
 
-    pub(crate) fn is_busy(&self, instance_id: u64) -> bool {
-        self.busy_ids.contains(&instance_id)
+    pub(crate) fn is_overloaded(&self, instance_id: u64) -> bool {
+        self.overloaded_ids.contains(&instance_id)
+    }
+
+    fn overloaded_ids(&self) -> Option<HashSet<u64>> {
+        if self.overloaded_ids.is_empty() {
+            return None;
+        }
+
+        Some(self.overloaded_ids.clone())
     }
 
     fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
         let old_discovered_ids = self.discovered_ids.iter().copied().collect::<HashSet<_>>();
         let new_discovered_ids = discovered_ids.iter().copied().collect::<HashSet<_>>();
-        let mut busy_ids = self.busy_ids.clone();
-        busy_ids.retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
+        let mut overloaded_ids = self.overloaded_ids.clone();
+        overloaded_ids
+            .retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
 
-        Self::from_parts(discovered_ids.clone(), discovered_ids, busy_ids)
+        Self::from_parts(discovered_ids.clone(), discovered_ids, overloaded_ids)
     }
 
     fn report_instance_down(&self, instance_id: u64) -> Self {
@@ -221,7 +231,7 @@ impl RoutingInstances {
         Self {
             discovered_ids: self.discovered_ids.clone(),
             routable_ids,
-            busy_ids: self.busy_ids.clone(),
+            overloaded_ids: self.overloaded_ids.clone(),
             free_ids: self.free_ids.clone(),
         }
     }
@@ -231,38 +241,38 @@ impl RoutingInstances {
         Self {
             discovered_ids: self.discovered_ids.clone(),
             routable_ids,
-            busy_ids: self.busy_ids.clone(),
+            overloaded_ids: self.overloaded_ids.clone(),
             free_ids: self.free_ids.clone(),
         }
     }
 
-    fn set_busy(&self, busy_ids: HashSet<u64>) -> Self {
+    fn set_overloaded(&self, overloaded_ids: HashSet<u64>) -> Self {
         Self::from_parts(
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
-            busy_ids,
+            overloaded_ids,
         )
     }
 
-    fn clear_busy_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
-        let mut busy_ids = self.busy_ids.clone();
-        busy_ids.retain(|id| !removed_ids.contains(id));
+    fn clear_overloaded_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
+        let mut overloaded_ids = self.overloaded_ids.clone();
+        overloaded_ids.retain(|id| !removed_ids.contains(id));
         Self::from_parts(
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
-            busy_ids,
+            overloaded_ids,
         )
     }
 
-    fn derive_free_ids(discovered_ids: &[u64], busy_ids: &HashSet<u64>) -> Vec<u64> {
-        if busy_ids.is_empty() {
+    fn derive_free_ids(discovered_ids: &[u64], overloaded_ids: &HashSet<u64>) -> Vec<u64> {
+        if overloaded_ids.is_empty() {
             return discovered_ids.to_vec();
         }
 
         discovered_ids
             .iter()
             .copied()
-            .filter(|id| !busy_ids.contains(id))
+            .filter(|id| !overloaded_ids.contains(id))
             .collect()
     }
 }
@@ -326,6 +336,10 @@ impl RoutingInstancesState {
         self.snapshot().counts()
     }
 
+    fn overloaded_ids(&self) -> Option<HashSet<u64>> {
+        self.snapshot().overloaded_ids()
+    }
+
     fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
         self.instance_avail_rx.clone()
     }
@@ -334,19 +348,22 @@ impl RoutingInstancesState {
         self.update(|current| current.report_instance_down(instance_id), true);
     }
 
-    fn set_busy_instances(&self, busy_instance_ids: &[u64]) {
-        let busy_ids = busy_instance_ids.iter().copied().collect::<HashSet<_>>();
-        self.update(move |current| current.set_busy(busy_ids), false);
+    fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) {
+        let overloaded_ids = overloaded_instance_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        self.update(move |current| current.set_overloaded(overloaded_ids), false);
     }
 
-    fn clear_busy_for_removed(&self, removed_instance_ids: &[u64]) {
+    fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
         if removed_instance_ids.is_empty() {
             return;
         }
 
         let removed_ids = removed_instance_ids.iter().copied().collect::<HashSet<_>>();
         self.update(
-            move |current| current.clear_busy_for_removed(&removed_ids),
+            move |current| current.clear_overloaded_for_removed(&removed_ids),
             false,
         );
     }
@@ -372,7 +389,7 @@ pub struct Client {
     endpoint_discovery_source: Arc<EndpointDiscoverySource>,
     // These are the remotes I know about from watching key-value store
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
-    // Immutable routing snapshot. Free IDs are derived from discovered IDs and busy IDs.
+    // Immutable routing snapshot. Free IDs are derived from discovered IDs and overloaded IDs.
     routing_instances: Arc<RoutingInstancesState>,
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
@@ -492,14 +509,19 @@ impl Client {
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
-    /// Replace the set of busy instances reported by the worker monitor.
-    pub fn set_busy_instances(&self, busy_instance_ids: &[u64]) {
-        self.routing_instances.set_busy_instances(busy_instance_ids);
+    /// Replace the set of overloaded instances reported by the worker monitor.
+    pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) {
+        self.routing_instances
+            .set_overloaded_instances(overloaded_instance_ids);
     }
 
-    pub fn clear_busy_instances_for_removed(&self, removed_instance_ids: &[u64]) {
+    pub fn clear_overloaded_instances_for_removed(&self, removed_instance_ids: &[u64]) {
         self.routing_instances
-            .clear_busy_for_removed(removed_instance_ids);
+            .clear_overloaded_for_removed(removed_instance_ids);
+    }
+
+    pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
+        self.routing_instances.overloaded_ids()
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -732,7 +754,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_instance_reconciliation_preserves_busy_existing_instances() {
+    async fn test_overloaded_instance_ids_returns_none_when_empty() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_overloaded_ids".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        assert_eq!(client.overloaded_instance_ids(), None);
+
+        client.set_overloaded_instances(&[7]);
+        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+
+        client.set_overloaded_instances(&[]);
+        assert_eq!(client.overloaded_instance_ids(), None);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_instance_reconciliation_preserves_overloaded_existing_instances() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
         let rt = Runtime::from_current().unwrap();
@@ -740,7 +784,7 @@ mod tests {
             .await
             .unwrap();
         let ns = drt
-            .namespace("test_busy_reconciliation".to_string())
+            .namespace("test_overloaded_reconciliation".to_string())
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
@@ -763,24 +807,24 @@ mod tests {
             "worker should be free after initial discovery reconciliation"
         );
 
-        client.set_busy_instances(&[worker_id]);
+        client.set_overloaded_instances(&[worker_id]);
         assert!(
             client.instance_ids_free().is_empty(),
-            "worker should be busy before periodic reconciliation"
+            "worker should be overloaded before periodic reconciliation"
         );
 
         tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
 
         assert!(
             client.instance_ids_free().is_empty(),
-            "periodic reconciliation should not mark an existing busy worker free"
+            "periodic reconciliation should not mark an existing overloaded worker free"
         );
 
         rt.shutdown();
     }
 
     #[tokio::test]
-    async fn test_report_instance_down_preserves_busy_state() {
+    async fn test_report_instance_down_preserves_overloaded_state() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
         let rt = Runtime::from_current().unwrap();
@@ -788,7 +832,7 @@ mod tests {
             .await
             .unwrap();
         let ns = drt
-            .namespace("test_report_down_preserves_busy".to_string())
+            .namespace("test_report_down_preserves_overloaded".to_string())
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
@@ -807,7 +851,7 @@ mod tests {
             tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
         }
 
-        client.set_busy_instances(&[worker_id]);
+        client.set_overloaded_instances(&[worker_id]);
         client.report_instance_down(worker_id);
 
         assert!(
@@ -815,34 +859,34 @@ mod tests {
             "reported-down worker should leave routable availability"
         );
         assert_eq!(
-            client.routing_instance_counts().busy,
+            client.routing_instance_counts().overloaded,
             1,
-            "reported-down worker should remain busy while still discovered"
+            "reported-down worker should remain overloaded while still discovered"
         );
         assert!(
             client.instance_ids_free().is_empty(),
-            "reported-down busy worker should not become free"
+            "reported-down overloaded worker should not become free"
         );
 
         endpoint.unregister_endpoint_instance().await.unwrap();
         for _ in 0..10 {
-            if client.routing_instance_counts().busy == 0 {
+            if client.routing_instance_counts().overloaded == 0 {
                 break;
             }
             tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
         }
 
         assert_eq!(
-            client.routing_instance_counts().busy,
+            client.routing_instance_counts().overloaded,
             0,
-            "stable discovery removal should clear busy state"
+            "stable discovery removal should clear overloaded state"
         );
 
         rt.shutdown();
     }
 
     #[tokio::test]
-    async fn test_instance_reconciliation_prunes_removed_busy_instances() {
+    async fn test_instance_reconciliation_prunes_removed_overloaded_instances() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
         let rt = Runtime::from_current().unwrap();
@@ -850,7 +894,7 @@ mod tests {
             .await
             .unwrap();
         let ns = drt
-            .namespace("test_removed_busy_cleanup".to_string())
+            .namespace("test_removed_overloaded_cleanup".to_string())
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
@@ -862,29 +906,29 @@ mod tests {
         let instances = client.wait_for_instances().await.unwrap();
         let worker_id = instances[0].id();
 
-        client.set_busy_instances(&[worker_id]);
-        assert_eq!(client.routing_instance_counts().busy, 1);
+        client.set_overloaded_instances(&[worker_id]);
+        assert_eq!(client.routing_instance_counts().overloaded, 1);
         assert!(client.instance_ids_free().is_empty());
 
         endpoint.unregister_endpoint_instance().await.unwrap();
         for _ in 0..10 {
-            if client.routing_instance_counts().busy == 0 {
+            if client.routing_instance_counts().overloaded == 0 {
                 break;
             }
             tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
         }
 
         assert_eq!(
-            client.routing_instance_counts().busy,
+            client.routing_instance_counts().overloaded,
             0,
-            "removed discovered workers should not remain in busy state"
+            "removed discovered workers should not remain in overloaded state"
         );
 
         rt.shutdown();
     }
 
     #[tokio::test]
-    async fn test_instance_ids_free_excludes_busy_new_instances() {
+    async fn test_instance_ids_free_excludes_overloaded_new_instances() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
         let rt = Runtime::from_current().unwrap();
@@ -893,7 +937,7 @@ mod tests {
             .unwrap();
         let worker_id = drt.connection_id();
         let ns = drt
-            .namespace("test_new_busy_reconciliation".to_string())
+            .namespace("test_new_overloaded_reconciliation".to_string())
             .unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
@@ -901,14 +945,14 @@ mod tests {
         let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
             .await
             .unwrap();
-        client.set_busy_instances(&[worker_id]);
+        client.set_overloaded_instances(&[worker_id]);
 
         endpoint.register_endpoint_instance().await.unwrap();
         let instances = client.wait_for_instances().await.unwrap();
         assert_eq!(instances[0].id(), worker_id);
         assert!(
             client.instance_ids_free().is_empty(),
-            "newly discovered busy worker should not be free"
+            "newly discovered overloaded worker should not be free"
         );
 
         tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
@@ -922,7 +966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_add_updates_free_without_busy_publish() {
+    async fn test_discovery_add_updates_free_without_overloaded_publish() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 
         let rt = Runtime::from_current().unwrap();
@@ -952,7 +996,7 @@ mod tests {
         assert_eq!(
             client.instance_ids_free(),
             vec![worker_id],
-            "newly discovered non-busy workers should appear free without a busy update"
+            "newly discovered non-overloaded workers should appear free without an overload update"
         );
 
         rt.shutdown();
