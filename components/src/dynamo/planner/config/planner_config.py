@@ -56,9 +56,9 @@ class PlannerConfig(BaseModel):
         description='Controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
     )
 
-    environment: Literal["kubernetes", "virtual", "global-planner"] = (
-        SLAPlannerDefaults.environment
-    )
+    environment: Literal[
+        "kubernetes", "virtual", "global-planner"
+    ] = SLAPlannerDefaults.environment
     namespace: str = Field(
         default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo"),
         exclude=True,
@@ -171,9 +171,9 @@ class PlannerConfig(BaseModel):
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
-    throughput_metrics_source: Literal["frontend", "router"] = (
-        SLAPlannerDefaults.throughput_metrics_source
-    )
+    throughput_metrics_source: Literal[
+        "frontend", "router"
+    ] = SLAPlannerDefaults.throughput_metrics_source
 
     model_name: Optional[str] = None
 
