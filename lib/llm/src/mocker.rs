@@ -449,17 +449,20 @@ impl MockEngine {
 
     /// Send a request to the appropriate scheduler, waiting for initialization if needed.
     pub async fn direct(&self, request: DirectRequest, dp_rank: usize) {
+        let sender = self.request_sender(dp_rank).await;
+        let _ = sender.send(request);
+    }
+
+    async fn request_sender(&self, dp_rank: usize) -> mpsc::UnboundedSender<DirectRequest> {
         if let Some(senders) = self.request_senders.get() {
-            let _ = senders[dp_rank].send(request);
-            return;
+            return senders[dp_rank].clone();
         }
 
         // Register the waiter *before* re-checking to avoid a TOCTOU race
         // where `start_schedulers` sets + notifies between our check and subscribe.
         let notified = self.senders_ready.notified();
         if let Some(senders) = self.request_senders.get() {
-            let _ = senders[dp_rank].send(request);
-            return;
+            return senders[dp_rank].clone();
         }
         notified.await;
 
@@ -467,7 +470,7 @@ impl MockEngine {
             .request_senders
             .get()
             .expect("must be set after notify");
-        let _ = senders[dp_rank].send(request);
+        senders[dp_rank].clone()
     }
 
     /// Create schedulers and spawn their background tasks for distributing token notifications.
@@ -688,8 +691,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         }
 
         // Bootstrap rendezvous for disaggregated serving
-        // - Decode: connect to prefill's server, block until prefill completes
-        // - Prefill: complete_room() is called after first token (see below)
+        // - Decode: send receiver metadata to prefill, then wait for prefill completion
+        // - Prefill: wait for decode metadata before emitting output, then complete_room()
         let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
         if let Some(bootstrap_info) = &request.bootstrap_info
             && self.engine_args.is_decode()
@@ -728,19 +731,51 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
         self.active_requests.insert(request_uuid, request_tx);
 
-        // Send the request to the appropriate scheduler based on dp_rank
-        self.direct(direct_request, dp_rank as usize).await;
+        let bootstrap_server = self.bootstrap_server.clone();
+        let delayed_prefill_submission = if is_prefill {
+            match (bootstrap_server.get().cloned(), bootstrap_room) {
+                (Some(server), Some(room_id)) => {
+                    let sender = self.request_sender(dp_rank as usize).await;
+                    Some((server, room_id, sender, direct_request))
+                }
+                _ => {
+                    self.direct(direct_request, dp_rank as usize).await;
+                    None
+                }
+            }
+        } else {
+            self.direct(direct_request, dp_rank as usize).await;
+            None
+        };
 
         // Create a simple channel for the stream
         let (stream_tx, stream_rx) = mpsc::unbounded_channel::<LLMEngineOutput>();
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
-        let bootstrap_server = self.bootstrap_server.clone();
         let reasoning = self.engine_args.reasoning.clone();
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
+            if let Some((server, room_id, sender, direct_request)) = delayed_prefill_submission {
+                if let Err(e) = server.wait_for_decode_ready(room_id).await {
+                    let _ = stream_tx.send(LLMEngineOutput::error(format!(
+                        "Bootstrap wait for decode metadata failed: {e}"
+                    )));
+                    active_requests.remove(&request_uuid);
+                    return;
+                }
+
+                if sender.send(direct_request).is_err() {
+                    let _ = stream_tx.send(LLMEngineOutput::error(
+                        "Scheduler input channel closed before bootstrap prefill submission"
+                            .to_string(),
+                    ));
+                    active_requests.remove(&request_uuid);
+                    return;
+                }
+            }
+
             let mut token_count = 0;
             let think_len = reasoning
                 .as_ref()
