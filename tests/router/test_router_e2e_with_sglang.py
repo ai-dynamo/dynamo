@@ -21,7 +21,11 @@ from tests.router.e2e_harness import (
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    allocate_ports,
+    deallocate_ports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +86,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
-            data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
+            data_parallel_size: If set, enables this many data-parallel ranks per worker process.
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
@@ -99,10 +103,13 @@ class SGLangProcess(ManagedEngineProcessMixin):
         self.worker_processes = []
         self.store_backend = store_backend
 
-        # Dynamically allocate unique system and KV event ports (one per worker)
-        # to avoid conflicts in parallel test runs.
+        # Dynamically allocate unique system and KV event ports to avoid
+        # conflicts in parallel test runs.
         self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        kv_event_rank_span = data_parallel_size or 1
+        self._kv_event_ports = allocate_contiguous_ports(
+            num_workers, kv_event_rank_span, DefaultPort.SYSTEM1.value
+        )
         request.addfinalizer(
             lambda: deallocate_ports(self._system_ports + self._kv_event_ports)
         )
@@ -178,9 +185,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
                     ]
                 )
 
-            # Add per-worker KV events config for ZMQ publishing
-            # Ports are dynamically allocated for xdist-safe parallel execution.
-            kv_events_port = self._kv_event_ports[worker_idx]
+            # Add per-worker KV events config for ZMQ publishing. SGLang DP
+            # ranks publish at base_port + dp_rank, so DP tests must reserve a
+            # contiguous port block and pass the block's base port here.
+            kv_events_port = self._kv_event_ports[worker_idx * kv_event_rank_span]
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
@@ -287,12 +295,9 @@ def test_router_decisions_sglang_multiple_workers(
 
 
 @pytest.mark.gpu_2
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
-@pytest.mark.skip(
-    reason="DYN-2265"
-)  # Currently fails probably due to SGLang startup issues when multiple workers on same GPU; re-enable when fixed
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,
