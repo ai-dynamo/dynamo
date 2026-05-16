@@ -107,7 +107,7 @@ the tag you just pushed.
 - An `nvcrimagepullsecret` Secret in the namespace, or update `imagePullSecrets` in
   [`deploy.yaml`](deploy.yaml) to match your cluster's pull-secret naming
 - A pre-existing `model-cache` PVC with `nvidia/Kimi-K2.5-NVFP4` downloaded (see
-  the [`model-cache/nvidia/`](../../../model-cache/nvidia/) sibling job)
+  the [`model-cache/`](../../../model-cache/) sibling job)
 - A registry your cluster's nodes can pull from with the `dynamo-tokenspeed` image
   pushed (see the build steps above)
 
@@ -118,7 +118,7 @@ export NAMESPACE=dynamo-demo
 
 # Download model weights into the model-cache PVC
 kubectl apply -f ../../../model-cache/model-cache.yaml -n ${NAMESPACE}
-kubectl apply -f ../../../model-cache/nvidia/model-download.yaml -n ${NAMESPACE}
+kubectl apply -f ../../../model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
 
 # After updating both image: fields in deploy.yaml, apply.

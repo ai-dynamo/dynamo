@@ -21,6 +21,7 @@ from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_b
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import IMAGE_COLOR_PROMPT
 from tests.utils.payload_builder import (
     cached_tokens_chat_payload,
     chat_payload,
@@ -58,6 +59,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -91,6 +93,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -122,6 +125,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_lmcache_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -144,6 +148,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_lmcache_multiproc_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -169,6 +174,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_request_planes_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -191,6 +197,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_request_planes_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -214,6 +221,7 @@ vllm_configs = {
         script_name="xpu/agg_router_xpu.sh",
         marks=[
             pytest.mark.xpu_2,
+            pytest.mark.router,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2263"),
         ],
@@ -237,6 +245,7 @@ vllm_configs = {
         script_name="xpu/agg_router_approx_xpu.sh",
         marks=[
             pytest.mark.xpu_2,
+            pytest.mark.router,
             pytest.mark.post_merge,
             pytest.mark.skip(reason="DYN-2264"),
         ],
@@ -292,7 +301,7 @@ vllm_configs = {
                 [
                     {
                         "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
+                        "text": IMAGE_COLOR_PROMPT,
                     },
                     {
                         "type": "image_url",
@@ -302,7 +311,8 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["green"],
                 temperature=0.0,
-                max_tokens=100,
+                max_tokens=20,
+                timeout=180,
             )
         ],
     ),
@@ -331,7 +341,7 @@ vllm_configs = {
                 [
                     {
                         "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
+                        "text": IMAGE_COLOR_PROMPT,
                     },
                     {
                         "type": "image_url",
@@ -339,8 +349,9 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["purple"],
-                max_tokens=100,
+                expected_response=["green"],
+                max_tokens=20,
+                timeout=180,
             ),
         ],
     ),
@@ -506,6 +517,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -532,6 +544,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -605,6 +618,7 @@ def test_serve_deployment(
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 @pytest.mark.xpu_2
 @pytest.mark.nightly
@@ -630,7 +644,7 @@ def test_multimodal_b64(
         [
             {
                 "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
+                "text": IMAGE_COLOR_PROMPT,
             },
             {
                 "type": "image_url",
@@ -638,8 +652,9 @@ def test_multimodal_b64(
             },
         ],
         repeat_count=1,
-        expected_response=["purple"],
-        max_tokens=100,
+        expected_response=["green"],
+        max_tokens=20,
+        timeout=180,
     )
 
     # Create test config
@@ -662,6 +677,7 @@ def test_multimodal_b64(
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 @pytest.mark.xpu_1
 @pytest.mark.pre_merge
@@ -686,7 +702,7 @@ def test_multimodal_b64_frontend_decoding(
         [
             {
                 "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
+                "text": IMAGE_COLOR_PROMPT,
             },
             {
                 "type": "image_url",
@@ -696,7 +712,8 @@ def test_multimodal_b64_frontend_decoding(
         repeat_count=1,
         expected_response=["green"],
         temperature=0.0,
-        max_tokens=100,
+        max_tokens=20,
+        timeout=180,
     )
 
     config = VLLMConfig(
@@ -760,6 +777,7 @@ def lora_chat_payload(
 
 
 @pytest.mark.vllm
+@pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.xpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B", "codelion/Qwen3-0.6B-accuracy-recovery-lora")
@@ -816,6 +834,7 @@ def test_lora_aggregated(
 
 
 @pytest.mark.vllm
+@pytest.mark.router
 @pytest.mark.e2e
 @pytest.mark.xpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
