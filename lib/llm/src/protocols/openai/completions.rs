@@ -178,6 +178,10 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
         self.nvext.as_ref()
     }
 
+    fn get_sampling_passthrough(&self, key: &str) -> Option<&serde_json::Value> {
+        self.unsupported_fields.get(key)
+    }
+
     fn get_seed(&self) -> Option<i64> {
         self.inner.seed
     }
@@ -496,7 +500,7 @@ impl ValidateRequest for NvCreateCompletionRequest {
 mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
-    use crate::protocols::common::OutputOptionsProvider;
+    use crate::protocols::common::{OutputOptionsProvider, SamplingOptionsProvider};
     use base64::Engine;
     use serde_json::json;
 
@@ -803,6 +807,7 @@ mod tests {
         let request_json = json!({
             "model": "test-model",
             "prompt": [1, 2, 3],
+            "detokenize": false,
             "allowed_token_ids": [10, 11],
             "bad_words_token_ids": [[12, 13]]
         });
@@ -818,6 +823,14 @@ mod tests {
             Some(&serde_json::json!([[12, 13]]))
         );
         assert!(ValidateRequest::validate(&request).is_ok());
+
+        let sampling_options = request.extract_sampling_options().unwrap();
+        assert_eq!(sampling_options.detokenize, Some(false));
+        assert_eq!(sampling_options.allowed_token_ids, Some(vec![10, 11]));
+        assert_eq!(
+            sampling_options.bad_words_token_ids,
+            Some(vec![vec![12, 13]])
+        );
     }
 
     #[test]

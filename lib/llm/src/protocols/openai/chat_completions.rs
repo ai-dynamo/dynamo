@@ -202,6 +202,11 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
+
+    fn get_sampling_passthrough(&self, key: &str) -> Option<&serde_json::Value> {
+        self.unsupported_fields.get(key)
+    }
+
     /// Retrieves the seed value for random number generation, if set.
     fn get_seed(&self) -> Option<i64> {
         self.inner.seed
@@ -454,7 +459,9 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
 mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
-    use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
+    use crate::protocols::common::{
+        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+    };
     use serde_json::json;
 
     #[test]
@@ -603,6 +610,7 @@ mod tests {
         let request_json = json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
+            "detokenize": false,
             "allowed_token_ids": [10, 11],
             "bad_words_token_ids": [[12, 13]]
         });
@@ -618,6 +626,14 @@ mod tests {
             Some(&serde_json::json!([[12, 13]]))
         );
         assert!(ValidateRequest::validate(&request).is_ok());
+
+        let sampling_options = request.extract_sampling_options().unwrap();
+        assert_eq!(sampling_options.detokenize, Some(false));
+        assert_eq!(sampling_options.allowed_token_ids, Some(vec![10, 11]));
+        assert_eq!(
+            sampling_options.bad_words_token_ids,
+            Some(vec![vec![12, 13]])
+        );
     }
 
     #[test]

@@ -55,6 +55,10 @@ pub(crate) trait OpenAISamplingOptionsProvider {
     fn get_best_of(&self) -> Option<u8>;
 
     fn nvext(&self) -> Option<&nvext::NvExt>;
+
+    fn get_sampling_passthrough(&self, _key: &str) -> Option<&serde_json::Value> {
+        None
+    }
 }
 
 pub(crate) trait OpenAIStopConditionsProvider {
@@ -160,6 +164,23 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 return Err(e);
             }
         };
+        let detokenize = self
+            .get_sampling_passthrough("detokenize")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("`detokenize` must be a boolean"))?;
+        let allowed_token_ids = self
+            .get_sampling_passthrough("allowed_token_ids")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs"))?;
+        let bad_words_token_ids = self
+            .get_sampling_passthrough("bad_words_token_ids")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|_| {
+                anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays")
+            })?;
 
         Ok(common::SamplingOptions {
             n,
@@ -176,6 +197,9 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             length_penalty: None,
             guided_decoding,
             include_stop_str_in_output,
+            detokenize,
+            allowed_token_ids,
+            bad_words_token_ids,
         })
     }
 }

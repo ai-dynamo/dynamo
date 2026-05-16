@@ -292,26 +292,6 @@ impl OpenAIPreprocessor {
         }
     }
 
-    fn sampling_passthrough_args<R: NvExtProvider>(
-        request: &R,
-    ) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let mut sampling_passthrough = serde_json::Map::new();
-
-        if let Some(fields) = request.unsupported_fields() {
-            for key in ["detokenize", "allowed_token_ids", "bad_words_token_ids"] {
-                if let Some(value) = fields.get(key) {
-                    sampling_passthrough.insert(key.to_string(), value.clone());
-                }
-            }
-        }
-
-        if sampling_passthrough.is_empty() {
-            None
-        } else {
-            Some(sampling_passthrough)
-        }
-    }
-
     fn backend_extra_args<R: NvExtProvider>(request: &R) -> Option<serde_json::Value> {
         let mut extra_args = serde_json::Map::new();
 
@@ -319,13 +299,6 @@ impl OpenAIPreprocessor {
             extra_args.insert(
                 "nvext".to_string(),
                 serde_json::Value::Object(nvext_passthrough),
-            );
-        }
-
-        if let Some(sampling_passthrough) = Self::sampling_passthrough_args(request) {
-            extra_args.insert(
-                "sampling_options".to_string(),
-                serde_json::Value::Object(sampling_passthrough),
             );
         }
 
@@ -2984,7 +2957,7 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_extra_args_preserves_nvext_and_sampling_extensions() {
+    fn test_sampling_passthrough_uses_top_level_sampling_options() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hi"}],
@@ -2999,19 +2972,29 @@ mod tests {
         .unwrap();
 
         let extra_args = OpenAIPreprocessor::backend_extra_args(&request).unwrap();
-
         assert_eq!(extra_args["nvext"]["cache_salt"], "step_7");
         assert_eq!(
             extra_args["nvext"]["extra_fields"],
             serde_json::json!(["completion_token_ids"])
         );
-        assert_eq!(extra_args["sampling_options"]["detokenize"], false);
+        assert!(extra_args.get("sampling_options").is_none());
+
+        let sampling_options = request.extract_sampling_options().unwrap();
+        assert_eq!(sampling_options.detokenize, Some(false));
+        assert_eq!(sampling_options.allowed_token_ids, Some(vec![10, 11]));
         assert_eq!(
-            extra_args["sampling_options"]["allowed_token_ids"],
+            sampling_options.bad_words_token_ids,
+            Some(vec![vec![12, 13]])
+        );
+
+        let sampling_options_json = serde_json::to_value(&sampling_options).unwrap();
+        assert_eq!(sampling_options_json["detokenize"], false);
+        assert_eq!(
+            sampling_options_json["allowed_token_ids"],
             serde_json::json!([10, 11])
         );
         assert_eq!(
-            extra_args["sampling_options"]["bad_words_token_ids"],
+            sampling_options_json["bad_words_token_ids"],
             serde_json::json!([[12, 13]])
         );
     }
