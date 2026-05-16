@@ -14,6 +14,7 @@ readme = "README.md"
 
 [features]
 default = []
+profile = []
 # Enables G1↔G2 offload simulation via kvbm-engine.
 kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo", "dep:futures"]
 

@@ -9,37 +9,47 @@ cases:
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L260
     model_text: 'functools[{"name": "get_time", "arguments": {}}]'
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
     model_text: 'functools[{"name": "get_time", "arguments": { }}]'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id003
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
     model_text: 'functools[{"name": "get_time"}]'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'functools[{"name": "get_time"}]'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: 'functools[{"name": "get_time"}]'
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'

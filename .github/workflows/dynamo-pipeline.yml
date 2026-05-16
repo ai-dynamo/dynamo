@@ -68,6 +68,7 @@ on:
       HF_TOKEN:
         required: false
 
+
 jobs:
   image:
     uses: ./.github/workflows/shared-build-image.yml
@@ -89,103 +90,84 @@ jobs:
   # aren't reproducible on plain ubuntu-latest runners.
   rust-gpu:
     needs: image
-    runs-on: prod-tester-amd-gpu-v1
+    runs-on: prod-tester-amd-gpu-v2
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.cuda_version != '' && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || startsWith(inputs.cuda_version, '13.') && '13' || inputs.cuda_version) || '' }}-test
+      env:
+        # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+        # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+        # USER here sidesteps two symptoms of that mismatch:
+        #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+        #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
     timeout-minutes: 30
-    env:
-      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-      - name: Calculate runtime image tag
-        id: image
+      - name: Select cargo target dir (prefer NVMe scratch)
         shell: bash
-        env:
-          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
         run: |
-          CUDA_VERSION="${{ inputs.cuda_version }}"
-          CUDA_MAJOR=${CUDA_VERSION%%.*}
-          SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-          IMAGE_TAG=${SOURCE_SHA}-${{ needs.image.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}
-          echo "runtime_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull runtime image
-        run: |
-          source ./.github/scripts/retry_docker.sh
-          retry_pull ${{ steps.image.outputs.runtime_image }}
+          # GPU runners mount /scratch (nvme-scratch emptyDir, RAID0 instance store).
+          CARGO_TARGET_DIR=/tmp/cargo-target
+          if [[ -d /scratch ]]; then
+            CARGO_TARGET_DIR=/scratch/cargo-target
+            echo "✅ NVMe scratch available, using ${CARGO_TARGET_DIR}"
+          fi
+          mkdir -p "${CARGO_TARGET_DIR}"
+          echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >> "$GITHUB_ENV"
+
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
+        working-directory: /workspace/lib/llm
         env:
-          SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        shell: bash
         run: |
-          docker run --rm --runtime=nvidia --gpus all --user root -w /workspace/lib/llm \
-            --name ${{ env.CONTAINER_ID }}_rust_checks \
-            -e SCCACHE_BUCKET="${SCCACHE_S3_BUCKET}" \
-            -e SCCACHE_REGION="${AWS_DEFAULT_REGION}" \
-            -e AWS_ROLE_ARN \
-            -e AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token \
-            -v "${AWS_WEB_IDENTITY_TOKEN_FILE}:/run/secrets/aws-token:ro" \
-            ${{ steps.image.outputs.runtime_image }} \
-            bash -ec 'ARCH_ALT=x86_64 /workspace/container/use-sccache.sh install && \
-                      eval $(/workspace/container/use-sccache.sh setup-env) && \
-                      rustup component add rustfmt clippy && \
-                      cargo fmt -- --check && \
-                      cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture && \
-                      cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4 && \
-                      /workspace/container/use-sccache.sh show-stats "Rust Checks"'
+          /workspace/container/use-sccache.sh install
+          eval $(/workspace/container/use-sccache.sh setup-env)
+          rustup component add rustfmt clippy
+          cargo fmt -- --check
+          cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
+          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
+          cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
+          /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
   mypy:
     needs: image
-    runs-on: prod-tester-amd-v1
+    runs-on: prod-tester-amd-v2
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.cuda_version != '' && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || startsWith(inputs.cuda_version, '13.') && '13' || inputs.cuda_version) || '' }}-test
+      env:
+        # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+        # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+        # USER here sidesteps two symptoms of that mismatch:
+        #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+        #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
     timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-      - name: Calculate test image tag
-        id: image
-        shell: bash
-        env:
-          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
-        run: |
-          CUDA_VERSION="${{ inputs.cuda_version }}"
-          CUDA_MAJOR=${CUDA_VERSION%%.*}
-          SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-          IMAGE_TAG=${SOURCE_SHA}-${{ needs.image.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}-test
-          echo "test_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      - name: Pull test image
-        run: |
-          source ./.github/scripts/retry_docker.sh
-          retry_pull ${{ steps.image.outputs.test_image }}
       - name: Run mypy (components)
+        working-directory: /workspace
+        shell: bash
         run: |
-          docker run --rm -w /workspace \
-            --name mypy_${{ github.run_id }}_${{ github.run_attempt }} \
-            ${{ steps.image.outputs.test_image }} \
-            bash -c '
-              MYPYPATH=components/src:lib/bindings/python/src
-              TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
-              MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
-            '
+          MYPYPATH=components/src:lib/bindings/python/src
+          TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
+          MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
       - name: Run mypy (bindings)
+        working-directory: /workspace
+        shell: bash
         run: |
-          docker run --rm -w /workspace \
-            --name mypy_bindings_${{ github.run_id }}_${{ github.run_attempt }} \
-            ${{ steps.image.outputs.test_image }} \
-            bash -c 'MYPYPATH=lib/bindings/python/src mypy -p dynamo'
+          MYPYPATH=lib/bindings/python/src mypy -p dynamo
 
   # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # below runs -n 0, so this job is NOT actually parallel right now.

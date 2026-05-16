@@ -17,15 +17,21 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'I will check the weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+      sglang:
+        calls: []
+        normal_text: I will check the weather.
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -34,11 +40,16 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo: &id002
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id002
+      sglang:
+        calls: []
+        normal_text: ''
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L1858
@@ -47,15 +58,21 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'I will check the weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+      sglang:
+        calls: []
+        normal_text: I will check the weather.
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -64,8 +81,10 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — EXPECTS_ERROR(Only one BOT token): vLLM mistral_tool_parser raises ValueError on two consecutive [TOOL_CALLS] envelopes
-    # vllm produces:
-    #   error: ValueError: Only one BOT token should have been outputted, but got I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Then check LA weather.
+      dynamo: &id003
+        calls: []
+        normal_text: I will check the weather.
+      vllm:
+        error: 'ValueError: Only one BOT token should have been outputted'
+        reason: vLLM mistral_tool_parser raises ValueError on two consecutive [TOOL_CALLS] envelopes
+      sglang: *id003

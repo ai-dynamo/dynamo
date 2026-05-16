@@ -25,14 +25,19 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
   PARSER.batch.2.b:
     description: Two back-to-back TOOLCALL wrappers
     ref: dynamo
@@ -42,14 +47,13 @@ cases:
     - *id001
     - *id002
     expected:
-      calls: []
-      normal_text: ''
-    # NOTE: Dynamo's nemotron_deci parser does not restart on back-to-back
-    # <TOOLCALL>...</TOOLCALL> wrappers (handles multi-call within ONE wrapper
-    # — see 2.a — but not multiple wrappers). Known parser limitation; the
-    # fixture pins actual oracle output, not desired behavior. nemotron_deci
-    # has no vLLM/SGLang peer (n/a row in parity matrix) so this is
-    # Dynamo-self-check only.
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -59,14 +63,19 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: 'Both:'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -76,11 +85,16 @@ cases:
     - *id001
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'

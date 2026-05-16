@@ -76,6 +76,8 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
+    # Total number of LLM requests accepted by the frontend handler
+    REQUESTS_STARTED_TOTAL = "requests_started_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
