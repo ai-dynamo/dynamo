@@ -314,8 +314,88 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
 
 /// 1 GiB cap on metadata fetch — realistic files are <20 MiB. Bounds
 /// disk usage if a worker advertises a bogus `CheckedFile.size`, and is
-/// the fallback when `size` is absent (legacy MDCs).
+/// the fallback when `size` is absent on a `CheckedFile`.
 const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// File extensions that identify model weights. Used by the hf:// sibling
+/// harvest to skip weight blobs (which `hub::from_hf(_, ignore_weights=true)`
+/// also already filters at download, but the snapshot dir may contain
+/// pre-existing weights from a prior unrestricted pull).
+///
+/// `.safetensors.index.json` is correctly kept: extension is `.json`.
+fn is_weight_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("safetensors" | "bin" | "gguf" | "onnx" | "tflite" | "h5" | "pt" | "pth" | "msgpack")
+    )
+}
+
+/// Parent directory of a `file://` URI when it resolves to a real local
+/// directory. Returns `None` for any other scheme or unreachable path.
+fn file_uri_parent(uri: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(uri).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    let path = url.to_file_path().ok()?;
+    let parent = path.parent()?;
+    parent.is_dir().then(|| parent.to_path_buf())
+}
+
+/// Symlink non-weight files from `snapshot_dir` into `slug_dir`. Picks up
+/// `preprocessor_config.json` and other sibling files that
+/// `from_pretrained(slug_dir)` consumers need.
+///
+/// Names in `typed_filenames` are owned by the resolve loop's typed-slot
+/// pass — never overwritten. Every other harvested sibling is re-linked
+/// unconditionally so a re-registration with the same `mdcsum` but a
+/// different upstream snapshot picks up fresh contents (mdcsum doesn't
+/// cover harvested files).
+fn harvest_siblings(
+    snapshot_dir: &Path,
+    slug_dir: &Path,
+    typed_filenames: &std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    let entries = match std::fs::read_dir(snapshot_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(
+                snapshot = %snapshot_dir.display(),
+                error = %e,
+                "sibling harvest: snapshot dir unreadable, skipping",
+            );
+            return Ok(());
+        }
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || is_weight_file(&path) {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if !n.is_empty() => n.to_owned(),
+            _ => continue,
+        };
+        if typed_filenames.contains(&name) {
+            continue;
+        }
+        let dst = slug_dir.join(&name);
+        // Resolve through the canonical target so a downstream
+        // `canonicalize` lands on a stable blob path rather than
+        // chasing snapshot-dir symlinks. `symlink_force` is idempotent
+        // and atomic via `stage_and_rename_sync`.
+        let target = std::fs::canonicalize(&path).unwrap_or(path);
+        symlink_force(&target, &dst)
+            .with_context(|| format!("harvesting {} -> {}", target.display(), dst.display()))?;
+        tracing::debug!(
+            file = %name,
+            target = %target.display(),
+            "harvested sibling into slug_dir",
+        );
+    }
+    Ok(())
+}
 
 /// Stage `uri` into `dest`, verifying staged bytes against `expected`
 /// before publishing. Schemes: `http(s)`, `file`, `hf`. For `hf://`,
@@ -991,6 +1071,24 @@ impl ModelDeploymentCard {
             cache_root = %mdc_cache_root().display(),
             "resolved model metadata files",
         );
+
+        // Harvest non-weight siblings (preprocessor_config.json, …) from
+        // every snapshot dir we touched. Typed-slot basenames are passed
+        // through so the harvest never overwrites them. No-op for `http://`.
+        let typed_filenames: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|(uri, _)| uri_basename(uri).ok())
+            .collect();
+        let mut snapshot_dirs: std::collections::HashSet<PathBuf> =
+            hf_snapshots.values().cloned().collect();
+        for (uri, _) in &entries {
+            if let Some(parent) = file_uri_parent(uri) {
+                snapshot_dirs.insert(parent);
+            }
+        }
+        for snap in &snapshot_dirs {
+            harvest_siblings(snap, &slug_dir, &typed_filenames)?;
+        }
 
         // Pass 3: rewrite cf.path to the cache symlink so downstream
         // tokenizer/config loaders read from a verified location.
@@ -1840,6 +1938,13 @@ mod tests {
             assert!(snap.join("tokenizer.json").exists());
             assert!(snap.join("generation_config.json").exists());
 
+            // Sibling harvest: TinyLlama_v1.1 fixture ships
+            // `special_tokens_map.json` and `tokenizer.model` outside the
+            // typed slots — both must land in slug_dir for
+            // `from_pretrained()` to see a complete model dir.
+            assert!(snap.join("special_tokens_map.json").exists());
+            assert!(snap.join("tokenizer.model").exists());
+
             for (cf, _) in mdc.iter_metadata_files() {
                 let path = cf.path().expect("post-download local path");
                 assert!(path.starts_with(&snap));
@@ -1947,5 +2052,81 @@ mod tests {
             "TmpGuard should have unlinked the tmp on cancel; leaked: {leaked_after:?}"
         );
         assert!(!dest.exists(), "dest must not exist after cancel");
+    }
+
+    /// Brings in the sibling that `lightseek-mm` needs.
+    #[test]
+    fn harvest_brings_in_non_weight_siblings() -> anyhow::Result<()> {
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+        std::fs::write(snap.path().join("preprocessor_config.json"), b"pre")?;
+        std::fs::write(snap.path().join("tokenizer.model"), b"sp")?;
+        // `.safetensors.index.json` is `.json`, not a weight — must be kept.
+        std::fs::write(snap.path().join("model.safetensors.index.json"), b"idx")?;
+        super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
+        assert!(slug.path().join("preprocessor_config.json").exists());
+        assert!(slug.path().join("tokenizer.model").exists());
+        assert!(slug.path().join("model.safetensors.index.json").exists());
+        Ok(())
+    }
+
+    /// Weight blobs stay out so the metadata cache doesn't bloat.
+    #[test]
+    fn harvest_skips_weight_blobs() -> anyhow::Result<()> {
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+            std::fs::write(snap.path().join(weight), b"WEIGHTS")?;
+        }
+        super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
+        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+            assert!(!slug.path().join(weight).exists());
+        }
+        Ok(())
+    }
+
+    /// Missing snapshot dir is best-effort: no error, no work.
+    #[test]
+    fn harvest_tolerates_missing_snapshot() -> anyhow::Result<()> {
+        let slug = tempfile::tempdir()?;
+        super::harvest_siblings(
+            &slug.path().join("does-not-exist"),
+            slug.path(),
+            &Default::default(),
+        )?;
+        Ok(())
+    }
+
+    /// Names in `typed_filenames` survive a harvest pass even when the
+    /// snapshot dir contains a different file at the same basename — the
+    /// resolve loop's typed slots own those.
+    #[test]
+    fn harvest_preserves_typed_filenames() -> anyhow::Result<()> {
+        let blob_dir = tempfile::tempdir()?;
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+
+        // Typed slot: blob in the dynamo cache; slug_dir links to it.
+        let typed_blob = blob_dir.path().join("config-blob");
+        std::fs::write(&typed_blob, b"typed-slot-content")?;
+        super::symlink_force(&typed_blob, &slug.path().join("config.json"))?;
+
+        // Snapshot dir has a different `config.json` — the stale-payload
+        // case the harvest must NOT import over the typed slot.
+        std::fs::write(snap.path().join("config.json"), b"STALE-DO-NOT-IMPORT")?;
+        std::fs::write(snap.path().join("special_tokens_map.json"), b"st")?;
+
+        let typed_filenames: std::collections::HashSet<String> =
+            ["config.json".to_string()].into_iter().collect();
+        super::harvest_siblings(snap.path(), slug.path(), &typed_filenames)?;
+
+        // Content equality is portable: `symlink_force` degrades to a copy
+        // on non-Unix, so we can't depend on `is_symlink()`.
+        assert_eq!(
+            std::fs::read(slug.path().join("config.json"))?,
+            b"typed-slot-content"
+        );
+        assert!(slug.path().join("special_tokens_map.json").exists());
+        Ok(())
     }
 }
