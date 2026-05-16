@@ -563,7 +563,7 @@ current optimum instead of relying on a one-shot launch decision.
 
 ## Related Guides
 
-- [Mocker trace replay](https://docs.nvidia.com/dynamo/dev/benchmarks/mocker-trace-replay)
+- [Mocker trace replay](../../benchmarks/mocker-trace-replay.md)
 - [Profiler guide](https://docs.nvidia.com/dynamo/dev/components/profiler/profiler-guide)
 - [Router guide](https://docs.nvidia.com/dynamo/dev/components/router/router-guide)
 - [Planner guide](https://docs.nvidia.com/dynamo/dev/components/planner/planner-guide)
