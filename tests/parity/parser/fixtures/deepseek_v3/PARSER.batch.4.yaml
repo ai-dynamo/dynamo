@@ -17,12 +17,16 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: None
+      dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
   PARSER.batch.4.b:
     description: Missing close brace inside fenced JSON
     ref: dynamo
@@ -34,16 +38,20 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-        ```json
-        {"location": "NYC"
-        ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': '{"location": "NYC"'}]
-    #   normal_text: None
+      dynamo: &id002
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"location": "NYC"
+          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "NYC"'
+        normal_text: ''
+      sglang: *id002
   PARSER.batch.4.c:
     description: Missing function name token
     ref: dynamo
@@ -55,16 +63,23 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
-        ```json
-        {"location": "NYC"}
-        ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: [{'name': '', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: None
+      dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
+          ```json
+          {"location": "NYC"}
+          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls:
+        - name: ''
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
   PARSER.batch.4.d:
     description: Missing fenced JSON block (no ```json)
     ref: dynamo
@@ -74,12 +89,21 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: None
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          {"location": "NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+  PARSER.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in PARSER.batch.4.a through 4.d.

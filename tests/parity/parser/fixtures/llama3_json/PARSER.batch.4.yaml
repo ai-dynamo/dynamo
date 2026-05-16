@@ -17,12 +17,17 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<|python_tag|>not even json'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|python_tag|>not even json
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang:
+        calls: []
+        normal_text: not even json
+        reason: impl-defined recovery contract; strips python_tag before returning malformed action text
   PARSER.batch.4.b:
     description: Missing close brace
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L66
@@ -30,12 +35,17 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"'
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang:
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"'
+        reason: impl-defined recovery contract; strips python_tag before returning malformed action text
   PARSER.batch.4.c:
     description: Missing name key
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L234
@@ -43,9 +53,35 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<|python_tag|>{"arguments": {"location": "NYC"}}'
+      dynamo: &id002
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<|python_tag|>{"arguments": {"location": "NYC"}}'
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang: *id002
+  PARSER.batch.4.e:
+    description: Malformed JSON prefix followed by a valid complete call
+    ref: SGLang TestLlama32Detector.test_invalid_then_valid_json
+    model_text: '{"name": "get_weather", "arguments": {{"name": "get_weather", "arguments": {}}'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      dynamo: &id003
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {{"name": "get_weather", "arguments": {}}'
+      vllm: *id003
+      sglang:
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''
+        reason: SGLang Llama32Detector scans past the malformed prefix and recovers the later valid JSON object.
+  PARSER.batch.4.d:
+    description: Malformed variant 4.d — not applicable to this family
+    reason: |-
+      Malformed-input variant 4.d does not apply to llama3_json's parser syntax (no equivalent end-marker recovery scenario).

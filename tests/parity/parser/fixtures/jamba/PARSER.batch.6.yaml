@@ -9,37 +9,47 @@ cases:
     ref: dynamo
     model_text: '<tool_calls>[{"name": "get_time", "arguments": {}}]</tool_calls>'
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
     model_text: '<tool_calls>[{"name": "get_time", "arguments": { }}]</tool_calls>'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id003
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
     model_text: '<tool_calls>[{"name": "get_time"}]</tool_calls>'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<tool_calls>[{"name": "get_time"}]</tool_calls>'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_time"}]</tool_calls>'
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'

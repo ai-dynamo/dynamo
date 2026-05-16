@@ -15,7 +15,7 @@ cases:
       </parameter>
       </function>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -23,11 +23,14 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L943
@@ -39,20 +42,30 @@ cases:
       </function>
       </tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: |-
-        <function=get_weather>
-        <parameter=location>
-        NYC
-        </parameter>
-        </function>
-        </tool_call>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: None
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang:
+        calls: []
+        normal_text: |-
+          <function=get_weather>
+          <parameter=location>
+          NYC
+          </parameter>
+          </function>
+          </tool_call>
   PARSER.batch.5.c:
     description: Truncation mid-parameter value
     ref: dynamo
@@ -62,10 +75,89 @@ cases:
       <parameter=location>
       NY
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NY
-      normal_text: ''
+      dynamo: &id003
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      vllm: *id003
+      sglang: *id003
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      Boston
+      </parameter>
+      </function>
+      </tool_call>
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      New York
+      </parameter>
+      </function>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm: *id004
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      Boston
+      </parameter>
+      </function>
+      </tool_call>
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      New York
+    tools:
+    - *id002
+    expected:
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm: *id005
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
