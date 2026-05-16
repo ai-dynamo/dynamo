@@ -232,8 +232,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             }
         }
 
-        // Keep token IDs available for optional nvext emission.
-        let completion_token_ids_for_nvext: Vec<TokenIdType> = delta.token_ids.clone();
+        // Keep token IDs available for optional nvext emission only when requested.
+        let completion_token_ids_for_nvext = if self.options.response_fields.completion_token_ids {
+            Some(delta.token_ids.clone())
+        } else {
+            None
+        };
         let logprobs = self.create_logprobs(
             delta.tokens,
             delta.token_ids,
@@ -266,7 +270,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
-            Some(&completion_token_ids_for_nvext),
+            completion_token_ids_for_nvext.as_deref(),
             prompt_logprobs_payload,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
