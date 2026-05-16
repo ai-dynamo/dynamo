@@ -780,6 +780,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_report_instance_down_preserves_busy_state() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_report_down_preserves_busy".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_avail().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        client.set_busy_instances(&[worker_id]);
+        client.report_instance_down(worker_id);
+
+        assert!(
+            !client.instance_ids_avail().contains(&worker_id),
+            "reported-down worker should leave routable availability"
+        );
+        assert_eq!(
+            client.routing_instance_counts().busy,
+            1,
+            "reported-down worker should remain busy while still discovered"
+        );
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "reported-down busy worker should not become free"
+        );
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        for _ in 0..10 {
+            if client.routing_instance_counts().busy == 0 {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(
+            client.routing_instance_counts().busy,
+            0,
+            "stable discovery removal should clear busy state"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn test_instance_reconciliation_prunes_removed_busy_instances() {
         const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
 

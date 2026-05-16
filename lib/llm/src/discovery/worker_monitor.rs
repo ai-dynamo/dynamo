@@ -573,10 +573,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
 
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
-                        if !removed_workers.is_empty() {
-                            client.clear_busy_instances_for_removed(&removed_workers);
-                            previous_busy_instances.retain(|id| !removed_workers.contains(id));
-                        }
 
                         // Update worker load states with runtime config values for all dp_ranks
                         // This ensures we track workers from MDCs even if they don't publish ActiveLoad
@@ -717,11 +713,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
-                            for worker_id in &removed_workers {
-                                worker_load_states.remove(worker_id);
-                            }
-                            client.clear_busy_instances_for_removed(&removed_workers);
-                            previous_busy_instances.retain(|id| !removed_workers.contains(id));
                         }
 
                         known_decode_workers = current_instances;
@@ -771,17 +762,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
-                            let removed_busy_workers = removed_workers
-                                .iter()
-                                .copied()
-                                .filter(|worker_id| !known_decode_workers.contains(worker_id))
-                                .collect::<Vec<_>>();
-                            for worker_id in &removed_busy_workers {
-                                worker_load_states.remove(worker_id);
-                            }
-                            client.clear_busy_instances_for_removed(&removed_busy_workers);
-                            previous_busy_instances
-                                .retain(|id| !removed_busy_workers.contains(id));
                         }
 
                         known_prefill_workers = current_instances;
