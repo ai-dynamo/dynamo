@@ -260,6 +260,7 @@ def vllm_omni_config_test(request):
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 def test_omni_serve_deployment(
     vllm_omni_config_test,

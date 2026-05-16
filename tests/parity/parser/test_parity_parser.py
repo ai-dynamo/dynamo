@@ -43,7 +43,12 @@ import yaml
 
 from tests.parity import common
 
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.core,
+]
 
 FIXTURES_ROOT = Path(__file__).parent / "fixtures"
 

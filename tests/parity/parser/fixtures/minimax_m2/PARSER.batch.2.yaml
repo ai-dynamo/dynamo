@@ -83,6 +83,7 @@ cases:
             timezone: EST
         normal_text: |2+
 
+        reason: "SGLang parser preserves the newline separator between adjacent MiniMax tool-call wrappers (`</minimax:tool_call>\\n<minimax:tool_call>`)."
   PARSER.batch.2.c:
     description: Parallel with surrounding narration
     ref: dynamo
@@ -118,6 +119,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: 'Both:  Done.'
+        reason: "SGLang preserves normal text after parsed MiniMax tool-call wrappers; Dynamo aligns with vLLM by keeping only text before the first parsed tool call."
   PARSER.batch.2.d:
     description: Same-name twice
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L331

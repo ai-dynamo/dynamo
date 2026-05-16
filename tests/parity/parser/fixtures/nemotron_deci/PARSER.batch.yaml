@@ -73,3 +73,33 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 would only exercise Dynamo-local JSON-array parsing here because neither vLLM nor SGLang has a nemotron_deci peer parser. Until a peer exists, this cross-implementation matrix intentionally treats the separator-state case as n/a for this family.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 would only exercise Dynamo-local JSON-array parsing here because neither vLLM nor SGLang has a nemotron_deci peer parser. Until a peer exists, this cross-implementation matrix intentionally treats the separator-state case as n/a for this family. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "unknown_tool", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'

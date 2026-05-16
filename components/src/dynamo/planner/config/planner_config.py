@@ -238,6 +238,13 @@ class PlannerConfig(BaseModel):
             "instead of the default timestamped name."
         ),
     )
+    report_write_gzip_log: bool = Field(
+        default=True,
+        description=(
+            "Write a compressed JSONL diagnostics log next to each HTML report. "
+            "The gzip sidecar uses the same report basename with .log.jsonl.gz."
+        ),
+    )
     live_dashboard_port: int = Field(
         default=8080,
         description=(
