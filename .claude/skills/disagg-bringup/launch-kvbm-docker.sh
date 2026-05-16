@@ -3,6 +3,16 @@
 #
 # Hard-won lessons from 2026-05-15 session:
 #
+# 7. Use `cache: {device: {}}` NOT `cache: {host: {...}}` in Docker on dlcluster.
+#    - `host` cache auto-enables UCX for inter-worker KV transfer: if UCX is
+#      unavailable (Docker on b100_preprod, 4u4g) → `No UCX plugin found`
+#    - `device` cache uses GPU memory (CUDA IPC) for same-node P+D → no UCX needed
+#    Set this in BOTH leader (decode) and worker (prefill) configs.
+#
+# 8. Do NOT specify explicit nixl.backends in the worker config. Let NIXL
+#    auto-discover. Specifying {"POSIX": {}} causes "No POSIX plugin found"
+#    because the named-backend path uses a different NIXL lookup API.
+#
 # 6. LD_LIBRARY_PATH must point to the WHEEL's NIXL, NOT the system NIXL.
 #    The system NIXL at /opt/nvidia/nvda_nixl was built against an old ABI (e.g.
 #    nixl-cu12==0.10.1). The WHEEL's NIXL (nixl-cu12 or nixl-cu13 in the venv)
