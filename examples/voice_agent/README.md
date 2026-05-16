@@ -1,7 +1,8 @@
 # Voice Agent
 
 This is the start of an end-to-end voice agent example. For now it contains a
-minimal local realtime deployment and a Python WebSocket client.
+minimal local realtime deployment, a Python backend, and a Python WebSocket
+client.
 
 This branch includes the realtime protocol and `ModelManager` wiring from the
 open realtime PRs. The public WebSocket endpoint exchanges OpenAI Realtime
@@ -13,6 +14,9 @@ The example keeps the normal Dynamo shape: a frontend process owns the
 HTTP/WebSocket server, and a backend process connects to the frontend and does
 the echo work. The bridge between them is still example-local because remote
 bidirectional request-plane dispatch is separate follow-up work.
+
+The backend bridge uses newline-delimited JSON Realtime events, so the Python
+backend does not need Rust realtime type bindings yet.
 
 ## Run the realtime frontend
 
@@ -32,14 +36,13 @@ exposes:
 
 It also listens for the backend bridge connection on `127.0.0.1:8081`.
 
-## Run the realtime backend
+## Run the Python realtime backend
 
 In a second terminal:
 
 ```bash
-CARGO_TARGET_DIR=/mnt/scratch/nealv/cargo/targets \
-cargo run --manifest-path examples/voice_agent/realtime/Cargo.toml \
-  --bin voice-agent-realtime-backend -- --connect 127.0.0.1:8081
+PYTHON=/mnt/scratch/nealv/venvs/dynamo_realtime/bin/python
+"$PYTHON" examples/voice_agent/backend.py --connect 127.0.0.1:8081
 ```
 
 The backend echoes appended audio bytes by streaming
@@ -67,7 +70,9 @@ the original text.
 ## Current Limitations
 
 - This is an audio-event echo scaffold, not a full voice agent yet.
-- The frontend/backend bridge is local-only and not the final Dynamo realtime
-  request plane.
+- The frontend/backend bridge is local-only JSON and not the final Dynamo
+  realtime request plane.
+- A true Python Dynamo realtime worker will need bindings and runtime support
+  for bidirectional Realtime event streams once remote dispatch lands.
 - Audio is treated as opaque base64 payload for now; there is no capture,
   playback, VAD, transcription, or model inference.
