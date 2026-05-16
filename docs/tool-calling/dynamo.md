@@ -150,3 +150,10 @@ OpenAI-compatible `tool_calls` entries on the response:
   ...
 }
 ```
+
+> [!TIP]
+> If `tool_calls` is `null`, the arguments look malformed, or raw
+> `<tool_call>` markers appear in `message.content`, add
+> `"logprobs": true` to a single repro request to see the raw model output
+> and localize the issue. See
+> [Troubleshooting Tool Calls](troubleshooting.md).
