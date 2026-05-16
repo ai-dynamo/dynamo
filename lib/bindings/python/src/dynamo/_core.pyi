@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -514,6 +515,7 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     enable_eagle: bool
+    taints: Set[str]
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -544,6 +546,26 @@ class ModelRuntimeConfig:
     def get_tensor_model_config(self) -> Any | None:
         """Get the tensor model configuration."""
         ...
+
+class RoutingConstraints:
+    """
+    Request-side routing constraints.
+
+    ``required_taints`` is a hard eligibility filter.
+    ``preferred_taints`` maps taint -> signed weight.
+    Positive weights prefer matching workers, negative weights avoid them,
+    and ``0.0`` is neutral. Matching weights are summed and squashed with
+    ``tanh``, so opposite preferences cancel before Dynamo converts the
+    bounded bias into a strictly positive score multiplier.
+    """
+    required_taints: Set[str]
+    preferred_taints: Dict[str, float]
+
+    def __init__(
+        self,
+        required_taints: Optional[Set[str]] = None,
+        preferred_taints: Optional[Dict[str, float]] = None,
+    ) -> None: ...
 
 class OverlapScores:
     """
@@ -1998,6 +2020,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         multi_modal_data: Optional[JsonLike] = None,
         mm_routing_info: Optional[JsonLike] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -2026,6 +2049,7 @@ class KvRouter:
             mm_routing_info: Optional structured routing-only multimodal payload
                             (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
                             used by router selection without changing execution token_ids.
+            routing_constraints: Optional request routing constraints used to constrain or prefer tainted workers.
 
         Returns:
             An async iterator yielding generation responses
@@ -2059,6 +2083,7 @@ class KvRouter:
         update_indexer: bool = False,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.

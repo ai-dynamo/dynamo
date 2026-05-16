@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
+use super::local_model::RoutingConstraints;
 use super::*;
 use crate::Endpoint;
 #[cfg(feature = "kv-indexer")]
@@ -957,7 +958,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None))]
+    #[pyo3(signature = (token_ids, model, stop_conditions=None, sampling_options=None, output_options=None, router_config_override=None, worker_id=None, dp_rank=None, extra_args=None, block_mm_infos=None, multi_modal_data=None, mm_routing_info=None, routing_constraints=None))]
     fn generate<'p>(
         &self,
         py: Python<'p>,
@@ -973,6 +974,7 @@ impl KvRouter {
         block_mm_infos: Option<PyObject>,
         multi_modal_data: Option<PyObject>,
         mm_routing_info: Option<PyObject>,
+        routing_constraints: Option<RoutingConstraints>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
         let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
@@ -1048,10 +1050,11 @@ impl KvRouter {
             .tracker(Some(tracker.clone()));
 
         // Set routing hints if worker_id or dp_rank is provided
-        if worker_id.is_some() || dp_rank.is_some() {
+        if worker_id.is_some() || dp_rank.is_some() || routing_constraints.is_some() {
             let routing = llm_rs::protocols::common::preprocessor::RoutingHints {
                 backend_instance_id: worker_id,
                 dp_rank,
+                routing_constraints: routing_constraints.map(Into::into),
                 ..Default::default()
             };
             request_builder.routing(Some(routing));
@@ -1087,7 +1090,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -1097,6 +1100,7 @@ impl KvRouter {
         update_indexer: bool,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
+        routing_constraints: Option<RoutingConstraints>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1125,6 +1129,7 @@ impl KvRouter {
                     0.0,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
+                    routing_constraints.map(Into::into).unwrap_or_default(),
                 )
                 .await
                 .map_err(to_pyerr)?;
