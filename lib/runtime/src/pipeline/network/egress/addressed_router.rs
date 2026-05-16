@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::time::Instant;
+use std::{collections::BTreeMap};
 
 use super::unified_client::RequestPlaneClient;
 use super::*;
@@ -56,6 +57,8 @@ struct RequestControlMessage {
     request_type: RequestType,
     response_type: ResponseType,
     connection_info: ConnectionInfo,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    metadata: BTreeMap<String, String>,
     /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
     /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
     /// Reliable for single-machine profiling; treat cross-host values as approximate.
@@ -255,6 +258,7 @@ where
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
             connection_info,
+            metadata: context.metadata().clone(),
             frontend_send_ts_ns: None,
         };
 

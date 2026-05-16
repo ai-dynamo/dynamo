@@ -11,6 +11,7 @@ from typing import (
     Dict,
     List,
     Literal,
+    MutableMapping,
     Optional,
     Tuple,
 )
@@ -340,18 +341,29 @@ def compute_block_hash_for_seq(
 
     ...
 
+class ContextMetadata(MutableMapping[str, str]):
+    """
+    Live mutable view over propagated context metadata.
+    """
+    ...
+
 class Context:
     """
     Context wrapper around AsyncEngineContext for Python bindings.
     Provides tracing and cancellation capabilities for request handling.
     """
 
-    def __init__(self, id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        id: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
         """
         Create a new Context instance.
 
         Args:
             id: Optional request ID. If None, a default ID will be generated.
+            metadata: Optional propagated metadata map.
         """
         ...
 
@@ -403,6 +415,16 @@ class Context:
         requests. Engines normally don't need this — the framework
         auto-fires on the first non-empty chunk in the response stream."""
         ...
+
+    @property
+    def metadata(self) -> ContextMetadata:
+        """
+        Get the live propagated context metadata mapping.
+        """
+        ...
+
+    @metadata.setter
+    def metadata(self, metadata: Dict[str, str]) -> None: ...
 
     @property
     def trace_id(self) -> Optional[str]:

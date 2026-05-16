@@ -568,7 +568,15 @@ impl LLMEngine for PyLLMEngine {
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, PyContext::new(inner_ctx, trace_context, first_token))?;
+                let py_ctx = Py::new(
+                    py,
+                    PyContext::new(
+                        inner_ctx,
+                        trace_context,
+                        first_token,
+                        ctx.metadata().clone(),
+                    ),
+                )?;
 
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("context", &py_ctx)?;
@@ -659,7 +667,10 @@ impl LLMEngine for PyLLMEngine {
             let py_future = tokio::task::spawn_blocking(move || {
                 Python::with_gil(|py| -> PyResult<_> {
                     let bound = engine.bind(py);
-                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context, None))?;
+                    let py_ctx = Py::new(
+                        py,
+                        PyContext::new(ctx, trace_context, None, Default::default()),
+                    )?;
                     let coroutine = bound.call_method1("abort", (py_ctx,))?;
                     let locals = TaskLocals::new(event_loop.bind(py).clone());
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)

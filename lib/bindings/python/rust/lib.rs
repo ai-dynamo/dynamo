@@ -121,7 +121,11 @@ fn create_request_context(
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
-            let child_ctx = RsContext::with_id(request, parent_ctx.inner().id().to_string());
+            let child_ctx = RsContext::with_id_and_metadata(
+                request,
+                parent_ctx.inner().id().to_string(),
+                parent_ctx.metadata_snapshot(),
+            );
             parent_ctx.inner().link_child(child_ctx.context());
             if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
                 // Let the server handle the cancellation for now since not all backends are
@@ -195,6 +199,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
+    m.add_class::<context::ContextMetadata>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::KvRouter>()?;

@@ -241,7 +241,8 @@ where
         // extend request with context
         tracing::trace!("received control message: {:?}", control_msg);
         tracing::trace!("received request: {:?}", request);
-        let request: context::Context<T> = Context::with_id(request, control_msg.id);
+        let request: context::Context<T> =
+            Context::with_id_and_metadata(request, control_msg.id, control_msg.metadata);
 
         // todo - eventually have a handler class which will returned an abstracted object, but for now,
         // we only support tcp here, so we can just unwrap the connection info

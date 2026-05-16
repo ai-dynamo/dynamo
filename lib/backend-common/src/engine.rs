@@ -12,6 +12,7 @@
 
 use std::ops::Deref;
 use std::sync::Arc;
+use std::{collections::BTreeMap};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -37,6 +38,7 @@ pub struct GenerateContext {
     /// Decode-mode first-token signal. `Some` only on decode-mode requests;
     /// `None` otherwise.
     first_token: Option<watch::Sender<bool>>,
+    metadata: BTreeMap<String, String>,
 }
 
 impl GenerateContext {
@@ -44,7 +46,23 @@ impl GenerateContext {
         inner: Arc<dyn AsyncEngineContext>,
         first_token: Option<watch::Sender<bool>>,
     ) -> Self {
-        Self { inner, first_token }
+        Self {
+            inner,
+            first_token,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_metadata(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<watch::Sender<bool>>,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            inner,
+            first_token,
+            metadata,
+        }
     }
 
     /// Clone the underlying runtime context Arc — for spawned tasks
@@ -69,6 +87,10 @@ impl GenerateContext {
     /// call [`notify_first_token`](Self::notify_first_token) instead.
     pub fn first_token_sender(&self) -> Option<&watch::Sender<bool>> {
         self.first_token.as_ref()
+    }
+
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        &self.metadata
     }
 }
 
