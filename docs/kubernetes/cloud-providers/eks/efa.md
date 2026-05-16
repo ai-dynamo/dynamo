@@ -317,4 +317,3 @@ kubectl logs <decode-pod> | grep "External prefix cache hit rate"
 - [AWS EFA documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) — EC2-side EFA overview
 - [`aws/eks-charts` — `aws-efa-k8s-device-plugin`](https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin) — Helm chart source
 - [ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/issues/12019) — CUDA dmabuf registration on EFA
-

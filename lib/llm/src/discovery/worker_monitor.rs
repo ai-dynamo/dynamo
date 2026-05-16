@@ -677,7 +677,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // Only update if busy_instances has changed
                         if busy_instances != previous_busy_instances {
                             let total_workers = client.instance_ids().len();
-                            client.update_free_instances(&busy_instances);
+                            client.set_busy_instances(&busy_instances);
                             let free_workers = client.instance_ids_free().len();
                             tracing::debug!(
                                 busy_instances = ?busy_instances,

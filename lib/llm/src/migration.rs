@@ -8,16 +8,39 @@ use anyhow::{Error, Result};
 use futures::{stream, stream::StreamExt};
 
 use crate::{
-    http::service::metrics::Metrics, model_card::ModelDeploymentCard, preprocessor::BackendOutput,
-    protocols::common::llm_backend::PreprocessedRequest,
+    http::service::metrics::Metrics,
+    model_card::ModelDeploymentCard,
+    protocols::{
+        TokenIdType,
+        common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+    },
 };
 
+use dynamo_runtime::engine::Data;
 use dynamo_runtime::error::{self, BackendError, DynamoError, ErrorType};
 use dynamo_runtime::pipeline::{
-    AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream,
-    ServerStreamingEngine, SingleIn, async_trait,
+    AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
+    ResponseStream, ServerStreamingEngine, SingleIn, async_trait,
 };
-use dynamo_runtime::protocols::{annotated::Annotated, maybe_error::MaybeError};
+use dynamo_runtime::protocols::annotated::Annotated;
+
+/// Access to the generated token IDs of a response, so migration can
+/// append already-delivered tokens onto the replayed request.
+pub(crate) trait HasTokenIds {
+    fn token_ids(&self) -> &[TokenIdType];
+}
+
+impl HasTokenIds for BackendOutput {
+    fn token_ids(&self) -> &[TokenIdType] {
+        &self.token_ids
+    }
+}
+
+impl HasTokenIds for LLMEngineOutput {
+    fn token_ids(&self) -> &[TokenIdType] {
+        &self.token_ids
+    }
+}
 
 /// Check if an error chain indicates the request should be migrated.
 fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
@@ -72,22 +95,44 @@ impl Migration {
             metrics,
         )
     }
+
+    /// Wrap as a `PipelineOperator` over the given response type to
+    /// disambiguate between the `Operator` impls on `Migration` since
+    /// the response type doesn't appear in the struct.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_operator_for<Resp>(
+        self: &Arc<Self>,
+    ) -> Arc<
+        PipelineOperator<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<Resp>>,
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<Resp>>,
+        >,
+    >
+    where
+        Resp: Data + HasTokenIds,
+    {
+        Operator::into_operator(self)
+    }
 }
 
 #[async_trait]
-impl
+impl<Resp>
     Operator<
         SingleIn<PreprocessedRequest>,
-        ManyOut<Annotated<BackendOutput>>,
+        ManyOut<Annotated<Resp>>,
         SingleIn<PreprocessedRequest>,
-        ManyOut<Annotated<BackendOutput>>,
+        ManyOut<Annotated<Resp>>,
     > for Migration
+where
+    Resp: Data + HasTokenIds,
 {
     async fn generate(
         &self,
         request: SingleIn<PreprocessedRequest>,
-        next: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
-    ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
+    ) -> Result<ManyOut<Annotated<Resp>>> {
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
@@ -112,22 +157,28 @@ impl
     }
 }
 
-struct RetryManager {
+struct RetryManager<Resp>
+where
+    Resp: Data + HasTokenIds,
+{
     context: Arc<dyn AsyncEngineContext>,
     request: PreprocessedRequest,
-    next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
-    next_stream: Option<ManyOut<Annotated<BackendOutput>>>,
+    next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
+    next_stream: Option<ManyOut<Annotated<Resp>>>,
     retries_left: u32,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
 }
 
-impl RetryManager {
+impl<Resp> RetryManager<Resp>
+where
+    Resp: Data + HasTokenIds,
+{
     pub async fn build(
         context: Arc<dyn AsyncEngineContext>,
         preprocessed_request: PreprocessedRequest,
-        next: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
         mut retries_left: u32,
         max_seq_len: Option<u32>,
         model_name: Arc<String>,
@@ -176,24 +227,24 @@ impl RetryManager {
         Ok(slf)
     }
 
-    pub async fn next(&mut self) -> Option<Annotated<BackendOutput>> {
+    pub async fn next(&mut self) -> Option<Annotated<Resp>> {
         loop {
             let response_stream = match self.next_stream.as_mut() {
                 Some(stream) => stream,
                 None => {
                     tracing::error!("next() called with next_stream is None - should not happen");
-                    return Some(Annotated::from_err(DynamoError::msg("next_stream is None")));
+                    return Some(Annotated::from_error("next_stream is None"));
                 }
             };
             if let Some(response) = response_stream.next().await {
                 // Check if this is a migratable error that should trigger stream recreation.
-                if let Some(err) = response.err()
-                    && is_migratable(&err)
+                if let Some(err) = response.error.as_ref()
+                    && is_migratable(err)
                 {
-                    tracing::warn!("Stream disconnected... recreating stream... {}", err);
+                    tracing::warn!(error = %err, "Stream disconnected, recreating stream");
                     self.metrics.inc_migration_ongoing_request(&self.model_name);
                     if let Err(err) = self.new_stream().await {
-                        tracing::warn!("Cannot recreate stream: {:#}", err);
+                        tracing::warn!(error = ?err, "Cannot recreate stream");
                     } else {
                         continue;
                     }
@@ -206,7 +257,7 @@ impl RetryManager {
     }
 
     async fn new_stream(&mut self) -> Result<()> {
-        let mut response_stream: Option<Result<ManyOut<Annotated<BackendOutput>>>> = None;
+        let mut response_stream: Option<Result<ManyOut<Annotated<Resp>>>> = None;
         while self.retries_left > 0 {
             self.retries_left -= 1;
             let request = Context::with_id(self.request.clone(), self.context.id().to_string());
@@ -226,7 +277,7 @@ impl RetryManager {
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
                 && is_migratable(err.as_ref())
             {
-                tracing::warn!("Creating new stream... retrying... {}", err);
+                tracing::warn!(error = %err, "Creating new stream, retrying");
                 self.metrics.inc_migration_new_request(&self.model_name);
                 continue;
             }
@@ -244,7 +295,7 @@ impl RetryManager {
         }
     }
 
-    fn track_response(&mut self, response: &Annotated<BackendOutput>) {
+    fn track_response(&mut self, response: &Annotated<Resp>) {
         if self.retries_left == 0 {
             return;
         }
@@ -252,14 +303,15 @@ impl RetryManager {
             Some(output) => output,
             None => return,
         };
-        if self.exceed_max_seq_len(llm_engine_output.token_ids.len() as u32) {
+        let token_ids = llm_engine_output.token_ids();
+        if self.exceed_max_seq_len(token_ids.len() as u32) {
             return;
         }
         if let Some(max_tokens) = self.request.stop_conditions.max_tokens {
             self.request.stop_conditions.max_tokens =
-                Some(max_tokens.saturating_sub(llm_engine_output.token_ids.len() as u32));
+                Some(max_tokens.saturating_sub(token_ids.len() as u32));
         }
-        for token_id in llm_engine_output.token_ids.iter() {
+        for token_id in token_ids.iter() {
             self.request.token_ids.push(*token_id);
         }
     }
@@ -296,6 +348,7 @@ mod tests {
     use dynamo_runtime::error::{DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::sync::mpsc;
 
@@ -1288,5 +1341,64 @@ mod tests {
         );
         // Migration was attempted but blocked (retries_left was already 0).
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+    }
+
+    /// Smoke test for the byo-preprocessor response shape.
+    #[tokio::test]
+    async fn test_retry_manager_generic_over_llm_engine_output() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+
+        struct LlmEngineMock(String);
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<LLMEngineOutput>>,
+                anyhow::Error,
+            > for LlmEngineMock
+        {
+            async fn generate(
+                &self,
+                _request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+                let responses = stream::iter((0..3u32).map(|i| {
+                    Annotated::from_data(LLMEngineOutput {
+                        token_ids: vec![200 + i],
+                        ..Default::default()
+                    })
+                }));
+                let ctx = Arc::new(Controller::new(self.0.clone()));
+                Ok(ResponseStream::new(Box::pin(responses), ctx))
+            }
+        }
+
+        let request = create_mock_request(3);
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(LlmEngineMock(context_id.clone()));
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            request,
+            next_generate,
+            1,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(r) = retry_manager.next().await {
+            responses.push(r);
+        }
+        assert_eq!(responses.len(), 3);
+        assert_eq!(
+            retry_manager.request.token_ids,
+            vec![1, 2, 3, 200, 201, 202]
+        );
     }
 }

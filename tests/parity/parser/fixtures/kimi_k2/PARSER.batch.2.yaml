@@ -63,25 +63,10 @@ cases:
     - *id002
     - *id003
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        - name: get_time
-          arguments:
-            timezone: EST
-        normal_text: I will check both.  Done.
-      vllm:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        - name: get_time
-          arguments:
-            timezone: EST
-        normal_text: 'I will check both. '
-      sglang:
+      # Kimi tool-call turns are intermediate: keep prefix content before the
+      # tool section, but drop post-wrapper narration until tool results
+      # produce final user-facing content.
+      dynamo: &d_2_c
         calls:
         - name: get_weather
           arguments:
@@ -90,6 +75,8 @@ cases:
           arguments:
             timezone: EST
         normal_text: 'I will check both. '
+      vllm: *d_2_c
+      sglang: *d_2_c
   PARSER.batch.2.d:
     description: Same-name twice (id distinctness)
     ref: dynamo
