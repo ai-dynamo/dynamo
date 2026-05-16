@@ -643,10 +643,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # sglang >= 0.5.11 already base64-encodes the routed_experts
-                    # tensor inside tokenizer_manager (upstream PR
-                    # sgl-project/sglang#21634). Pass the string through; the
-                    # frontend nvext mapping consumes it as-is.
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream (sgl#21634).
                     out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
@@ -740,9 +737,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     response_nvext["stop_reason"] = stop_reason
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
-                    # sglang >= 0.5.11 already base64-encodes the routed_experts
-                    # tensor inside tokenizer_manager (upstream PR
-                    # sgl-project/sglang#21634). Pass the string through.
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream (sgl#21634).
                     response_nvext["routed_experts"] = routed_experts
                 if response_nvext:
                     response["nvext"] = response_nvext

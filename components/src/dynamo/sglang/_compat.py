@@ -14,16 +14,10 @@ fallback branch must document which version it covers and when it can be
 removed. When the old version falls outside the support window, delete the
 fallback and any associated polyfills.
 
-Out of scope: runtime data-contract changes that do not change any import or
-function signature. Those live as inline comments at the call site. Current
-notes worth knowing:
+Runtime data-contract notes (not code-level shims):
 
-* ``meta_info["routed_experts"]`` is delivered as a pre-encoded base64 UTF-8
-  string from sglang >= 0.5.11 (upstream PR sgl-project/sglang#21634 plus the
-  ``isinstance(val, torch.Tensor)`` follow-up in v0.5.11's tokenizer_manager).
-  Consumers must pass it through, not re-encode. Enforced inline in
-  ``request_handlers/llm/decode_handler.py`` and pinned by
-  ``tests/test_routed_experts_passthrough.py``.
+* ``meta_info["routed_experts"]`` is a base64 UTF-8 string from sglang
+  >= 0.5.11 (sgl-project/sglang#21634). Pass through; do not re-encode.
 """
 
 import inspect
