@@ -74,9 +74,10 @@ dynamo_reap_and_exit() {
     # Shield bash from its own pgid TERM/INT; otherwise the kill below
     # boomerangs and re-enters this trap.
     trap '' TERM INT
-    if [[ -n "$(jobs -p)" ]]; then
-        kill -TERM 0 2>/dev/null || true  # whole pgid, including grandchildren
-    fi
+    # Always signal the pgid, not just when `jobs -p` is non-empty. A
+    # direct child reaped by `wait -n` upstream leaves jobs -p empty,
+    # but its subprocesses may still be alive in our pgid.
+    kill -TERM 0 2>/dev/null || true
     wait 2>/dev/null || true
     exit "$_rc"
 }
