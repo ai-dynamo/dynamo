@@ -15,7 +15,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 - **Default model:** `FastVideo/FastWan2.1-T2V-1.3B-Diffusers`.
 - **Typed API:** The worker builds `GeneratorConfig` once at startup and creates a `GenerationRequest` for each `/v1/videos` request.
-- **Optimized inference:** `torch.compile` and FP4 quantization are available through `--torch-compile` and `--fp4-quantization`; the legacy `--enable-optimizations` flag remains as a shortcut for both.
+- **Optimized inference:** `torch.compile` and NVFP4 transformer quantization are available through `--torch-compile` and `--fp4-quantization`; the legacy `--enable-optimizations` flag remains as a shortcut for both.
 - **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
@@ -27,15 +27,15 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 The local Docker workflow builds a runtime image from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile):
 
 - Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
-- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from a pinned Git commit with `fastvideo.api`
+- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from a pinned Git commit with `fastvideo.api` and NVFP4 transformer quantization support
 - Installs the `ai-dynamo` package with `/v1/videos` support
 - Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
 
-The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a` for Blackwell). Pass `--build-arg` to target a different architecture:
+The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a 12.0` for Blackwell data center GPUs and RTX 50-series GPUs). Pass `--build-arg` to target a different architecture:
 
 ```bash
 # Blackwell (default)
-docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a"
+docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a 12.0"
 
 # Hopper
 docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a"
@@ -229,6 +229,42 @@ jq -r '.data[0].b64_json' response.json | base64 --decode > output.mp4
 jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 ```
 
+### FullHD Video with Audio (LTX-2)
+
+LTX-2 models support native audio generation alongside video. To generate a FullHD clip with audio:
+
+Start the local example with an LTX-2 model:
+
+```bash
+cd <dynamo-root>/examples/diffusers/local
+
+MODEL=FastVideo/LTX2-Distilled-Diffusers \
+WORKER_EXTRA_ARGS="--attention-backend TORCH_SDPA" \
+./run_local.sh
+```
+
+Then send the request from another terminal:
+
+```bash
+curl -s -X POST http://localhost:8000/v1/videos \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "FastVideo/LTX2-Distilled-Diffusers",
+    "prompt": "A waterfall cascading into a forest pool, birds singing",
+    "size": "1920x1080",
+    "response_format": "b64_json",
+    "nvext": {
+      "fps": 24,
+      "num_frames": 121,
+      "num_inference_steps": 5,
+      "guidance_scale": 1.0,
+      "seed": 42
+    }
+  }'
+```
+
+FastVideo exposes generated audio and `audio_sample_rate` on its Python result object. This Dynamo worker returns the saved MP4 in `data[0].b64_json`, with FastVideo muxing the generated 24 kHz audio into the MP4 output.
+
 ## Worker Configuration Reference
 
 ### CLI Flags
@@ -240,7 +276,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | `--attention-backend` | `VIDEO_SPARSE_ATTN` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
 | `--vsa-sparsity` | `0.8` | Sets `PipelineSelection.experimental["VSA_sparsity"]` |
 | `--torch-compile` | off | Enables FastVideo `CompileConfig` |
-| `--fp4-quantization` | off | Requests FP4 transformer quantization through `QuantizationConfig` |
+| `--fp4-quantization` | off | Requests FastVideo NVFP4 transformer quantization through `QuantizationConfig(transformer_quant="NVFP4")` |
 | `--enable-optimizations` | off | Backward-compatible shortcut for `--torch-compile --fp4-quantization` |
 | `--dit-cpu-offload`, `--vae-cpu-offload`, `--text-encoder-cpu-offload`, `--image-encoder-cpu-offload`, `--pin-cpu-memory` | on | CPU offload controls; each has a `--no-*` variant |
 | `--max-video-width`, `--max-video-height` | `4096`, `4096` | Reject request dimensions above these caps before calling FastVideo |
@@ -254,7 +290,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | `num_frames` | `125` | Total frames; overrides `fps * seconds` when set |
 | `num_inference_steps` | `50` | Diffusion inference steps |
 | `guidance_scale` | `1.0` | Classifier-free guidance scale |
-| `seed` | `1024` | RNG seed for reproducibility |
+| `seed` | FastVideo preset | RNG seed override for reproducibility |
 | `negative_prompt` | — | Text to avoid in generation |
 
 ### Environment Variables
@@ -272,11 +308,11 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | Symptom | Cause | Fix |
 |---|---|---|
 | OOM during Docker build | `flash-attention` compilation uses too much RAM | Pass `--build-arg MAX_JOBS=2` (or lower) at build time |
-| `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper) |
+| `no kernel image available for this GPU` or CUDA arch error at runtime | Image was built for a different GPU architecture | Rebuild with the correct `TORCH_CUDA_ARCH_LIST` (e.g. `9.0 9.0a` for Hopper or `12.0` for RTX 50-series) |
 | 10–20 min wait on first start with `--torch-compile` enabled | Model download + `torch.compile` warmup | Expected behavior; subsequent starts are faster if weights are cached |
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
-| Lower throughput than expected on B200/B300 | FP4/compile are opt-in | Pass `--torch-compile --fp4-quantization` |
-| Startup or import failure after enabling FP4/compile or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--torch-compile --fp4-quantization`, or use `--attention-backend TORCH_SDPA` |
+| Lower throughput than expected on Blackwell GPUs | NVFP4/compile are opt-in | Pass `--torch-compile --fp4-quantization` |
+| Startup or import failure after enabling FP4/compile or changing the attention backend | NVFP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--torch-compile --fp4-quantization`, or use `--attention-backend TORCH_SDPA` |
 
 ## Source Code
 

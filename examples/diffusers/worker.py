@@ -87,7 +87,7 @@ DEFAULT_FPS = 24
 DEFAULT_NUM_FRAMES = 125
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 1.0
-DEFAULT_SEED = 1024
+DEFAULT_SEED = None
 DEFAULT_MAX_VIDEO_WIDTH = 4096
 DEFAULT_MAX_VIDEO_HEIGHT = 4096
 DEFAULT_RESPONSE_FORMAT = "b64_json"
@@ -195,6 +195,53 @@ def _coerce_optional_float(value: object) -> float | None:
         return None
 
 
+def _supports_fp4_quantization() -> bool:
+    try:
+        import torch
+    except ImportError as exc:
+        logger.warning(
+            "NVFP4 quantization requested but torch is unavailable. "
+            "Continuing without NVFP4 quantization: %s",
+            exc,
+        )
+        return False
+
+    try:
+        major, minor = torch.cuda.get_device_capability()
+    except (AssertionError, RuntimeError) as exc:
+        logger.warning(
+            "NVFP4 quantization requested but CUDA device capability could not be "
+            "detected. Continuing without NVFP4 quantization: %s",
+            exc,
+        )
+        return False
+
+    if major < 10:
+        logger.warning(
+            "NVFP4 quantization is only supported on NVIDIA Blackwell GPUs "
+            "(compute capability 10.0+). Detected compute capability: %d.%d. "
+            "Continuing without NVFP4 quantization.",
+            major,
+            minor,
+        )
+        return False
+
+    try:
+        from fastvideo.layers.quantization import get_quantization_config
+
+        get_quantization_config("NVFP4")
+    except (ImportError, ValueError) as exc:
+        logger.warning(
+            "NVFP4 quantization requested but this FastVideo build does not provide "
+            "NVFP4 transformer quantization. Continuing without NVFP4 "
+            "quantization: %s",
+            exc,
+        )
+        return False
+
+    return True
+
+
 def _add_negatable_bool_argument(
     parser: argparse.ArgumentParser,
     flag_name: str,
@@ -259,9 +306,8 @@ class FastVideoBackend:
         experimental: dict[str, object] = {}
         if self.args.vsa_sparsity is not None:
             experimental["VSA_sparsity"] = self.args.vsa_sparsity
-        if enable_fp4_quantization:
-            quantization = QuantizationConfig(transformer_quant="FP4")
-            experimental["fp4_quantization"] = True
+        if enable_fp4_quantization and _supports_fp4_quantization():
+            quantization = QuantizationConfig(transformer_quant="NVFP4")
 
         return GeneratorConfig(
             model_path=self.model_name,
@@ -370,16 +416,19 @@ class FastVideoBackend:
         if nvext.guidance_scale_2 is not None:
             sampling_kwargs["guidance_scale_2"] = nvext.guidance_scale_2
 
-        return GenerationRequest(
-            prompt=prompt,
-            negative_prompt=nvext.negative_prompt,
-            sampling=SamplingConfig(**sampling_kwargs),
-            output=OutputConfig(
+        generation_kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "sampling": SamplingConfig(**sampling_kwargs),
+            "output": OutputConfig(
                 output_path=str(output_path),
                 save_video=True,
                 return_frames=False,
             ),
-        )
+        }
+        if nvext.negative_prompt is not None:
+            generation_kwargs["negative_prompt"] = nvext.negative_prompt
+
+        return GenerationRequest(**generation_kwargs)
 
     def _coerce_single_result(self, result: Any) -> Any:
         if isinstance(result, list):
@@ -419,7 +468,11 @@ class FastVideoBackend:
             seed=seed,
             nvext=nvext,
         )
-        result = self.generator.generate(generation_request)
+        try:
+            result = self.generator.generate(generation_request)
+        except Exception:
+            self._cleanup_staging_file(output_path, video_id)
+            raise
         result = self._coerce_single_result(result)
         video_path = Path(getattr(result, "video_path", None) or output_path)
         generation_time = _coerce_optional_float(
@@ -430,9 +483,25 @@ class FastVideoBackend:
             raise FileNotFoundError(f"FastVideo output video not found: {video_path}")
         return video_path, generation_time
 
+    def _cleanup_staging_file(self, video_path: Path | None, video_id: str) -> None:
+        if video_path is None:
+            return
+        try:
+            video_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning(
+                "[%s] Failed to delete staging video %s",
+                video_id,
+                video_path,
+                exc_info=True,
+            )
+
     async def _make_video_data(
         self,
         *,
+        video_id: str,
         output_format: str,
         response_format: str,
         video_path: Path,
@@ -442,15 +511,14 @@ class FastVideoBackend:
                 "FastVideo example worker only supports response_format='b64_json'"
             )
 
-        video_bytes = await asyncio.to_thread(video_path.read_bytes)
         try:
-            await asyncio.to_thread(video_path.unlink)
-        except FileNotFoundError:
-            pass
-        return VideoData(
-            output_format=output_format,
-            b64_json=base64.b64encode(video_bytes).decode("utf-8"),
-        )
+            video_bytes = await asyncio.to_thread(video_path.read_bytes)
+            return VideoData(
+                output_format=output_format,
+                b64_json=base64.b64encode(video_bytes).decode("utf-8"),
+            )
+        finally:
+            self._cleanup_staging_file(video_path, video_id)
 
     # ── Dynamo endpoint ───────────────────────────────────────────────────────
 
@@ -460,6 +528,7 @@ class FastVideoBackend:
         started_at = time.time()
         video_id = f"video_{uuid.uuid4().hex}"
         created_ts = int(started_at)
+        video_path: Path | None = None
 
         try:
             if self.generator is None:
@@ -510,19 +579,58 @@ class FastVideoBackend:
             )
             async with self._generate_lock:
                 time_start = time.perf_counter()
-                video_path, generation_time = await asyncio.to_thread(
-                    self._generate_video,
-                    prompt=request.prompt,
-                    video_id=video_id,
-                    width=width,
-                    height=height,
-                    num_frames=num_frames,
-                    fps=fps,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    seed=seed,
-                    nvext=nvext,
+                generate_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self._generate_video,
+                        prompt=request.prompt,
+                        video_id=video_id,
+                        width=width,
+                        height=height,
+                        num_frames=num_frames,
+                        fps=fps,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        seed=seed,
+                        nvext=nvext,
+                    )
                 )
+                try:
+                    video_path, generation_time = await asyncio.shield(generate_task)
+                except asyncio.CancelledError:
+                    logger.info(
+                        "[%s] Request cancelled; waiting for FastVideo generation "
+                        "thread before releasing lock",
+                        video_id,
+                    )
+                    cancelled_video_path: Path | None = None
+                    while True:
+                        try:
+                            cancelled_video_path, _ = await asyncio.shield(
+                                generate_task
+                            )
+                            break
+                        except asyncio.CancelledError:
+                            if not generate_task.done():
+                                continue
+                            if generate_task.cancelled():
+                                break
+                            try:
+                                cancelled_video_path, _ = generate_task.result()
+                            except Exception:
+                                logger.exception(
+                                    "[%s] FastVideo generation failed after "
+                                    "cancellation",
+                                    video_id,
+                                )
+                            break
+                        except Exception:
+                            logger.exception(
+                                "[%s] FastVideo generation failed after cancellation",
+                                video_id,
+                            )
+                            break
+                    self._cleanup_staging_file(cancelled_video_path, video_id)
+                    raise
                 elapsed = time.perf_counter() - time_start
 
             if generation_time is not None:
@@ -539,6 +647,7 @@ class FastVideoBackend:
                 model=request.model,
                 data=[
                     await self._make_video_data(
+                        video_id=video_id,
                         output_format=output_format,
                         response_format=response_format,
                         video_path=video_path,
@@ -547,6 +656,7 @@ class FastVideoBackend:
                 inference_time_s=time.time() - started_at,
             ).model_dump()
         except asyncio.CancelledError:
+            self._cleanup_staging_file(video_path, video_id)
             raise
         except Exception as exc:
             logger.exception("[%s] Generation failed", video_id)
@@ -672,7 +782,7 @@ def _parse_args() -> argparse.Namespace:
         "--fp4-quantization",
         action="store_true",
         dest="fp4_quantization",
-        help="Request FP4 transformer quantization through QuantizationConfig.",
+        help="Request NVFP4 transformer quantization through QuantizationConfig.",
     )
     _add_negatable_bool_argument(
         parser,
