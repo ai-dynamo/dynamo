@@ -1577,8 +1577,9 @@ async fn responses(
     check_ready(&state)?;
 
     // Apply template values if present. When no template and no client-supplied
-    // max_output_tokens, leave it as None and let the underlying engine apply its
-    // own default — matching the chat completions path.
+    // max_output_tokens, leave it as None for response echoing; the Responses
+    // to Chat conversion applies a bounded internal generation cap before the
+    // request reaches a backend.
     if let Some(template) = template {
         if request.inner.model.as_deref().unwrap_or("").is_empty() {
             request.inner.model = Some(template.model.clone());
