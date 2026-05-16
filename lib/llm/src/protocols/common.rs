@@ -343,18 +343,6 @@ pub struct SamplingOptions {
 
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,
-
-    /// When `Some(false)`, the engine should skip text decoding if supported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize: Option<bool>,
-
-    /// Token IDs that are allowed during generation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_token_ids: Option<Vec<TokenIdType>>,
-
-    /// Token ID sequences that must not be generated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bad_words_token_ids: Option<Vec<Vec<TokenIdType>>>,
 }
 
 /// Guided Decoding Options

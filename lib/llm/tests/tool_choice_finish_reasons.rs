@@ -52,7 +52,6 @@ fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) ->
         completion_usage: None,
         disaggregated_params: None,
         engine_data: None,
-        prompt_logprobs: None,
     }
 }
 

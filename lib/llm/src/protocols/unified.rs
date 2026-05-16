@@ -392,18 +392,6 @@ impl CommonExtProvider for UnifiedRequest {
     fn get_prompt_logprobs_count(&self) -> Option<u32> {
         self.inner.common.prompt_logprobs
     }
-
-    fn get_detokenize(&self) -> Option<bool> {
-        self.inner.common.detokenize
-    }
-
-    fn get_allowed_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
-        self.inner.common.allowed_token_ids.clone()
-    }
-
-    fn get_bad_words_token_ids(&self) -> Option<Vec<Vec<crate::types::TokenIdType>>> {
-        self.inner.common.bad_words_token_ids.clone()
-    }
 }
 
 impl OpenAIStopConditionsProvider for UnifiedRequest {

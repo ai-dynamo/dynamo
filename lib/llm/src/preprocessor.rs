@@ -273,6 +273,50 @@ impl OpenAIPreprocessor {
         }
     }
 
+    fn sampling_passthrough_args<R: NvExtProvider>(
+        request: &R,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let mut sampling_passthrough = serde_json::Map::new();
+
+        if let Some(fields) = request.unsupported_fields() {
+            for key in ["detokenize", "allowed_token_ids", "bad_words_token_ids"] {
+                if let Some(value) = fields.get(key) {
+                    sampling_passthrough.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+
+        if sampling_passthrough.is_empty() {
+            None
+        } else {
+            Some(sampling_passthrough)
+        }
+    }
+
+    fn backend_extra_args<R: NvExtProvider>(request: &R) -> Option<serde_json::Value> {
+        let mut extra_args = serde_json::Map::new();
+
+        if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
+            extra_args.insert(
+                "nvext".to_string(),
+                serde_json::Value::Object(nvext_passthrough),
+            );
+        }
+
+        if let Some(sampling_passthrough) = Self::sampling_passthrough_args(request) {
+            extra_args.insert(
+                "sampling_options".to_string(),
+                serde_json::Value::Object(sampling_passthrough),
+            );
+        }
+
+        if extra_args.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(extra_args))
+        }
+    }
+
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
@@ -599,10 +643,8 @@ impl OpenAIPreprocessor {
             }));
         }
 
-        if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
-            builder.extra_args(Some(
-                serde_json::json!({ "nvext": serde_json::Value::Object(nvext_passthrough) }),
-            ));
+        if let Some(extra_args) = Self::backend_extra_args(request) {
+            builder.extra_args(Some(extra_args));
         }
 
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
@@ -908,8 +950,13 @@ impl OpenAIPreprocessor {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
             }
 
-            if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
-                extra_args["nvext"] = serde_json::Value::Object(nvext_passthrough);
+            if let Some(serde_json::Value::Object(backend_extra_args)) =
+                Self::backend_extra_args(request)
+            {
+                let extra_args_obj = extra_args
+                    .as_object_mut()
+                    .expect("multimodal extra_args must be an object");
+                extra_args_obj.extend(backend_extra_args);
             }
 
             // Forward routing-side mm_hashes as `multi_modal_uuids` so vLLM
@@ -2858,6 +2905,39 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    #[test]
+    fn test_backend_extra_args_preserves_nvext_and_sampling_extensions() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "detokenize": false,
+            "allowed_token_ids": [10, 11],
+            "bad_words_token_ids": [[12, 13]],
+            "nvext": {
+                "cache_salt": "step_7",
+                "extra_fields": ["completion_token_ids"]
+            }
+        }))
+        .unwrap();
+
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request).unwrap();
+
+        assert_eq!(extra_args["nvext"]["cache_salt"], "step_7");
+        assert_eq!(
+            extra_args["nvext"]["extra_fields"],
+            serde_json::json!(["completion_token_ids"])
+        );
+        assert_eq!(extra_args["sampling_options"]["detokenize"], false);
+        assert_eq!(
+            extra_args["sampling_options"]["allowed_token_ids"],
+            serde_json::json!([10, 11])
+        );
+        assert_eq!(
+            extra_args["sampling_options"]["bad_words_token_ids"],
+            serde_json::json!([[12, 13]])
+        );
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.

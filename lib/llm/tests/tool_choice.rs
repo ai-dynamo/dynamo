@@ -136,7 +136,6 @@ fn build_backend_output(text: &str) -> BackendOutput {
         completion_usage: None,
         disaggregated_params: None,
         engine_data: None,
-        prompt_logprobs: None,
     }
 }
 
@@ -306,7 +305,6 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             completion_usage: None,
             disaggregated_params: None,
             engine_data: None,
-            prompt_logprobs: None,
         };
 
         let response = generator
@@ -375,7 +373,6 @@ async fn test_streaming_required_tool_parallel() {
             completion_usage: None,
             disaggregated_params: None,
             engine_data: None,
-            prompt_logprobs: None,
         };
 
         let response = generator
@@ -446,7 +443,6 @@ fn test_no_tool_choice_outputs_normal_text() {
         completion_usage: None,
         disaggregated_params: None,
         engine_data: None,
-        prompt_logprobs: None,
     };
 
     let response = generator
