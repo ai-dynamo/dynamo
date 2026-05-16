@@ -11,11 +11,14 @@ so reports work identically in live mode (wall clock) and replay
 
 from __future__ import annotations
 
+import gzip
+import json
 import logging
+import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import plotly.graph_objects as go  # type: ignore[import-untyped]
 from plotly.subplots import make_subplots  # type: ignore[import-untyped]
@@ -763,6 +766,75 @@ class DiagnosticsRecorder:
 
         return fig.to_html(include_plotlyjs=True, full_html=True)
 
+    @staticmethod
+    def _snapshot_log_path(report_path: str) -> str:
+        root = (
+            report_path[:-5] if report_path.lower().endswith(".html") else report_path
+        )
+        return f"{root}.log.jsonl.gz"
+
+    @classmethod
+    def _json_safe(cls, value):
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {k: cls._json_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [cls._json_safe(v) for v in value]
+        return value
+
+    @staticmethod
+    def _jsonl_dumps(record: Any) -> str:
+        return json.dumps(
+            record,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    def _write_snapshot_log(self, report_path: str, snaps: list[TickSnapshot]) -> str:
+        log_path = self._snapshot_log_path(report_path)
+        metadata = self._json_safe(
+            {
+                "schema": "planner_diagnostics_snapshot_log_v1",
+                "kind": "metadata",
+                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "num_snapshots": len(snaps),
+                "html_report_path": report_path,
+                "ttft_ms": self.config.ttft_ms,
+                "itl_ms": self.config.itl_ms,
+            }
+        )
+        with gzip.open(log_path, "wt", encoding="utf-8") as f:
+            f.write(self._jsonl_dumps(metadata))
+            f.write("\n")
+            for snap in snaps:
+                record = self._json_safe(asdict(snap))
+                record["schema"] = "planner_diagnostics_snapshot_log_v1"
+                record["kind"] = "snapshot"
+                record["timestamp_utc"] = datetime.fromtimestamp(
+                    snap.timestamp_s,
+                    tz=timezone.utc,
+                ).isoformat()
+                f.write(self._jsonl_dumps(record))
+                f.write("\n")
+        return log_path
+
+    def _try_write_snapshot_log(
+        self,
+        report_path: str,
+        snaps: list[TickSnapshot],
+    ) -> None:
+        try:
+            log_path = self._write_snapshot_log(report_path, snaps)
+        except OSError:
+            logger.warning(
+                "Failed to write planner diagnostics gzip log",
+                exc_info=True,
+            )
+            return
+        logger.info(f"Planner diagnostics gzip log written to {log_path}")
+
     def generate_report(self) -> Optional[str]:
         """Generate a periodic report, write it to disk, and clear snapshots."""
         if not self._snapshots:
@@ -787,6 +859,8 @@ class DiagnosticsRecorder:
         with open(filepath, "w") as f:
             f.write(html)
         logger.info(f"Planner diagnostics report written to {filepath}")
+        if self.config.report_write_gzip_log:
+            self._try_write_snapshot_log(filepath, snaps)
 
         self._last_report_s = ts[-1]
         self._snapshots.clear()

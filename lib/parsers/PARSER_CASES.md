@@ -54,6 +54,9 @@ fed the full model output as a single string.
 - **`PARSER.batch.8`** Normal text interleaved with tool calls.
 - **`PARSER.batch.9`** Empty content / empty `tool_calls` array / null response.
 - **`PARSER.batch.10`** Duplicate tool calls (same name twice, possibly with same args).
+- **`PARSER.batch.11`** Separator characters inside argument string values.
+- **`PARSER.batch.12`** Multiple calls where one argument contains a separator character.
+- **`PARSER.batch.13`** Unknown / unregistered tool name (valid grammar, name absent from supplied `tools`).
 
 ### Parser, stream mode
 
@@ -193,6 +196,9 @@ class.
 - **`PARSER.batch.4.d`** Malformed wrapper / XML structure. Unclosed tags,
   missing delimiters, mismatched fences. Tests the wrapper-parser layer
   (vs the JSON-body layer in `.b`).
+- **`PARSER.batch.4.e`** Recovery after malformed prefix. A bad tool-looking
+  fragment is followed by a valid complete call; parsers may either treat the
+  whole string as normal text or resynchronize and extract the later valid call.
 
 ## `PARSER.batch.5` — Missing end-token recovery
 
@@ -343,6 +349,55 @@ the same arguments.
 - Expected behavior: both calls must appear in `tool_calls` with
   distinct IDs. (The runtime / client is responsible for deciding
   whether duplicate invocation is intended.)
+
+## `PARSER.batch.11` — Separator characters inside argument strings
+
+A single call contains a grammar-level separator character inside an
+argument string value. Examples: Llama JSON uses semicolon-separated
+calls while the SQL argument contains `SELECT a; SELECT b`; JSON-array
+families use commas between calls while the SQL argument contains
+`SELECT a, SELECT b`; Gemma4 uses comma/colon/brace delimiters inside
+its custom argument object.
+
+- Applies to delimiter-separated formats.
+- The parser must not split inside a JSON string.
+- Related existing tests: `PARSER.batch.7.b` already covers escaped /
+  special string values, but not a grammar separator embedded in a
+  string. SGLang's `JsonArrayParser` tests cover comma-separator state
+  and `}` inside string values; Dynamo's `base_json_parser` documents
+  the exact `<|python_tag|>` semicolon hazard. Keep this as a separate
+  delimiter-state regression rather than folding it into generic
+  string escaping.
+
+## `PARSER.batch.12` — Separator characters inside one call of a multi-call response
+
+Two or more calls are present, and one call's argument string contains a
+separator-looking character before the real call separator.
+
+- Applies to delimiter-separated formats.
+- Extends `PARSER.batch.11` to the parallel-call path so the parser has to
+  distinguish in-string separators from inter-call separators while continuing
+  to parse later calls.
+- Related existing tests: `PARSER.batch.2.a` covers real call
+  separators, but not a separator-looking character inside the first
+  call's argument. This case is the combined `2.a + 11` state-machine
+  check.
+
+## `PARSER.batch.13` — Unknown / unregistered tool name
+
+The model emits a syntactically valid tool call, but the function name is
+not present in the request's supplied `tools` list.
+
+- Applies to every parser that receives the tool schema at parse time.
+- Behavior is implementation-defined: some parsers forward the call with
+  an unknown name, some drop it, and some return the original block as
+  normal text. The fixture should record the parser's chosen contract.
+- Source: SGLang `test_unknown_tool_name.py` pins both default drop
+  behavior and opt-in forwarding via `SGLANG_FORWARD_UNKNOWN_TOOLS`.
+- Related existing tests: this is not `PARSER.batch.4.c` because the
+  emitted call is syntactically valid and contains the expected
+  structural keys. The unknown part is the function registry lookup
+  against the request's supplied `tools` list.
 
 ---
 
@@ -582,7 +637,8 @@ Minimum viable set:
    non-negotiable for any parser that sits behind a streaming
    frontend.
 6. `PARSER.batch.8` — interleaved text.
-7. `PARSER.batch.{9, 10}` — empty/null and duplicate calls.
+7. `PARSER.batch.{9, 10, 13}` — empty/null, duplicate calls, and
+   unknown tool names.
 8. Format variants where applicable (`PARSER.fmt.{1..5}`): cover
    any that the parser's grammar permits. Mark `N/A` for those that
    don't apply. JSON-family parsers (Mistral, Llama 3 JSON, Hermes)

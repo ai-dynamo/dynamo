@@ -94,6 +94,7 @@ class EngineConfig:
     # decode concurrent with prefill).
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+    runtime_data: Optional[dict[str, Any]] = None
 
 
 class LLMEngine(ABC):

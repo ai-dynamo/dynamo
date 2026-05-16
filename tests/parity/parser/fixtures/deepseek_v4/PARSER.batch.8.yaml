@@ -51,9 +51,9 @@ cases:
         normal_text: ''
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
@@ -77,9 +77,9 @@ cases:
         normal_text: 'I will check the weather. '
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: 'I will check the weather. '
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
@@ -110,12 +110,12 @@ cases:
         normal_text: 'I will check the weather. '
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_weather
+          arguments:
             location: LA
-          name: get_weather
         normal_text: 'I will check the weather. '
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'

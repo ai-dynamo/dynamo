@@ -2038,6 +2038,7 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
