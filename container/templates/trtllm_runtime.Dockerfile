@@ -14,7 +14,9 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 
 WORKDIR /workspace
 
-ENV DYNAMO_HOME=/opt/dynamo
+# DYNAMO_HOME points at /workspace so bundled TRT-LLM scripts that reference
+# $DYNAMO_HOME/examples/... resolve. Examples and tests are copied below.
+ENV DYNAMO_HOME=/workspace
 ENV HOME=/home/dynamo
 ENV PATH=/usr/local/bin/etcd:${PATH}
 
