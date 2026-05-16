@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_hash};
@@ -164,7 +166,71 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+    fn taints(&self) -> &HashSet<String> {
+        &EMPTY_WORKER_TAINTS
+    }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RoutingConstraints {
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub required_taints: HashSet<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub preferred_taints: HashMap<String, f32>,
+}
+
+impl RoutingConstraints {
+    pub fn is_empty(&self) -> bool {
+        self.required_taints.is_empty() && self.preferred_taints.is_empty()
+    }
+
+    pub fn has_hard_constraints(&self) -> bool {
+        !self.required_taints.is_empty()
+    }
+
+    pub fn is_compatible_with_worker_taints(&self, worker_taints: &HashSet<String>) -> bool {
+        if self.required_taints.is_empty() {
+            return true;
+        }
+
+        self.required_taints
+            .iter()
+            .all(|taint| worker_taints.contains(taint))
+    }
+
+    pub fn preferred_taint_matches(&self, worker_taints: &HashSet<String>) -> usize {
+        if self.preferred_taints.is_empty() {
+            return 0;
+        }
+
+        self.preferred_taints
+            .keys()
+            .filter(|taint| worker_taints.contains(*taint))
+            .count()
+    }
+
+    pub fn preferred_taint_multiplier(&self, worker_taints: &HashSet<String>) -> Option<f64> {
+        if self.preferred_taints.is_empty() {
+            return None;
+        }
+
+        // Use exp(-tanh(sum)) so equal-magnitude positive and negative preferences
+        // have reciprocal effect around the neutral multiplier 1.0, while keeping the
+        // multiplier strictly positive and bounded to [exp(-1), exp(1)] ~= [0.368, 2.718]
+        // for numerically stable composition with the existing linear work score.
+        let bias = self
+            .preferred_taints
+            .iter()
+            .filter(|(taint, _)| worker_taints.contains(*taint))
+            .map(|(_, weight)| f64::from(*weight))
+            .sum::<f64>()
+            .tanh();
+
+        Some((-bias).exp())
+    }
+}
+
+static EMPTY_WORKER_TAINTS: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
 
 /// Transport abstraction for publishing batched router-visible KV cache events.
 pub trait RouterEventSink: Send + Sync {
@@ -307,6 +373,8 @@ pub enum RouterRequest {
         tokens: Vec<Token>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "RoutingConstraints::is_empty")]
+        routing_constraints: RoutingConstraints,
     },
     MarkPrefill,
     MarkFree {
@@ -322,6 +390,7 @@ impl Default for RouterRequest {
         RouterRequest::New {
             tokens: vec![],
             block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
         }
     }
 }

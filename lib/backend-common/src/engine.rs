@@ -10,6 +10,7 @@
 //! Object-safety: every instance method takes `&self`. `Arc<dyn LLMEngine>` is
 //! the handle `Worker` drives the lifecycle through.
 
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -134,6 +135,8 @@ pub struct EngineConfig {
     pub bootstrap_host: Option<String>,
     /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
     pub bootstrap_port: Option<u16>,
+    /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
+    pub runtime_data: HashMap<String, serde_json::Value>,
 }
 
 /// Inference engine trait.

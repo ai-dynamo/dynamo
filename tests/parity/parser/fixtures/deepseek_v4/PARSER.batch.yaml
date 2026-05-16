@@ -81,3 +81,42 @@ cases:
       vllm: *id005
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. deepseek_v4 uses DSML invoke/parameter tags rather than delimiter-splitting call bodies, so separator-looking characters inside values are not a distinct parser state from the existing malformed/string-value coverage.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. deepseek_v4 uses DSML invoke/parameter tags rather than delimiter-splitting call bodies, so separator-looking characters inside values are not a distinct parser state from the existing malformed/string-value coverage. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="unknown_tool">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
