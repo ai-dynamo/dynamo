@@ -144,9 +144,6 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_grammar = self.get_guided_grammar();
         let guided_choice = self.get_guided_choice();
         let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
-        let allowed_token_ids = self.get_allowed_token_ids();
-        let bad_words_token_ids = self.get_bad_words_token_ids();
-
         let guided_decoding = match common::GuidedDecodingOptions::from_optional(
             guided_json,
             guided_regex,
@@ -164,9 +161,6 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             }
         };
 
-        // Surface `detokenize` so engines can skip text decoding when requested.
-        let detokenize = self.common_ext().and_then(|c| c.detokenize);
-
         Ok(common::SamplingOptions {
             n,
             best_of,
@@ -182,9 +176,6 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             length_penalty: None,
             guided_decoding,
             include_stop_str_in_output,
-            detokenize,
-            allowed_token_ids,
-            bad_words_token_ids,
         })
     }
 }

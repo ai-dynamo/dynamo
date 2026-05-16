@@ -266,18 +266,6 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     fn get_prompt_logprobs_count(&self) -> Option<u32> {
         self.common.prompt_logprobs
     }
-
-    fn get_detokenize(&self) -> Option<bool> {
-        self.common.detokenize
-    }
-
-    fn get_allowed_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
-        self.common.allowed_token_ids.clone()
-    }
-
-    fn get_bad_words_token_ids(&self) -> Option<Vec<Vec<crate::types::TokenIdType>>> {
-        self.common.bad_words_token_ids.clone()
-    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
@@ -418,9 +406,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
 mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
-    use crate::protocols::common::{
-        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-    };
+    use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
     use serde_json::json;
 
     #[test]
@@ -565,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sampling_token_constraints() {
+    fn test_passthrough_token_constraints_validate() {
         let request_json = json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -575,14 +561,15 @@ mod tests {
         let request: NvCreateChatCompletionRequest =
             serde_json::from_value(request_json).expect("Failed to deserialize request");
 
-        let sampling_options = request
-            .extract_sampling_options()
-            .expect("extract sampling options");
-        assert_eq!(sampling_options.allowed_token_ids, Some(vec![10, 11]));
         assert_eq!(
-            sampling_options.bad_words_token_ids,
-            Some(vec![vec![12, 13]])
+            request.unsupported_fields.get("allowed_token_ids"),
+            Some(&serde_json::json!([10, 11]))
         );
+        assert_eq!(
+            request.unsupported_fields.get("bad_words_token_ids"),
+            Some(&serde_json::json!([[12, 13]]))
+        );
+        assert!(ValidateRequest::validate(&request).is_ok());
     }
 
     #[test]

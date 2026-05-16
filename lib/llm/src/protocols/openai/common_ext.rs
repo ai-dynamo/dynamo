@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
 
-use crate::types::TokenIdType;
-
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
 /// but are commonly needed across different request types.
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
@@ -88,21 +86,6 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub prompt_logprobs: Option<u32>,
-
-    /// When `Some(false)`, the engine should skip text decoding if supported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub detokenize: Option<bool>,
-
-    /// Token IDs that are allowed during generation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub allowed_token_ids: Option<Vec<TokenIdType>>,
-
-    /// Token ID sequences that must not be generated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub bad_words_token_ids: Option<Vec<Vec<TokenIdType>>>,
 }
 
 impl CommonExt {
@@ -138,19 +121,6 @@ pub trait CommonExtProvider {
     fn get_prompt_logprobs_count(&self) -> Option<u32> {
         None
     }
-
-    /// Whether the engine should decode generated tokens into text.
-    fn get_detokenize(&self) -> Option<bool> {
-        None
-    }
-
-    /// Token ID constraints forwarded to compatible backends.
-    fn get_allowed_token_ids(&self) -> Option<Vec<TokenIdType>> {
-        None
-    }
-    fn get_bad_words_token_ids(&self) -> Option<Vec<Vec<TokenIdType>>> {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -173,8 +143,6 @@ mod tests {
         assert_eq!(common_ext.guided_decoding_backend, None);
         assert_eq!(common_ext.include_stop_str_in_output, None);
         assert_eq!(common_ext.skip_special_tokens, None);
-        assert_eq!(common_ext.allowed_token_ids, None);
-        assert_eq!(common_ext.bad_words_token_ids, None);
     }
 
     #[test]
@@ -191,8 +159,6 @@ mod tests {
             .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
             .guided_decoding_backend("backend".to_string())
             .skip_special_tokens(false)
-            .allowed_token_ids(vec![1, 2])
-            .bad_words_token_ids(vec![vec![3, 4]])
             .build()
             .unwrap();
 
@@ -216,8 +182,6 @@ mod tests {
             Some("backend".to_string())
         );
         assert_eq!(common_ext.skip_special_tokens, Some(false));
-        assert_eq!(common_ext.allowed_token_ids, Some(vec![1, 2]));
-        assert_eq!(common_ext.bad_words_token_ids, Some(vec![vec![3, 4]]));
     }
 
     #[test]
@@ -253,9 +217,6 @@ mod tests {
             guided_whitespace_pattern: None,
             skip_special_tokens: None,
             prompt_logprobs: None,
-            detokenize: None,
-            allowed_token_ids: None,
-            bad_words_token_ids: None,
         };
         assert!(common_ext.validate().is_ok());
     }

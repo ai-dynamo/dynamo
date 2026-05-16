@@ -98,7 +98,13 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 //
 
 /// Extra-body fields accepted for backend-specific handling.
-pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &["cache_salt", "stop_token_ids"];
+pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
+    "cache_salt",
+    "stop_token_ids",
+    "detokenize",
+    "allowed_token_ids",
+    "bad_words_token_ids",
+];
 
 /// Validates that no unsupported fields are present in the request.
 ///
@@ -122,6 +128,20 @@ pub fn validate_no_unsupported_fields(
     if let Some(value) = unsupported_fields.get("stop_token_ids") {
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("detokenize")
+        && !value.is_boolean()
+    {
+        anyhow::bail!("`detokenize` must be a boolean");
+    }
+    if let Some(value) = unsupported_fields.get("allowed_token_ids") {
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+            .map_err(|_| anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("bad_words_token_ids") {
+        serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
+            |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
+        )?;
     }
     Ok(())
 }
