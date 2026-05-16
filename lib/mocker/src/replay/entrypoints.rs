@@ -27,9 +27,7 @@ fn load_trace_from_file(
     trace_num_prefix_groups: usize,
 ) -> Result<Trace> {
     match trace_format {
-        TraceFileFormat::Mooncake | TraceFileFormat::MooncakeDelta => {
-            Trace::from_mooncake(trace_path, trace_block_size)
-        }
+        TraceFileFormat::Mooncake => Trace::from_mooncake(trace_path, trace_block_size),
         TraceFileFormat::AppliedComputeAgentic => Trace::from_applied_compute_agentic(
             trace_path,
             trace_block_size,
@@ -39,19 +37,11 @@ fn load_trace_from_file(
     }
 }
 
-fn trace_accumulates_session_deltas(trace_format: TraceFileFormat) -> bool {
-    trace_format == TraceFileFormat::MooncakeDelta
-}
-
 fn single_turn_mooncake_requests(
     trace_format: TraceFileFormat,
     trace: &Trace,
 ) -> Result<Option<Vec<DirectRequest>>> {
-    if matches!(
-        trace_format,
-        TraceFileFormat::Mooncake | TraceFileFormat::MooncakeDelta
-    ) && trace.is_single_turn()
-    {
+    if trace_format == TraceFileFormat::Mooncake && trace.is_single_turn() {
         // The timestamped request path expects every request to carry an
         // arrival timestamp; without this guard a trace missing
         // `first_arrival_timestamp_ms` would panic in
@@ -156,15 +146,6 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             1.0,
             router_mode,
         )?
-    } else if trace_accumulates_session_deltas(trace_format) {
-        crate::replay::offline::simulate_trace_workload_accumulating_deltas(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            num_workers,
-            router_mode,
-        )?
     } else {
         crate::replay::offline::simulate_trace_workload(
             args,
@@ -220,9 +201,6 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
         bail!(
             "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
         );
-    }
-    if trace_accumulates_session_deltas(trace_format) {
-        bail!("mooncake-delta trace format is not supported for disaggregated replay");
     }
     let trace = load_trace_from_file(
         trace_path,
@@ -319,9 +297,6 @@ pub fn simulate_trace_live_file_with_router_mode_and_format(
         bail!(
             "applied_compute_agentic trace format requires replay_concurrency because source traces do not contain first-turn timestamps"
         );
-    }
-    if trace_accumulates_session_deltas(trace_format) {
-        bail!("mooncake-delta trace format is not supported for online replay");
     }
     let trace = load_trace_from_file(
         trace_path,
@@ -534,27 +509,15 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
         trace_shared_prefix_ratio,
         trace_num_prefix_groups,
     )?;
-    let report = if trace_accumulates_session_deltas(trace_format) {
-        crate::replay::offline::simulate_concurrency_workload_accumulating_deltas(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            max_in_flight,
-            num_workers,
-            router_mode,
-        )?
-    } else {
-        simulate_concurrency_workload_with_router_mode(
-            args,
-            router_config,
-            prefill_load_estimator,
-            trace,
-            max_in_flight,
-            num_workers,
-            router_mode,
-        )?
-    };
+    let report = simulate_concurrency_workload_with_router_mode(
+        args,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        max_in_flight,
+        num_workers,
+        router_mode,
+    )?;
     Ok(report)
 }
 
@@ -596,9 +559,6 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
-    if trace_accumulates_session_deltas(trace_format) {
-        bail!("mooncake-delta trace format is not supported for disaggregated replay");
-    }
     let trace = load_trace_from_file(
         trace_path,
         trace_block_size,
@@ -678,9 +638,6 @@ pub fn simulate_concurrency_live_file_with_router_mode_and_format(
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
-    if trace_accumulates_session_deltas(trace_format) {
-        bail!("mooncake-delta trace format is not supported for online replay");
-    }
     let trace = load_trace_from_file(
         trace_path,
         trace_block_size,

@@ -420,13 +420,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     parser.add_argument(
         "--trace-format",
-        choices=("mooncake", "mooncake-delta", "applied_compute_agentic"),
+        choices=("mooncake", "applied_compute_agentic"),
         default="mooncake",
-        help=(
-            "format of trace_file when replaying from a file; mooncake-delta "
-            "accumulates per-session input deltas into cumulative prompts and "
-            "can use substantially more memory than mooncake"
-        ),
+        help="format of trace_file when replaying from a file",
     )
     parser.add_argument(
         "--trace-block-size",

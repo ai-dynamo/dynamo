@@ -799,28 +799,12 @@ impl Trace {
         WorkloadDriver::new_trace(self, engine_block_size)
     }
 
-    pub fn into_delta_accumulating_trace_driver_with_block_size(
-        self,
-        engine_block_size: usize,
-    ) -> Result<WorkloadDriver> {
-        self.validate_for_trace_mode()?;
-        WorkloadDriver::new_trace_accumulating_deltas(self, engine_block_size)
-    }
-
     pub fn into_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
         WorkloadDriver::new_concurrency(self, engine_block_size)
-    }
-
-    pub fn into_delta_accumulating_concurrency_driver_with_block_size(
-        self,
-        engine_block_size: usize,
-    ) -> Result<WorkloadDriver> {
-        self.validate_for_concurrency_mode()?;
-        WorkloadDriver::new_concurrency_accumulating_deltas(self, engine_block_size)
     }
 
     fn validate(&self, allow_missing_first_timestamp: bool) -> Result<()> {

@@ -17,12 +17,6 @@ pub struct Trace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceFileFormat {
     Mooncake,
-    /// Mooncake-shaped rows where follow-up turns contain input deltas.
-    /// Offline replay accumulates those deltas per session in token space before
-    /// computing engine block hashes. Use this only for delta traces: it expands
-    /// compact session deltas into cumulative prompts and can use much more
-    /// memory than `Mooncake`.
-    MooncakeDelta,
     AppliedComputeAgentic,
 }
 
