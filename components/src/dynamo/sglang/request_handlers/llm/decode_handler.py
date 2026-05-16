@@ -10,13 +10,15 @@ import sglang as sgl
 from PIL.Image import Image as PILImage
 
 from dynamo._core import Context
+from dynamo.common.backend.sglang_logprobs import (
+    build_logprob_kwargs as _shared_build_logprob_kwargs,
+)
+from dynamo.common.backend.sglang_logprobs import (
+    extract_logprobs as _shared_extract_logprobs,
+)
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.backend.sglang_logprobs import (
-    build_logprob_kwargs as _shared_build_logprob_kwargs,
-    extract_logprobs as _shared_extract_logprobs,
-)
 from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher

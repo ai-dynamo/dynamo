@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator
 from typing import Any, Optional
 
 from dynamo._core import Context
-from dynamo._core.backend import UnsupportedFieldPolicy  # type: ignore[import-not-found]
+from dynamo._core import backend as _backend
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import KvEventPublisher
 
@@ -107,7 +107,7 @@ class SampleLLMEngine(LLMEngine):
 
         mode = DisaggregationMode(args.disaggregation_mode)
         policy = getattr(
-            UnsupportedFieldPolicy, args.unsupported_field_policy.capitalize()
+            _backend.UnsupportedFieldPolicy, args.unsupported_field_policy.capitalize()
         )
         engine = cls(
             model_name=args.model_name,

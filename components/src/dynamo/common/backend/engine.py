@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
-from dynamo._core.backend import Capability  # type: ignore[import-not-found]
+from dynamo._core import backend as _backend
 
 from .publisher import KvEventSource
 
@@ -107,7 +107,7 @@ class EngineConfig:
     runtime_data: Optional[dict[str, Any]] = None
     # Forwarded-field capabilities consumed by the Rust schema gate; see
     # lib/backend-common/src/schema.rs.
-    capabilities: set[Capability] = field(default_factory=set)
+    capabilities: set[_backend.Capability] = field(default_factory=set)
 
 
 class LLMEngine(ABC):

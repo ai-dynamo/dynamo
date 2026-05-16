@@ -40,12 +40,12 @@ from dynamo.common.backend.health_check import (
     is_probe,
 )
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
+from dynamo.common.backend.sglang_logprobs import build_logprob_kwargs, extract_logprobs
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
-from dynamo.common.backend.sglang_logprobs import build_logprob_kwargs, extract_logprobs
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
@@ -274,7 +274,9 @@ class SglangLLMEngine(LLMEngine):
         input_param = self._get_input_param(request)
         logprob_kwargs = build_logprob_kwargs(dict(request))
         return_tokens_as_token_ids = bool(
-            (request.get("output_options") or {}).get("return_tokens_as_token_ids", False)
+            (request.get("output_options") or {}).get(
+                "return_tokens_as_token_ids", False
+            )
         )
 
         # SGLang disagg keys NIXL transport on a (host, port, room) triple

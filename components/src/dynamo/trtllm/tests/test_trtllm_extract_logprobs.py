@@ -29,7 +29,9 @@ pytestmark = [
 ]
 
 
-def _logprob(logprob: float, rank: int, decoded_token: str | None = None) -> SimpleNamespace:
+def _logprob(
+    logprob: float, rank: int, decoded_token: str | None = None
+) -> SimpleNamespace:
     return SimpleNamespace(logprob=logprob, rank=rank, decoded_token=decoded_token)
 
 

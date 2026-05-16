@@ -25,7 +25,6 @@ from enum import Enum
 from typing import Optional
 
 from dynamo._core import backend as _backend
-from dynamo._core.backend import UnsupportedFieldPolicy  # type: ignore[import-not-found]
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -111,8 +110,8 @@ class WorkerConfig:
     # See lib/backend-common/src/schema.rs for the policy semantics.
     # `default_factory` because dataclasses treat the PyO3 enum class as
     # a mutable type and reject it as a direct default.
-    unsupported_field_policy: UnsupportedFieldPolicy = field(
-        default_factory=lambda: UnsupportedFieldPolicy.Warn
+    unsupported_field_policy: _backend.UnsupportedFieldPolicy = field(
+        default_factory=lambda: _backend.UnsupportedFieldPolicy.Warn
     )
 
     @classmethod
