@@ -382,7 +382,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
         super::nvext::validate_completion_token_ids_single_choice(
-            self.inner.n,
+            self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
         // none for modalities

@@ -389,7 +389,6 @@ impl
                     completion_usage: data.completion_usage,
                     disaggregated_params: data.disaggregated_params,
                     engine_data: data.engine_data,
-                    prompt_logprobs: data.prompt_logprobs,
                 })
             })
         });
