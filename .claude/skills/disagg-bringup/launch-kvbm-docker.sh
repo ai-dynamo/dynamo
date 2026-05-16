@@ -3,6 +3,17 @@
 #
 # Hard-won lessons from 2026-05-15 session:
 #
+# 6. LD_LIBRARY_PATH must point to the WHEEL's NIXL, NOT the system NIXL.
+#    The system NIXL at /opt/nvidia/nvda_nixl was built against an old ABI (e.g.
+#    nixl-cu12==0.10.1). The WHEEL's NIXL (nixl-cu12 or nixl-cu13 in the venv)
+#    has the correct ABI AND the plugins (libplugin_POSIX.so, libplugin_UCX.so).
+#    Without this, you get:
+#      nixl_agent.cpp:283] getPluginParams: backend 'POSIX' not found
+#    Fix: find the wheel path and export LD_LIBRARY_PATH:
+#      NIXL_WHEEL=$(ls -d $VENV/lib/python*/site-packages/.nixl_cu*.mesonpy.libs)
+#      export LD_LIBRARY_PATH="$NIXL_WHEEL:$NIXL_WHEEL/plugins:..."
+#    This is documented in env.sh. See also: NIXL_PLUGIN_DIR, NIXL_LIB_DIR.
+#
 # 1. RUSTUP_HOME and CARGO_HOME must be passed via `docker exec -e`, NOT via
 #    `export` inside bash -c. The Docker image sets RUSTUP_HOME=/home/dynamo/.rustup
 #    as an ENV, which overrides any shell export when running as a non-dynamo user.
@@ -49,7 +60,7 @@ PREFILL_PORT=8001
 DECODE_PORT=8000
 
 # Env vars that MUST be passed via -e (not export inside bash -c)
-DOCKER_ENV="-e RUSTUP_HOME=/scratch/.rustup -e CARGO_HOME=/scratch/.cargo -e CARGO_TARGET_DIR=${CARGO_TARGET}"
+DOCKER_ENV="-e RUSTUP_HOME=/scratch/.rustup -e CARGO_HOME=/scratch/.cargo -e CARGO_TARGET_DIR=${CARGO_TARGET} -e NIXL_PREFIX=/opt/nvidia/nvda_nixl"
 
 dexec() {
   docker exec ${DOCKER_ENV} -e PYTHONPATH="${PYTHONPATH_KVBM}" "${CONTAINER}" bash -c "$@"
