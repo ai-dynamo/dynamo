@@ -102,7 +102,7 @@ dynamo/
 
 ### Test Oracles
 
-Logs are diagnostics, not functional or semantic oracles. Do not make pass/fail assertions by scraping debug or info log lines; assert behavior through API responses, structured response fields, metrics, or test helper APIs.
+Prefer API responses, structured response fields, metrics, or direct test helper APIs for functional and semantic assertions. If a router-internal fact is only exposed as a structured tracing event, keep parsing in a shared helper rather than duplicating ad hoc log scraping in tests.
 
 ---
 

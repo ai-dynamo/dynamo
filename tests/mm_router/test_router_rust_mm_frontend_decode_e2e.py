@@ -44,7 +44,10 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
-from tests.utils.router_nvext import require_router_kv_block_timing
+from tests.utils.router_logs import (
+    extract_router_kv_overlap_records,
+    wait_for_router_kv_overlap,
+)
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
@@ -211,7 +214,6 @@ def _build_payload(image_uris: list[str]) -> dict[str, Any]:
         "model": VLLM_MM_MODEL,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 4,
-        "nvext": {"extra_fields": ["timing"]},
     }
 
 
@@ -221,6 +223,9 @@ def _send(
     payload: dict[str, Any],
     label: str,
 ) -> tuple[int, int, dict[str, Any]]:
+    pre_request_logs = router_proc.read_logs()
+    start_offset = len(pre_request_logs)
+    pre_request_record_count = len(extract_router_kv_overlap_records(pre_request_logs))
     resp = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
@@ -228,11 +233,11 @@ def _send(
     )
     assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text}"
     data = resp.json()
-    recent_logs = router_proc.read_logs()
-    overlap, total = require_router_kv_block_timing(
-        data,
+    overlap, total, _recent_logs = wait_for_router_kv_overlap(
+        router_proc.read_logs,
+        start_offset=start_offset,
+        pre_request_record_count=pre_request_record_count,
         context=label,
-        recent_logs=recent_logs,
         log_label="frontend",
     )
     print(f"[FED] {label}: overlap={overlap}/{total} usage={data.get('usage')}")

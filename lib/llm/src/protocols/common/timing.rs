@@ -314,14 +314,6 @@ impl RequestTracker {
         Some(overlap / isl as f64)
     }
 
-    pub fn kv_overlap_blocks(&self) -> Option<f64> {
-        self.kv_overlap_blocks.get().copied()
-    }
-
-    pub fn kv_total_blocks(&self) -> Option<usize> {
-        self.isl_blocks.get().copied()
-    }
-
     /// Set the request phase and return a permit that blocks subsequent phase changes.
     ///
     /// The returned permit must be dropped to allow the next `set_phase` call to proceed.
@@ -600,8 +592,6 @@ impl RequestTracker {
             ttft_ms: self.ttft_ms(),
             total_time_ms: self.total_time_ms(),
             kv_hit_rate: self.kv_hit_rate(),
-            kv_overlap_blocks: self.kv_overlap_blocks(),
-            kv_total_blocks: self.kv_total_blocks(),
             router_queue_depth: self.router_queue_depth(),
             kv_transfer_estimated_latency_ms: self
                 .kv_transfer_estimated_latency_secs()
@@ -644,14 +634,6 @@ pub struct TimingInfo {
     /// KV cache hit rate (0.0 to 1.0) - ratio of cached blocks to total input blocks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hit_rate: Option<f64>,
-
-    /// Effective KV overlap in blocks at routing time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kv_overlap_blocks: Option<f64>,
-
-    /// Total input blocks considered by the KV router at routing time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kv_total_blocks: Option<usize>,
 
     /// Number of requests pending in the router scheduler queue at routing time
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -732,10 +714,6 @@ mod tests {
             (rate - 0.3).abs() < f64::EPSILON,
             "KV hit rate should be 0.3, got {rate}"
         );
-
-        let timing = tracker.get_timing_info();
-        assert_eq!(timing.kv_overlap_blocks, Some(3.0));
-        assert_eq!(timing.kv_total_blocks, Some(10));
     }
 
     #[test]

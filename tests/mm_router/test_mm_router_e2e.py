@@ -28,7 +28,10 @@ from tests.conftest import EtcdServer, NatsServer
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
-from tests.utils.router_nvext import require_router_kv_block_timing
+from tests.utils.router_logs import (
+    extract_router_kv_overlap_records,
+    wait_for_router_kv_overlap,
+)
 
 TRTLLM_MM_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 TRTLLM_MM_MODEL_TYPE = "qwen3_vl"
@@ -235,7 +238,6 @@ def _build_payload(
         "model": TRTLLM_MM_MODEL,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 1,
-        "nvext": {"extra_fields": ["timing"]},
     }
 
 
@@ -246,6 +248,9 @@ def _send_request_get_overlap(
     label: str,
 ) -> tuple[int, int, str]:
     """Send one request and read the router's semantic overlap score."""
+    pre_request_logs = router_proc.read_logs()
+    start_offset = len(pre_request_logs)
+    pre_request_record_count = len(extract_router_kv_overlap_records(pre_request_logs))
     resp = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
@@ -255,11 +260,12 @@ def _send_request_get_overlap(
     data = resp.json()
     assert "choices" in data, f"Missing choices in response: {data}"
 
-    recent_logs = router_proc.read_logs()
-    overlap, total = require_router_kv_block_timing(
-        data,
+    overlap, total, recent_logs = wait_for_router_kv_overlap(
+        router_proc.read_logs,
+        start_offset=start_offset,
+        pre_request_record_count=pre_request_record_count,
         context=label,
-        recent_logs=recent_logs,
+        timeout_s=120,
     )
     print(f"[MM_ROUTER_E2E] {label}: current={overlap}/{total}")
 

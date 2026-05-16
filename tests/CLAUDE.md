@@ -1,5 +1,5 @@
 # Test Authoring Guidance
 
-- Do not use debug log output as the oracle for functional or semantic checks.
-- Prefer existing structured router test surfaces such as router helpers, `nvext` response fields, metrics, or direct helper APIs.
-- Logs may be included in assertion messages as diagnostics, but they should not determine pass/fail behavior.
+- Prefer structured test surfaces such as response fields, metrics, or direct helper APIs for functional and semantic checks.
+- If a router-internal fact is only exposed as a structured tracing event, parse it through a shared test helper.
+- Logs may be included in assertion messages as diagnostics.

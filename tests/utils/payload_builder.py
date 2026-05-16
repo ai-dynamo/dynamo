@@ -152,11 +152,8 @@ def router_selection_chat_payload_default(
         max_tokens=max_tokens,
         temperature=temperature,
         stream=stream,
-        extra_body=router_nvext_extra_body(["worker_id", "timing"]),
-        router_nvext_expectation=RouterNvextExpectation(
-            worker_id=True,
-            kv_block_timing=True,
-        ),
+        extra_body=router_nvext_extra_body(["worker_id"]),
+        router_nvext_expectation=RouterNvextExpectation(worker_id=True),
     )
 
 
@@ -173,8 +170,6 @@ def router_cached_tokens_chat_payload(
         max_tokens=max_tokens,
         temperature=temperature,
         min_cached_tokens=min_cached_tokens,
-        extra_body=router_nvext_extra_body(["timing"]),
-        router_nvext_expectation=RouterNvextExpectation(kv_block_timing=True),
     )
 
 

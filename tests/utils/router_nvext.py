@@ -10,7 +10,6 @@ from typing import Any, Mapping, Sequence
 @dataclass(frozen=True)
 class RouterNvextExpectation:
     worker_id: bool = False
-    kv_block_timing: bool = False
 
 
 def router_nvext_extra_body(fields: Sequence[str]) -> dict[str, Any]:
@@ -50,34 +49,6 @@ def require_router_worker_id(
     return worker_id
 
 
-def require_router_kv_block_timing(
-    data: Mapping[str, Any],
-    *,
-    context: str = "",
-    recent_logs: str | None = None,
-    log_label: str = "router",
-) -> tuple[int, int]:
-    nvext = response_nvext(data)
-    timing = nvext.get("timing") or {}
-    assert isinstance(timing, Mapping), (
-        f"{_context_prefix(context)}Expected nvext.timing object, "
-        f"got nvext={dict(nvext)!r}"
-    )
-
-    overlap = timing.get("kv_overlap_blocks")
-    total = timing.get("kv_total_blocks")
-    if overlap is None or total is None:
-        message = (
-            f"{_context_prefix(context)}Expected router KV block timing in response "
-            f"nvext, got nvext={dict(nvext)!r}."
-        )
-        if recent_logs is not None:
-            message += f"\nRecent {log_label} logs:\n{recent_logs[-4000:]}"
-        raise AssertionError(message)
-
-    return int(float(overlap) + 0.5), int(total)
-
-
 def validate_router_nvext(
     data: Mapping[str, Any],
     expectation: RouterNvextExpectation | None,
@@ -88,5 +59,3 @@ def validate_router_nvext(
         return
     if expectation.worker_id:
         require_router_worker_id(data, context=context)
-    if expectation.kv_block_timing:
-        require_router_kv_block_timing(data, context=context)
