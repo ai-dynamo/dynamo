@@ -16,6 +16,8 @@ use std::sync::OnceLock;
 
 static GLOBAL_HARMONY_GPTOSS_ENCODING: OnceLock<Result<HarmonyEncoding, anyhow::Error>> =
     OnceLock::new();
+static HARMONY_CALL_TOKEN_IDS: OnceLock<Vec<u32>> = OnceLock::new();
+const HARMONY_CALL_MARKER: &str = "<|call|>";
 
 fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::Error> {
     GLOBAL_HARMONY_GPTOSS_ENCODING.get_or_init(|| {
@@ -71,6 +73,57 @@ fn encode_text_to_tokens(text: &str) -> anyhow::Result<Vec<u32>> {
         .as_ref()
         .map_err(|e| anyhow::anyhow!("Failed to get harmony encoding: {e}"))?;
     Ok(enc.tokenizer().encode_with_special_tokens(text))
+}
+
+fn harmony_call_token_ids() -> Option<&'static [u32]> {
+    let ids = HARMONY_CALL_TOKEN_IDS.get_or_init(|| {
+        get_harmony_encoding()
+            .as_ref()
+            .map(|enc| {
+                enc.tokenizer()
+                    .encode_with_special_tokens(HARMONY_CALL_MARKER)
+            })
+            .unwrap_or_default()
+    });
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids.as_slice())
+    }
+}
+
+fn token_ids_contain_sequence(token_ids: &[u32], marker_ids: &[u32]) -> bool {
+    !marker_ids.is_empty()
+        && marker_ids.len() <= token_ids.len()
+        && token_ids
+            .windows(marker_ids.len())
+            .any(|window| window == marker_ids)
+}
+
+fn input_contains_call_marker(
+    text: &str,
+    token_ids: &[u32],
+    caller_supplied_token_ids: bool,
+) -> bool {
+    if !token_ids.is_empty()
+        && let Some(call_ids) = harmony_call_token_ids()
+    {
+        return token_ids_contain_sequence(token_ids, call_ids);
+    }
+
+    !caller_supplied_token_ids && text.contains(HARMONY_CALL_MARKER)
+}
+
+fn raw_input_text_for_tool_parser(
+    text: &str,
+    token_ids: &[u32],
+    caller_supplied_token_ids: bool,
+) -> String {
+    if caller_supplied_token_ids && let Ok(enc) = get_harmony_encoding() {
+        return enc.tokenizer().decode_utf8(token_ids).unwrap_or_default();
+    }
+
+    text.to_string()
 }
 
 impl ReasoningParser for GptOssReasoningParser {
@@ -179,6 +232,7 @@ impl ReasoningParser for GptOssReasoningParser {
         text: &str,
         token_ids: &[u32],
     ) -> ParserResult {
+        let caller_supplied_token_ids = !token_ids.is_empty();
         let token_ids = if token_ids.is_empty() {
             // WAR: Since we are moving to just text based reasoning parsing, converting to token_ids now using harmony encoding
             let encoded_tokens = match encode_text_to_tokens(text) {
@@ -223,6 +277,12 @@ impl ReasoningParser for GptOssReasoningParser {
                     _ => {}
                 }
             }
+        }
+
+        if input_contains_call_marker(text, token_ids, caller_supplied_token_ids) {
+            let raw_input_text =
+                raw_input_text_for_tool_parser(text, token_ids, caller_supplied_token_ids);
+            normal_delta.push_str(&raw_input_text);
         }
 
         if !normal_delta.is_empty() || !reasoning_delta.is_empty() {

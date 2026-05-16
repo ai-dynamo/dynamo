@@ -1004,8 +1004,8 @@ impl JailedStream {
                             Some(Role::Assistant),
                             normal_text.as_deref().unwrap_or(""),
                             Some(tool_call_chunks),
-                            None,
-                            None,
+                            base_choice.finish_reason,
+                            base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
                         )
                     }

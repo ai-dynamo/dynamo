@@ -1,0 +1,117 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: harmony
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing <|call|> end marker (bare envelope)
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm: &d_5_a
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+  PARSER.batch.5.b:
+    description: Bare <|call|> without preceding channel envelope
+    ref: "OpenAI Harmony tool-call stop token: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
+    model_text: <|call|>
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_5_b
+        calls: []
+        normal_text: ''
+      vllm: *d_5_b
+      sglang:
+        calls: []
+        normal_text: <|call|>
+        reason: "Dynamo/vLLM are more spec-correct: '<|call|>' is a control stop token, not user-visible text; SGLang preserves raw markup"
+  PARSER.batch.5.c:
+    description: Truncation mid-message JSON
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm: *d_5_a
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"New York"}
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!commentary
+          to=functions.get_weather json{"location":"New York"}
+        reason: "Dynamo/SGLang are more spec-correct: they strip the incomplete trailing commentary envelope after extracting the complete first call; vLLM preserves protocol-stripped residue from the incomplete second call"
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"New York
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!commentary
+          to=functions.get_weather json{"location":"New York
+        reason: "Dynamo/SGLang are more spec-correct: they strip the incomplete trailing commentary envelope after extracting the complete first call; vLLM preserves protocol-stripped residue from the incomplete second call"
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
