@@ -380,3 +380,29 @@ def test_worker_config_rejects_non_enum_policy():
     )
     with pytest.raises(TypeError):
         backend.WorkerConfig(namespace="dynamo", unsupported_field_policy="bogus")
+
+
+@pytest.mark.unified
+def test_python_worker_config_from_runtime_config_propagates_policy():
+    """A runtime_cfg that exposes `unsupported_field_policy` must reach
+    the WorkerConfig; absence leaves the default `Warn` in place."""
+    from dynamo.common.backend.worker import WorkerConfig
+
+    class _RuntimeWithPolicy:
+        namespace = "ns"
+        discovery_backend = "etcd"
+        request_plane = "tcp"
+        event_plane = "nats"
+        unsupported_field_policy = backend.UnsupportedFieldPolicy.Reject
+
+    cfg = WorkerConfig.from_runtime_config(_RuntimeWithPolicy(), model_name="m")
+    assert cfg.unsupported_field_policy == backend.UnsupportedFieldPolicy.Reject
+
+    class _RuntimeWithoutPolicy:
+        namespace = "ns"
+        discovery_backend = "etcd"
+        request_plane = "tcp"
+        event_plane = "nats"
+
+    cfg = WorkerConfig.from_runtime_config(_RuntimeWithoutPolicy(), model_name="m")
+    assert cfg.unsupported_field_policy == backend.UnsupportedFieldPolicy.Warn
