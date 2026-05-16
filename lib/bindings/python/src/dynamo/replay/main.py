@@ -42,6 +42,22 @@ _DEFAULT_VLLM_BLOCK_SIZE = 64
 _DEFAULT_SGLANG_BLOCK_SIZE = 1
 
 
+def _optional_int(value: object, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {type(value).__name__}")
+    return value
+
+
+def _optional_float(value: object, name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{name} must be a number, got {type(value).__name__}")
+    return float(value)
+
+
 def resolve_planner_profile_data(
     planner_profile_data: Path | None,
 ) -> PlannerProfileDataResult:
@@ -61,13 +77,15 @@ def resolve_planner_profile_data(
 
 
 def _resolve_block_size_for_capacity(raw: dict) -> int:
-    block_size = raw.get("block_size")
+    block_size = _optional_int(raw.get("block_size"), "block_size")
     if block_size is not None:
         return block_size
     if raw.get("engine_type") == "sglang":
         sglang = raw.get("sglang")
         if isinstance(sglang, dict) and sglang.get("page_size") is not None:
-            return sglang["page_size"]
+            page_size = _optional_int(sglang["page_size"], "sglang.page_size")
+            if page_size is not None:
+                return page_size
         return _DEFAULT_SGLANG_BLOCK_SIZE
     return _DEFAULT_VLLM_BLOCK_SIZE
 
@@ -86,25 +104,36 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
             "AIC KV cache capacity estimation requires aic_model_path in engine args"
         )
 
+    tp_size = _optional_int(raw.get("aic_tp_size"), "aic_tp_size")
+    max_num_batched_tokens = _optional_int(
+        raw.get("max_num_batched_tokens"), "max_num_batched_tokens"
+    )
+    gpu_memory_utilization = _optional_float(
+        raw.get("gpu_memory_utilization"), "gpu_memory_utilization"
+    )
+    mem_fraction_static = _optional_float(
+        raw.get("mem_fraction_static"), "mem_fraction_static"
+    )
+
     raw["num_gpu_blocks"] = estimate_num_gpu_blocks(
         backend_name=aic_backend,
         system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
         model_path=aic_model_path,
-        tp_size=raw.get("aic_tp_size") if raw.get("aic_tp_size") is not None else 1,
+        tp_size=tp_size if tp_size is not None else 1,
         block_size=_resolve_block_size_for_capacity(raw),
         max_num_batched_tokens=(
-            raw.get("max_num_batched_tokens")
-            if raw.get("max_num_batched_tokens") is not None
+            max_num_batched_tokens
+            if max_num_batched_tokens is not None
             else _DEFAULT_MAX_NUM_BATCHED_TOKENS
         ),
         gpu_memory_utilization=(
-            raw.get("gpu_memory_utilization")
-            if raw.get("gpu_memory_utilization") is not None
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
             else DEFAULT_GPU_MEMORY_UTILIZATION
         ),
         mem_fraction_static=(
-            raw.get("mem_fraction_static")
-            if raw.get("mem_fraction_static") is not None
+            mem_fraction_static
+            if mem_fraction_static is not None
             else DEFAULT_MEM_FRACTION_STATIC
         ),
         backend_version=raw.get("aic_backend_version"),
