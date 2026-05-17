@@ -2164,6 +2164,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "slotmap",
  "tokio",
  "tokio-timerfd",

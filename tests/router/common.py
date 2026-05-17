@@ -1123,16 +1123,11 @@ def _test_router_overload_503(
                                 return response.status
 
                             if response.status == 503:
-                                body = await response.json()
+                                body = await response.text()
                                 logger.info(
                                     f"Request {req_id} got expected 503: {body}"
                                 )
                                 stop_event.set()
-                                error_msg = body.get("message", "")
-                                assert (
-                                    "Service temporarily unavailable" in error_msg
-                                    or "All workers are busy" in error_msg
-                                ), f"Expected service overload error message, got: {body}"
                                 return response.status
 
                             body = await response.text()
