@@ -255,8 +255,8 @@ pub struct StopConditions {
     // TODO(ignore_eos) - improve this my masking the EOS token with logit bias
     pub ignore_eos: Option<bool>,
 
-    /// Maximum number of thinking tokens allowed
-    /// NOTE: Currently a passthrough - no enforcement logic implemented
+    /// Maximum number of thinking tokens allowed.
+    /// vLLM maps this to `SamplingParams.thinking_token_budget` (vLLM >= 0.20)
     pub max_thinking_tokens: Option<u32>,
 }
 
