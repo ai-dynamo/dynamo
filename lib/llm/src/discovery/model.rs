@@ -275,51 +275,35 @@ impl Model {
 
     /// Whether this model can serve at least one inference request right now.
     ///
-    /// Stricter than [`Self::is_displayable`]: requires a WorkerSet that has at
-    /// least one non-prefill serving engine attached, workers connected, and
-    /// `can_serve_requests()` true. Used by KServe gRPC `model_ready` /
-    /// `server_ready` to avoid the race where a `ModelDeploymentCard` is
-    /// registered before its WorkerSet has been wired up.
+    /// Differs from [`Self::is_displayable`] in that it does **not** fall back
+    /// to prefill-only WorkerSets: requires a WorkerSet that has a serving
+    /// engine attached, workers connected, and `can_serve_requests()` true.
+    /// Used by KServe gRPC `model_ready` / `server_ready` to avoid the race
+    /// where a `ModelDeploymentCard` is registered before its WorkerSet has
+    /// been wired up.
     pub fn is_ready_to_serve(&self) -> bool {
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
             if ws.worker_count() == 0 || !ws.can_serve_requests() {
                 return false;
             }
-            ws.has_chat_engine()
-                || ws.has_completions_engine()
-                || ws.has_embeddings_engine()
-                || ws.has_images_engine()
-                || ws.has_tensor_engine()
-                || ws.has_videos_engine()
-                || ws.has_audios_engine()
+            ws.has_any_serving_engine()
         })
     }
 
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
-        let has_serving_engine = |ws: &WorkerSet| {
-            ws.has_chat_engine()
-                || ws.has_completions_engine()
-                || ws.has_embeddings_engine()
-                || ws.has_images_engine()
-                || ws.has_tensor_engine()
-                || ws.has_videos_engine()
-                || ws.has_audios_engine()
-                || ws.has_realtime_engine()
-        };
-
-        let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
-            let ws = entry.value();
-            has_serving_engine(ws.as_ref())
-        });
+        let any_set_has_engine = self
+            .worker_sets
+            .iter()
+            .any(|entry| entry.value().has_any_serving_engine());
 
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
             if ws.worker_count() == 0 || !ws.can_serve_requests() {
                 return false;
             }
-            has_serving_engine(ws.as_ref()) || (!has_any_serving_engine && ws.is_prefill_set())
+            ws.has_any_serving_engine() || (!any_set_has_engine && ws.is_prefill_set())
         })
     }
 
@@ -1167,12 +1151,11 @@ mod tests {
             "abc".to_string(),
             crate::model_card::ModelDeploymentCard::default(),
         );
+        // Keep the sender bound for the duration of the test so the watcher
+        // doesn't close.
         let (_tx, rx) = watch::channel::<Vec<u64>>(vec![]);
         ws.set_instance_watcher(rx);
         ws.chat_engine = Some(make_test_chat_engine());
-        // Keep the sender alive for the duration of the test so the watcher
-        // doesn't close.
-        let _tx_keep = _tx;
         model.add_worker_set("ns1".to_string(), Arc::new(ws));
 
         assert!(
