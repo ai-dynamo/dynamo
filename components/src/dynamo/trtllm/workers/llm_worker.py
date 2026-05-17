@@ -85,7 +85,6 @@ def build_kv_connector_config(config: Config):
     return None
 
 
-
 def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     """Parse --model-loader-extra-config into a dict. Accepts a dict or a JSON string."""
     if raw is None or raw == "":
