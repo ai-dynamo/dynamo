@@ -788,7 +788,8 @@ fn build_transform_invocation(
     let kind = match_kernel(src_kv, dst_kv, dtype).ok_or_else(|| {
         anyhow!(
             "build_transform_invocation: no kernel registered for (src={src_kv:?}, \
-             dst={dst_kv:?}, dtype={dtype:?}). UniversalPP support is pending."
+             dst={dst_kv:?}, dtype={dtype:?}). Catalog miss — pair has no \
+             registered kernel."
         )
     })?;
 
@@ -2204,7 +2205,7 @@ mod tests {
             validate_cuda_planner_entry(
                 TransferStrategy::CudaAsyncD2D,
                 KvBlockLayout::OperationalNHD,
-                KvBlockLayout::UniversalTP,
+                KvBlockLayout::Universal,
             )
             .is_ok()
         );
@@ -2275,7 +2276,7 @@ mod tests {
             validate_nixl_planner_entry(
                 TransferStrategy::NixlReadFlipped,
                 KvBlockLayout::OperationalNHD,
-                KvBlockLayout::UniversalTP,
+                KvBlockLayout::Universal,
             )
             .is_ok()
         );

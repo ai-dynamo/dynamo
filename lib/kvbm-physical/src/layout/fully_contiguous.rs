@@ -46,7 +46,7 @@ pub struct FullyContiguousLayout {
 /// let layout = FullyContiguousLayout::builder()
 ///     .config(config)
 ///     .memory(buffer)
-///     .kv_block_layout(KvBlockLayout::UniversalTP)
+///     .kv_block_layout(KvBlockLayout::Universal)
 ///     .build()?;
 /// ```
 #[derive(Debug, Default)]
@@ -269,11 +269,10 @@ impl Layout for FullyContiguousLayout {
     /// Axis order depends on [`KvBlockLayout`]:
     /// - `OperationalNHD`: `[Block, Layer, Outer, Page, HeadCount, HeadSize]`
     /// - `OperationalHND`: `[Block, Layer, Outer, HeadCount, Page, HeadSize]`
-    /// - `UniversalTP`:    `[Block, HeadCount, Layer, Outer, Page, HeadSize]`
-    /// - `UniversalPP`:    `[Block, Layer, HeadCount, Outer, Page, HeadSize]`
+    /// - `Universal`:      `[Block, HeadCount, Layer, Outer, Page, HeadSize]`
     ///
-    /// The four orderings are what makes the kernel catalog's
-    /// signature-keyed dispatch work — NHD vs HND vs UniversalTP/PP differ
+    /// The three orderings are what makes the kernel catalog's
+    /// signature-keyed dispatch work — NHD vs HND vs Universal differ
     /// only in where `HeadCount` sits relative to the inner axes.
     fn layout_view(&self) -> Result<LayoutView> {
         let cfg = &self.config;
@@ -349,7 +348,7 @@ impl Layout for FullyContiguousLayout {
                     vec![s_bk, s_la, s_ot, s_hc, s_pg, s_hs],
                 )
             }
-            KvBlockLayout::UniversalTP => {
+            KvBlockLayout::Universal => {
                 // [Block, HeadCount, Layer, Outer, Page, HeadSize] — per-block
                 // shape `[nh, nl, no, nt, hd]` (matches universal_from_block /
                 // block_from_universal kernel layout in kvbm-kernels).
@@ -377,34 +376,6 @@ impl Layout for FullyContiguousLayout {
                         hd,
                     ],
                     vec![s_bk, s_hc, s_la, s_ot, s_pg, s_hs],
-                )
-            }
-            KvBlockLayout::UniversalPP => {
-                // [Block, Layer, HeadCount, Outer, Page, HeadSize].
-                let s_hs = elem;
-                let s_pg = s_hs * hd;
-                let s_ot = s_pg * cfg.page_size;
-                let s_hc = s_ot * cfg.outer_dim;
-                let s_la = s_hc * nh;
-                let s_bk = s_la * cfg.num_layers;
-                (
-                    vec![
-                        KvDim::Block,
-                        KvDim::Layer,
-                        KvDim::HeadCount,
-                        KvDim::Outer,
-                        KvDim::Page,
-                        KvDim::HeadSize,
-                    ],
-                    vec![
-                        cfg.num_blocks,
-                        cfg.num_layers,
-                        nh,
-                        cfg.outer_dim,
-                        cfg.page_size,
-                        hd,
-                    ],
-                    vec![s_bk, s_la, s_hc, s_ot, s_pg, s_hs],
                 )
             }
             KvBlockLayout::Custom(_) => bail!(

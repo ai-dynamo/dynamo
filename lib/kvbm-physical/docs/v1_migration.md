@@ -98,7 +98,7 @@ combined.await?;
 ```rust,ignore
 let options = TransferOptions::builder()
     .src_kv_layout(KvBlockLayout::OperationalNHD)
-    .dst_kv_layout(KvBlockLayout::UniversalTP)
+    .dst_kv_layout(KvBlockLayout::Universal)
     .build()?;
 ```
 
@@ -216,12 +216,12 @@ let g2_desc = manager.build_logical_descriptor(host_handle, LogicalLayoutHandle:
 
 ### 6. Consider KvBlockLayout annotations for cross-format transfers
 
-If your transfers involve blocks stored in different dimension orderings (e.g., operational NHD from the engine vs. universal TP for storage), annotate with `KvBlockLayout`:
+If your transfers involve blocks stored in different dimension orderings (e.g., operational NHD from the engine vs. universal for storage), annotate with `KvBlockLayout`:
 
 ```rust,ignore
 let options = TransferOptions::builder()
     .src_kv_layout(KvBlockLayout::OperationalNHD)
-    .dst_kv_layout(KvBlockLayout::UniversalTP)
+    .dst_kv_layout(KvBlockLayout::Universal)
     .build()?;
 ```
 

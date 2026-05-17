@@ -1051,7 +1051,7 @@ mod tests {
         let result = PhysicalLayoutBuilder::new(agent)
             .with_config(cfg)
             .layer_separate(BlockDimension::BlockIsFirstDim)
-            .with_block_layout(KvBlockLayout::UniversalTP)
+            .with_block_layout(KvBlockLayout::Universal)
             .with_registered_regions(regions)
             .expect("registered regions")
             .build();

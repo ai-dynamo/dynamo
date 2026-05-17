@@ -98,7 +98,7 @@ fn payload(mode: BlockLayoutMode) -> LayoutCompatPayload {
         canonical: Some(default_canonical()),
         per_worker_layout: match mode {
             BlockLayoutMode::Operational => KvBlockLayout::OperationalNHD,
-            BlockLayoutMode::Universal => KvBlockLayout::UniversalTP,
+            BlockLayoutMode::Universal => KvBlockLayout::Universal,
         },
         per_worker_config: default_layout_config(),
         tp_size: 2,

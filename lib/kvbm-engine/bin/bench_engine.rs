@@ -100,7 +100,7 @@ use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
 /// tag. The tag controls whether the planner takes the direct-copy
 /// fast path (matching shapes + matching tags) or invokes a transform
 /// kernel (mismatching tags — e.g. operational → universal). LW +
-/// UniversalTP is rejected at builder time, so the enum omits it.
+/// Universal is rejected at builder time, so the enum omits it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
@@ -115,7 +115,7 @@ enum BenchLayout {
     /// Layer-separate (block-first), `KvBlockLayout::OperationalNHD`
     /// (vLLM-style per-layer KV cache with operational tag).
     LwNhd,
-    /// Fully contiguous, `KvBlockLayout::UniversalTP` — head dimension
+    /// Fully contiguous, `KvBlockLayout::Universal` — head dimension
     /// pivoted to the leading position within a block so cross-TP
     /// pulls slice along head_count without reshuffling. Pair with
     /// an operational source (e.g. `lw-nhd`) to measure the
@@ -168,11 +168,11 @@ impl BenchLayout {
             BenchLayout::Lw => (true, None),
             BenchLayout::FcNhd => (false, Some(KvBlockLayout::OperationalNHD)),
             BenchLayout::LwNhd => (true, Some(KvBlockLayout::OperationalNHD)),
-            BenchLayout::FcUniversal => (false, Some(KvBlockLayout::UniversalTP)),
+            BenchLayout::FcUniversal => (false, Some(KvBlockLayout::Universal)),
         }
     }
 
-    /// `KvBlockLayout::OperationalNHD` / `UniversalTP` both require
+    /// `KvBlockLayout::OperationalNHD` / `Universal` both require
     /// `LayoutConfig.num_heads` to be set so head_dim is derivable.
     /// `Unknown` doesn't.
     fn requires_num_heads(self) -> bool {
@@ -655,7 +655,7 @@ fn spawn_worker_thread(
 
                 // Build layout config. num_heads is only set when at
                 // least one G1/G2 layout selected a tagged variant
-                // (OperationalNHD / UniversalTP) — the legacy
+                // (OperationalNHD / Universal) — the legacy
                 // `Unknown` path leaves it None and the planner falls
                 // back to direct-copy without head-dim awareness.
                 let mut layout_config_builder = LayoutConfig::builder();
@@ -1504,7 +1504,7 @@ fn validate_config(config: &BenchConfig) -> Result<()> {
     );
     ensure!(config.iterations > 0, "iterations must be > 0");
 
-    // Tagged block layouts (operational NHD, UniversalTP) require
+    // Tagged block layouts (operational NHD, Universal) require
     // `LayoutConfig.num_heads` so the planner can derive head_dim and
     // dispatch the right transform kernel. Refuse to start instead of
     // letting the layout builder fail later with a less obvious error.

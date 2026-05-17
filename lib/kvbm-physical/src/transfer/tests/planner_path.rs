@@ -219,7 +219,7 @@ fn build_fc_with_block_layout(
 async fn assert_operational_universal_round_trip(operational: KvBlockLayout) -> Result<()> {
     let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
     let src = build_fc_with_block_layout(agent.clone(), operational, 4);
-    let mid = build_fc_with_block_layout(agent.clone(), KvBlockLayout::UniversalTP, 4);
+    let mid = build_fc_with_block_layout(agent.clone(), KvBlockLayout::Universal, 4);
     let dst = build_fc_with_block_layout(agent.clone(), operational, 4);
 
     let src_blocks = vec![0, 1];

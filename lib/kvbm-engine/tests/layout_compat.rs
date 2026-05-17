@@ -370,7 +370,7 @@ fn build_unstamped_worker(
 #[test]
 fn template_satisfies_universal_when_metadata_unstamped() {
     let recipe = CanonicalRecipe::default();
-    let raw = build_unstamped_worker(recipe, KvBlockLayout::UniversalTP, 42);
+    let raw = build_unstamped_worker(recipe, KvBlockLayout::Universal, 42);
 
     let layout_cfg = LayoutConfig::builder()
         .num_blocks(4)
@@ -412,7 +412,7 @@ fn template_satisfies_universal_when_metadata_unstamped() {
 #[test]
 fn no_template_universal_rejects_unstamped_metadata() {
     let recipe = CanonicalRecipe::default();
-    let raw = build_unstamped_worker(recipe, KvBlockLayout::UniversalTP, 42);
+    let raw = build_unstamped_worker(recipe, KvBlockLayout::Universal, 42);
 
     let err = kvbm_engine::leader::layout_compat::build_layout_compat_payload_with_template(
         BlockLayoutMode::Universal,

@@ -1876,8 +1876,7 @@ fn kv_block_layout_name(details: &kvbm_physical::layout::LayoutTypeDetails) -> S
         LayoutTypeDetails::LayerSeparate(d) => d.kv_block_layout,
     };
     match kbl {
-        KvBlockLayout::UniversalTP => "universal_tp".to_owned(),
-        KvBlockLayout::UniversalPP => "universal_pp".to_owned(),
+        KvBlockLayout::Universal => "universal".to_owned(),
         KvBlockLayout::OperationalHND => "operational_hnd".to_owned(),
         KvBlockLayout::OperationalNHD => "operational_nhd".to_owned(),
         KvBlockLayout::Unknown => "unknown".to_owned(),

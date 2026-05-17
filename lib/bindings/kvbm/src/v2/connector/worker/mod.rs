@@ -57,8 +57,8 @@ impl PyConnectorWorker {
     ///     dim_sizes: Per-axis sizes (matching `dim_labels` index-for-index). Each
     ///                tensor's `shape()` must equal `dim_sizes` exactly.
     ///     block_layout: Per-block dim ordering as a string — one of
-    ///                   `"OperationalNHD"`, `"OperationalHND"`, `"UniversalTP"`,
-    ///                   `"UniversalPP"`, `"Unknown"`. Derived in Python from
+    ///                   `"OperationalNHD"`, `"OperationalHND"`, `"Universal"`,
+    ///                   `"Unknown"`. Derived in Python from
     ///                   `attn_backend.get_kv_cache_stride_order(False)`.
     ///
     /// Raises:
@@ -268,14 +268,13 @@ fn parse_kv_dim(s: &str) -> PyResult<kvbm_common::KvDim> {
 fn parse_kv_block_layout(s: &str) -> PyResult<kvbm_common::KvBlockLayout> {
     use kvbm_common::KvBlockLayout;
     match s {
-        "UniversalTP" => Ok(KvBlockLayout::UniversalTP),
-        "UniversalPP" => Ok(KvBlockLayout::UniversalPP),
+        "Universal" => Ok(KvBlockLayout::Universal),
         "OperationalHND" => Ok(KvBlockLayout::OperationalHND),
         "OperationalNHD" => Ok(KvBlockLayout::OperationalNHD),
         "Unknown" => Ok(KvBlockLayout::Unknown),
         other => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown KvBlockLayout '{other}'; expected one of \
-             UniversalTP, UniversalPP, OperationalHND, OperationalNHD, Unknown"
+             Universal, OperationalHND, OperationalNHD, Unknown"
         ))),
     }
 }

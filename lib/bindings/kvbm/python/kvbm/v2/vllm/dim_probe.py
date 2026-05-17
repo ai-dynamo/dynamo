@@ -63,8 +63,7 @@ class KvBlockLayout(str, Enum):
 
     OperationalNHD = "OperationalNHD"
     OperationalHND = "OperationalHND"
-    UniversalTP = "UniversalTP"
-    UniversalPP = "UniversalPP"
+    Universal = "Universal"
     Unknown = "Unknown"
 
 

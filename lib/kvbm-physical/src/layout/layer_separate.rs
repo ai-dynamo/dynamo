@@ -346,9 +346,9 @@ impl Layout for LayerSeparateLayout {
                 );
                 (s_hs, s_pre_outer, inner)
             }
-            KvBlockLayout::UniversalTP | KvBlockLayout::UniversalPP => bail!(
+            KvBlockLayout::Universal => bail!(
                 "LayerSeparateLayout::layout_view: cannot represent universal \
-                 KvBlockLayout (LayerSeparateLayout::build rejects these)"
+                 KvBlockLayout (LayerSeparateLayout::build rejects it)"
             ),
             KvBlockLayout::Custom(_) => bail!(
                 "LayerSeparateLayout::layout_view: KvBlockLayout::Custom is not \

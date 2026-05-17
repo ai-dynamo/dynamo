@@ -33,7 +33,7 @@ use std::sync::Arc;
 /// let blocks = KvBlocks::new(
 ///     physical_layout.clone(),
 ///     vec![0, 1, 2, 3],  // block IDs
-///     Some(KvBlockLayout::UniversalTP),
+///     Some(KvBlockLayout::Universal),
 /// )?;
 ///
 /// // Use in transfers - the override tells the transfer system

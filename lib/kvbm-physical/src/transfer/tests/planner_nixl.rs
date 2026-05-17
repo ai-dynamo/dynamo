@@ -326,7 +326,7 @@ fn build_fc_with_block_layout_on_agent(
 ///
 /// 1. Fill `src(operational, owner)` with a deterministic pattern;
 ///    record its content-based checksums.
-/// 2. Staged Pull `src → mid(UniversalTP, remote)` (the path under
+/// 2. Staged Pull `src → mid(Universal, remote)` (the path under
 ///    test — kernel runs on remote after raw NIXL pull).
 /// 3. Local Cuda* transfer `mid → final(operational, remote)` —
 ///    PR-6.1's catalog dispatches `block_from_universal` locally.
@@ -348,7 +348,7 @@ async fn assert_staged_pull_round_trip(operational: KvBlockLayout) -> Result<()>
     // final on remote (operational), bounce on remote (operational
     // — matches src for the raw NIXL leg).
     let src = build_fc_with_block_layout_on_agent(owner.clone(), operational, 4)?;
-    let mid = build_fc_with_block_layout_on_agent(remote.clone(), KvBlockLayout::UniversalTP, 4)?;
+    let mid = build_fc_with_block_layout_on_agent(remote.clone(), KvBlockLayout::Universal, 4)?;
     let final_dst = build_fc_with_block_layout_on_agent(remote.clone(), operational, 4)?;
     let bounce_layout = build_fc_with_block_layout_on_agent(remote.clone(), operational, 4)?;
 
@@ -411,7 +411,7 @@ async fn assert_staged_pull_round_trip(operational: KvBlockLayout) -> Result<()>
 }
 
 /// Mirror for Push direction: round-trip
-/// `src(operational, owner) → mid(UniversalTP, owner)` via the
+/// `src(operational, owner) → mid(Universal, owner)` via the
 /// local Cuda* catalog, then staged Push
 /// `mid → final(operational, remote)`. The final's checksums on
 /// remote must match src's by position.
@@ -426,7 +426,7 @@ async fn assert_staged_push_round_trip(operational: KvBlockLayout) -> Result<()>
         build_ucx_agent(&remote_name)?.expect("UCX backend missing — caller should have skipped");
 
     let src = build_fc_with_block_layout_on_agent(owner.clone(), operational, 4)?;
-    let mid = build_fc_with_block_layout_on_agent(owner.clone(), KvBlockLayout::UniversalTP, 4)?;
+    let mid = build_fc_with_block_layout_on_agent(owner.clone(), KvBlockLayout::Universal, 4)?;
     let final_dst = build_fc_with_block_layout_on_agent(remote.clone(), operational, 4)?;
     let bounce_layout = build_fc_with_block_layout_on_agent(owner.clone(), operational, 4)?;
 
@@ -791,7 +791,7 @@ async fn use_planner_nixl_transform_without_bounce_errors() -> Result<()> {
         build_ucx_agent(&remote_name)?.expect("UCX backend missing — caller should have skipped");
 
     let src = build_fc_with_block_layout_on_agent(owner.clone(), KvBlockLayout::OperationalNHD, 4)?;
-    let dst = build_fc_with_block_layout_on_agent(remote.clone(), KvBlockLayout::UniversalTP, 4)?;
+    let dst = build_fc_with_block_layout_on_agent(remote.clone(), KvBlockLayout::Universal, 4)?;
 
     let owner_md = owner
         .get_local_md()

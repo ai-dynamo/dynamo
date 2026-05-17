@@ -66,18 +66,12 @@ pub(crate) fn select_transform_kernel(
 
     match (src_layout, dst_layout) {
         // Operational to Universal
-        (KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalTP)
-        | (KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalPP)
-        | (KvBlockLayout::OperationalHND, KvBlockLayout::UniversalTP)
-        | (KvBlockLayout::OperationalHND, KvBlockLayout::UniversalPP) => {
+        (KvBlockLayout::OperationalNHD | KvBlockLayout::OperationalHND, KvBlockLayout::Universal) => {
             TransformKernel::BlockToUniversal { src_layout }
         }
 
         // Universal to Operational
-        (KvBlockLayout::UniversalTP, KvBlockLayout::OperationalNHD)
-        | (KvBlockLayout::UniversalTP, KvBlockLayout::OperationalHND)
-        | (KvBlockLayout::UniversalPP, KvBlockLayout::OperationalNHD)
-        | (KvBlockLayout::UniversalPP, KvBlockLayout::OperationalHND) => {
+        (KvBlockLayout::Universal, KvBlockLayout::OperationalNHD | KvBlockLayout::OperationalHND) => {
             TransformKernel::UniversalToBlock { dst_layout }
         }
 
@@ -89,13 +83,6 @@ pub(crate) fn select_transform_kernel(
 
         // Custom layouts need explicit handling
         (KvBlockLayout::Custom(_), _) | (_, KvBlockLayout::Custom(_)) => {
-            TransformKernel::Unsupported
-        }
-
-        // Universal to Universal (different variants)
-        (KvBlockLayout::UniversalTP, KvBlockLayout::UniversalPP)
-        | (KvBlockLayout::UniversalPP, KvBlockLayout::UniversalTP) => {
-            // TODO: Add direct universal-to-universal kernel
             TransformKernel::Unsupported
         }
 
@@ -703,7 +690,7 @@ mod tests {
             TransformKernel::None
         );
         assert_eq!(
-            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::UniversalTP),
+            select_transform_kernel(KvBlockLayout::Universal, KvBlockLayout::Universal),
             TransformKernel::None
         );
     }
@@ -712,13 +699,13 @@ mod tests {
     fn test_select_transform_kernel_block_to_universal() {
         // Operational to Universal
         assert!(matches!(
-            select_transform_kernel(KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalTP),
+            select_transform_kernel(KvBlockLayout::OperationalNHD, KvBlockLayout::Universal),
             TransformKernel::BlockToUniversal {
                 src_layout: KvBlockLayout::OperationalNHD
             }
         ));
         assert!(matches!(
-            select_transform_kernel(KvBlockLayout::OperationalHND, KvBlockLayout::UniversalTP),
+            select_transform_kernel(KvBlockLayout::OperationalHND, KvBlockLayout::Universal),
             TransformKernel::BlockToUniversal {
                 src_layout: KvBlockLayout::OperationalHND
             }
@@ -729,13 +716,13 @@ mod tests {
     fn test_select_transform_kernel_universal_to_block() {
         // Universal to Operational
         assert!(matches!(
-            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::OperationalNHD),
+            select_transform_kernel(KvBlockLayout::Universal, KvBlockLayout::OperationalNHD),
             TransformKernel::UniversalToBlock {
                 dst_layout: KvBlockLayout::OperationalNHD
             }
         ));
         assert!(matches!(
-            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::OperationalHND),
+            select_transform_kernel(KvBlockLayout::Universal, KvBlockLayout::OperationalHND),
             TransformKernel::UniversalToBlock {
                 dst_layout: KvBlockLayout::OperationalHND
             }

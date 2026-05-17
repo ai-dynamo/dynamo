@@ -4592,6 +4592,7 @@ name = "kvbm-common"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bincode 2.0.1",
  "dynamo-tokens",
  "serde",
  "serde_json",

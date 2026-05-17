@@ -88,7 +88,7 @@ fn make_d2d_key(src: &PhysicalLayout, dst: &PhysicalLayout) -> BenchmarkKey {
 
 // ── PR-7.5.1 test: TransformKernel end-to-end timing ─────────────────────────
 
-/// Benchmark `BenchmarkCandidate::TransformKernel` (OperationalNHD → UniversalTP)
+/// Benchmark `BenchmarkCandidate::TransformKernel` (OperationalNHD → Universal)
 /// on Device(0) and assert the cache is populated with a `"TransformKernel"` winner.
 ///
 /// # What this proves
@@ -113,7 +113,7 @@ async fn benchmark_pair_times_transform_kernel_d2d() -> Result<()> {
     ));
     let dst = Arc::new(build_fc_with_block_layout(
         agent.clone(),
-        KvBlockLayout::UniversalTP,
+        KvBlockLayout::Universal,
         4,
     ));
 
@@ -200,7 +200,7 @@ async fn benchmark_pair_compares_three_candidates() -> Result<()> {
     ));
     let dst = Arc::new(build_fc_with_block_layout(
         agent.clone(),
-        KvBlockLayout::UniversalTP,
+        KvBlockLayout::Universal,
         4,
     ));
 

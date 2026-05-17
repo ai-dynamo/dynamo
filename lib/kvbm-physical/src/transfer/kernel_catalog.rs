@@ -89,13 +89,11 @@ pub(crate) fn match_kernel(
     match (src_kv, dst_kv) {
         // Operational → Universal: universal_from_block kernel.
         // The template selects NHD vs HND from `block_layout` at
-        // launch; UniversalTP and UniversalPP differ only in axis
-        // order on the universal side, which the kernel does not
-        // distinguish (PP support arrives when a kernel template
-        // for it lands — currently the kernel produces the TP shape).
-        (OperationalNHD | OperationalHND, UniversalTP) => Some(KernelKind::UniversalFromBlock),
+        // launch; the universal side is the canonical
+        // `[Head, Layer, Outer, Page]` axis order.
+        (OperationalNHD | OperationalHND, Universal) => Some(KernelKind::UniversalFromBlock),
         // Universal → Operational: block_from_universal.
-        (UniversalTP, OperationalNHD | OperationalHND) => Some(KernelKind::BlockFromUniversal),
+        (Universal, OperationalNHD | OperationalHND) => Some(KernelKind::BlockFromUniversal),
         // Operational ↔ Operational (PR-6.3): nhd_hnd_transpose.
         // Direction is carried on `KernelInvocation::block_layout`
         // (the kernel's `src_layout` template parameter).
@@ -105,7 +103,7 @@ pub(crate) fn match_kernel(
         // Same layout: no transform needed (defensive — `requires_transform`
         // also reports false here, so plan_copy would emit Direct).
         (a, b) if a == b => None,
-        // PP variants and Custom are not yet covered.
+        // Custom layouts are not covered by the catalog.
         _ => None,
     }
 }
@@ -132,11 +130,11 @@ mod tests {
     #[test]
     fn matches_operational_to_universal() {
         assert_eq!(
-            match_kernel(OperationalNHD, UniversalTP, TensorDataType::F16),
+            match_kernel(OperationalNHD, Universal, TensorDataType::F16),
             Some(KernelKind::UniversalFromBlock),
         );
         assert_eq!(
-            match_kernel(OperationalHND, UniversalTP, TensorDataType::BF16),
+            match_kernel(OperationalHND, Universal, TensorDataType::BF16),
             Some(KernelKind::UniversalFromBlock),
         );
     }
@@ -144,11 +142,11 @@ mod tests {
     #[test]
     fn matches_universal_to_operational() {
         assert_eq!(
-            match_kernel(UniversalTP, OperationalNHD, TensorDataType::F32),
+            match_kernel(Universal, OperationalNHD, TensorDataType::F32),
             Some(KernelKind::BlockFromUniversal),
         );
         assert_eq!(
-            match_kernel(UniversalTP, OperationalHND, TensorDataType::F16),
+            match_kernel(Universal, OperationalHND, TensorDataType::F16),
             Some(KernelKind::BlockFromUniversal),
         );
     }
@@ -157,7 +155,7 @@ mod tests {
     /// and the planner should stay on the Direct path.
     #[test]
     fn same_layout_returns_none() {
-        for kv in [OperationalNHD, OperationalHND, UniversalTP] {
+        for kv in [OperationalNHD, OperationalHND, Universal] {
             assert_eq!(match_kernel(kv, kv, TensorDataType::F16), None);
         }
     }
@@ -178,18 +176,18 @@ mod tests {
         );
     }
 
-    /// Universal-PP routes through the same logical kernel as TP at the
-    /// FFI boundary, but the catalog's PP entries are deferred until
-    /// the kernel template handles the PP axis order. Today: miss.
+    /// Reproducer for c1: single Universal variant dispatches the
+    /// universal_from_block / block_from_universal kernels in both
+    /// directions for the operational pair.
     #[test]
-    fn universal_pp_returns_none() {
+    fn matches_universal_round_trip() {
         assert_eq!(
-            match_kernel(OperationalNHD, UniversalPP, TensorDataType::F16),
-            None,
+            match_kernel(OperationalNHD, Universal, TensorDataType::F16),
+            Some(KernelKind::UniversalFromBlock),
         );
         assert_eq!(
-            match_kernel(UniversalPP, OperationalNHD, TensorDataType::F16),
-            None,
+            match_kernel(Universal, OperationalNHD, TensorDataType::F16),
+            Some(KernelKind::BlockFromUniversal),
         );
     }
 
@@ -219,6 +217,6 @@ mod tests {
             to_kernel_block_layout(OperationalHND),
             Some(kvbm_kernels::BlockLayout::HND)
         );
-        assert_eq!(to_kernel_block_layout(UniversalTP), None);
+        assert_eq!(to_kernel_block_layout(Universal), None);
     }
 }

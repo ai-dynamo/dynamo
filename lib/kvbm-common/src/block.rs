@@ -40,7 +40,7 @@ pub enum BlockDim {
 ///
 /// # Examples
 ///
-/// - `UniversalTP`: `[nh, nl, no, nt, hd]` - heads outermost for TP resharding
+/// - `Universal`: `[nh, nl, no, nt, hd]` - heads outermost for TP resharding
 /// - `OperationalNHD`: `[nl, no, nt, nh, hd]` - inner is `[nt, nh, hd]`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum KvBlockLayout {
@@ -48,13 +48,10 @@ pub enum KvBlockLayout {
     ///
     /// Heads are outermost to enable tensor parallelism (TP) resharding.
     /// Cache saved from one TP configuration can be loaded into another
-    /// by simply slicing the head dimension differently.
-    UniversalTP,
-
-    /// Pipeline parallelism format: `[nl, nh, no, nt, hd]`
-    ///
-    /// Layers are outermost for pipeline parallelism scenarios.
-    UniversalPP,
+    /// by simply slicing the head dimension differently. This is the
+    /// canonical storage/transfer layout selected by
+    /// `BlockLayoutMode::Universal`.
+    Universal,
 
     /// Operational HND format: `[nl, no, nh, nt, hd]`
     ///
@@ -92,8 +89,7 @@ impl KvBlockLayout {
     pub fn dim_order(&self) -> Option<[BlockDim; 4]> {
         use BlockDim::*;
         match self {
-            Self::UniversalTP => Some([Head, Layer, Outer, Page]),
-            Self::UniversalPP => Some([Layer, Head, Outer, Page]),
+            Self::Universal => Some([Head, Layer, Outer, Page]),
             Self::OperationalHND => Some([Layer, Outer, Head, Page]),
             Self::OperationalNHD => Some([Layer, Outer, Page, Head]),
             Self::Custom(order) => Some(*order),
@@ -130,19 +126,19 @@ impl KvBlockLayout {
         matches!(self, Self::OperationalNHD | Self::OperationalHND)
     }
 
-    /// Check if this is a universal layout (TP or PP).
+    /// Check if this is the universal layout.
     ///
-    /// Universal layouts are optimized for storage and transfer,
-    /// with different parallelism-friendly orderings.
+    /// Universal is optimized for storage and transfer with heads outermost
+    /// for tensor-parallel resharding (canonical axis order
+    /// `[Head, Layer, Outer, Page]`).
     pub fn is_universal(&self) -> bool {
-        matches!(self, Self::UniversalTP | Self::UniversalPP)
+        matches!(self, Self::Universal)
     }
 
     /// Get the layout name as a string identifier.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::UniversalTP => "universal_tp",
-            Self::UniversalPP => "universal_pp",
+            Self::Universal => "universal",
             Self::OperationalHND => "operational_hnd",
             Self::OperationalNHD => "operational_nhd",
             Self::Custom(_) => "custom",
@@ -175,8 +171,7 @@ impl KvBlockLayout {
 impl std::fmt::Display for KvBlockLayout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UniversalTP => write!(f, "Universal TP [nh, nl, no, nt, hd]"),
-            Self::UniversalPP => write!(f, "Universal PP [nl, nh, no, nt, hd]"),
+            Self::Universal => write!(f, "Universal [nh, nl, no, nt, hd]"),
             Self::OperationalHND => write!(f, "Operational HND [nl, no, nh, nt, hd]"),
             Self::OperationalNHD => write!(f, "Operational NHD [nl, no, nt, nh, hd]"),
             Self::Custom(order) => write!(f, "Custom {:?}", order),
@@ -224,7 +219,7 @@ mod tests {
         use BlockDim::*;
 
         assert_eq!(
-            KvBlockLayout::UniversalTP.dim_order(),
+            KvBlockLayout::Universal.dim_order(),
             Some([Head, Layer, Outer, Page])
         );
         assert_eq!(
@@ -240,7 +235,7 @@ mod tests {
         assert!(!KvBlockLayout::OperationalNHD.requires_transform(&KvBlockLayout::OperationalNHD));
 
         // Different layouts - transform required
-        assert!(KvBlockLayout::OperationalNHD.requires_transform(&KvBlockLayout::UniversalTP));
+        assert!(KvBlockLayout::OperationalNHD.requires_transform(&KvBlockLayout::Universal));
         assert!(KvBlockLayout::OperationalHND.requires_transform(&KvBlockLayout::OperationalNHD));
 
         // Unknown→Known requires transform (conservative)
@@ -255,15 +250,16 @@ mod tests {
     fn test_is_operational() {
         assert!(KvBlockLayout::OperationalNHD.is_operational());
         assert!(KvBlockLayout::OperationalHND.is_operational());
-        assert!(!KvBlockLayout::UniversalTP.is_operational());
+        assert!(!KvBlockLayout::Universal.is_operational());
         assert!(!KvBlockLayout::Unknown.is_operational());
     }
 
     #[test]
     fn test_is_universal() {
-        assert!(KvBlockLayout::UniversalTP.is_universal());
-        assert!(KvBlockLayout::UniversalPP.is_universal());
+        assert!(KvBlockLayout::Universal.is_universal());
         assert!(!KvBlockLayout::OperationalNHD.is_universal());
+        assert!(!KvBlockLayout::OperationalHND.is_universal());
+        assert!(!KvBlockLayout::Unknown.is_universal());
     }
 
     #[test]
@@ -271,9 +267,62 @@ mod tests {
         assert_eq!(KvBlockLayout::default(), KvBlockLayout::Unknown);
     }
 
+    /// Reproducer for c1: collapse UniversalTP + UniversalPP into a single
+    /// Universal variant carrying today's UniversalTP semantics (axis order
+    /// [Head, Layer, Outer, Page], serde tag "Universal", label "universal").
+    #[test]
+    fn universal_is_single_variant() {
+        use BlockDim::*;
+        assert_eq!(
+            KvBlockLayout::Universal.dim_order(),
+            Some([Head, Layer, Outer, Page])
+        );
+        assert_eq!(KvBlockLayout::Universal.name(), "universal");
+        assert!(KvBlockLayout::Universal.is_universal());
+        assert!(!KvBlockLayout::Universal.is_operational());
+    }
+
+    /// Forward wire-stability guard. `KvBlockLayout` flows through
+    /// `#[bincode(with_serde)]` inside `LogicalLayoutDescriptor`
+    /// (lib/kvbm-physical/src/manager/metadata.rs), which encodes enum
+    /// variants by **declaration-order index** (u32 varint). Reordering
+    /// or deleting any variant silently shifts surviving discriminants
+    /// and turns a wire-version skew into an NHD↔HND swap on decode.
+    ///
+    /// Lock down today's post-c1 discriminants so any future refactor
+    /// that touches the enum has to acknowledge the wire impact:
+    ///   0 = Universal
+    ///   1 = OperationalHND
+    ///   2 = OperationalNHD
+    ///   3 = Custom(...)
+    ///   4 = Unknown
+    ///
+    /// Backcompat with pre-c1 bytes is **not** preserved — nothing
+    /// shipped before c1, so there are no pre-c1 bytes in the wild.
+    #[test]
+    fn variant_discriminants_are_wire_stable() {
+        let cfg = bincode::config::standard();
+        let first_byte = |k: KvBlockLayout| -> u8 {
+            bincode::serde::encode_to_vec(k, cfg).unwrap()[0]
+        };
+        assert_eq!(first_byte(KvBlockLayout::Universal), 0);
+        assert_eq!(first_byte(KvBlockLayout::OperationalHND), 1);
+        assert_eq!(first_byte(KvBlockLayout::OperationalNHD), 2);
+        assert_eq!(
+            first_byte(KvBlockLayout::Custom([
+                BlockDim::Layer,
+                BlockDim::Outer,
+                BlockDim::Page,
+                BlockDim::Head,
+            ])),
+            3
+        );
+        assert_eq!(first_byte(KvBlockLayout::Unknown), 4);
+    }
+
     #[test]
     fn test_serialization() {
-        let layout = KvBlockLayout::UniversalTP;
+        let layout = KvBlockLayout::Universal;
         let json = serde_json::to_string(&layout).unwrap();
         let deserialized: KvBlockLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(layout, deserialized);
@@ -305,6 +354,6 @@ mod tests {
             KvBlockLayout::OperationalNHD.to_inner_shape(),
             Some(InnerShape::NHD)
         );
-        assert_eq!(KvBlockLayout::UniversalTP.to_inner_shape(), None);
+        assert_eq!(KvBlockLayout::Universal.to_inner_shape(), None);
     }
 }

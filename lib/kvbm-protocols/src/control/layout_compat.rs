@@ -240,7 +240,7 @@ mod tests {
             canonical: Some(canonical()),
             per_worker_layout: match mode {
                 BlockLayoutMode::Operational => KvBlockLayout::OperationalNHD,
-                BlockLayoutMode::Universal => KvBlockLayout::UniversalTP,
+                BlockLayoutMode::Universal => KvBlockLayout::Universal,
             },
             per_worker_config: cfg(),
             tp_size: 2,
@@ -273,11 +273,20 @@ mod tests {
 
     #[test]
     fn universal_accepts_different_per_worker_layout() {
-        // Universal explicitly permits different per-worker permutations
-        // when canonicals match.
+        // Universal-mode policy: aggregate-canonical equality decides
+        // compat; per_worker_layout is intentionally not compared.
+        // (UniversalPP collapsed into Universal in c1; cross-topology
+        // decompositions get their own cases in c4.) Use Custom on one
+        // side as the layout-difference probe.
+        use kvbm_common::BlockDim;
         let a = payload(BlockLayoutMode::Universal);
         let mut b = payload(BlockLayoutMode::Universal);
-        b.per_worker_layout = KvBlockLayout::UniversalPP;
+        b.per_worker_layout = KvBlockLayout::Custom([
+            BlockDim::Head,
+            BlockDim::Page,
+            BlockDim::Layer,
+            BlockDim::Outer,
+        ]);
         check_layout_compat(&a, &b).unwrap();
     }
 
