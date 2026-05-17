@@ -100,6 +100,10 @@ dynamo/
 | Deployment         | Deployment validation                 | `tests/deploy/`                               |
 | Benchmark          | Performance/load                      | `benchmarks/`                                 |
 
+### Test Oracles
+
+Prefer API responses, structured response fields, metrics, or direct test helper APIs for functional and semantic assertions. If a router-internal fact is only exposed as a structured tracing event, keep parsing in a shared helper rather than duplicating ad hoc log scraping in tests.
+
 ---
 
 ## Test Marking: How to Mark Tests

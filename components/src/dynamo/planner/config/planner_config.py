@@ -30,6 +30,14 @@ from dynamo.planner.config.defaults import SLAPlannerDefaults
 logger = logging.getLogger(__name__)
 
 
+def _prometheus_ssl_verify_default() -> bool:
+    return os.environ.get("PROMETHEUS_SSL_VERIFY", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 class PlannerPreDeploymentSweepMode(str, Enum):
     None_ = "none"
     Rapid = "rapid"
@@ -148,6 +156,16 @@ class PlannerConfig(BaseModel):
             "every PromQL request. Useful for hardened monitoring stacks "
             "(OpenShift thanos-querier, OAuth-proxied Prometheus). Token is "
             "read once at startup."
+        ),
+    )
+    metric_pulling_prometheus_ssl_verify: bool = Field(
+        default_factory=_prometheus_ssl_verify_default,
+        exclude=True,
+        description=(
+            "Verify the upstream Prometheus TLS certificate. Default False "
+            "preserves the previous PrometheusConnect(disable_ssl=True) "
+            "behavior. Set True for hardened monitoring stacks; pair with "
+            "an injected CA bundle if the upstream uses a private CA."
         ),
     )
     metric_reporting_prometheus_port: int = Field(
