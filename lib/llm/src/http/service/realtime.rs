@@ -398,7 +398,21 @@ where
         };
         let model_name = match &session_update.session {
             Session::RealtimeSession(s) => s.model.as_deref().filter(|m| !m.is_empty()),
-            Session::RealtimeTranscriptionSession(_) => None,
+            Session::RealtimeTranscriptionSession(_) => {
+                // Transcription sessions need their own engine wiring (audio →
+                // text via /audio/transcriptions) that this slice doesn't
+                // implement. Surface that directly instead of letting the
+                // empty `model` fall through to the generic "session.model
+                // required" error from the realtime path below.
+                send_error_event(
+                    ws_tx,
+                    "unsupported_session_type",
+                    "session.type 'transcription' is not yet supported (only 'realtime' is supported)",
+                    Some("session.type"),
+                )
+                .await;
+                continue;
+            }
         };
         let Some(model_name) = model_name else {
             send_error_event(
