@@ -516,7 +516,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         // Spawn background monitoring task
         tokio::spawn(async move {
             let mut kv_metrics_rx = kv_metrics_rx; // Move into async block
-            let mut previous_overloaded_instances = Vec::new(); // Track previous state
 
             // Track decode worker IDs (for ITL cleanup)
             let mut known_decode_workers: std::collections::HashSet<u64> =
@@ -573,6 +572,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
 
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
+                        client.clear_overloaded_instances_for_removed(&removed_workers);
 
                         // Update worker load states with runtime config values for all dp_ranks
                         // This ensures we track workers from MDCs even if they don't publish ActiveLoad
@@ -674,9 +674,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             );
                         }
 
-                        // Only update if overloaded_instances has changed
-                        if overloaded_instances != previous_overloaded_instances {
-                            client.set_overloaded_instances(&overloaded_instances);
+                        if client.set_overloaded_instances(&overloaded_instances) {
                             let counts = client.routing_instance_counts();
                             tracing::debug!(
                                 overloaded_instances = ?overloaded_instances,
@@ -684,7 +682,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 total_workers = counts.discovered,
                                 "overloaded instances changed"
                             );
-                            previous_overloaded_instances = overloaded_instances;
                         }
                     }
 

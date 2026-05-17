@@ -348,12 +348,20 @@ impl RoutingInstancesState {
         self.update(|current| current.report_instance_down(instance_id), true);
     }
 
-    fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) {
+    fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
         let overloaded_ids = overloaded_instance_ids
             .iter()
             .copied()
             .collect::<HashSet<_>>();
-        self.update(move |current| current.set_overloaded(overloaded_ids), false);
+        let _guard = self.update_lock.lock().unwrap();
+        let current = self.snapshot.load();
+        if current.overloaded_ids == overloaded_ids {
+            return false;
+        }
+
+        let next = Arc::new(current.set_overloaded(overloaded_ids));
+        self.snapshot.store(next);
+        true
     }
 
     fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -510,9 +518,10 @@ impl Client {
     }
 
     /// Replace the set of overloaded instances reported by the worker monitor.
-    pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) {
+    /// Returns true when this changes the routing snapshot.
+    pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
         self.routing_instances
-            .set_overloaded_instances(overloaded_instance_ids);
+            .set_overloaded_instances(overloaded_instance_ids)
     }
 
     pub fn clear_overloaded_instances_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -766,11 +775,13 @@ mod tests {
 
         assert_eq!(client.overloaded_instance_ids(), None);
 
-        client.set_overloaded_instances(&[7]);
+        assert!(client.set_overloaded_instances(&[7]));
         assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+        assert!(!client.set_overloaded_instances(&[7]));
 
-        client.set_overloaded_instances(&[]);
+        assert!(client.set_overloaded_instances(&[]));
         assert_eq!(client.overloaded_instance_ids(), None);
+        assert!(!client.set_overloaded_instances(&[]));
 
         rt.shutdown();
     }
