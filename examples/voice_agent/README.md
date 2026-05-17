@@ -78,6 +78,20 @@ single append as one VAD-delimited utterance for this PoC, sends it through
 `conversation.item.input_audio_transcription.completed` plus a text response.
 By default it targets NVIDIA's Parakeet CTC 0.6B ASR endpoint.
 
+For a locally deployed Riva/NIM ASR service, point the backend at the insecure
+gRPC port and disable cloud metadata. For example, if the NIM is bound on
+`0.0.0.0:50051`, connect to it from the backend as `127.0.0.1:50051`:
+
+```bash
+PYTHON=/mnt/scratch/nealv/venvs/dynamo_realtime/bin/python
+"$PYTHON" examples/voice_agent/pipecat_backend.py \
+  --connect 127.0.0.1:8081 \
+  --nvidia-server 127.0.0.1:50051 \
+  --nvidia-no-ssl \
+  --nvidia-function-id "" \
+  --nvidia-model-name parakeet-0.6b-en-US-asr-offline
+```
+
 ## Run the Python client
 
 Install the only client dependency:
