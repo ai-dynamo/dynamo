@@ -146,6 +146,27 @@ jobs:
           esac
 
   # ============================================================================
+  # MANUAL RELEASE APPROVAL GATE
+  # ============================================================================
+  # Manual workflow_dispatch that would publish (release=true) must be approved
+  # by a reviewer of the `manual-release-approval` environment before the
+  # `release` job runs release.yml. Scheduled runs skip this job; the `release`
+  # job below accepts `skipped` as success.
+  manual-release-approval:
+    name: Manual release approval gate
+    needs: [compute-release-mode]
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.compute-release-mode.outputs.release == 'true' }}
+    runs-on: prod-default-small-v2
+    environment: manual-release-approval
+    permissions:
+      contents: read
+    steps:
+      - name: Record approval
+        run: |
+          echo "Manual nightly release approved by ${{ github.actor }}"
+          echo "Run: ${{ github.run_id }} attempt ${{ github.run_attempt }}"
+
+  # ============================================================================
   # BUILD JOBS
   # ============================================================================
 
@@ -432,6 +453,7 @@ jobs:
     needs:
       - resolve-source-sha
       - compute-release-mode
+      - manual-release-approval
       - vllm-test
       - vllm-multi-gpu-test
       - sglang-test
@@ -441,7 +463,12 @@ jobs:
       - dynamo-pipeline
       - rust-tests
     # Framework (vllm/sglang/trtllm) and rust tests do not block publishing.
-    if: ${{ !cancelled() && needs.compute-release-mode.outputs.release == 'true' }}
+    # The manual-release-approval gate is `skipped` on cron and `success` after
+    # reviewer approval on workflow_dispatch — both are accepted here.
+    if: ${{ !cancelled()
+        && needs.compute-release-mode.outputs.release == 'true'
+        && (needs.manual-release-approval.result == 'success'
+            || needs.manual-release-approval.result == 'skipped') }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
