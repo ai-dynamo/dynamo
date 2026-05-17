@@ -788,6 +788,7 @@ async fn feature_register_without_manager_rejects() {
         peer_info: peer.clone(),
         features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Prefill,
+            layout_compat: None,
         }))],
     };
     let resp = http()
@@ -884,6 +885,7 @@ async fn feature_cd_role_conflict_on_reregister() {
             peer_info: peer.clone(),
             features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
                 role,
+                layout_compat: None,
             }))],
         };
         http()
@@ -908,6 +910,7 @@ async fn feature_cd_unregister_removes_from_lists() {
         peer_info: peer.clone(),
         features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Prefill,
+            layout_compat: None,
         }))],
     };
     http()
@@ -948,6 +951,7 @@ async fn feature_cd_reaper_evicts_from_lists() {
         peer_info: peer.clone(),
         features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Prefill,
+            layout_compat: None,
         }))],
     };
     http()
@@ -993,12 +997,12 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
     );
 
     let p_hub_id = p_cd
-        .register(p_velo.peer_info())
+        .register(p_velo.peer_info(), None)
         .await
         .unwrap()
         .expect("hub velo id");
     let d_hub_id = d_cd
-        .register(d_velo.peer_info())
+        .register(d_velo.peer_info(), None)
         .await
         .unwrap()
         .expect("hub velo id");
@@ -1183,7 +1187,7 @@ async fn dispatcher_worker_drains_queue_and_invokes_dispatcher() {
         ConditionalDisaggRole::Decode,
     );
     let d_hub_id = d_cd
-        .register(d_velo.peer_info())
+        .register(d_velo.peer_info(), None)
         .await
         .unwrap()
         .expect("hub velo id");
@@ -1244,7 +1248,7 @@ async fn no_dispatcher_does_not_spawn_worker() {
         ConditionalDisaggRole::Decode,
     );
     let d_hub_id = d_cd
-        .register(d_velo.peer_info())
+        .register(d_velo.peer_info(), None)
         .await
         .unwrap()
         .expect("hub velo id");
@@ -1276,7 +1280,7 @@ async fn no_dispatcher_does_not_spawn_worker() {
         ConditionalDisaggRole::Prefill,
     );
     let p_hub_id = p_cd
-        .register(p_velo.peer_info())
+        .register(p_velo.peer_info(), None)
         .await
         .unwrap()
         .expect("hub velo id");

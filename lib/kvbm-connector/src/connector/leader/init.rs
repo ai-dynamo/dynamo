@@ -438,6 +438,10 @@ impl ConnectorLeader {
             // leader built with `control.metrics = true` would silently log
             // a warning at register time and the module would never appear.
             .observability(self.runtime.observability().clone())
+            // Cross-leader block-layout compat policy
+            // (Operational by default; Universal opts-in to canonical-only
+            // matching across permutations / TP / PP).
+            .block_layout_mode(self.runtime.config().block_layout)
             .registry(registry)
             .g2_manager(g2_manager)
             .bypass_host(bypass_host)
@@ -761,6 +765,51 @@ impl ConnectorLeader {
             use kvbm_config::DisaggregationRole;
             use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
 
+            // Build the layout-compat payload from the leader's
+            // rank-0 worker metadata so the hub can gate this
+            // registration against the first-registered baseline.
+            // SPMD leaders carry identical per-worker shape across
+            // workers (`validate_remote_metadata` enforces it), so a
+            // rank-0 sample is sufficient. The cached metadata is
+            // *raw* — workers emit `parallelism = None` and the
+            // descriptor is only stamped lazily inside the leader
+            // (`stamp_parallelism_descriptors`). Pass the freshly-
+            // built [`ParallelismTemplate`] so universal mode can
+            // derive its canonical aggregate without needing the
+            // metadata to be pre-stamped.
+            let block_layout_mode = self.runtime.config().block_layout;
+            // NOTE: this template construction mirrors the one further up
+            // at the `leader_builder.parallelism_template(...)` call site —
+            // both must derive from the same `(reference_config, parallelism
+            // mode, num_workers)` so the hub-side compat gate and the
+            // engine-side `connect_remote` gate agree on canonical extents.
+            // If you change one site, change the other.
+            let template_for_payload = if reference_config.num_heads.is_some() {
+                Some(
+                    kvbm_engine::leader::parallelism::ParallelismTemplate::from_layout_config(
+                        reference_config,
+                        self.runtime.config().cache.parallelism,
+                        num_workers,
+                    )
+                    .context("building ParallelismTemplate for hub registration payload")?,
+                )
+            } else {
+                None
+            };
+            let layout_compat_payload = {
+                let state = self.init.lock();
+                state.worker_metadata.first().cloned()
+            }
+            .map(|w| {
+                kvbm_engine::leader::layout_compat::build_layout_compat_payload_with_template(
+                    block_layout_mode,
+                    &w,
+                    template_for_payload.as_ref(),
+                )
+                .context("building layout_compat payload for hub registration")
+            })
+            .transpose()?;
+
             let (hub, client, hub_velo_id) = super::disagg::register_with_hub(
                 &disagg_cfg,
                 Arc::clone(
@@ -768,6 +817,7 @@ impl ConnectorLeader {
                         .velo()
                         .expect("velo not initialized on runtime"),
                 ),
+                layout_compat_payload,
             )
             .await
             .context("conditional-disagg hub registration failed")?;

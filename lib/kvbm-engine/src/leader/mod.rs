@@ -6,6 +6,7 @@ pub mod control;
 mod describe_map;
 pub mod dispatch;
 mod instance;
+pub mod layout_compat;
 mod onboarding;
 pub mod parallelism;
 #[doc = include_str!("../../docs/session.md")]

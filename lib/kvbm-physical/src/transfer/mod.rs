@@ -44,7 +44,6 @@ pub mod context;
 pub(crate) mod executor;
 pub(crate) mod fill;
 pub(crate) mod graph_cache;
-#[cfg(feature = "permute_kernels")]
 pub(crate) mod kernel_catalog;
 pub(crate) mod lower;
 pub(crate) mod notifications;
@@ -124,12 +123,10 @@ impl BounceBufferInternal {
         Self { layout, block_ids }
     }
 
-    #[cfg_attr(not(feature = "permute_kernels"), allow(dead_code))]
     pub(crate) fn layout(&self) -> &PhysicalLayout {
         &self.layout
     }
 
-    #[cfg_attr(not(feature = "permute_kernels"), allow(dead_code))]
     pub(crate) fn block_ids(&self) -> &[BlockId] {
         &self.block_ids
     }

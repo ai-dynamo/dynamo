@@ -146,23 +146,19 @@ pub fn standard_config(num_blocks: usize) -> LayoutConfig {
 /// at toy scale). The kernel catalog requires `num_heads` to be set when projecting
 /// a known `KvBlockLayout`, so wiring it in here keeps `use_planner = true` paths
 /// happy without disturbing legacy tests (the field was already `Option<usize>`).
-/// When `permute_kernels` is on, `dtype = F16` matches the existing
-/// `dtype_width_bytes = 2`.
+/// `dtype = F16` matches the existing `dtype_width_bytes = 2`.
 pub fn standard_config_with_page_size(num_blocks: usize, page_size: usize) -> LayoutConfig {
-    let mut builder = LayoutConfig::builder();
-    builder
+    LayoutConfig::builder()
         .num_blocks(num_blocks)
         .num_layers(2)
         .outer_dim(2)
         .page_size(page_size)
         .inner_dim(128)
         .dtype_width_bytes(2)
-        .num_heads(Some(8));
-    #[cfg(feature = "permute_kernels")]
-    {
-        builder.dtype(Some(kvbm_kernels::TensorDataType::F16));
-    }
-    builder.build().unwrap()
+        .num_heads(Some(8))
+        .dtype(Some(kvbm_kernels::TensorDataType::F16))
+        .build()
+        .unwrap()
 }
 
 /// Helper function for creating a PhysicalLayout builder with standard config.

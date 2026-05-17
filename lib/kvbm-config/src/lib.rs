@@ -30,6 +30,7 @@ pub use discovery::{
     DiscoveryConfig, EtcdDiscoveryConfig, FilesystemDiscoveryConfig, P2pDiscoveryConfig,
 };
 pub use events::{BatchingConfig as EventsBatchingConfig, EventPolicyConfig, EventsConfig};
+pub use kvbm_common::BlockLayoutMode;
 pub use messenger::{MessengerBackendConfig, MessengerConfig};
 pub use metrics::MetricsConfig;
 pub use nixl::NixlConfig;
@@ -131,6 +132,21 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub control: ControlConfig,
+
+    /// Block-layout compatibility mode applied at cross-leader metadata
+    /// import (conditional disagg, future leader-to-leader exchange).
+    ///
+    /// - `operational` (default): per-worker `(KvBlockLayout, LayoutConfig)`
+    ///   must match exactly on import. Strict / bit-for-bit.
+    /// - `universal`: canonical aggregate tensor must match; per-worker
+    ///   permutation and shard extents may differ. Requires every local
+    ///   worker's `KvBlockLayout` to be labeled (not `Unknown`) at
+    ///   registration.
+    ///
+    /// See [`BlockLayoutMode`] docs for full semantics. Env override:
+    /// `KVBM_BLOCK_LAYOUT={operational|universal}`.
+    #[serde(default)]
+    pub block_layout: BlockLayoutMode,
 }
 
 impl KvbmConfig {
@@ -233,6 +249,8 @@ impl KvbmConfig {
                 Env::prefixed("KVBM_CONTROL_")
                     .map(|k| format!("control.{}", k.as_str().to_lowercase()).into()),
             )
+            // Block-layout compat mode: KVBM_BLOCK_LAYOUT=operational|universal
+            .merge(Env::prefixed("KVBM_BLOCK_LAYOUT").map(|_| "block_layout".into()))
     }
 
     /// Load configuration from default figment (env and files).
@@ -732,6 +750,39 @@ mod tests {
                 assert!(cfg.control.test);
             },
         );
+    }
+
+    #[test]
+    fn block_layout_defaults_to_operational() {
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH", "KVBM_BLOCK_LAYOUT"], || {
+            let cfg = KvbmConfig::from_env().unwrap();
+            assert_eq!(cfg.block_layout, BlockLayoutMode::Operational);
+        });
+    }
+
+    #[test]
+    fn block_layout_env_universal_parses() {
+        temp_env::with_vars(vec![("KVBM_BLOCK_LAYOUT", Some("universal"))], || {
+            let cfg = KvbmConfig::from_env().unwrap();
+            assert_eq!(cfg.block_layout, BlockLayoutMode::Universal);
+        });
+    }
+
+    #[test]
+    fn block_layout_env_operational_parses() {
+        temp_env::with_vars(vec![("KVBM_BLOCK_LAYOUT", Some("operational"))], || {
+            let cfg = KvbmConfig::from_env().unwrap();
+            assert_eq!(cfg.block_layout, BlockLayoutMode::Operational);
+        });
+    }
+
+    #[test]
+    fn block_layout_json_universal_parses() {
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH", "KVBM_BLOCK_LAYOUT"], || {
+            let json = r#"{"block_layout": "universal"}"#;
+            let cfg = KvbmConfig::from_figment_with_json(json).unwrap();
+            assert_eq!(cfg.block_layout, BlockLayoutMode::Universal);
+        });
     }
 
     #[test]

@@ -100,7 +100,6 @@ fn make_d2d_key(src: &PhysicalLayout, dst: &PhysicalLayout) -> BenchmarkKey {
 /// 3. End-to-end: the kernel launches, the stream synchronises, and the
 ///    elapsed time is non-zero (or at worst 0 µs — the assertion checks
 ///    the cache entry exists, not the specific latency).
-#[cfg(feature = "permute_kernels")]
 #[tokio::test]
 async fn benchmark_pair_times_transform_kernel_d2d() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
@@ -188,10 +187,6 @@ async fn benchmark_pair_times_transform_kernel_d2d() -> Result<()> {
 ///
 /// We assert `runs_compared == 3` (counting logic) and that the cache is
 /// populated.  The winner is not asserted — timing jitter may vary.
-///
-/// Only compiled when `permute_kernels` is enabled because the third
-/// variant requires `BenchmarkCandidate::TransformKernel`.
-#[cfg(feature = "permute_kernels")]
 #[tokio::test]
 async fn benchmark_pair_compares_three_candidates() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
@@ -238,7 +233,7 @@ async fn benchmark_pair_compares_three_candidates() -> Result<()> {
                 size: 0,
             }],
         },
-        // Candidate 3: TransformKernel — requires permute_kernels.
+        // Candidate 3: TransformKernel.
         BenchmarkCandidate::TransformKernel {
             invocation,
             src: src.clone(),

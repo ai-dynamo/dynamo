@@ -25,9 +25,9 @@
 //! - **`DirectDma`**: `Instant::now()` → `dispatch_direct_dma_ops` →
 //!   `stream.synchronize()` → elapsed. Both submit and DMA transfer time
 //!   are included.
-//! - **`TransformKernel`** (requires `permute_kernels` feature): same
-//!   pattern with `dispatch_transform_kernel` + `stream.synchronize()`.
-//!   Includes pointer-table H2D upload and kernel execution.
+//! - **`TransformKernel`**: same pattern with `dispatch_transform_kernel`
+//!   + `stream.synchronize()`. Includes pointer-table H2D upload and
+//!   kernel execution.
 //! - **`NixlDirectDma`**: `Instant::now()` → `create_xfer_req` +
 //!   `post_xfer_req` → tight sync poll on `get_xfer_status()` until
 //!   completion → elapsed. End-to-end including network transfer.
@@ -89,7 +89,7 @@ pub struct BenchmarkKey {
     /// Labelled-axis signature of the destination layout.
     pub dst_signature: LayoutSignature,
     /// Element size in bytes (`cfg.dtype_width_bytes`), used as a
-    /// dtype discriminant without requiring the `permute_kernels` feature.
+    /// dtype discriminant.
     pub dtype_width_bytes: Option<u32>,
     /// Transfer route encoded as `TransferStrategy`'s discriminant
     /// integer so the type stays hashable without a custom impl.
@@ -265,7 +265,7 @@ impl BenchmarkCache {
     /// - [`BenchmarkCandidate::DirectDma`]: measures end-to-end via
     ///   `memcpy_batch` + `stream.synchronize()`.
     /// - [`BenchmarkCandidate::TransformKernel`]: `dispatch_transform_kernel`
-    ///   + `stream.synchronize()`. Requires the `permute_kernels` feature.
+    ///   + `stream.synchronize()`.
     /// - [`BenchmarkCandidate::NixlDirectDma`]: `create_xfer_req` +
     ///   `post_xfer_req` + sync polling on `get_xfer_status()`.
     ///
@@ -358,9 +358,6 @@ pub(crate) enum BenchmarkCandidate {
     },
 
     /// Planner-driven permute kernel (operational ↔ universal, or NHD ↔ HND).
-    ///
-    /// Only present when the `permute_kernels` feature is enabled.
-    #[cfg(feature = "permute_kernels")]
     TransformKernel {
         /// Kernel launch parameters resolved by the catalog.
         invocation: crate::transfer::kernel_catalog::KernelInvocation,
@@ -401,7 +398,6 @@ impl BenchmarkCandidate {
     pub(crate) fn class_name(&self) -> &'static str {
         match self {
             BenchmarkCandidate::DirectDma { .. } => "DirectDma",
-            #[cfg(feature = "permute_kernels")]
             BenchmarkCandidate::TransformKernel { .. } => "TransformKernel",
             BenchmarkCandidate::NixlDirectDma { .. } => "DirectDma",
         }
@@ -447,7 +443,6 @@ fn dispatch_benchmark_candidate(
             Ok(("DirectDma", t0.elapsed().as_micros() as u64))
         }
 
-        #[cfg(feature = "permute_kernels")]
         BenchmarkCandidate::TransformKernel {
             invocation,
             src,

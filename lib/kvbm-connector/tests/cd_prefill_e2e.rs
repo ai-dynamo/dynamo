@@ -1354,7 +1354,11 @@ async fn cd_prefill_observer_fires_before_attach_buffered_and_drained() -> Resul
     );
 
     let avails = session.make_available_calls();
-    assert_eq!(avails.len(), 1, "buffered drain must invoke make_available once");
+    assert_eq!(
+        avails.len(),
+        1,
+        "buffered drain must invoke make_available once"
+    );
     assert_eq!(
         avails[0], expected_hashes,
         "drained availability hashes must match the buffered output blocks"
@@ -1379,8 +1383,10 @@ async fn cd_prefill_multiple_observer_commits_before_attach_accumulate() -> Resu
     assert_eq!(batch1.len(), 1);
     assert_eq!(batch2.len(), 1);
 
-    h.coordinator.commit_output_blocks("req-1", batch1.clone())?;
-    h.coordinator.commit_output_blocks("req-1", batch2.clone())?;
+    h.coordinator
+        .commit_output_blocks("req-1", batch1.clone())?;
+    h.coordinator
+        .commit_output_blocks("req-1", batch2.clone())?;
 
     let expected_hashes: Vec<kvbm_logical::SequenceHash> = batch1
         .iter()

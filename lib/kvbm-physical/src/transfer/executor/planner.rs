@@ -153,7 +153,6 @@ pub(crate) fn execute_planner_cuda_transfer(
             // heterogeneous sizes get one batch per size.
             dispatch_ops_grouped_by_size(&ops, stream.as_ref())?;
         }
-        #[cfg(feature = "permute_kernels")]
         PlanOutcome::Transform {
             invocation,
             block_pairs,
@@ -241,9 +240,7 @@ pub(crate) fn execute_planner_nixl_transfer(
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
     strategy: TransferStrategy,
-    #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))] bounce_buffer: Option<
-        &crate::transfer::BounceBufferInternal,
-    >,
+    bounce_buffer: Option<&crate::transfer::BounceBufferInternal>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
@@ -287,7 +284,6 @@ pub(crate) fn execute_planner_nixl_transfer(
     )? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Direct(ops) => ops,
-        #[cfg(feature = "permute_kernels")]
         PlanOutcome::Transform {
             invocation,
             block_pairs,
@@ -432,7 +428,6 @@ enum PlanOutcome {
     /// PR-6.1: a `KernelInvocation` resolved through the catalog —
     /// dispatch via the matching `kvbm-kernels` FFI entrypoint with
     /// pointer arrays built from the original `PhysicalLayout`s.
-    #[cfg(feature = "permute_kernels")]
     Transform {
         invocation: crate::transfer::kernel_catalog::KernelInvocation,
         block_pairs: Vec<(BlockId, BlockId)>,
@@ -462,7 +457,6 @@ impl PlanOutcome {
         match self {
             PlanOutcome::Empty => "Empty", // not emitted; here for completeness
             PlanOutcome::Direct(_) => "DirectDma",
-            #[cfg(feature = "permute_kernels")]
             PlanOutcome::Transform { .. } => "TransformKernel",
             PlanOutcome::SmallStridedCopy(_) => "SmallStridedCopy",
             PlanOutcome::CudaGraphReplay { .. } => "CudaGraphReplay",
@@ -477,12 +471,10 @@ impl PlanOutcome {
     ///   moves exactly one block worth of data per pair. `bytes_per_block`
     ///   is taken from the `src` layout (caller passes it in to avoid
     ///   needing another `PhysicalLayout` ref inside the enum).
-    #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
     fn coalesced_bytes(&self, src_bytes_per_block: usize) -> usize {
         match self {
             PlanOutcome::Empty => 0,
             PlanOutcome::Direct(ops) => ops.iter().map(|o| o.size).sum(),
-            #[cfg(feature = "permute_kernels")]
             PlanOutcome::Transform { block_pairs, .. } => block_pairs.len() * src_bytes_per_block,
             PlanOutcome::SmallStridedCopy(ops) => ops.iter().map(|o| o.size).sum(),
             PlanOutcome::CudaGraphReplay { ops, .. } => ops.iter().map(|o| o.size).sum(),
@@ -497,7 +489,6 @@ impl PlanOutcome {
         match self {
             PlanOutcome::Empty => 0,
             PlanOutcome::Direct(ops) => ops.len(),
-            #[cfg(feature = "permute_kernels")]
             PlanOutcome::Transform { block_pairs, .. } => block_pairs.len(),
             PlanOutcome::SmallStridedCopy(ops) => ops.len(),
             PlanOutcome::CudaGraphReplay { ops, .. } => ops.len(),
@@ -585,7 +576,6 @@ fn plan_and_lower(
     // Cross-leader sliced transfers under layout-mismatch + permute
     // is a future PR (combine kernel staged-bounce with a sliced
     // post-kernel leg).
-    #[cfg(feature = "permute_kernels")]
     {
         let src_kv = src.layout().block_layout();
         let dst_kv = dst.layout().block_layout();
@@ -604,26 +594,6 @@ fn plan_and_lower(
                 invocation,
                 block_pairs,
             });
-        }
-    }
-    // AB-1d: when the permute_kernels feature is OFF, the transform
-    // path doesn't exist — but neither does the slice machinery for
-    // it, so the same invariant holds. Reject axis_slices when we'd
-    // otherwise route them at a `KvBlockLayout::requires_transform`
-    // pair under the non-permute build.
-    #[cfg(not(feature = "permute_kernels"))]
-    {
-        if !axis_slices.is_empty() {
-            let src_kv = src.layout().block_layout();
-            let dst_kv = dst.layout().block_layout();
-            if src_kv.requires_transform(&dst_kv) {
-                bail!(
-                    "plan_and_lower: axis_slices requires the permute_kernels feature \
-                     when src/dst KvBlockLayout differ (src={:?}, dst={:?})",
-                    src_kv,
-                    dst_kv,
-                );
-            }
         }
     }
 
@@ -674,9 +644,9 @@ fn plan_and_lower(
                     };
                     // `dtype_width_bytes` from LayoutConfig is always set
                     // (defaults to 2 if not explicitly configured). We use it
-                    // as the dtype discriminant regardless of whether the
-                    // `permute_kernels` feature is active, keeping the cache
-                    // key consistent across feature configurations.
+                    // as the dtype discriminant, keeping the cache key
+                    // consistent regardless of whether `LayoutConfig::dtype`
+                    // is populated.
                     let cache_key = GraphCacheKey {
                         descriptor_count: ops.len(),
                         total_bytes,
@@ -695,7 +665,6 @@ fn plan_and_lower(
                 strategy,
                 descriptor_count: candidates.len(),
                 total_bytes,
-                #[cfg(feature = "permute_kernels")]
                 dtype: src.layout().config().dtype,
                 capabilities,
                 benchmark_outcome,
@@ -734,7 +703,6 @@ fn plan_and_lower(
                 strategy,
                 descriptor_count: candidates.len(),
                 total_bytes,
-                #[cfg(feature = "permute_kernels")]
                 dtype: src.layout().config().dtype,
                 capabilities,
                 benchmark_outcome,
@@ -769,7 +737,6 @@ fn plan_and_lower(
 /// Resolve a kernel for a `CopyPlan::Transform` through the catalog
 /// and build the launch parameters. Errors precisely when no kernel
 /// covers the (src_kv, dst_kv, dtype) triple.
-#[cfg(feature = "permute_kernels")]
 fn build_transform_invocation(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -956,11 +923,10 @@ pub(crate) fn validate_planner_block_ids(
 /// through the Direct path, registered transform pairs through the
 /// Transform path, unregistered transform pairs surface a precise
 /// no-matching-kernel error.
-#[cfg_attr(feature = "permute_kernels", allow(unused_variables))]
 pub(crate) fn validate_cuda_planner_entry(
     strategy: TransferStrategy,
-    src_block_layout: KvBlockLayout,
-    dst_block_layout: KvBlockLayout,
+    _src_block_layout: KvBlockLayout,
+    _dst_block_layout: KvBlockLayout,
 ) -> Result<()> {
     if !matches!(
         strategy,
@@ -974,34 +940,19 @@ pub(crate) fn validate_cuda_planner_entry(
              entrypoint"
         );
     }
-    // Without the `permute_kernels` feature, the catalog isn't compiled
-    // in, so transforms can't be dispatched — keep the conservative
-    // guard active in that build.
-    #[cfg(not(feature = "permute_kernels"))]
-    if src_block_layout.requires_transform(&dst_block_layout) {
-        bail!(
-            "validate_cuda_planner_entry: src ({src_block_layout:?}) and dst \
-             ({dst_block_layout:?}) require a kernel-side transform, but the \
-             `permute_kernels` feature is not enabled in kvbm-physical. Drop \
-             use_planner=true or build with --features permute_kernels."
-        );
-    }
     Ok(())
 }
 
 /// Per-entrypoint guard for [`execute_planner_nixl_transfer`].
 ///
 /// Rejects strategies outside the `Nixl{Read,Write,ReadFlipped,
-/// WriteFlipped}` family. When the `permute_kernels` feature is
-/// disabled the layout-pair compatibility check stays active (no
-/// catalog → no Staged dispatch); with `permute_kernels` on, the
-/// Staged executor handles `requires_transform=true` pairs and the
-/// guard collapses to strategy-only.
-#[cfg_attr(feature = "permute_kernels", allow(unused_variables))]
+/// WriteFlipped}` family. Layout-pair compatibility is enforced
+/// downstream — the Staged executor handles `requires_transform=true`
+/// pairs via the kernel catalog.
 pub(crate) fn validate_nixl_planner_entry(
     strategy: TransferStrategy,
-    src_block_layout: KvBlockLayout,
-    dst_block_layout: KvBlockLayout,
+    _src_block_layout: KvBlockLayout,
+    _dst_block_layout: KvBlockLayout,
 ) -> Result<()> {
     if !matches!(
         strategy,
@@ -1014,15 +965,6 @@ pub(crate) fn validate_nixl_planner_entry(
             "validate_nixl_planner_entry: strategy {strategy:?} is not a NIXL \
              variant — caller routed a non-NIXL strategy into the NIXL planner \
              entrypoint"
-        );
-    }
-    #[cfg(not(feature = "permute_kernels"))]
-    if src_block_layout.requires_transform(&dst_block_layout) {
-        bail!(
-            "validate_nixl_planner_entry: src ({src_block_layout:?}) and dst \
-             ({dst_block_layout:?}) require a kernel-side transform, but the \
-             `permute_kernels` feature is not enabled in kvbm-physical. Drop \
-             use_planner=true or build with --features permute_kernels."
         );
     }
     Ok(())
@@ -1041,7 +983,6 @@ pub(crate) fn validate_nixl_planner_entry(
 ///   `num_blocks_to_transfer`. Computed as
 ///   `single_buffer_base + block_id * bytes_per_block` (universal
 ///   layouts are FC-only, so a single allocation backs all blocks).
-#[cfg(feature = "permute_kernels")]
 pub(crate) fn dispatch_transform_kernel(
     invocation: &crate::transfer::kernel_catalog::KernelInvocation,
     src: &PhysicalLayout,
@@ -1198,7 +1139,6 @@ pub(crate) fn dispatch_transform_kernel(
 /// shaped `[num_blocks_to_transfer × num_layers × outer_dim]` each.
 /// The direction is carried on `KernelInvocation::block_layout`
 /// (kernel's `src_layout` template parameter).
-#[cfg(feature = "permute_kernels")]
 fn dispatch_nhd_hnd_transpose_kernel(
     invocation: &crate::transfer::kernel_catalog::KernelInvocation,
     src: &PhysicalLayout,
@@ -1288,7 +1228,6 @@ fn dispatch_nhd_hnd_transpose_kernel(
 /// `TransferContext::register_cuda_event` (which panics on alloc
 /// failure), these are hot-path helpers that surface errors to their
 /// caller for graceful handling.
-#[cfg(feature = "permute_kernels")]
 struct OwnedStagedContext {
     event_system: Arc<velo::EventManager>,
     tx_cuda_event: tokio::sync::mpsc::Sender<
@@ -1310,7 +1249,6 @@ struct OwnedStagedContext {
     capabilities: crate::transfer::TransferCapabilities,
 }
 
-#[cfg(feature = "permute_kernels")]
 impl OwnedStagedContext {
     /// Snapshot the bits needed for the staged executor from a live
     /// `TransferContext`. The stream is acquired once here so both
@@ -1484,7 +1422,6 @@ impl OwnedStagedContext {
 /// the tokio runtime is dropped before the chain finishes, the outer
 /// `velo::Event` is poisoned and the awaiter resolves with an
 /// error (not a hang).
-#[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 fn dispatch_staged_nixl_transform(
     src: &PhysicalLayout,
@@ -2326,14 +2263,13 @@ mod tests {
     }
 
     /// PR-6.2: layout-pair compatibility is no longer enforced at the
-    /// NIXL entry guard when `permute_kernels` is on — the Staged
-    /// executor handles `requires_transform=true` pairs by stitching
-    /// a local kernel between the NIXL leg and the placement leg.
-    /// Pairs the catalog doesn't cover surface a precise error from
+    /// NIXL entry guard — the Staged executor handles
+    /// `requires_transform=true` pairs by stitching a local kernel
+    /// between the NIXL leg and the placement leg. Pairs the catalog
+    /// doesn't cover surface a precise error from
     /// `build_transform_invocation` instead.
-    #[cfg(feature = "permute_kernels")]
     #[test]
-    fn nixl_entry_accepts_transform_pairs_with_permute_kernels() {
+    fn nixl_entry_accepts_transform_pairs() {
         // Operational ↔ Universal — PR-6.1 catalog has both directions.
         assert!(
             validate_nixl_planner_entry(

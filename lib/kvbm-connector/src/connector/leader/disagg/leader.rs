@@ -454,6 +454,7 @@ impl ConnectorLeaderApi for ConditionalDisaggLeader {
 pub async fn register_with_hub(
     config: &DisaggConfig,
     velo: Arc<Velo>,
+    layout_compat: Option<kvbm_hub::protocol::LayoutCompatPayload>,
 ) -> Result<(
     Arc<HubClient>,
     Arc<ConditionalDisaggClient>,
@@ -479,7 +480,7 @@ pub async fn register_with_hub(
     // `TCP streaming: peer <worker_id> not registered (call register_peer first)`.
     let peer_info = velo.peer_info();
     let hub_velo_id = client
-        .register(peer_info)
+        .register(peer_info, layout_compat)
         .await
         .with_context(|| format!("registering with kvbm-hub at {}", config.hub_url))?;
 

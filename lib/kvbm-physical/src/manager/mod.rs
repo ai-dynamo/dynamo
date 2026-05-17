@@ -3,11 +3,13 @@
 
 //! Transport manager for local and remote physical layouts with transfer execution.
 
+pub mod canonical;
 mod handle;
 mod local;
 mod metadata;
 mod remote;
 
+pub use canonical::canonical_shape_from_worker;
 pub use handle::LayoutHandle;
 pub use metadata::{
     LogicalLayoutDescriptor, ParallelismDescriptor, RdmaLayoutDescriptors, SerializedLayout,

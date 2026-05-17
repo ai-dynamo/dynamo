@@ -19,8 +19,9 @@ use super::dispatcher::{DispatchOutcome, PrefillRequestDispatcher};
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::protocol::{
     self, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, Feature, FeatureKey,
-    PrefillRequest,
+    LayoutCompatPayload, PrefillRequest,
 };
+use kvbm_protocols::control::layout_compat::check_layout_compat;
 
 /// Tracks which instances participate in ConditionalDisagg and under what role.
 ///
@@ -47,6 +48,12 @@ struct CdInner {
     prefill: HashSet<InstanceId>,
     decode: HashSet<InstanceId>,
     by_instance: HashMap<InstanceId, ConditionalDisaggRole>,
+    /// Block-layout baseline established by the first CD instance whose
+    /// registration carried a [`LayoutCompatPayload`]. Subsequent
+    /// registrations whose payloads are not compatible with this baseline
+    /// are rejected. Cleared when the prefill + decode sets are both empty
+    /// (see [`FeatureManager::on_unregister`]).
+    layout_baseline: Option<LayoutCompatPayload>,
 }
 
 impl std::fmt::Debug for ConditionalDisaggManager {
@@ -80,6 +87,7 @@ impl ConditionalDisaggManager {
                 prefill: HashSet::new(),
                 decode: HashSet::new(),
                 by_instance: HashMap::new(),
+                layout_baseline: None,
             }),
             velo: OnceLock::new(),
             queue_backend: OnceLock::new(),
@@ -209,9 +217,44 @@ impl FeatureManager for ConditionalDisaggManager {
                         prior, role
                     )));
                 }
-                // Same role re-registration is idempotent.
+                // Same role re-registration is idempotent — including the
+                // layout compat gate: a re-register cannot redefine an
+                // already-established baseline, and the existing baseline
+                // already accepted this instance once.
                 return Ok(());
             }
+
+            // Block-layout compatibility gate. Only registrations that opt
+            // in by sending a `layout_compat` payload are inspected;
+            // legacy clients without a payload bypass the gate (the
+            // baseline is also not modified by them). The first opt-in
+            // payload sets the baseline; every subsequent opt-in payload
+            // must pass [`check_layout_compat`] against it.
+            //
+            // The first payload also has to pass `validate_self` —
+            // without that guard a malformed first registration (e.g.
+            // `Universal` mode with `canonical = None`) could become an
+            // unverifiable baseline that silently accepts every
+            // subsequent peer in the same mode.
+            if let Some(candidate) = cfg.layout_compat.as_ref() {
+                match inner.layout_baseline.as_ref() {
+                    None => {
+                        candidate.validate_self().map_err(|e| {
+                            FeatureError::InvalidConfig(format!(
+                                "block_layout payload from instance {instance_id} is \
+                                 internally inconsistent: {e}"
+                            ))
+                        })?;
+                        inner.layout_baseline = Some(candidate.clone());
+                    }
+                    Some(baseline) => check_layout_compat(baseline, candidate).map_err(|e| {
+                        FeatureError::InvalidConfig(format!(
+                            "block_layout incompatibility for instance {instance_id}: {e}"
+                        ))
+                    })?,
+                }
+            }
+
             inner.by_instance.insert(instance_id, role);
             insert_role(&mut inner, instance_id, role);
             Ok(())
@@ -222,6 +265,13 @@ impl FeatureManager for ConditionalDisaggManager {
         let mut inner = self.inner.write();
         if let Some(role) = inner.by_instance.remove(&instance_id) {
             remove_role(&mut inner, instance_id, role);
+        }
+        // Clear the layout baseline once both populations are empty, so a
+        // new CD group can adopt a different mode/shape without bouncing
+        // the hub. This matches the "first instance defines" semantics
+        // contextually rather than persistently.
+        if inner.prefill.is_empty() && inner.decode.is_empty() {
+            inner.layout_baseline = None;
         }
     }
 
@@ -342,7 +392,10 @@ mod tests {
     use crate::protocol::ConditionalDisaggConfig;
 
     fn cd(role: ConditionalDisaggRole) -> Feature {
-        Feature::ConditionalDisagg(Some(ConditionalDisaggConfig { role }))
+        Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+            role,
+            layout_compat: None,
+        }))
     }
 
     #[tokio::test]

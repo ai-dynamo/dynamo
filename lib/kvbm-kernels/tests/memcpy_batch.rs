@@ -4,9 +4,6 @@
 //! Integration tests for `memcpy_batch` and the always-available query helpers
 //! (`is_memcpy_batch_available`, `is_using_stubs`).
 //!
-//! These don't require `permute_kernels` — the functions are unconditionally
-//! linked regardless of feature flags.
-//!
 //! Functional tests use pinned-host -> device -> pinned-host roundtrips (H2D + D2H)
 //! to match the transfer patterns that `cudaMemcpyBatchAsync` is designed for.
 

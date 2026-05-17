@@ -445,9 +445,9 @@ impl TransferContext {
     /// to benchmark (e.g. at startup with known layout pairs) and provides
     /// the key, pre-decoded candidates, and a CUDA stream to dispatch on.
     ///
-    /// Supported variants: `DirectDma`, `TransformKernel` (requires
-    /// `permute_kernels`), and `NixlDirectDma`. All routes measure
-    /// end-to-end transfer time including device/network completion.
+    /// Supported variants: `DirectDma`, `TransformKernel`, and
+    /// `NixlDirectDma`. All routes measure end-to-end transfer time
+    /// including device/network completion.
     ///
     /// See [`BenchmarkCache::benchmark_pair`] for timing semantics and
     /// error conditions.
@@ -466,7 +466,6 @@ impl TransferContext {
     /// Used by the planner-driven Staged executor (PR-6.2) to register
     /// CUDA events from inside a `tokio::spawn`-ed chain task without
     /// holding `&TransferContext` across an `.await`.
-    #[cfg(feature = "permute_kernels")]
     pub(crate) fn tx_cuda_event_clone(
         &self,
     ) -> mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>> {
@@ -476,7 +475,6 @@ impl TransferContext {
     /// Clone the NIXL status polling channel sender. Used for the same
     /// reason as [`Self::tx_cuda_event_clone`] — Staged-task NIXL
     /// completion registration without `&TransferContext`.
-    #[cfg(feature = "permute_kernels")]
     pub(crate) fn tx_nixl_status_clone(
         &self,
     ) -> mpsc::Sender<RegisterPollingNotification<notifications::NixlStatusChecker>> {

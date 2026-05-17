@@ -85,10 +85,10 @@ CUDA_ARCHS="80,86,89,90,100" cargo build
 cargo build --features static-kernels
 
 # Run CUDA integration tests (requires GPU + nvcc)
-cargo test --features testing-cuda,permute_kernels
+cargo test --features testing-cuda
 
 # Specific test with output
-cargo test --features testing-cuda,permute_kernels fused_copy_roundtrip -- --nocapture
+cargo test --features testing-cuda fused_copy_roundtrip -- --nocapture
 
 # Python bindings
 cd lib/bindings/kvbm

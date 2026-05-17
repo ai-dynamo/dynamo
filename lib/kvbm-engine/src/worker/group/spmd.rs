@@ -73,6 +73,28 @@ pub struct SpmdParallelWorkers {
     /// set, every remote rank must carry a stamped `ParallelismDescriptor`
     /// and the gates in [`validate_remote_metadata`] apply.
     local_template: RwLock<Option<ParallelismTemplate>>,
+
+    /// Block-layout compatibility policy applied at `connect_remote`.
+    ///
+    /// `Operational` (default) keeps the existing strict
+    /// [`validate_remote_metadata`] checks: every remote rank's
+    /// `LayoutConfig` and `KvBlockLayout` must match local exactly.
+    ///
+    /// `Universal` relaxes those strict per-worker checks to canonical
+    /// aggregate equality — same un-sharded `num_layers_total`,
+    /// `num_heads_total`, `head_dim`, `page_size`, `outer_dim`,
+    /// `dtype_width_bytes`. Per-worker permutation and shard extents
+    /// may differ. See
+    /// [`crate::leader::layout_compat::check_import_compat`] and
+    /// [`kvbm_common::block_layout_mode`] for the full semantics.
+    block_layout_mode: kvbm_common::BlockLayoutMode,
+
+    /// This leader's per-worker exported metadata, rank-ordered.
+    /// Populated by [`Self::with_local_metadata`] at construction time
+    /// from the connector's `cached_worker_metadata`; consumed by the
+    /// Operational-mode `check_import_compat` call in `connect_remote`.
+    /// Empty = skip the check (legacy / not-yet-exported path).
+    local_metadata: Vec<SerializedLayout>,
 }
 
 impl SpmdParallelWorkers {
@@ -95,7 +117,31 @@ impl SpmdParallelWorkers {
             remote_tp_sizes: RwLock::new(HashMap::new()),
             remote_descriptors: RwLock::new(HashMap::new()),
             local_template: RwLock::new(None),
+            block_layout_mode: kvbm_common::BlockLayoutMode::Operational,
+            local_metadata: Vec::new(),
         }
+    }
+
+    /// Builder-style: install the block-layout compatibility policy
+    /// applied at `connect_remote`. Defaults to
+    /// [`kvbm_common::BlockLayoutMode::Operational`] (strict per-worker
+    /// equality, the pre-existing behaviour).
+    pub fn with_block_layout_mode(mut self, mode: kvbm_common::BlockLayoutMode) -> Self {
+        self.block_layout_mode = mode;
+        self
+    }
+
+    /// Builder-style: install this leader's exported per-worker
+    /// metadata (rank-ordered). Consumed by the Operational compat
+    /// check in `connect_remote`. Empty leaves the check disabled.
+    pub fn with_local_metadata(mut self, metadata: Vec<SerializedLayout>) -> Self {
+        self.local_metadata = metadata;
+        self
+    }
+
+    /// Block-layout compatibility policy this group runs under.
+    pub fn block_layout_mode(&self) -> kvbm_common::BlockLayoutMode {
+        self.block_layout_mode
     }
 
     /// Get the number of workers.
@@ -199,6 +245,100 @@ impl WorkerTransfers for SpmdParallelWorkers {
     ) -> Result<ConnectRemoteResponse> {
         if metadata.is_empty() {
             anyhow::bail!("connect_remote: empty remote metadata");
+        }
+
+        tracing::debug!(
+            %instance_id,
+            block_layout_mode = %self.block_layout_mode,
+            remote_rank_count = metadata.len(),
+            "connect_remote: importing remote leader metadata",
+        );
+
+        // Block-layout compatibility gate driven by `block_layout_mode`.
+        //
+        // Operational (default): per-worker `(KvBlockLayout,
+        // LayoutConfig)` must match exactly between routed pairs. Uses
+        // the leader's stamped `local_metadata` (rank-ordered).
+        //
+        // Universal: canonical aggregate must match; per-worker
+        // permutation and shard extents may differ. Built from the
+        // local `ParallelismTemplate` so the check works even when
+        // `local_metadata` is empty (e.g. legacy paths that never
+        // populated the cache).
+        //
+        // Both checks run *before* the existing `validate_remote_metadata`
+        // gate below so that a layout mismatch surfaces with a
+        // [`crate::leader::layout_compat`] message naming the diverging
+        // field, not as a parallelism-descriptor error.
+        match self.block_layout_mode {
+            kvbm_common::BlockLayoutMode::Operational => {
+                if !self.local_metadata.is_empty() {
+                    let template_guard = self.local_template.read().unwrap();
+                    crate::leader::layout_compat::check_import_compat(
+                        kvbm_common::BlockLayoutMode::Operational,
+                        &self.local_metadata,
+                        &metadata,
+                        template_guard.as_ref(),
+                    )
+                    .context(
+                        "connect_remote: operational block_layout compatibility \
+                         gate rejected peer",
+                    )?;
+                }
+            }
+            kvbm_common::BlockLayoutMode::Universal => {
+                // Universal mode requires every remote rank to carry a
+                // labeled KvBlockLayout — not just rank 0. This check is
+                // unconditional: it runs even when this leader has no
+                // local shape data (empty `local_metadata` AND no
+                // `local_template`) so an Unknown remote axis cannot
+                // slip through the legacy lenient branch.
+                require_universal_remote_labels(&metadata).context(
+                    "connect_remote: universal block_layout compatibility gate \
+                     rejected peer",
+                )?;
+
+                // Canonical aggregate equality check, if we have local
+                // shape data to compare against. Prefer the full
+                // [`check_import_compat`] helper (it also re-validates
+                // labels on both sides) when local SerializedLayouts
+                // are available; fall back to template-derived canonical
+                // when only a template is installed.
+                if !self.local_metadata.is_empty() {
+                    let template_guard = self.local_template.read().unwrap();
+                    crate::leader::layout_compat::check_import_compat(
+                        kvbm_common::BlockLayoutMode::Universal,
+                        &self.local_metadata,
+                        &metadata,
+                        template_guard.as_ref(),
+                    )
+                    .context(
+                        "connect_remote: universal block_layout compatibility gate \
+                         rejected peer",
+                    )?;
+                } else if let Some(local_canonical) = self
+                    .local_template
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|t| t.canonical_block_shape())
+                {
+                    let remote_canonical =
+                        kvbm_physical::manager::canonical_shape_from_worker(&metadata[0]).context(
+                            "connect_remote: failed to build canonical shape \
+                                 from remote worker 0 under universal block_layout mode",
+                        )?;
+                    local_canonical.require_equal(&remote_canonical).context(
+                        "connect_remote: universal block_layout compatibility gate \
+                         rejected peer",
+                    )?;
+                }
+                // No local shape data — the unconditional label check
+                // above has ensured the remote is well-defined, but we
+                // cannot verify canonical aggregate equality. This
+                // matches pre-existing behaviour where a leader without
+                // any local shape data skips strict canonical comparison.
+            }
         }
 
         // Unpack each remote rank up front so we can extract its
@@ -578,6 +718,44 @@ pub(crate) enum ImportStrategy {
     /// At least one remote rank is unstamped. Fall back to the legacy
     /// same-rank zip behaviour — but only if the rank count matches.
     Legacy,
+}
+
+/// Universal-mode template fast path: validate that every remote rank
+/// carries a labeled [`KvBlockLayout`] (not [`KvBlockLayout::Unknown`]).
+///
+/// The full [`crate::leader::layout_compat::check_import_compat`] helper
+/// runs this check via `require_all_labeled`, but `connect_remote`'s
+/// template-derived fast path otherwise only reads rank 0. Without this
+/// guard a peer whose rank 0 is labeled and rank 7 is `Unknown` would
+/// slip through Universal compat — the canonical aggregate would match
+/// while later ranks carry semantically-undefined layouts.
+fn require_universal_remote_labels(metadata: &[SerializedLayout]) -> Result<()> {
+    use kvbm_common::KvBlockLayout;
+    use kvbm_physical::layout::LayoutTypeDetails;
+    for (rank, w) in metadata.iter().enumerate() {
+        let unpacked = w.unpack().with_context(|| {
+            format!("universal compat: failed to unpack remote rank {rank} for label check")
+        })?;
+        let Some(layout) = unpacked.layouts.first() else {
+            // A rank with no layouts is treated as Unknown — universal
+            // mode cannot reason about an empty payload.
+            anyhow::bail!(
+                "universal compat: remote rank {rank} exported no layouts; \
+                 universal mode requires every rank to carry a labeled KvBlockLayout"
+            );
+        };
+        let kv = match &layout.layout.layout_type_details {
+            LayoutTypeDetails::FullyContiguous(d) => d.kv_block_layout,
+            LayoutTypeDetails::LayerSeparate(d) => d.kv_block_layout,
+        };
+        if matches!(kv, KvBlockLayout::Unknown) {
+            anyhow::bail!(
+                "universal compat: remote rank {rank} has KvBlockLayout::Unknown; \
+                 universal mode requires every axis to be labeled"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Decide whether to take the strict (all-stamped) or legacy
@@ -1216,5 +1394,416 @@ mod tests {
                 .is_none(),
             "Legacy bail must not have populated the descriptor cache"
         );
+    }
+
+    // ─────────── block_layout compat gate in connect_remote ──────────────────
+    //
+    // These tests exercise the production hot path: `connect_remote` must
+    // reject incompatible peer metadata under [`BlockLayoutMode::Operational`]
+    // (per-worker equality) and under [`BlockLayoutMode::Universal`]
+    // (canonical aggregate equality). They are the regression net for the
+    // Codex stop-time review finding that Operational mode was silently
+    // unenforced in the SPMD path.
+
+    use std::ops::Range;
+
+    use dynamo_memory::StorageKind;
+    use dynamo_memory::nixl::MemType;
+    use kvbm_common::{KvBlockLayout, LogicalLayoutHandle};
+    use kvbm_physical::layout::{
+        BlockFormat, FullyContiguousDetails, LayoutConfig, LayoutDescriptor, LayoutTypeDetails,
+        NixlMetadata,
+    };
+    use kvbm_physical::manager::{LayoutHandle, LogicalLayoutDescriptor, WorkerAddress};
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_compat_worker(
+        worker_id: u64,
+        tp_size: usize,
+        rank: usize,
+        kv_layout: KvBlockLayout,
+        num_layers_total: usize,
+        num_heads_total: usize,
+        head_dim: usize,
+        page_size: usize,
+        outer_dim: usize,
+        dtype_width_bytes: usize,
+    ) -> SerializedLayout {
+        let per_worker_heads = num_heads_total / tp_size;
+        let inner_dim = per_worker_heads * head_dim;
+        let cfg = LayoutConfig::builder()
+            .num_blocks(4)
+            .num_layers(num_layers_total)
+            .outer_dim(outer_dim)
+            .page_size(page_size)
+            .inner_dim(inner_dim)
+            .dtype_width_bytes(dtype_width_bytes)
+            .num_heads(Some(per_worker_heads))
+            .build()
+            .unwrap();
+        let layout_descriptor = LayoutDescriptor {
+            version: LayoutDescriptor::CURRENT_VERSION,
+            layout_config: cfg,
+            location: StorageKind::System,
+            nixl_metadata: NixlMetadata::new(format!("agent-{worker_id}"), MemType::Dram, 0),
+            memory_descriptors: vec![],
+            layout_type_details: LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
+                block_format: BlockFormat::Operational,
+                kv_block_layout: kv_layout,
+            }),
+        };
+        let parallelism = ParallelismDescriptor {
+            tp_size,
+            pp_size: 1,
+            rank,
+            shard_axis: KvDim::HeadCount,
+            global_extents: vec![
+                (KvDim::Layer, num_layers_total),
+                (KvDim::Outer, outer_dim),
+                (KvDim::Page, page_size),
+                (KvDim::HeadCount, num_heads_total),
+                (KvDim::HeadSize, head_dim),
+            ],
+            layer_ownership: Range {
+                start: 0,
+                end: num_layers_total,
+            },
+        };
+        let logical = LogicalLayoutDescriptor::new(
+            LayoutHandle::new(worker_id, 0),
+            LogicalLayoutHandle::G2,
+            layout_descriptor,
+        );
+        SerializedLayout::pack(
+            WorkerAddress::new(worker_id, format!("agent-{worker_id}")),
+            Vec::new(),
+            vec![logical],
+            Some(parallelism),
+        )
+        .unwrap()
+    }
+
+    fn make_compat_spmd_with(
+        mode: kvbm_common::BlockLayoutMode,
+        local_metadata: Vec<SerializedLayout>,
+    ) -> SpmdParallelWorkers {
+        use ::velo::EventManager;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        )
+        .with_block_layout_mode(mode)
+        .with_local_metadata(local_metadata)
+    }
+
+    /// Operational mode in `connect_remote` rejects a peer whose
+    /// per-worker `KvBlockLayout` differs from local. This is the
+    /// Codex-flagged regression: previously this case slid through
+    /// because the SPMD path never consulted `block_layout_mode`.
+    #[test]
+    fn connect_remote_operational_rejects_mismatched_kv_block_layout() {
+        let local = vec![build_compat_worker(
+            100,
+            1,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            64,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let remote = vec![build_compat_worker(
+            200,
+            1,
+            0,
+            KvBlockLayout::OperationalHND,
+            32,
+            64,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let spmd = make_compat_spmd_with(kvbm_common::BlockLayoutMode::Operational, local);
+        let err = match spmd.connect_remote(InstanceId::new_v4(), remote) {
+            Ok(_) => panic!("operational must reject mismatched KvBlockLayout"),
+            Err(e) => e,
+        };
+        let s = format!("{err:#}");
+        assert!(
+            s.contains("operational block_layout compatibility") || s.contains("KvBlockLayout"),
+            "expected operational compat error, got: {s}"
+        );
+    }
+
+    /// Operational mode in `connect_remote` accepts identical
+    /// per-worker shape on both sides.
+    #[test]
+    fn connect_remote_operational_accepts_matching() {
+        let local = vec![build_compat_worker(
+            100,
+            1,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            64,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let remote = vec![build_compat_worker(
+            200,
+            1,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            64,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let spmd = make_compat_spmd_with(kvbm_common::BlockLayoutMode::Operational, local);
+        spmd.connect_remote(InstanceId::new_v4(), remote)
+            .expect("operational must accept identical layouts");
+    }
+
+    /// Operational mode rejects when canonical `num_heads_total`
+    /// differs (this catches both per-worker shape mismatch and
+    /// canonical aggregate mismatch in one test).
+    #[test]
+    fn connect_remote_operational_rejects_different_num_heads_total() {
+        let local = vec![build_compat_worker(
+            100,
+            1,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            64,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let remote = vec![build_compat_worker(
+            200,
+            1,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            48,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let spmd = make_compat_spmd_with(kvbm_common::BlockLayoutMode::Operational, local);
+        let res = spmd.connect_remote(InstanceId::new_v4(), remote);
+        assert!(
+            res.is_err(),
+            "operational must reject different canonical num_heads_total"
+        );
+    }
+
+    /// Universal mode in `connect_remote` accepts a peer with a
+    /// different per-worker permutation when the canonical aggregate
+    /// matches.
+    #[test]
+    fn connect_remote_universal_accepts_different_permutation() {
+        let local = vec![build_compat_worker(
+            100,
+            1,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            64,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let remote = vec![build_compat_worker(
+            200,
+            1,
+            0,
+            KvBlockLayout::OperationalHND,
+            32,
+            64,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let spmd = make_compat_spmd_with(kvbm_common::BlockLayoutMode::Universal, local);
+        spmd.connect_remote(InstanceId::new_v4(), remote)
+            .expect("universal must accept different permutation when canonical matches");
+    }
+
+    /// Universal mode rejects a peer whose rank > 0 has
+    /// `KvBlockLayout::Unknown`, even when rank 0 is labeled. This is
+    /// the Codex-flagged regression: the template-derived fast path
+    /// previously only read `metadata[0]` so a later Unknown rank
+    /// silently slipped through.
+    ///
+    /// To exercise the template-derived fast path specifically (not the
+    /// SerializedLayouts path), build the SPMD with a template but no
+    /// `local_metadata`.
+    #[test]
+    fn connect_remote_universal_template_path_rejects_unknown_remote_rank_gt_zero() {
+        use crate::leader::parallelism::ParallelismTemplate;
+        use ::velo::EventManager;
+        use kvbm_config::ParallelismMode;
+
+        // A LayoutConfig with num_heads set so the template can derive
+        // global_extents.
+        let local_cfg = LayoutConfig::builder()
+            .num_blocks(4)
+            .num_layers(32)
+            .outer_dim(2)
+            .page_size(16)
+            .inner_dim(64) // 32 heads * 2 head_dim ... wait, 32 heads -> head_dim=2
+            .dtype_width_bytes(2)
+            .num_heads(Some(32))
+            .build()
+            .unwrap();
+        let template = ParallelismTemplate::from_layout_config(
+            &local_cfg,
+            ParallelismMode::TensorParallel,
+            1, // num_workers = 1 ⇒ global heads = per_worker (32)
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let spmd = SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        )
+        .with_block_layout_mode(kvbm_common::BlockLayoutMode::Universal)
+        .with_local_template(template);
+        // Intentionally do NOT call with_local_metadata so the
+        // template-derived fast path is exercised.
+
+        // Build a 2-rank remote leader where rank 0 is labeled but rank 1
+        // is Unknown. Canonical extents agree on both ranks so the
+        // canonical equality check would pass — only the per-rank label
+        // check should catch this.
+        let labeled = build_compat_worker(
+            200,
+            2,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            32,
+            2,
+            16,
+            2,
+            2,
+        );
+        let unknown = build_compat_worker(201, 2, 1, KvBlockLayout::Unknown, 32, 32, 2, 16, 2, 2);
+        let remote = vec![labeled, unknown];
+
+        let err = match spmd.connect_remote(InstanceId::new_v4(), remote) {
+            Ok(_) => {
+                panic!("universal mode must reject a peer with KvBlockLayout::Unknown at rank > 0")
+            }
+            Err(e) => e,
+        };
+        let s = format!("{err:#}");
+        assert!(
+            s.contains("Unknown") && (s.contains("rank 1") || s.contains("rank=1")),
+            "expected per-rank Unknown rejection, got: {s}"
+        );
+    }
+
+    /// Universal mode rejects an Unknown remote rank even when this
+    /// leader has NO local shape data at all (empty `local_metadata`
+    /// and no `local_template`). Previously the label check was nested
+    /// inside the template-fast-path arm, so a peer with Unknown axes
+    /// silently passed when no local shape was installed.
+    #[test]
+    fn connect_remote_universal_rejects_unknown_remote_with_no_local_shape() {
+        use ::velo::EventManager;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        // No template, no local_metadata — but Universal mode is on.
+        let spmd = SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        )
+        .with_block_layout_mode(kvbm_common::BlockLayoutMode::Universal);
+
+        let remote = vec![build_compat_worker(
+            200,
+            1,
+            0,
+            KvBlockLayout::Unknown,
+            32,
+            32,
+            2,
+            16,
+            2,
+            2,
+        )];
+
+        let err = match spmd.connect_remote(InstanceId::new_v4(), remote) {
+            Ok(_) => panic!(
+                "universal mode must reject Unknown remote even when this leader \
+                 has no local shape data"
+            ),
+            Err(e) => e,
+        };
+        let s = format!("{err:#}");
+        assert!(
+            s.contains("Unknown"),
+            "expected Unknown rejection, got: {s}"
+        );
+    }
+
+    /// Universal mode rejects when canonical `head_dim` differs.
+    #[test]
+    fn connect_remote_universal_rejects_different_head_dim() {
+        let local = vec![build_compat_worker(
+            100,
+            1,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            64,
+            64,
+            16,
+            2,
+            2,
+        )];
+        let remote = vec![build_compat_worker(
+            200,
+            1,
+            0,
+            KvBlockLayout::OperationalNHD,
+            32,
+            64,
+            128, // diverges
+            16,
+            2,
+            2,
+        )];
+        let spmd = make_compat_spmd_with(kvbm_common::BlockLayoutMode::Universal, local);
+        let err = match spmd.connect_remote(InstanceId::new_v4(), remote) {
+            Ok(_) => panic!("universal must reject divergent head_dim"),
+            Err(e) => e,
+        };
+        assert!(format!("{err:#}").contains("head_dim"));
     }
 }

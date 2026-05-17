@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use derive_builder::Builder;
-#[cfg(feature = "permute_kernels")]
 use kvbm_kernels::TensorDataType;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
@@ -72,7 +71,6 @@ pub struct LayoutConfig {
     /// `#[serde(skip)]` because [`TensorDataType`] does not implement
     /// serde traits in `kvbm-kernels`. Cross-process layout reconstruction
     /// will need to plumb this separately when wire transport lands.
-    #[cfg(feature = "permute_kernels")]
     #[builder(default = "None")]
     #[serde(skip)]
     pub dtype: Option<TensorDataType>,

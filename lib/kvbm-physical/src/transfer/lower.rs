@@ -58,10 +58,9 @@ use crate::transfer::strategy::TransferStrategy;
 // a `DirectDma`-shaped graph vs a future `BatchedDma`-shaped one without the
 // key overloading `(shape, dtype, route)` alone.
 //
-// `dtype_width_bytes` is stored as `Option<u32>` so the key is usable whether
-// or not the `permute_kernels` feature is active (the feature gates
-// `TensorDataType`; the width in bytes is always a plain integer and remains
-// feature-agnostic without losing discrimination power for the graph cache).
+// `dtype_width_bytes` is stored as `Option<u32>` so a layout whose `dtype`
+// is not yet stamped can still key the cache by byte width — same-shape
+// transfers over different dtypes don't share a graph.
 
 /// Cache key for CUDA graph capture/replay (PR-7.4 scaffolding).
 ///
@@ -78,9 +77,9 @@ pub(crate) struct GraphCacheKey {
     pub descriptor_count: usize,
     /// Total bytes across all ops.
     pub total_bytes: usize,
-    /// Element width in bytes, or `None` when `permute_kernels` is disabled
-    /// or the layout's dtype is unset. Used as a discriminant for the cache
-    /// so that same-shape transfers over different dtypes don't share a graph.
+    /// Element width in bytes, or `None` when the layout's dtype is unset.
+    /// Used as a discriminant for the cache so that same-shape transfers
+    /// over different dtypes don't share a graph.
     pub dtype_width_bytes: Option<u32>,
     /// `TransferStrategy` discriminant encoded as its debug-string hash
     /// substitute. Stored as a u8 index into the strategy family:
@@ -135,7 +134,6 @@ pub(crate) enum Candidate {
     /// the resolved [`KernelKind`] + launch params; the executor reads
     /// per-side region pointers from the original `PhysicalLayout`s
     /// at dispatch.
-    #[cfg(feature = "permute_kernels")]
     TransformKernel {
         invocation: crate::transfer::kernel_catalog::KernelInvocation,
     },
@@ -189,7 +187,6 @@ impl Candidate {
         match self {
             Candidate::DirectDma { .. } => "DirectDma",
             Candidate::BatchedDma { .. } => "BatchedDma",
-            #[cfg(feature = "permute_kernels")]
             Candidate::TransformKernel { .. } => "TransformKernel",
             Candidate::SmallStridedCopy { .. } => "SmallStridedCopy",
             Candidate::Staged { .. } => "Staged",
@@ -235,12 +232,8 @@ pub(crate) struct SelectionContext<'a> {
     /// Total bytes to be moved across all ops.
     pub total_bytes: usize,
 
-    /// Tensor element dtype when the kernel catalog is enabled.
-    ///
-    /// `None` when `cfg(not(feature = "permute_kernels"))` or when the
-    /// caller's `LayoutConfig::dtype` is unset (same gate as in
-    /// `LayoutConfig`).
-    #[cfg(feature = "permute_kernels")]
+    /// Tensor element dtype. `None` when the caller's `LayoutConfig::dtype`
+    /// is unset.
     pub dtype: Option<kvbm_kernels::TensorDataType>,
 
     /// Capability flags in effect for this transfer.
@@ -364,7 +357,6 @@ const SCORE_STAGED: i64 = -1;
 /// documents the intended preference order for future multi-path planners.
 /// Only meaningful on Cuda-family routes; NIXL paths bail before reaching
 /// `select_candidate` for this variant.
-#[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
 pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>) -> i64 {
     let base = score_candidate_base(candidate, ctx);
     // PR-7.5: apply benchmark winner bonus when the cache has an entry.
@@ -384,12 +376,10 @@ pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>)
 ///
 /// Split out so tests can verify base scores independently of the
 /// benchmark-outcome pathway.
-#[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
 fn score_candidate_base(candidate: &Candidate, ctx: &SelectionContext<'_>) -> i64 {
     match candidate {
         Candidate::DirectDma { .. } => SCORE_DIRECT_DMA,
         Candidate::BatchedDma { .. } => SCORE_BATCHED_DMA,
-        #[cfg(feature = "permute_kernels")]
         Candidate::TransformKernel { .. } => {
             // TransformKernel is only meaningful on Cuda-family routes;
             // it earns a higher base score than DirectDma because the
@@ -561,10 +551,8 @@ mod tests {
             .class_name(),
             "CudaGraphReplay"
         );
-        // TransformKernel is feature-gated; tested under `permute_kernels` below.
     }
 
-    #[cfg(feature = "permute_kernels")]
     #[test]
     fn candidate_class_name_transform_kernel() {
         use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
@@ -603,7 +591,6 @@ mod tests {
             strategy: TransferStrategy::CudaAsyncD2D,
             descriptor_count: 1,
             total_bytes: 4096,
-            #[cfg(feature = "permute_kernels")]
             dtype: None,
             capabilities: &CAPS,
             benchmark_outcome: None,
@@ -704,7 +691,6 @@ mod tests {
 
     /// On a Cuda route, TransformKernel scores 1100 vs DirectDma's 1000 vs
     /// BatchedDma's 1000. TransformKernel should win.
-    #[cfg(feature = "permute_kernels")]
     #[test]
     fn select_picks_highest_scoring_candidate() {
         use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
@@ -1136,7 +1122,6 @@ mod tests {
             strategy: TransferStrategy::CudaAsyncD2D,
             descriptor_count: 8,
             total_bytes: 32768,
-            #[cfg(feature = "permute_kernels")]
             dtype: None,
             capabilities: &CAPS_ENABLED,
             benchmark_outcome: None,
@@ -1224,7 +1209,6 @@ mod tests {
             strategy: TransferStrategy::CudaAsyncD2D,
             descriptor_count: 4,
             total_bytes: 16384,
-            #[cfg(feature = "permute_kernels")]
             dtype: None,
             capabilities: &CAPS_BENCH,
             benchmark_outcome: Some(BenchmarkOutcome {

@@ -37,6 +37,9 @@ velo = { workspace = true }
 # Memory dependencies (for NixL)
 dynamo-memory = { workspace = true }
 
+# kvbm-common: BlockLayoutMode used by leader-import compatibility checks
+kvbm-common = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 temp-env = { version = "0.3.6" }

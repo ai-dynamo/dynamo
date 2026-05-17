@@ -27,7 +27,6 @@ use tokio::sync::Mutex;
 pub use nixl::NixlTransferBuilder;
 
 // PR-7.5.1: expose the transform-kernel dispatcher for benchmark.rs timing.
-#[cfg(feature = "permute_kernels")]
 pub(crate) use planner::dispatch_transform_kernel;
 
 /// Transformation kernel types for converting between different block layouts.

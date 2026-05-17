@@ -6,11 +6,7 @@
 //! Mirrors the Python tests in `lib/bindings/kvbm/tests/test_tensor_kernels.py`
 //! using ndarray for reference permutations and cudarc for GPU memory management.
 
-#![cfg(all(
-    feature = "testing-cuda",
-    feature = "permute_kernels",
-    not(stub_kernels)
-))]
+#![cfg(all(feature = "testing-cuda", not(stub_kernels)))]
 
 use std::ffi::c_void;
 use std::fmt::Debug;

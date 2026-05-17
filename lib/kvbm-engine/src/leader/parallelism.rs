@@ -45,6 +45,11 @@ pub struct ParallelismTemplate {
     /// Total number of layers. Today every worker owns `0..num_layers`
     /// (PP=1). The first PP PR will replace this with per-rank ranges.
     pub num_layers: usize,
+    /// dtype width in bytes (from `LayoutConfig::dtype_width_bytes`).
+    /// Carried on the template so the Universal block-layout
+    /// compatibility check can compare it against remote canonicals
+    /// without re-reading per-worker `LayoutConfig`.
+    pub dtype_width_bytes: usize,
 }
 
 impl ParallelismTemplate {
@@ -109,6 +114,30 @@ impl ParallelismTemplate {
                 (KvDim::HeadSize, head_size),
             ],
             num_layers: layout.num_layers,
+            dtype_width_bytes: layout.dtype_width_bytes,
+        })
+    }
+
+    /// Build a [`CanonicalBlockShape`](kvbm_common::CanonicalBlockShape)
+    /// from this template.
+    ///
+    /// Returns `None` if `global_extents` is missing one of the required
+    /// canonical axes (Layer / Outer / Page / HeadCount / HeadSize). This
+    /// is the local side of the Universal-mode block-layout
+    /// compatibility check in [`SpmdParallelWorkers::connect_remote`].
+    pub fn canonical_block_shape(&self) -> Option<kvbm_common::CanonicalBlockShape> {
+        let extent = |axis: KvDim| -> Option<usize> {
+            self.global_extents
+                .iter()
+                .find_map(|(d, n)| if *d == axis { Some(*n) } else { None })
+        };
+        Some(kvbm_common::CanonicalBlockShape {
+            num_layers_total: extent(KvDim::Layer)?,
+            outer_dim: extent(KvDim::Outer)?,
+            page_size: extent(KvDim::Page)?,
+            num_heads_total: extent(KvDim::HeadCount)?,
+            head_dim: extent(KvDim::HeadSize)?,
+            dtype_width_bytes: self.dtype_width_bytes,
         })
     }
 
@@ -512,6 +541,7 @@ mod tests {
             shard_axis: KvDim::HeadCount,
             global_extents: vec![(KvDim::HeadCount, 32), (KvDim::Layer, 24)],
             num_layers: 24,
+            dtype_width_bytes: 2,
         }
     }
 
@@ -710,6 +740,7 @@ mod tests {
                 (KvDim::HeadSize, 64),
             ],
             num_layers: 24,
+            dtype_width_bytes: 2,
         }
     }
 

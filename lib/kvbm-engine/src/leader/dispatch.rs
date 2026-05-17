@@ -476,6 +476,7 @@ mod tests {
                 (KvDim::HeadSize, 64),
             ],
             num_layers: 24,
+            dtype_width_bytes: 2,
         }
     }
 

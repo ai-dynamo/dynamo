@@ -11,6 +11,7 @@
 //! All request/response bodies are JSON.
 
 use kvbm_protocols::control::MetricsSnapshotResponse;
+pub use kvbm_protocols::control::layout_compat::LayoutCompatPayload;
 /// Remote-prefill request payload carried by the hub's CD queue.
 ///
 /// The payload shape is owned by `kvbm-protocols (disagg)`; the hub owns only
@@ -221,10 +222,18 @@ impl Feature {
 }
 
 /// Configuration payload for the ConditionalDisagg feature.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConditionalDisaggConfig {
     /// The role this instance is taking inside the ConditionalDisagg split.
     pub role: ConditionalDisaggRole,
+    /// Block-layout compatibility payload. When `Some`, the hub gates this
+    /// registration against the baseline from the first CD instance with a
+    /// non-`None` payload and rejects mismatches at register time. `None` is
+    /// the backward-compatible path used by older clients that predate the
+    /// gate; those registrations always accept but also never set or modify
+    /// the baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_compat: Option<LayoutCompatPayload>,
 }
 
 /// Role a ConditionalDisagg participant takes on.
@@ -406,6 +415,7 @@ mod tests {
             peer_info: peer_info.clone(),
             features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
                 role: ConditionalDisaggRole::Prefill,
+                layout_compat: None,
             }))],
         };
         let json = serde_json::to_string(&orig).unwrap();
@@ -430,6 +440,7 @@ mod tests {
     fn feature_cd_with_config_serde_round_trip() {
         let f = Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Decode,
+            layout_compat: None,
         }));
         let json = serde_json::to_string(&f).unwrap();
         // Adjacently-tagged: {"kind":"conditional_disagg","config":{"role":"decode"}}

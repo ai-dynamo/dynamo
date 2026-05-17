@@ -2891,10 +2891,7 @@ mod tests {
             // Slot is now Onboarding with both shards and cd_payload set.
             match slot.txn_state() {
                 TransactionState::Onboarding(state) => {
-                    assert!(
-                        !state.shards.is_empty(),
-                        "shards preserved across install"
-                    );
+                    assert!(!state.shards.is_empty(), "shards preserved across install");
                     assert!(state.cd_payload.is_some(), "cd_payload installed");
                     assert_eq!(state.num_computed_tokens, 100);
                 }

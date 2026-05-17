@@ -215,6 +215,7 @@ pub struct InstanceLeaderBuilder {
     role: Option<DisaggregationRole>,
     observability: Option<SharedKvbmObservability>,
     bypass_host: bool,
+    block_layout_mode: kvbm_common::BlockLayoutMode,
 }
 
 impl InstanceLeaderBuilder {
@@ -322,6 +323,16 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    /// Set the block-layout compatibility policy applied at
+    /// `connect_remote`. Defaults to
+    /// [`kvbm_common::BlockLayoutMode::Operational`] (strict per-worker
+    /// equality, the pre-existing behaviour). Sourced from
+    /// `KvbmConfig.block_layout` at the builder call site.
+    pub fn block_layout_mode(mut self, mode: kvbm_common::BlockLayoutMode) -> Self {
+        self.block_layout_mode = mode;
+        self
+    }
+
     /// Set the disaggregation role this leader plays. Surfaced via
     /// [`InstanceLeader::describe`] for the hub UI. Defaults to `None`
     /// (standalone — not part of a P/D split).
@@ -363,12 +374,19 @@ impl InstanceLeaderBuilder {
         // Create parallel worker if workers are provided. When a
         // parallelism template is configured (AB-1a step 2), install
         // it on the SPMD layer so connect_remote can run cross-leader
-        // compatibility gates (AB-1b).
+        // compatibility gates (AB-1b). The cached worker metadata is
+        // forwarded so the block-layout compat check in connect_remote
+        // can compare against this leader's actual per-worker
+        // SerializedLayouts.
         let parallel_worker: Option<Arc<dyn ParallelWorkers>> = if !self.workers.is_empty() {
             let mut spmd =
-                SpmdParallelWorkers::new(self.workers.to_vec(), events.clone(), runtime.clone());
+                SpmdParallelWorkers::new(self.workers.to_vec(), events.clone(), runtime.clone())
+                    .with_block_layout_mode(self.block_layout_mode);
             if let Some(template) = self.parallelism_template.clone() {
                 spmd = spmd.with_local_template(template);
+            }
+            if let Some(metadata) = self.cached_worker_metadata.clone() {
+                spmd = spmd.with_local_metadata(metadata);
             }
             Some(Arc::new(spmd))
         } else {
@@ -2225,6 +2243,7 @@ mod tests {
             shard_axis: KvDim::HeadCount,
             global_extents: vec![(KvDim::HeadCount, 16)],
             num_layers: 12,
+            dtype_width_bytes: 2,
         }
     }
 

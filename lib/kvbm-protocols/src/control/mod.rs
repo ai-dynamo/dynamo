@@ -20,6 +20,7 @@
 //! - `client` (feature `client`) — the [`client::LeaderControlClient`] that
 //!   speaks all of the above.
 
+pub mod layout_compat;
 pub mod modules;
 
 #[cfg(feature = "client")]
@@ -37,6 +38,7 @@ use thiserror::Error;
 // Re-export the `core` + `dev` modules' protocol surface at `control::*` so
 // callers migrating from the old `kvbm-control-protocol` crate keep flat
 // import paths.
+pub use layout_compat::{LayoutCompatPayload, check_layout_compat};
 pub use modules::core::{
     DESCRIBE_INSTANCE_HANDLER, DescribeInstanceRequest, DisaggRole, HostInfo, InstanceDescription,
     LayerRange, LayoutConfigDescription, LayoutDescription, ParallelismDescription,

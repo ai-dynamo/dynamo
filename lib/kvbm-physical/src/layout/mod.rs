@@ -28,18 +28,17 @@ pub(super) mod tests;
 
 pub use builder::PhysicalLayoutBuilder;
 pub use config::{BlockDimension, LayoutConfig};
-// Re-export `TensorDataType` (which `LayoutConfig.dtype` consumes
-// under `permute_kernels`) so downstream crates can populate it
-// without taking a direct `kvbm-kernels` dep.
+// Re-export `TensorDataType` (consumed by `LayoutConfig.dtype`) so downstream
+// crates can populate it without taking a direct `kvbm-kernels` dep.
 pub(crate) use fully_contiguous::FullyContiguousLayout;
 pub use kv_block_layout::{BlockDim, InnerShape, KvBlockLayout};
-#[cfg(feature = "permute_kernels")]
 pub use kvbm_kernels::TensorDataType;
 pub(crate) use layer_separate::LayerSeparateLayout;
 pub use physical::NixlMetadata;
 pub use physical::PhysicalLayout;
-pub(crate) use serialize::LayoutDescriptor;
-pub use serialize::{BlockFormat, FullyContiguousDetails, LayerSeparateDetails, LayoutTypeDetails};
+pub use serialize::{
+    BlockFormat, FullyContiguousDetails, LayerSeparateDetails, LayoutDescriptor, LayoutTypeDetails,
+};
 // `intersect_views` is exposed for planner / executor wiring (PR-5+).
 // Today only view.rs's tests call it directly.
 #[allow(unused_imports)]

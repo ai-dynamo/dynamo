@@ -22,7 +22,6 @@ use std::ffi::c_void;
 use cudarc::runtime::sys::{cudaError_t, cudaStream_t};
 
 /// Numeric tags passed across the FFI boundary to select the CUDA template.
-#[cfg(feature = "permute_kernels")]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TensorDataType {
@@ -33,7 +32,6 @@ pub enum TensorDataType {
 }
 
 /// Identifies how each `[nt, nh, hd]` chunk is laid out in device memory.
-#[cfg(feature = "permute_kernels")]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockLayout {
@@ -41,7 +39,6 @@ pub enum BlockLayout {
     HND = 1,
 }
 
-#[cfg(feature = "permute_kernels")]
 #[allow(dead_code)]
 unsafe extern "C" {
     fn kvbm_kernels_launch_universal_from_block(
@@ -192,7 +189,6 @@ pub unsafe fn memcpy_batch(
 ///   table of chunk pointers.
 /// * `nh, nl, no, nt, hd` – logical dimensions of each universal tensor.
 /// * `stream` – CUDA stream used for the launch.
-#[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn universal_from_block(
     universal_ptrs: *const *mut c_void,
@@ -231,7 +227,6 @@ pub unsafe fn universal_from_block(
 /// outer)` slot). `src_layout` selects the source side's inner ordering
 /// (the destination is the opposite layout); `hd` is the contiguous
 /// innermost axis on both sides.
-#[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn nhd_hnd_transpose(
     src_ptrs: *const *const c_void,
@@ -264,7 +259,6 @@ pub unsafe fn nhd_hnd_transpose(
 }
 
 /// Copy `num_blocks` universal tensors back into their block stacks.
-#[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn block_from_universal(
     universal_ptrs: *const *const c_void,
@@ -334,14 +328,8 @@ pub unsafe fn vectorized_copy(
 
 // Tests are gated to only run when:
 // 1. testing-cuda feature is enabled
-// 2. permute_kernels feature is enabled (tests use universal kernels)
-// 3. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
-#[cfg(all(
-    test,
-    feature = "testing-cuda",
-    feature = "permute_kernels",
-    not(stub_kernels)
-))]
+// 2. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
+#[cfg(all(test, feature = "testing-cuda", not(stub_kernels)))]
 mod tests {
     use super::*;
     use cudarc::driver::result::memset_d8_async;

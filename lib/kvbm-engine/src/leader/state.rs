@@ -16,7 +16,10 @@ use anyhow::Result;
 
 use crate::InstanceId;
 use crate::worker::{CoordinatedWorker, Worker};
+use kvbm_common::BlockLayoutMode;
 use kvbm_physical::manager::SerializedLayout;
+
+use super::layout_compat::check_import_compat;
 
 /// Info about a remote leader and its workers.
 #[derive(Debug)]
@@ -47,6 +50,9 @@ pub struct LeaderState {
 
     /// Known remote leaders (by their instance ID)
     remote_leaders: RwLock<HashMap<InstanceId, RemoteLeaderInfo>>,
+
+    /// Block-layout compatibility mode applied at remote-leader import.
+    block_layout_mode: BlockLayoutMode,
 }
 
 impl LeaderState {
@@ -54,14 +60,28 @@ impl LeaderState {
     ///
     /// # Arguments
     /// * `instance_id` - This leader's unique identifier
-    /// * `velo` - Velo runtime for RPC communication
-    pub fn new(instance_id: InstanceId, messenger: Arc<Messenger>) -> Self {
+    /// * `messenger` - Velo runtime for RPC communication
+    /// * `block_layout_mode` - Cross-leader layout compatibility policy.
+    ///   See `kvbm_common::block_layout_mode` for semantics. Pass
+    ///   `BlockLayoutMode::Operational` for the legacy strict-equality
+    ///   behaviour.
+    pub fn new(
+        instance_id: InstanceId,
+        messenger: Arc<Messenger>,
+        block_layout_mode: BlockLayoutMode,
+    ) -> Self {
         Self {
             instance_id,
             messenger,
             workers: Vec::new(),
             remote_leaders: RwLock::new(HashMap::new()),
+            block_layout_mode,
         }
+    }
+
+    /// Block-layout compatibility mode this leader operates under.
+    pub fn block_layout_mode(&self) -> BlockLayoutMode {
+        self.block_layout_mode
     }
 
     /// Get this leader's instance ID.
@@ -133,6 +153,11 @@ impl LeaderState {
     /// - Many-to-one when local TP > remote TP
     /// - One-to-many when local TP < remote TP
     ///
+    /// Before storing the remote info, this enforces the configured
+    /// [`BlockLayoutMode`] via [`check_import_compat`]. Operational mode
+    /// rejects any per-worker shape mismatch; Universal mode rejects
+    /// canonical-aggregate mismatch.
+    ///
     /// # Arguments
     /// * `remote_leader_id` - Instance ID of the remote leader
     /// * `remote_metadata` - Metadata from each remote worker (rank-ordered)
@@ -148,8 +173,26 @@ impl LeaderState {
             local_count,
             remote_count,
             %remote_leader_id,
+            block_layout_mode = %self.block_layout_mode,
             "Importing remote leader metadata"
         );
+
+        // Block-layout compatibility check before storing or routing.
+        // Errors here propagate to the caller (e.g. velo handler) and
+        // prevent any worker from receiving incompatible metadata.
+        let local_metadata = self.export_worker_metadata().await?;
+        check_import_compat(
+            self.block_layout_mode,
+            &local_metadata,
+            &remote_metadata,
+            None,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "remote leader {remote_leader_id} rejected by {} compat: {e}",
+                self.block_layout_mode,
+            )
+        })?;
 
         // Store remote leader info
         {

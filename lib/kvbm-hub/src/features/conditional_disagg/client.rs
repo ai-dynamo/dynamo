@@ -17,7 +17,7 @@ use velo_ext::{InstanceId, PeerInfo};
 use crate::client::HubClient;
 use crate::protocol::{
     self, ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole,
-    Feature, PrefillRequest,
+    Feature, LayoutCompatPayload, PrefillRequest,
 };
 
 /// Thin wrapper that registers an instance under the ConditionalDisagg
@@ -96,13 +96,24 @@ impl ConditionalDisaggClient {
     /// On success, caches the hub's velo `InstanceId` internally so
     /// subsequent prefill-queue calls can target it without re-reading the
     /// response.
-    pub async fn register(&self, peer_info: PeerInfo) -> Result<Option<InstanceId>> {
+    ///
+    /// `layout_compat` carries this leader's
+    /// [`LayoutCompatPayload`](crate::protocol::LayoutCompatPayload) so the
+    /// hub can gate this registration against the baseline established by
+    /// the first CD instance. Pass `None` for the legacy / backward-
+    /// compatible path that bypasses the gate.
+    pub async fn register(
+        &self,
+        peer_info: PeerInfo,
+        layout_compat: Option<LayoutCompatPayload>,
+    ) -> Result<Option<InstanceId>> {
         let hub_id = self
             .hub
             .register_instance_with_features(
                 peer_info,
                 vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
                     role: self.role,
+                    layout_compat,
                 }))],
             )
             .await?;
