@@ -26,6 +26,7 @@ DEFAULT_CONNECT = "127.0.0.1:8081"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
+DEFAULT_TRANSCRIPT_DRAIN_TIMEOUT = 0.25
 DEFAULT_NVIDIA_SERVER = "grpc.nvcf.nvidia.com:443"
 DEFAULT_PARAKEET_FUNCTION_ID = "d8dd4e9b-fbf5-4fb0-9dba-8cf436c8d965"
 DEFAULT_PARAKEET_MODEL_NAME = "parakeet-ctc-0.6b-asr"
@@ -121,6 +122,15 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for the Pipecat ASR pipeline to emit a transcript.",
     )
     parser.add_argument(
+        "--transcript-drain-timeout",
+        type=float,
+        default=DEFAULT_TRANSCRIPT_DRAIN_TIMEOUT,
+        help=(
+            "Seconds to wait for additional final transcript frames after the "
+            "first final frame."
+        ),
+    )
+    parser.add_argument(
         "--max-frame-bytes",
         type=int,
         default=DEFAULT_MAX_FRAME_BYTES,
@@ -163,6 +173,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--channels must be >= 1")
     if args.pipeline_timeout <= 0:
         parser.error("--pipeline-timeout must be > 0")
+    if args.transcript_drain_timeout <= 0:
+        parser.error("--transcript-drain-timeout must be > 0")
     if args.max_frame_bytes < 1:
         parser.error("--max-frame-bytes must be >= 1")
     if (
@@ -256,6 +268,7 @@ class PipecatASRSession:
         self._sample_rate = args.sample_rate
         self._channels = args.channels
         self._timeout = args.pipeline_timeout
+        self._drain_timeout = args.transcript_drain_timeout
         self._output_queue: asyncio.Queue[TranscriptResult | PipelineFailure] = (
             asyncio.Queue()
         )
@@ -317,15 +330,22 @@ class PipecatASRSession:
         )
         await self._task.queue_frame(VADUserStoppedSpeakingFrame())
 
+        text_parts: list[str] = []
         while True:
-            result = await asyncio.wait_for(
-                self._output_queue.get(),
-                timeout=self._timeout,
-            )
+            timeout = self._drain_timeout if text_parts else self._timeout
+            try:
+                result = await asyncio.wait_for(
+                    self._output_queue.get(),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                if text_parts:
+                    return TranscriptResult("\n".join(text_parts), final=True)
+                raise
             if isinstance(result, PipelineFailure):
                 raise RuntimeError(result.message)
             if result.final:
-                return result
+                text_parts.append(result.text)
 
     def audio_duration_seconds(self, audio: bytes) -> float:
         return len(audio) / (self._sample_rate * self._channels * 2)

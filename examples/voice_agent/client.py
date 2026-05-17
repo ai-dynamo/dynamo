@@ -45,6 +45,15 @@ def parse_args() -> argparse.Namespace:
         help="16-bit PCM WAV file to send as input_audio_buffer.append audio.",
     )
     parser.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Split --audio-file into multiple input_audio_buffer.append events "
+            "of this many seconds. 0 sends the whole file as one event."
+        ),
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=10.0,
@@ -53,16 +62,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_audio(args: argparse.Namespace) -> bytes:
+def load_audio_chunks(args: argparse.Namespace) -> list[bytes]:
     if args.audio_file is None:
-        return args.text.encode("utf-8")
+        return [args.text.encode("utf-8")]
 
     with wave.open(str(args.audio_file), "rb") as wav:
         if wav.getsampwidth() != 2:
             raise ValueError("--audio-file must be 16-bit PCM WAV")
         if wav.getnchannels() != 1:
             raise ValueError("--audio-file must be mono PCM WAV")
-        return wav.readframes(wav.getnframes())
+        if args.chunk_seconds <= 0:
+            return [wav.readframes(wav.getnframes())]
+
+        frames_per_chunk = max(1, int(wav.getframerate() * args.chunk_seconds))
+        chunks = []
+        while chunk := wav.readframes(frames_per_chunk):
+            chunks.append(chunk)
+        return chunks
 
 
 async def recv_event(ws: Any, timeout: float) -> dict[str, Any]:
@@ -91,7 +107,7 @@ async def expect_event(ws: Any, event_type: str, timeout: float) -> dict[str, An
 
 
 async def run_client(args: argparse.Namespace) -> None:
-    audio = base64.b64encode(load_audio(args)).decode("ascii")
+    audio_chunks = load_audio_chunks(args)
 
     async with websockets.connect(args.url) as ws:
         await expect_event(ws, "session.created", args.timeout)
@@ -106,38 +122,42 @@ async def run_client(args: argparse.Namespace) -> None:
         )
         await expect_event(ws, "session.updated", args.timeout)
 
-        await ws.send(
-            json.dumps(
-                {
-                    "type": "input_audio_buffer.append",
-                    "audio": audio,
-                }
+        outputs = []
+        for audio in audio_chunks:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(audio).decode("ascii"),
+                    }
+                )
             )
-        )
 
-        echoed_audio = []
-        text_output = []
-        input_transcript = None
-        while True:
-            event = await recv_event(ws, args.timeout)
-            event_type = event.get("type")
-            if event_type == "response.output_audio.delta":
-                echoed_audio.append(event.get("delta", ""))
-            elif event_type == "response.output_text.delta":
-                text_output.append(event.get("delta", ""))
-            elif event_type == "conversation.item.input_audio_transcription.completed":
-                input_transcript = event.get("transcript")
-            elif event_type == "response.done":
-                if text_output:
-                    print("".join(text_output))
-                elif input_transcript is not None:
-                    print(input_transcript)
-                else:
-                    decoded = base64.b64decode("".join(echoed_audio)).decode(
-                        "utf-8", errors="replace"
-                    )
-                    print(decoded)
-                return
+            echoed_audio = []
+            text_output = []
+            input_transcript = None
+            while True:
+                event = await recv_event(ws, args.timeout)
+                event_type = event.get("type")
+                if event_type == "response.output_audio.delta":
+                    echoed_audio.append(event.get("delta", ""))
+                elif event_type == "response.output_text.delta":
+                    text_output.append(event.get("delta", ""))
+                elif event_type == "conversation.item.input_audio_transcription.completed":
+                    input_transcript = event.get("transcript")
+                elif event_type == "response.done":
+                    if text_output:
+                        outputs.append("".join(text_output))
+                    elif input_transcript is not None:
+                        outputs.append(input_transcript)
+                    else:
+                        decoded = base64.b64decode("".join(echoed_audio)).decode(
+                            "utf-8", errors="replace"
+                        )
+                        outputs.append(decoded)
+                    break
+
+        print("\n".join(outputs))
 
 
 def main() -> int:

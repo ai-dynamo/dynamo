@@ -118,13 +118,23 @@ backend defaults to 16 kHz input and does not resample:
 "$PYTHON" examples/voice_agent/client.py --audio-file /path/to/input-16k-mono.wav
 ```
 
+For larger files, split the WAV into multiple realtime append events so each
+WebSocket frame stays below the default frame limit:
+
+```bash
+"$PYTHON" examples/voice_agent/client.py \
+  --audio-file examples/voice_agent/MLKDream_64kb.wav \
+  --chunk-seconds 120 \
+  --timeout 300
+```
+
 ## Current Limitations
 
 - This is an audio-event echo scaffold, not a full voice agent yet.
 - The frontend/backend bridge is local-only JSON and not the final Dynamo
   realtime request plane.
 - The Pipecat ASR backend currently treats one `input_audio_buffer.append` as a
-  complete utterance.
+  complete utterance. Use client-side chunking for large files in this PoC.
 - A true Python Dynamo realtime worker will need bindings and runtime support
   for bidirectional Realtime event streams once remote dispatch lands.
 - There is no microphone capture, playback, resampling, multi-append buffering,
