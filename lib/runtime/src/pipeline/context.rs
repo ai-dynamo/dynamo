@@ -254,7 +254,11 @@ pub struct StreamContext {
 }
 
 impl StreamContext {
-    fn new(controller: Arc<Controller>, registry: Registry, metadata: BTreeMap<String, String>) -> Self {
+    fn new(
+        controller: Arc<Controller>,
+        registry: Registry,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
         StreamContext {
             controller,
             registry: Arc::new(registry),
