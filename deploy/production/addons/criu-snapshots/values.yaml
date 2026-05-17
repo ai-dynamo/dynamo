@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# criu-snapshots production overrides for the Dynamo + SGLang + Megatron-LM
+# fleet. See addons/criu-snapshots/README.md for the responsibility split
+# and runbooks/criu-snapshots.md for the hard constraints.
+
+image:
+  controller:
+    repository: ghcr.io/ai-blaise/criu-snapshots-controller
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  daemon:
+    repository: ghcr.io/ai-blaise/criu-snapshots-daemon
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+installCRDs: true
+
+controller:
+  replicas: 1
+  leaderElection: true
+  metricsPort: 8080
+  healthPort: 8081
+  agentPort: 9101
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+daemon:
+  metricsPort: 9100
+  rpcPort: 9101
+  hostRoot: /var/lib/dynamo-snapshots
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  # Restrict to GPU nodes only. The NVIDIA Node Feature Discovery label
+  # from addons/gpu-operator is what surfaces NVIDIA devices.
+  nodeSelector:
+    feature.node.kubernetes.io/pci-10de.present: "true"
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+storage:
+  zstdLevel: 3
+  maxSizeGiB: 256
+
+ghcr:
+  pullSecretName: ghcr-pull
+  pushSecretName: ghcr-push
+  pushSecretKey: token
+
+prometheus:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    labels:
+      release: kube-prometheus-stack
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+networkPolicy:
+  enabled: true
+  apiServerCIDR: "0.0.0.0/0"
+  ghcrCIDR: "0.0.0.0/0"

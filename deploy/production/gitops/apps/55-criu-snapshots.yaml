@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# criu-snapshots: host-kernel CRIU + cuda-checkpoint snapshot/restore for
+# Dynamo + SGLang serving and Megatron-LM training. Sync wave 55: after
+# the gang scheduler (51-grove) and before SMG so the SGLang Pods that SMG
+# fronts can rely on CRDs being registered. See addons/criu-snapshots/.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: criu-snapshots
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "55"
+spec:
+  project: dynamo-production
+  sources:
+    - repoURL: https://github.com/ai-blaise/criu-snapshots.git
+      targetRevision: v0.1.0
+      path: chart
+      helm:
+        releaseName: criu-snapshots
+        valueFiles:
+          - $values/deploy/production/addons/criu-snapshots/values.yaml
+    - repoURL: https://github.com/ai-blaise/dynamo-prod-k8s.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: criu-snapshots
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

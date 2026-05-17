@@ -1,0 +1,382 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 BlaiseAI / ai-blaise. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek V3.2 REAP W4A4KV4 NVFP4 on the Dynamo production profile, with
+# CRIU + cuda-checkpoint snapshot fast-start. Identical topology and SGLang
+# arguments to examples/deepseek-v32-reap-sglang.yaml; the only deltas are:
+#
+#   * snapshots.ai-blaise.io/enabled annotation on prefill + decode
+#   * SGLANG_SNAPSHOT_HOOKS=1 env var on prefill + decode
+#   * snapshot-pull initContainer on prefill + decode
+#   * snap emptyDir volume on prefill + decode
+#   * sglang-criu-entrypoint wrapper as the worker container command
+#   * CHECKPOINT_RESTORE + SYS_PTRACE capabilities on the worker container
+#
+# Frontend is left untouched: it is stateless and re-initializes fast.
+#
+# Before applying:
+#   1. addons/criu-snapshots/ is healthy and the CRDs exist.
+#   2. Take an initial snapshot via deploy-a4-snapshots.sh once the
+#      non-snapshotted DGD is serving; promote to the -current tag.
+#   3. Then `kubectl apply` this file (or swap targetRevision in Argo CD).
+#
+# Read deploy/production/runbooks/criu-snapshots.md before flipping the
+# annotations on a production DGD.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v32-reap-sglang
+  labels:
+    app.kubernetes.io/name: deepseek-v32-reap-sglang
+    app.kubernetes.io/part-of: dynamo-production
+    ai-blaise.io/inference-engine: optimization-playground
+  annotations:
+    snapshots.ai-blaise.io/enabled: "true"
+    snapshots.ai-blaise.io/repo: ghcr.io/ai-blaise/dynamo-snapshots
+spec:
+  backendFramework: sglang
+  envs:
+    - { name: HF_HOME,                                       value: /models }
+    - { name: HF_HUB_OFFLINE,                                value: "1" }
+    - { name: HF_XET_HIGH_PERFORMANCE,                       value: "1" }
+    - { name: PYTHONUNBUFFERED,                              value: "1" }
+    - { name: PYTORCH_ALLOC_CONF,                            value: "expandable_segments:True,max_split_size_mb:512" }
+    - { name: SGLANG_ENABLE_SPEC_V2,                         value: "1" }
+    - { name: SGLANG_ENABLE_JIT_DEEPGEMM,                    value: "0" }
+    - { name: SGLANG_DISABLE_FLASHINFER_FUSED_TOPK_DEEPSEEK, value: "0" }
+    - { name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN,     value: "1" }
+    - { name: SGLANG_MOE_NVFP4_DISPATCH,                     value: "1" }
+    - { name: SGLANG_SMC_DRAFT_FP8_GEMM_BACKEND,             value: cutlass }
+    - { name: SGLANG_SMC_TARGET_VERIFY_GRAPH,                value: "0" }
+    - { name: NCCL_IB_DISABLE,                               value: "1" }
+    - { name: NCCL_NVLS_ENABLE,                              value: "0" }
+    - { name: NCCL_P2P_LEVEL,                                value: NVL }
+    - { name: NCCL_P2P_DISABLE,                              value: "0" }
+    - { name: NCCL_CUMEM_ENABLE,                             value: "0" }
+    - { name: NCCL_ALGO,                                     value: Ring }
+    # Install the SGLang pre_snapshot / post_resume hooks on worker import.
+    - { name: SGLANG_SNAPSHOT_HOOKS,                         value: "1" }
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations: [{ operator: Exists }]
+        mainContainer:
+          image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4-snapshot-v0.1.0
+          imagePullPolicy: IfNotPresent
+          command: [python3, -m, dynamo.frontend]
+          args:
+            - --router-mode
+            - kv
+            - --router-kv-events
+            - --router-reset-states
+            - --dyn-chat-processor
+            - dynamo
+            - --tokenizer
+            - fastokens
+            - --http-port
+            - "8000"
+          env:
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        limits:    { gpu: "4" }
+        requests:  { gpu: "4" }
+      sharedMemory: { size: 120Gi }
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations: [{ operator: Exists }]
+        volumes:
+          - name: deepseek-v32-reap-model
+            hostPath:
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+              type: Directory
+          - name: snap
+            emptyDir: { medium: "", sizeLimit: 128Gi }
+          - name: opt-criu-snapshots
+            hostPath:
+              path: /opt/criu-snapshots
+              type: Directory
+        initContainers:
+          - name: snapshot-pull
+            image: ghcr.io/ai-blaise/criu-snapshots-daemon:0.1.0
+            imagePullPolicy: IfNotPresent
+            env:
+              - { name: GHCR_REPO,          value: ghcr.io/ai-blaise/dynamo-snapshots }
+              - { name: SNAPSHOT_TAG,       value: deepseek-v32-reap-prefill-current }
+              - { name: SNAPSHOT_DIR,       value: /snap }
+              - { name: FINGERPRINT_STRICT, value: "1" }
+              - { name: ZSTD_THREADS,       value: "0" }
+              - { name: PREWARM,            value: "1" }
+            envFrom:
+              - secretRef: { name: ghcr-pull, optional: true }
+            command: ["/usr/local/bin/snapshot-pull"]
+            volumeMounts:
+              - { name: snap, mountPath: /snap }
+              - { name: opt-criu-snapshots, mountPath: /opt/criu-snapshots, readOnly: true }
+        mainContainer:
+          image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4-snapshot-v0.1.0
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command: [/usr/local/bin/sglang-criu-entrypoint]
+          args:
+            - "--snapshot-dir=/snap"
+            - "--"
+            - python3
+            - -m
+            - dynamo.sglang
+            - --model-path
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+            - --host
+            - 0.0.0.0
+            - --trust-remote-code
+            - --quantization
+            - compressed-tensors
+            - --fp4-gemm-backend
+            - auto
+            - --fp8-gemm-backend
+            - auto
+            - --kv-cache-dtype
+            - bfloat16
+            - --tp
+            - "4"
+            - --dp
+            - "4"
+            - --enable-dp-attention
+            - --mem-fraction-static
+            - "0.80"
+            - --max-running-requests
+            - "8"
+            - --context-length
+            - "73728"
+            - --max-total-tokens
+            - "524288"
+            - --cuda-graph-max-bs
+            - "8"
+            - --disable-custom-all-reduce
+            - --disable-flashinfer-autotune
+            - --watchdog-timeout
+            - "1800"
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+            - --nsa-prefill-backend
+            - flashmla_sparse
+            - --nsa-decode-backend
+            - flashmla_sparse
+            - --nsa-indexer-mode
+            - indexcache
+            - --nsa-indexcache-pattern
+            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
+            - --enable-turboquant-dense-kv-cache
+            - --turboquant-dense-kv-preset
+            - latent_2p5bit_nc
+            - --turboquant-execution-mode
+            - fused_decode
+            - --disaggregation-mode
+            - prefill
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --dyn-tool-call-parser
+            - deepseek_v3_2
+            - --dyn-reasoning-parser
+            - deepseek_r1
+          env:
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+          securityContext:
+            capabilities:
+              add: [IPC_LOCK, CHECKPOINT_RESTORE, SYS_ADMIN, SYS_PTRACE]
+          startupProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            # Snapshot restore drops startup well below the cold-start
+            # ceiling, but the probe budget stays generous so the cold-
+            # start fallback (snapshot absent on first deploy) still works.
+            failureThreshold: 360
+          volumeMounts:
+            - name: deepseek-v32-reap-model
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+              readOnly: true
+            - { name: snap, mountPath: /snap }
+            - { name: opt-criu-snapshots, mountPath: /opt/criu-snapshots, readOnly: true }
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        limits:   { gpu: "4" }
+        requests: { gpu: "4" }
+      sharedMemory: { size: 120Gi }
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: a4-us-001-rl9
+        tolerations: [{ operator: Exists }]
+        volumes:
+          - name: deepseek-v32-reap-model
+            hostPath:
+              path: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+              type: Directory
+          - name: smcsd-draft-model
+            hostPath:
+              path: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
+              type: Directory
+          - name: snap
+            emptyDir: { medium: "", sizeLimit: 128Gi }
+          - name: opt-criu-snapshots
+            hostPath:
+              path: /opt/criu-snapshots
+              type: Directory
+        initContainers:
+          - name: snapshot-pull
+            image: ghcr.io/ai-blaise/criu-snapshots-daemon:0.1.0
+            imagePullPolicy: IfNotPresent
+            env:
+              - { name: GHCR_REPO,          value: ghcr.io/ai-blaise/dynamo-snapshots }
+              - { name: SNAPSHOT_TAG,       value: deepseek-v32-reap-decode-current }
+              - { name: SNAPSHOT_DIR,       value: /snap }
+              - { name: FINGERPRINT_STRICT, value: "1" }
+              - { name: ZSTD_THREADS,       value: "0" }
+              - { name: PREWARM,            value: "1" }
+            envFrom:
+              - secretRef: { name: ghcr-pull, optional: true }
+            command: ["/usr/local/bin/snapshot-pull"]
+            volumeMounts:
+              - { name: snap, mountPath: /snap }
+              - { name: opt-criu-snapshots, mountPath: /opt/criu-snapshots, readOnly: true }
+        mainContainer:
+          image: ghcr.io/ai-blaise/optimization-playground-sglang-runtime:reap-nvfp4-snapshot-v0.1.0
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command: [/usr/local/bin/sglang-criu-entrypoint]
+          args:
+            - "--snapshot-dir=/snap"
+            - "--"
+            - python3
+            - -m
+            - dynamo.sglang
+            - --model-path
+            - /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+            - --served-model-name
+            - BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+            - --host
+            - 0.0.0.0
+            - --trust-remote-code
+            - --quantization
+            - compressed-tensors
+            - --fp4-gemm-backend
+            - auto
+            - --fp8-gemm-backend
+            - auto
+            - --kv-cache-dtype
+            - bfloat16
+            - --tp
+            - "4"
+            - --dp
+            - "4"
+            - --enable-dp-attention
+            - --mem-fraction-static
+            - "0.80"
+            - --max-running-requests
+            - "8"
+            - --context-length
+            - "73728"
+            - --max-total-tokens
+            - "524288"
+            - --cuda-graph-max-bs
+            - "8"
+            - --disable-custom-all-reduce
+            - --disable-flashinfer-autotune
+            - --watchdog-timeout
+            - "1800"
+            - --disable-radix-cache
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+            - --nsa-prefill-backend
+            - flashmla_sparse
+            - --nsa-decode-backend
+            - flashmla_sparse
+            - --nsa-indexer-mode
+            - indexcache
+            - --nsa-indexcache-pattern
+            - FSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSF
+            - --enable-turboquant-dense-kv-cache
+            - --turboquant-dense-kv-preset
+            - latent_2p5bit_nc
+            - --turboquant-execution-mode
+            - fused_decode
+            - --enable-hisparse
+            - --hisparse-config
+            - '{"top_k":2048,"device_buffer_size":6144,"host_to_device_ratio":10}'
+            - --disaggregation-mode
+            - decode
+            - --disaggregation-transfer-backend
+            - nixl
+            - --disaggregation-bootstrap-port
+            - "12345"
+            - --speculative-algorithm
+            - SMC
+            - --speculative-draft-model-path
+            - /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
+            - --speculative-draft-model-quantization
+            - fp8
+            - --speculative-draft-attention-backend
+            - triton
+            - --smc-draft-kv-cache-dtype
+            - fp8_e4m3
+            - --smc-n-particles
+            - "4"
+            - --smc-gamma
+            - "6"
+            - --smc-draft-temperature
+            - "0.7"
+            - --smc-target-temperature
+            - "1.0"
+            - --smc-resample-threshold
+            - "0.5"
+            - --smc-resample-method
+            - systematic
+            - --dyn-tool-call-parser
+            - deepseek_v3_2
+            - --dyn-reasoning-parser
+            - deepseek_r1
+          env:
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+          securityContext:
+            capabilities:
+              add: [IPC_LOCK, CHECKPOINT_RESTORE, SYS_ADMIN, SYS_PTRACE]
+          startupProbe:
+            httpGet: { path: /health, port: 9090 }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 360
+          volumeMounts:
+            - name: deepseek-v32-reap-model
+              mountPath: /models/BlaiseAI/DeepSeek-V3.2-REAP-345B-NVFP4-W4A4KV4-IndexerK8-FP8-GatedNorm-G1
+              readOnly: true
+            - name: smcsd-draft-model
+              mountPath: /models/smcsd/GLM-4-9B-0414-FP8-DeepSeekV32-OMP
+              readOnly: true
+            - { name: snap, mountPath: /snap }
+            - { name: opt-criu-snapshots, mountPath: /opt/criu-snapshots, readOnly: true }
