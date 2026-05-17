@@ -25,6 +25,7 @@ if os.path.isdir(PIPECAT_SRC):
 DEFAULT_CONNECT = "127.0.0.1:8081"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
+DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_NVIDIA_SERVER = "grpc.nvcf.nvidia.com:443"
 DEFAULT_PARAKEET_FUNCTION_ID = "d8dd4e9b-fbf5-4fb0-9dba-8cf436c8d965"
 DEFAULT_PARAKEET_MODEL_NAME = "parakeet-ctc-0.6b-asr"
@@ -120,6 +121,12 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for the Pipecat ASR pipeline to emit a transcript.",
     )
     parser.add_argument(
+        "--max-frame-bytes",
+        type=int,
+        default=DEFAULT_MAX_FRAME_BYTES,
+        help="Maximum newline-delimited JSON frame size accepted from the frontend.",
+    )
+    parser.add_argument(
         "--nvidia-api-key",
         default=os.environ.get("NVIDIA_API_KEY"),
         help="NVIDIA API key [default: NVIDIA_API_KEY].",
@@ -156,6 +163,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--channels must be >= 1")
     if args.pipeline_timeout <= 0:
         parser.error("--pipeline-timeout must be > 0")
+    if args.max_frame_bytes < 1:
+        parser.error("--max-frame-bytes must be >= 1")
     if (
         not args.nvidia_no_ssl
         and args.nvidia_server == DEFAULT_NVIDIA_SERVER
@@ -278,7 +287,15 @@ class PipecatASRSession:
             enable_turn_tracking=False,
             idle_timeout_secs=None,
         )
+        self._task.event_handler("on_pipeline_error")(self._on_pipeline_error)
         self._runner = PipelineRunner(handle_sigint=False)
+
+    async def _on_pipeline_error(
+        self,
+        _task: PipelineTask,
+        frame: ErrorFrame,
+    ) -> None:
+        await self._output_queue.put(PipelineFailure(frame.error))
 
     async def start(self) -> None:
         if self._runner_task is None:
@@ -473,7 +490,11 @@ async def run_backend(args: argparse.Namespace) -> None:
     host, port = args.connect
     while True:
         try:
-            reader, writer = await asyncio.open_connection(host, port)
+            reader, writer = await asyncio.open_connection(
+                host,
+                port,
+                limit=args.max_frame_bytes,
+            )
         except OSError as exc:
             print(
                 f"waiting for frontend bridge at tcp://{host}:{port}: {exc}",
