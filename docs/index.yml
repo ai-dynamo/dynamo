@@ -166,6 +166,8 @@ navigation:
             path: tool-calling/dynamo.md
           - page: Tool Call Parsing (Engine Fallback)
             path: tool-calling/engine-fallback.md
+          - page: Troubleshooting Tool Calls
+            path: tool-calling/troubleshooting.md
       - section: Reasoning
         slug: reasoning
         path: reasoning/README.md

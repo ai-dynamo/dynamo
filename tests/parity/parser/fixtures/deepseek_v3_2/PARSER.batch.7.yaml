@@ -62,5 +62,11 @@ cases:
         normal_text: ''
       vllm: *d_7_b
       sglang: *d_7_b
-  # PARSER.batch.7.c (schema mismatch on JSON value) n/a: DSML encodes typing explicitly via the string="true|false" parameter attribute, not via JSON. There's no JSON-typing/coercion path to mismatch with.
-  # PARSER.batch.7.d (multi-arg + nested + streaming-split) n/a: multi-arg is already 7.a; nested values via string="false" + JSON body are covered in Rust unit tests (test_parse_{json,nested_object}_parameter); split-across-chunks belongs to PARSER.stream.*.
+  PARSER.batch.7.c:
+    description: Schema-type-mismatch test 7.c — not yet authored for this family
+    reason: |-
+      Schema-type-mismatch test 7.c not yet authored for deepseek_v3_2; argument-shape coverage is provided by 7.a / 7.b for this family.
+  PARSER.batch.7.d:
+    description: Nested-arguments test 7.d — not yet authored for this family
+    reason: |-
+      Nested-arguments test 7.d not yet authored for deepseek_v3_2; see 7.a / 7.b for simpler argument shapes.
