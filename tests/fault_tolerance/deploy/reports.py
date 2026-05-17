@@ -515,8 +515,12 @@ class PerWorkerLatencyReport(Report):
                 )
                 continue
 
-            sections_screen.append(self._render(load.name, by_pod, "fancy_grid"))
-            sections_file.append(self._render(load.name, by_pod, "pipe"))
+            sections_screen.append(
+                self._render(load.name, by_pod, "fancy_grid")
+            )
+            sections_file.append(
+                self._render(load.name, by_pod, "pipe")
+            )
             ctx.logger.info("\n" + sections_screen[-1])
 
         if self.save_to_file and sections_file:
@@ -564,7 +568,9 @@ class PerWorkerLatencyReport(Report):
                         bk = series.get("buckets")
                         if not bk:
                             continue
-                        comp = series.get("labels", {}).get("dynamo_component")
+                        comp = (
+                            series.get("labels", {}).get("dynamo_component")
+                        )
                         if comp and ep not in role_by_ep:
                             role_by_ep[ep] = comp
                         first.setdefault(ep, {}).setdefault(k, bk)
@@ -614,9 +620,7 @@ class PerWorkerLatencyReport(Report):
             if c >= target:
                 if c == prev_count:
                     return le
-                return prev_le + (target - prev_count) / (c - prev_count) * (
-                    le - prev_le
-                )
+                return prev_le + (target - prev_count) / (c - prev_count) * (le - prev_le)
             prev_le, prev_count = le, c
         # In the +Inf bucket — no upper bound resolvable from histogram.
         return f">{items[-1][0]:.1f}"
@@ -631,7 +635,6 @@ class PerWorkerLatencyReport(Report):
         from tabulate import tabulate
 
         labels = [label for _, label in cls._METRICS]
-
         # Prefill rows first, then decode/backend, then anything else;
         # within a role, sort lexicographically by short pod id.
         def role_sort_key(p):
@@ -727,8 +730,7 @@ class GpuMemoryReport(Report):
             ctx.logger.warning(
                 "GpuMemoryReport: no DCGM samples returned. Check Prometheus URL "
                 "(%s) and that DCGM_FI_DEV_FB_USED has labels exported_namespace=%s.",
-                self.prometheus_url,
-                ns,
+                self.prometheus_url, ns,
             )
             return
 
@@ -751,10 +753,7 @@ class GpuMemoryReport(Report):
             for v in violators:
                 ctx.logger.error(
                     "GpuMemoryReport: %s on rung %s used %.2f GB (> %.2f GB cap)",
-                    v["gpu"],
-                    v["rung"],
-                    v["max_gb"],
-                    self.max_gb_per_gpu,
+                    v["gpu"], v["rung"], v["max_gb"], self.max_gb_per_gpu,
                 )
         else:
             ctx.logger.info(
@@ -780,9 +779,10 @@ class GpuMemoryReport(Report):
         selector = f'exported_namespace="{ns}"'
         if dgd_name:
             selector += f',exported_pod=~".*{dgd_name}.*"'
-        query = f"max_over_time(DCGM_FI_DEV_FB_USED{{{selector}}}[{win_s}s])"
-        url = f"{self.prometheus_url}/api/v1/query?" + urllib.parse.urlencode(
-            {"query": query, "time": end_ts}
+        query = f'max_over_time(DCGM_FI_DEV_FB_USED{{{selector}}}[{win_s}s])'
+        url = (
+            f"{self.prometheus_url}/api/v1/query?"
+            + urllib.parse.urlencode({"query": query, "time": end_ts})
         )
         try:
             with urllib.request.urlopen(url, timeout=5) as r:
@@ -872,7 +872,9 @@ class ErrorTrackingReport(Report):
 
         load_events = [e for e in ctx.events if isinstance(e, StartLoad)]
         if not load_events:
-            ctx.logger.info("ErrorTrackingReport: no StartLoad in scenario; skipping")
+            ctx.logger.info(
+                "ErrorTrackingReport: no StartLoad in scenario; skipping"
+            )
             return
 
         ns = ctx.namespace
@@ -896,16 +898,16 @@ class ErrorTrackingReport(Report):
             row["aiperf_error_types"] = ai_types
 
             # vLLM worker error counters (sum across pods of per-pod delta).
-            row.update(
-                self._vllm_error_deltas(
-                    os.path.join(local_dir, "server_metrics_export.jsonl")
-                )
-            )
+            row.update(self._vllm_error_deltas(
+                os.path.join(local_dir, "server_metrics_export.jsonl")
+            ))
 
             # Container restart count + reason during the rung window.
             started = getattr(load, "started_at", None)
             ended = getattr(load, "ended_at", None)
-            restarts, reasons = self._container_restarts(ns, dgd_name, started, ended)
+            restarts, reasons = self._container_restarts(
+                ns, dgd_name, started, ended
+            )
             row["container_restarts"] = restarts
             row["restart_reasons"] = reasons
 
@@ -925,7 +927,9 @@ class ErrorTrackingReport(Report):
             try:
                 os.makedirs(os.path.dirname(out), exist_ok=True)
                 with open(out, "w") as f:
-                    f.write(self._render(rows, "pipe") + "\n\n" + log_summary + "\n")
+                    f.write(
+                        self._render(rows, "pipe") + "\n\n" + log_summary + "\n"
+                    )
                 ctx.logger.info(f"ErrorTrackingReport written to {out}")
             except OSError as e:
                 ctx.logger.warning(f"ErrorTrackingReport save failed: {e}")
@@ -1010,8 +1014,8 @@ class ErrorTrackingReport(Report):
         # Each component subdir (frontend / vllmprefillworker /
         # vllmdecodeworker) contains <pod>_<ts>.log. Strip the
         # `_<digits>.log` suffix to group log files by pod name.
-        import re
         from collections import defaultdict
+        import re
 
         TS_SUFFIX = re.compile(r"_(\d+)\.log$")
         per_pod: dict[str, list[str]] = defaultdict(list)
@@ -1031,13 +1035,7 @@ class ErrorTrackingReport(Report):
             f"Pods with > 1 log file (= restarted): {len(restarted)}",
         ]
         if restarted:
-            lines.extend(
-                [
-                    "",
-                    "| pod | log files (= container starts) | restarts |",
-                    "|---|---:|---:|",
-                ]
-            )
+            lines.extend(["", "| pod | log files (= container starts) | restarts |", "|---|---:|---:|"])
             for p, count in sorted(restarted):
                 lines.append(f"| {p} | {count} | {count - 1} |")
         else:
@@ -1063,8 +1061,9 @@ class ErrorTrackingReport(Report):
             selector += f',pod=~".*{dgd_name}.*"'
 
         def _q(query):
-            url = f"{self.prometheus_url}/api/v1/query?" + urllib.parse.urlencode(
-                {"query": query, "time": end_ts}
+            url = (
+                f"{self.prometheus_url}/api/v1/query?"
+                + urllib.parse.urlencode({"query": query, "time": end_ts})
             )
             try:
                 with urllib.request.urlopen(url, timeout=5) as r:
@@ -1087,7 +1086,9 @@ class ErrorTrackingReport(Report):
         # Group per-pod with reason. We use last_terminated_reason as the
         # most informative signal — its label `reason` carries
         # OOMKilled / Error / Completed / etc.
-        d = _q(f"kube_pod_container_status_last_terminated_reason{{{selector}}} == 1")
+        d = _q(
+            f'kube_pod_container_status_last_terminated_reason{{{selector}}} == 1'
+        )
         reasons = {}
         for s in d.get("data", {}).get("result", []):
             m = s["metric"]
@@ -1095,7 +1096,9 @@ class ErrorTrackingReport(Report):
             reason = m.get("reason", "?")
             reasons[pod] = reason
 
-        bits = sorted(f"{pod.rsplit('-', 1)[-1]}:{r}" for pod, r in reasons.items())
+        bits = sorted(
+            f"{pod.rsplit('-', 1)[-1]}:{r}" for pod, r in reasons.items()
+        )
         return total, ", ".join(bits)
 
     @staticmethod
@@ -1103,28 +1106,21 @@ class ErrorTrackingReport(Report):
         from tabulate import tabulate
 
         headers = [
-            "rung",
-            "aiperf_errors",
-            "aiperf_error_types",
-            "preemptions",
-            "nixl_failed_xfers",
-            "nixl_kv_expired",
-            "container_restarts",
-            "restart_reasons",
+            "rung", "aiperf_errors", "aiperf_error_types",
+            "preemptions", "nixl_failed_xfers", "nixl_kv_expired",
+            "container_restarts", "restart_reasons",
         ]
         table = []
         for r in rows:
-            table.append(
-                [
-                    r.get("rung", "?"),
-                    r.get("aiperf_errors", 0),
-                    r.get("aiperf_error_types", ""),
-                    r.get("preemptions", 0),
-                    r.get("nixl_failed_xfers", 0),
-                    r.get("nixl_kv_expired", 0),
-                    r.get("container_restarts", 0),
-                    r.get("restart_reasons", ""),
-                ]
-            )
+            table.append([
+                r.get("rung", "?"),
+                r.get("aiperf_errors", 0),
+                r.get("aiperf_error_types", ""),
+                r.get("preemptions", 0),
+                r.get("nixl_failed_xfers", 0),
+                r.get("nixl_kv_expired", 0),
+                r.get("container_restarts", 0),
+                r.get("restart_reasons", ""),
+            ])
         title = "### Error tracking — per-rung aiperf + vLLM error counters + container restarts"
         return f"{title}\n\n{tabulate(table, headers=headers, tablefmt=tablefmt)}"

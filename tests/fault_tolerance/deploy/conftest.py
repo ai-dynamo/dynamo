@@ -46,7 +46,9 @@ def pytest_configure(config):
     The user-set ``DYN_TEST_OUTPUT_PATH`` always wins.
     """
     if "DYN_TEST_OUTPUT_PATH" not in os.environ:
-        os.environ["DYN_TEST_OUTPUT_PATH"] = os.path.join(os.getcwd(), "test_outputs")
+        os.environ["DYN_TEST_OUTPUT_PATH"] = os.path.join(
+            os.getcwd(), "test_outputs"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +76,9 @@ def _refresh_kubeconfig_if_requested():
 
         logger = logging.getLogger(__name__)
         try:
-            r = subprocess.run([script], capture_output=True, text=True, timeout=120)
+            r = subprocess.run(
+                [script], capture_output=True, text=True, timeout=120
+            )
             if r.returncode != 0:
                 logger.warning(
                     f"DYN_TEST_REFRESH_KUBECONFIG script {script!r} failed "
@@ -121,7 +125,9 @@ def _parse_concurrency_list(value):
     if not out:
         raise pytest.UsageError("--fault-concurrency cannot be empty")
     if any(n < 1 for n in out):
-        raise pytest.UsageError(f"--fault-concurrency values must be >= 1, got {out}")
+        raise pytest.UsageError(
+            f"--fault-concurrency values must be >= 1, got {out}"
+        )
     return out
 
 
@@ -135,11 +141,7 @@ def fault_concurrency(request):
     own ``test_outputs/<test>[N]/`` directory). The fixture itself
     just returns the int that pytest dispatched for this run.
     """
-    return (
-        request.param
-        if hasattr(request, "param")
-        else _resolve_fault_concurrency_default(request.config)
-    )
+    return request.param if hasattr(request, "param") else _resolve_fault_concurrency_default(request.config)
 
 
 def _resolve_fault_concurrency_default(config):
@@ -185,26 +187,20 @@ def goodput_slos(request):
     """
     slos = []
     rl = _resolve_float_opt(
-        request.config,
-        "--goodput-request-latency-ms",
-        "DYN_TEST_GOODPUT_REQUEST_LATENCY_MS",
-        None,
+        request.config, "--goodput-request-latency-ms",
+        "DYN_TEST_GOODPUT_REQUEST_LATENCY_MS", None,
     )
     if rl is not None:
         slos.append(f"request_latency:{rl}")
     ttft = _resolve_float_opt(
-        request.config,
-        "--goodput-ttft-ms",
-        "DYN_TEST_GOODPUT_TTFT_MS",
-        None,
+        request.config, "--goodput-ttft-ms",
+        "DYN_TEST_GOODPUT_TTFT_MS", None,
     )
     if ttft is not None:
         slos.append(f"time_to_first_token:{ttft}")
     itl = _resolve_float_opt(
-        request.config,
-        "--goodput-itl-ms",
-        "DYN_TEST_GOODPUT_ITL_MS",
-        None,
+        request.config, "--goodput-itl-ms",
+        "DYN_TEST_GOODPUT_ITL_MS", None,
     )
     if itl is not None:
         slos.append(f"inter_token_latency:{itl}")

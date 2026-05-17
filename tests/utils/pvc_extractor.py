@@ -70,9 +70,19 @@ class PvcExtractor:
         file_patterns: list[str],
         local_output_dir: str,
         job_prefix: str = "pvc-extract",
-        ready_timeout: int = 60,
-        tar_timeout: int = 30,
-        cat_timeout: int = 60,
+        # Defaults sized for FSx-Lustre + multi-hundred-MB aiperf outputs:
+        #   ready_timeout: cold FSx mount + busybox image pull on dgxc can take
+        #     several minutes (we observed 7 min for first-bind PVC verify).
+        #   tar_timeout/cat_timeout: aiperf produces 100s of MB per rung
+        #     (inputs.json + server_metrics.jsonl); single-threaded busybox gzip
+        #     ≈ 30 MB/s, so allow several minutes.
+        ready_timeout: int = 600,
+        tar_timeout: int = 300,
+        cat_timeout: int = 300,
+        # Defaults to True: after successful local-write, in-place rm the
+        # sub-path contents so a shared PVC doesn't accumulate stale data.
+        # Cheap no-op when the PVC is ephemeral (deleted at teardown anyway).
+        clear_after_extract: bool = True,
     ) -> dict:
         """Extract files from a PVC to a local directory.
 
@@ -121,8 +131,10 @@ class PvcExtractor:
 
             # Step 4: Create tar archive on-demand
             find_expr = self._build_find_expr(file_patterns)
-            tar_script = f"""
-cd {container_path} 2>/dev/null || exit 1
+            # `set -e` makes a tar error a non-zero exit (so the failure
+            # surfaces via returncode rather than a silently-false TAR_CREATED).
+            tar_script = f"""set -e
+cd {container_path} 2>/dev/null || {{ echo "CD_FAILED:{container_path}"; exit 2; }}
 FILE_LIST=$(find . -type f {find_expr} | sort)
 FILE_COUNT=$(echo "$FILE_LIST" | grep -c . || echo 0)
 echo "FILE_COUNT:$FILE_COUNT"
@@ -139,6 +151,16 @@ fi
             )
 
             output = tar_result.stdout.decode() if tar_result.stdout else ""
+            stderr = tar_result.stderr.decode() if tar_result.stderr else ""
+            if tar_result.returncode != 0:
+                # Make the shell-side failure loud — earlier the exception path
+                # logged an empty message and we'd assume "tar succeeded with 0
+                # files" rather than "tar errored mid-stream".
+                raise RuntimeError(
+                    f"tar step failed (exit={tar_result.returncode}) "
+                    f"stdout={output!r} stderr={stderr!r}"
+                )
+
             file_count = 0
             tar_created = False
             for line in output.split("\n"):
@@ -157,12 +179,39 @@ fi
             # Step 5: Download and extract tar
             extracted_files = []
             if file_count > 0 and tar_created:
-                cat_result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        pod.exec, ["cat", "/tmp/download/archive.tar.gz"]
-                    ),
-                    timeout=cat_timeout,
-                )
+                # Retry the cat-over-WebSocket up to 3 times. The k8s
+                # API server occasionally drops large streams mid-flight
+                # ("ExceptionGroup: unhandled errors in a TaskGroup"
+                # from httpx_ws); a fresh exec on the same pod usually
+                # succeeds. The tar.gz on the pod is unchanged across
+                # retries so this is idempotent.
+                cat_attempts = 3
+                cat_result = None
+                last_err = None
+                for attempt in range(1, cat_attempts + 1):
+                    try:
+                        cat_result = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                pod.exec, ["cat", "/tmp/download/archive.tar.gz"]
+                            ),
+                            timeout=cat_timeout,
+                        )
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if attempt < cat_attempts:
+                            self._logger.warning(
+                                "PVC cat attempt %d/%d failed (%s: %s); retrying...",
+                                attempt, cat_attempts, type(e).__name__, e,
+                            )
+                            await asyncio.sleep(2)
+                        else:
+                            self._logger.error(
+                                "PVC cat exhausted %d attempts; raising.",
+                                cat_attempts,
+                            )
+                            raise
+                assert cat_result is not None  # at least one success or raise above
 
                 if cat_result.returncode != 0:
                     raise RuntimeError(
@@ -181,6 +230,45 @@ fi
                 self._logger.info(
                     f"Extracted {len(extracted_files)} files to {local_output_dir}"
                 )
+
+                # Step 5b: Optionally clear the sub-path in-place so the
+                # shared log PVC can be reused next run without stale data.
+                # Skipped in default ephemeral-PVC mode (the PVC will be
+                # deleted at teardown anyway). Only runs after local-write
+                # succeeded; on any earlier failure the PVC contents are
+                # preserved for debugging.
+                if clear_after_extract:
+                    clear_script = (
+                        f"set -e\n"
+                        f"cd {container_path} 2>/dev/null || exit 0\n"
+                        "find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +\n"
+                        f'echo "CLEARED:{sub_path}"\n'
+                    )
+                    try:
+                        clear_result = await asyncio.wait_for(
+                            asyncio.to_thread(pod.exec, ["sh", "-c", clear_script]),
+                            timeout=tar_timeout,
+                        )
+                        if clear_result.returncode == 0:
+                            self._logger.info(
+                                f"Cleared sub-path {sub_path} on PVC {pvc_name} "
+                                f"(in-place rm; PVC binding preserved)"
+                            )
+                        else:
+                            # Non-fatal: data is safe in local_output_dir.
+                            stderr = (
+                                clear_result.stderr.decode()
+                                if clear_result.stderr else ""
+                            )
+                            self._logger.warning(
+                                f"In-place clear of {sub_path} returned exit={clear_result.returncode}: "
+                                f"stderr={stderr!r}; subsequent runs may see stale files."
+                            )
+                    except Exception as clear_err:
+                        self._logger.warning(
+                            f"In-place clear of {sub_path} raised {type(clear_err).__name__}: "
+                            f"{clear_err}; subsequent runs may see stale files."
+                        )
             else:
                 self._logger.info("No files matched for extraction")
 
@@ -195,12 +283,18 @@ fi
             }
 
         except Exception as e:
-            self._logger.error(f"PVC extraction failed: {e}")
+            # str(asyncio.TimeoutError()) is empty — log the type name so the
+            # failure mode is visible (don't tee a blank "PVC extraction failed:").
+            err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            self._logger.exception(
+                "PVC extraction failed (job=%s, pvc=%s, sub_path=%s): %s",
+                job_name, pvc_name, sub_path, err_msg,
+            )
             # Best-effort cleanup
             await self._delete_job(job_name)
             return {
                 "success": False,
-                "error": str(e),
+                "error": err_msg,
                 "output_dir": local_output_dir,
             }
 
@@ -287,7 +381,10 @@ done
                                         "name": "pvc-volume",
                                         "mountPath": container_path,
                                         "subPath": sub_path,
-                                        "readOnly": True,
+                                        # Mount is RW: after a successful tar+download
+                                        # the pod also clears the sub-path in-place so
+                                        # the standing log PVC can be reused without
+                                        # accumulating stale aiperf data across runs.
                                     }
                                 ],
                                 "resources": {

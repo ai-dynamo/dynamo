@@ -76,6 +76,7 @@ from tests.fault_tolerance.deploy.scenario import run_scenario
 from tests.utils.managed_deployment import DeploymentSpec
 from tests.utils.managed_load import LoadConfig
 
+
 _TEMPLATE = (
     "/workspace/tests/fault_tolerance/deploy/templates/vllm/"
     "disagg_qwen3_30b_unit_prod.yaml"
@@ -83,7 +84,9 @@ _TEMPLATE = (
 
 _V110_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0"
 
-_PROD_SEQ_DIST = "100,200:5;500,200:15;1000,200:20;1600,200:30;3400,200:20;7000,200:10"
+_PROD_SEQ_DIST = (
+    "100,200:5;500,200:15;1000,200:20;1600,200:30;3400,200:20;7000,200:10"
+)
 _NUM_PREFIX_PROMPTS = 15
 _PREFIX_PROMPT_LENGTH = 600
 
@@ -94,7 +97,7 @@ _PREWARM_SEQ_DIST = "8000,50:100"
 # Cluster-wide closed-loop concurrency rungs (N=3 = 3 FE pods).
 # Per-set: 24, 48, 72, 96, 144. Design point ~96/set; rung 5 = 1.5× design.
 _RUNGS = [
-    ("c72", 72, 10.0),
+    ("c72",  72,  10.0),
     ("c144", 144, 10.0),
     ("c216", 216, 10.0),
     ("c288", 288, 10.0),
@@ -102,7 +105,7 @@ _RUNGS = [
 ]
 
 
-from dataclasses import dataclass  # noqa: E402
+from dataclasses import dataclass
 
 
 @dataclass
@@ -115,12 +118,15 @@ class _KvCacheStaysBelow(Check):
 
     def validate(self, ctx) -> None:
         observed: dict = {}
-        for ts_ns, pod, val in _iter_server_metric(ctx, "vllm:kv_cache_usage_perc"):
+        for ts_ns, pod, val in _iter_server_metric(
+            ctx, "vllm:kv_cache_usage_perc"
+        ):
             cur = observed.get(pod)
             if cur is None or val > cur:
                 observed[pod] = val
         ctx.logger.info(
-            f"_KvCacheStaysBelow: per-pod max KV={observed} " f"ceiling={self.ceiling}"
+            f"_KvCacheStaysBelow: per-pod max KV={observed} "
+            f"ceiling={self.ceiling}"
         )
         breaches = {p: v for p, v in observed.items() if v > self.ceiling}
         assert not breaches, (
@@ -149,7 +155,9 @@ class _KvImbalanceGap(Check):
 
     def validate(self, ctx) -> None:
         observed: dict = {}
-        for ts_ns, pod, val in _iter_server_metric(ctx, "vllm:kv_cache_usage_perc"):
+        for ts_ns, pod, val in _iter_server_metric(
+            ctx, "vllm:kv_cache_usage_perc"
+        ):
             cur = observed.get(pod)
             if cur is None or val > cur:
                 observed[pod] = val
@@ -196,7 +204,8 @@ def _scale_to_units(spec, units):
         spec[service].replicas = spec[service].replicas * units
 
 
-def _prod_load(*, served_model, concurrency, duration_minutes, name, seq_dist=None):
+def _prod_load(*, served_model, concurrency, duration_minutes, name,
+               seq_dist=None):
     return LoadConfig(
         model_name=served_model,
         tokenizer=served_model,
@@ -236,7 +245,9 @@ async def test_n3_v110_routing_threshold_compare(runtime_env, request, arm):
 
     # aks-dev: pin Frontend to the A100 node pool (1.87 TB ephemeral).
     fe_pod = spec["Frontend"]._spec.setdefault("extraPodSpec", {})
-    fe_pod["nodeSelector"] = {"nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"}
+    fe_pod["nodeSelector"] = {
+        "nvidia.com/gpu.product": "NVIDIA-A100-SXM4-80GB"
+    }
     fe_pod["tolerations"] = [
         {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
     ]
@@ -244,11 +255,9 @@ async def test_n3_v110_routing_threshold_compare(runtime_env, request, arm):
     # aks-dev: full unprivileged-bypass recipe for UCX/NIXL on
     # cri-containerd AppArmor + 64KB memlock default (OPS-4332).
     for svc in ("VllmPrefillWorker", "VllmDecodeWorker"):
-        main = (
-            spec[svc]
-            ._spec.setdefault("extraPodSpec", {})
-            .setdefault("mainContainer", {})
-        )
+        main = spec[svc]._spec.setdefault(
+            "extraPodSpec", {}
+        ).setdefault("mainContainer", {})
         secctx = main.setdefault("securityContext", {})
         secctx["privileged"] = True
         secctx["runAsUser"] = 0
@@ -335,7 +344,9 @@ async def test_n3_v110_routing_threshold_compare(runtime_env, request, arm):
             RestartCountIncreased(
                 services=["VllmDecodeWorker"], expect_min_increment=0
             ),
-            RestartCountIncreased(services=["Frontend"], expect_min_increment=0),
+            RestartCountIncreased(
+                services=["Frontend"], expect_min_increment=0
+            ),
             LoadCompleted(name=final),
             common_panics,
         ]
@@ -355,12 +366,18 @@ async def test_n3_v110_routing_threshold_compare(runtime_env, request, arm):
                 threshold=0.90,  # at least one pod hits this
                 within_seconds=3600,
             ),
-            _KvImbalanceGap(services=["VllmDecodeWorker"], min_gap=0.30),
-            SlaViolation(load_name=final, e2e_p99_ms=20000.0, ttft_p99_ms=10000.0),
+            _KvImbalanceGap(
+                services=["VllmDecodeWorker"], min_gap=0.30
+            ),
+            SlaViolation(
+                load_name=final, e2e_p99_ms=20000.0, ttft_p99_ms=10000.0
+            ),
             RestartCountIncreased(
                 services=["VllmDecodeWorker"], expect_min_increment=0
             ),
-            RestartCountIncreased(services=["Frontend"], expect_min_increment=0),
+            RestartCountIncreased(
+                services=["Frontend"], expect_min_increment=0
+            ),
             LoadCompleted(name=final),
             common_panics,
         ]
@@ -373,12 +390,18 @@ async def test_n3_v110_routing_threshold_compare(runtime_env, request, arm):
         #  - Zero restarts.
         checks = [
             LoadApplied(load_name=final, min_requests=500),
-            _KvCacheStaysBelow(services=["VllmDecodeWorker"], ceiling=0.95),
-            _KvImbalanceGap(services=["VllmDecodeWorker"], max_gap=0.15),
+            _KvCacheStaysBelow(
+                services=["VllmDecodeWorker"], ceiling=0.95
+            ),
+            _KvImbalanceGap(
+                services=["VllmDecodeWorker"], max_gap=0.15
+            ),
             RestartCountIncreased(
                 services=["VllmDecodeWorker"], expect_min_increment=0
             ),
-            RestartCountIncreased(services=["Frontend"], expect_min_increment=0),
+            RestartCountIncreased(
+                services=["Frontend"], expect_min_increment=0
+            ),
             RestartCountIncreased(
                 services=["VllmPrefillWorker"], expect_min_increment=0
             ),

@@ -34,7 +34,6 @@ import os
 import pytest
 
 from tests.fault_tolerance.deploy.checks import RestartCountIncreased
-
 # Note: WorkerPanics and ServiceLogPatternRate currently break in post-teardown
 # phase because they call ctx.deployment.collect_service_logs() after
 # scenario.py sets ctx.deployment = None. Until that's fixed, we verify
@@ -72,9 +71,7 @@ def _env_str(name: str, default):
     return raw if raw else default
 
 
-def _apply_liveness_override(
-    service, period_s: int, timeout_s: int, failure_threshold: int, port_name: str
-) -> None:
+def _apply_liveness_override(service, period_s: int, timeout_s: int, failure_threshold: int, port_name: str) -> None:
     """Inject a livenessProbe override into the DGD service spec.
 
     The operator merges DGD-provided probes entirely (no partial merge),
@@ -91,9 +88,7 @@ def _apply_liveness_override(
 
 def _apply_cpu_limit(service, cpu_limit: str) -> None:
     """Set a CPU resources.limits on this service (e.g. '500m')."""
-    service._spec.setdefault("resources", {}).setdefault("limits", {})[
-        "cpu"
-    ] = cpu_limit
+    service._spec.setdefault("resources", {}).setdefault("limits", {})["cpu"] = cpu_limit
     # Mirror to requests so the pod schedules and CFS quota actually applies.
     service._spec["resources"].setdefault("requests", {})["cpu"] = cpu_limit
 
@@ -101,9 +96,6 @@ def _apply_cpu_limit(service, cpu_limit: str) -> None:
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
 @pytest.mark.e2e
-@pytest.mark.k8s
-@pytest.mark.e2e
-@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_cascade_repro_mocker(runtime_env, request):
     """Cascade repro via mocker: panic flood -> /live degradation -> SIGTERM."""
@@ -116,7 +108,7 @@ async def test_cascade_repro_mocker(runtime_env, request):
     _decode_args = spec["decode"]._get_args()
     if "--planner-profile-data" in _decode_args:
         idx = _decode_args.index("--planner-profile-data")
-        del _decode_args[idx : idx + 2]
+        del _decode_args[idx:idx + 2]
     spec["decode"].set_arg("--startup-time", "5")
 
     # --- replicas ---
@@ -159,16 +151,12 @@ async def test_cascade_repro_mocker(runtime_env, request):
     cfg = LoadConfig(
         model_name=served_model,
         tokenizer=served_model,
-        input_tokens_mean=512,
-        input_tokens_stddev=0,
-        output_tokens_mean=2000,
-        output_tokens_stddev=0,
+        input_tokens_mean=512, input_tokens_stddev=0,
+        output_tokens_mean=2000, output_tokens_stddev=0,
         concurrency=concurrency,
         duration_minutes=load_minutes,
         request_timeout_seconds=120,
-        streaming=True,
-        ignore_eos=True,
-        warmup_requests=0,
+        streaming=True, ignore_eos=True, warmup_requests=0,
         connection_reuse_strategy="never",
     )
 

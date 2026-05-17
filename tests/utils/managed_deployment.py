@@ -2442,7 +2442,9 @@ class ManagedDeployment:
         # See the _extract_logs_from_pvc docstring: run_id prefix is
         # always present on the PVC, regardless of reuse mode.
         run_id = getattr(self.deployment_spec, "_log_collection_run_id", "")
-        sub_path = f"{run_id}/service_logs" if run_id else "service_logs"
+        sub_path = (
+            f"{run_id}/service_logs" if run_id else "service_logs"
+        )
         return await extractor.extract(
             pvc_name=pvc_name,
             sub_path=sub_path,
@@ -2726,7 +2728,9 @@ class ManagedDeployment:
             # exists on the PVC → `0 files matched for extraction` and
             # every per-pod log was silently lost at teardown.
             run_id = getattr(self.deployment_spec, "_log_collection_run_id", "")
-            sub_path = f"{run_id}/service_logs" if run_id else "service_logs"
+            sub_path = (
+                f"{run_id}/service_logs" if run_id else "service_logs"
+            )
             result = await extractor.extract(
                 pvc_name=pvc_name,
                 sub_path=sub_path,

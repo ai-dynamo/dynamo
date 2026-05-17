@@ -118,7 +118,9 @@ def _resolve_pod_selection(pods, pod_indices, logger=None):
             return []
         chosen = random.choice(pods)
         if logger is not None:
-            logger.info(f"pod_indices=RANDOM resolved to pod '{chosen.name}'")
+            logger.info(
+                f"pod_indices=RANDOM resolved to pod '{chosen.name}'"
+            )
         return [chosen]
     return [pods[i] for i in pod_indices if 0 <= i < len(pods)]
 
@@ -143,7 +145,8 @@ def _resolve_rank_selection(matches, rank_index, pod_name, logger=None):
         chosen = random.choice(matches)
         if logger is not None:
             logger.info(
-                f"rank_index=RANDOM resolved to pid={chosen.pid} " f"on pod {pod_name}"
+                f"rank_index=RANDOM resolved to pid={chosen.pid} "
+                f"on pod {pod_name}"
             )
         return [chosen]
     if 0 <= rank_index < len(matches):
@@ -154,17 +157,15 @@ def _resolve_rank_selection(matches, rank_index, pod_name, logger=None):
             f"{pod_name} ({len(matches)} matches); skipping"
         )
     return []
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
+import aiohttp
+from kubernetes_asyncio import client
+from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
-from abc import ABC, abstractmethod  # noqa: E402
-from dataclasses import dataclass, field  # noqa: E402
-from typing import TYPE_CHECKING, Any  # noqa: E402
-
-import aiohttp  # noqa: E402
-from kubernetes_asyncio import client  # noqa: E402
-from kubernetes_asyncio.client import exceptions as k8s_exceptions  # noqa: E402
-
-from tests.utils.managed_load import LoadConfig, ManagedLoad  # noqa: E402
+from tests.utils.managed_load import LoadConfig, ManagedLoad
 
 if TYPE_CHECKING:
     from tests.fault_tolerance.deploy.scenario import ScenarioContext
@@ -260,8 +261,7 @@ class StartLoad(Event):
                     ctx.deployment.get_pods, [service.name]
                 )
                 metrics_port = (
-                    spec.port
-                    if service.component_type == "frontend"
+                    spec.port if service.component_type == "frontend"
                     else spec.system_port
                 )
                 for pod in pods_by_service.get(service.name) or []:
@@ -269,7 +269,9 @@ class StartLoad(Event):
                     if pod_ip:
                         urls.append(f"http://{pod_ip}:{metrics_port}/metrics")
             if urls:
-                ctx.logger.info(f"StartLoad: auto-discovered /metrics URLs: {urls}")
+                ctx.logger.info(
+                    f"StartLoad: auto-discovered /metrics URLs: {urls}"
+                )
                 self.load_config.extra_server_metrics_urls = urls
 
         self._managed_load = ManagedLoad(
@@ -464,9 +466,7 @@ class DeletePod(Event):
                 live_set = live_by_svc.get(svc, set())
                 # A replacement is "any pod in this service whose name was
                 # not in the pre-delete baseline and is not the deleted name".
-                fresh = (live_set - self._baseline_names[svc]) - set(
-                    self._deleted_names
-                )
+                fresh = (live_set - self._baseline_names[svc]) - set(self._deleted_names)
                 if name not in live_set and fresh:
                     replaced[name] = True
             if all(replaced.values()):
@@ -852,13 +852,8 @@ class StallProcess(Event):
         )
 
     async def _verify_state_pairs(
-        self,
-        ctx,
-        pairs,
-        *,
-        expected: str | None = None,
-        not_expected: str | None = None,
-        phase: str,
+        self, ctx, pairs, *, expected: str | None = None,
+        not_expected: str | None = None, phase: str,
     ) -> None:
         """Check /proc/<pid>/stat field 3 on each (pod, pid) tuple."""
         failures: list[str] = []
@@ -981,9 +976,7 @@ class PrintProcessTree(Event):
                         ["ps", "-eo", "pid,ppid,pgid,cmd", "--forest"],
                     )
                     stdout = (
-                        result.stdout.decode()
-                        if hasattr(result, "stdout")
-                        else str(result)
+                        result.stdout.decode() if hasattr(result, "stdout") else str(result)
                     )
                     for line in stdout.splitlines():
                         ctx.logger.info(f"  {line}")
@@ -1335,7 +1328,9 @@ class RstInjection(Event):
     pod_indices: list[int] | str | None = None
     name: str = ""
     results: dict[str, Any] | None = field(default=None, init=False)
-    _helper_pod_names: list[str] = field(default_factory=list, init=False, repr=False)
+    _helper_pod_names: list[str] = field(
+        default_factory=list, init=False, repr=False
+    )
 
     async def execute(self, ctx: "ScenarioContext") -> None:
         import os
@@ -1344,7 +1339,9 @@ class RstInjection(Event):
             await asyncio.to_thread(ctx.deployment.get_pods, [self.service])
         ).get(self.service) or []
         all_pods = sorted(all_pods, key=lambda p: p.name)
-        target_pods = _resolve_pod_selection(all_pods, self.pod_indices, ctx.logger)
+        target_pods = _resolve_pod_selection(
+            all_pods, self.pod_indices, ctx.logger
+        )
         if not target_pods:
             ctx.logger.warning(
                 f"RstInjection: no pods to target in service '{self.service}'"
@@ -1410,14 +1407,18 @@ class RstInjection(Event):
                             "command": ["sh", "-c", cmd],
                             "securityContext": {
                                 "privileged": True,
-                                "capabilities": {"add": ["NET_ADMIN", "NET_RAW"]},
+                                "capabilities": {
+                                    "add": ["NET_ADMIN", "NET_RAW"]
+                                },
                             },
                         }
                     ],
                 },
             }
             try:
-                await core.create_namespaced_pod(namespace=ctx.namespace, body=body)
+                await core.create_namespaced_pod(
+                    namespace=ctx.namespace, body=body
+                )
                 self._helper_pod_names.append(helper_name)
                 ctx.logger.info(
                     f"RstInjection: launched {helper_name} on node {node} "
@@ -1462,7 +1463,9 @@ class RstInjection(Event):
                     )
                     phase = p.status.phase
                     if phase == "Running" or phase == "Succeeded":
-                        ctx.logger.info(f"RstInjection: helper {name} reached {phase}")
+                        ctx.logger.info(
+                            f"RstInjection: helper {name} reached {phase}"
+                        )
                         continue
                     if phase == "Failed":
                         ctx.logger.error(
@@ -1497,16 +1500,11 @@ class RstInjection(Event):
                 logs = f"<read_pod_log failed: {e}>"
             installed = "RULE-INSTALLED" in (logs or "")
             removed = "RULE-REMOVED" in (logs or "")
-            records.append(
-                {
-                    "pod": name,
-                    "installed": installed,
-                    "removed": removed,
-                    "logs": logs or "",
-                }
-            )
+            records.append({"pod": name, "installed": installed,
+                            "removed": removed, "logs": logs or ""})
             ctx.logger.info(
-                f"RstInjection: {name} installed={installed} " f"removed={removed}"
+                f"RstInjection: {name} installed={installed} "
+                f"removed={removed}"
             )
 
         # Persist a verification record so a post-hoc reader can confirm
@@ -1515,18 +1513,14 @@ class RstInjection(Event):
         if log_dir:
             try:
                 os.makedirs(log_dir, exist_ok=True)
-                with open(
-                    os.path.join(log_dir, "rst_injection_verification.txt"), "w"
-                ) as fh:
+                with open(os.path.join(log_dir, "rst_injection_verification.txt"), "w") as fh:
                     for r in records:
                         fh.write(
                             f"=== {r['pod']} installed={r['installed']} "
                             f"removed={r['removed']} ===\n{r['logs']}\n\n"
                         )
             except Exception as e:
-                ctx.logger.warning(
-                    f"RstInjection: could not write verification file: {e}"
-                )
+                ctx.logger.warning(f"RstInjection: could not write verification file: {e}")
 
         # Hard fail the event if any helper pod did not install rules.
         not_installed = [r["pod"] for r in records if not r["installed"]]
@@ -1723,7 +1717,7 @@ class WaitForModelReady(Event):
 
 
 _RST_CLIENT_SCRIPT = r"""
-import os, socket, struct, sys, time  # noqa: E402,E401
+import os, socket, struct, sys, time
 host = os.environ["TARGET_HOST"]
 ports = [int(p) for p in os.environ["TARGET_PORTS"].split(",") if p.strip()]
 count = int(os.environ.get("RST_COUNT", "100"))
@@ -1811,7 +1805,9 @@ class RstFromInsidePod(Event):
             "      print(int(p[1].split(':')[1], 16))\""
         )
         result = pod.exec(["sh", "-c", script])
-        stdout = result.stdout.decode() if hasattr(result, "stdout") else str(result)
+        stdout = (
+            result.stdout.decode() if hasattr(result, "stdout") else str(result)
+        )
         ports = []
         for line in stdout.splitlines():
             line = line.strip()
@@ -1833,15 +1829,11 @@ class RstFromInsidePod(Event):
     async def execute(self, ctx: "ScenarioContext") -> None:
         import os
 
-        all_pods = (
-            await asyncio.to_thread(ctx.deployment.get_pods, [self.service])
-        ).get(self.service) or []
+        all_pods = (await asyncio.to_thread(ctx.deployment.get_pods, [self.service])).get(self.service) or []
         all_pods = sorted(all_pods, key=lambda p: p.name)
         target_pods = _resolve_pod_selection(all_pods, self.pod_indices, ctx.logger)
         if not target_pods:
-            ctx.logger.warning(
-                f"RstFromInsidePod: no target pods in service '{self.service}'"
-            )
+            ctx.logger.warning(f"RstFromInsidePod: no target pods in service '{self.service}'")
             return
 
         # Use a generic python image — no Dynamo dep needed for the client.
@@ -1851,9 +1843,7 @@ class RstFromInsidePod(Event):
         for pod in target_pods:
             pod_ip = pod.raw.get("status", {}).get("podIP")
             if not pod_ip:
-                ctx.logger.warning(
-                    f"RstFromInsidePod: {pod.name} has no podIP; skipping"
-                )
+                ctx.logger.warning(f"RstFromInsidePod: {pod.name} has no podIP; skipping")
                 continue
 
             if self.target_port is not None:
@@ -1873,40 +1863,29 @@ class RstFromInsidePod(Event):
 
             name = f"rst-client-{secrets.token_hex(4)}"
             body = {
-                "apiVersion": "v1",
-                "kind": "Pod",
+                "apiVersion": "v1", "kind": "Pod",
                 "metadata": {
-                    "name": name,
-                    "namespace": ctx.namespace,
-                    "labels": {
-                        "managed-by": "managed-deployment",
-                        "purpose": "rst-from-inside-pod",
-                        "target-pod": pod.name[:60],
-                    },
+                    "name": name, "namespace": ctx.namespace,
+                    "labels": {"managed-by": "managed-deployment",
+                               "purpose": "rst-from-inside-pod",
+                               "target-pod": pod.name[:60]},
                 },
                 "spec": {
                     "restartPolicy": "Never",
                     "tolerations": [{"operator": "Exists"}],
-                    "containers": [
-                        {
-                            "name": "rst-client",
-                            "image": helper_image,
-                            "imagePullPolicy": "IfNotPresent",
-                            "command": ["python3", "-c", _RST_CLIENT_SCRIPT],
-                            "env": [
-                                {"name": "TARGET_HOST", "value": pod_ip},
-                                {
-                                    "name": "TARGET_PORTS",
-                                    "value": ",".join(str(p) for p in ports),
-                                },
-                                {"name": "RST_COUNT", "value": str(self.count)},
-                                {
-                                    "name": "RST_INTER_DELAY",
-                                    "value": str(self.inter_delay),
-                                },
-                            ],
-                        }
-                    ],
+                    "containers": [{
+                        "name": "rst-client",
+                        "image": helper_image,
+                        "imagePullPolicy": "IfNotPresent",
+                        "command": ["python3", "-c", _RST_CLIENT_SCRIPT],
+                        "env": [
+                            {"name": "TARGET_HOST", "value": pod_ip},
+                            {"name": "TARGET_PORTS",
+                             "value": ",".join(str(p) for p in ports)},
+                            {"name": "RST_COUNT", "value": str(self.count)},
+                            {"name": "RST_INTER_DELAY", "value": str(self.inter_delay)},
+                        ],
+                    }],
                 },
             }
             try:
@@ -1917,23 +1896,17 @@ class RstFromInsidePod(Event):
                     f"({pod_ip}:{self.target_port}) count={self.count}"
                 )
             except k8s_exceptions.ApiException as e:
-                ctx.logger.warning(
-                    f"RstFromInsidePod: failed to schedule helper for {pod.name}: {e}"
-                )
+                ctx.logger.warning(f"RstFromInsidePod: failed to schedule helper for {pod.name}: {e}")
 
         # Wait for each helper to finish (Succeeded or Failed). Cap based
         # on count*inter_delay + 60s buffer.
-        deadline = asyncio.get_event_loop().time() + max(
-            120.0, self.count * self.inter_delay + 60.0
-        )
+        deadline = asyncio.get_event_loop().time() + max(120.0, self.count * self.inter_delay + 60.0)
         pending = list(self._helper_pod_names)
         while pending and asyncio.get_event_loop().time() < deadline:
             still = []
             for name in pending:
                 try:
-                    p = await core.read_namespaced_pod(
-                        name=name, namespace=ctx.namespace
-                    )
+                    p = await core.read_namespaced_pod(name=name, namespace=ctx.namespace)
                     phase = p.status.phase
                     if phase in ("Succeeded", "Failed"):
                         continue
@@ -1955,30 +1928,20 @@ class RstFromInsidePod(Event):
         records = []
         for name in self._helper_pod_names:
             try:
-                logs = await core.read_namespaced_pod_log(
-                    name=name, namespace=ctx.namespace
-                )
+                logs = await core.read_namespaced_pod_log(name=name, namespace=ctx.namespace)
             except k8s_exceptions.ApiException as e:
                 logs = f"<read_pod_log failed: {e}>"
-            sent_line = next(
-                (ln for ln in (logs or "").splitlines() if "RST SENT count=" in ln), ""
-            )
+            sent_line = next((l for l in (logs or "").splitlines() if "RST SENT count=" in l), "")
             records.append({"pod": name, "sent_line": sent_line, "logs": logs or ""})
-            ctx.logger.info(
-                f"RstFromInsidePod: {name} -> {sent_line or '<no SENT line>'}"
-            )
+            ctx.logger.info(f"RstFromInsidePod: {name} -> {sent_line or '<no SENT line>'}")
         if log_dir:
             try:
                 os.makedirs(log_dir, exist_ok=True)
                 with open(os.path.join(log_dir, "rst_from_inside_pod.txt"), "w") as fh:
                     for r in records:
-                        fh.write(
-                            f"=== {r['pod']} ===\nSENT: {r['sent_line']}\n{r['logs']}\n\n"
-                        )
+                        fh.write(f"=== {r['pod']} ===\nSENT: {r['sent_line']}\n{r['logs']}\n\n")
             except Exception as e:
-                ctx.logger.warning(
-                    f"RstFromInsidePod: could not write verification file: {e}"
-                )
+                ctx.logger.warning(f"RstFromInsidePod: could not write verification file: {e}")
         not_sent = [r["pod"] for r in records if not r["sent_line"]]
         if not_sent:
             raise RuntimeError(
@@ -1989,9 +1952,7 @@ class RstFromInsidePod(Event):
     async def _cleanup(self, ctx, core) -> None:
         for name in list(self._helper_pod_names):
             try:
-                await core.delete_namespaced_pod(
-                    name=name, namespace=ctx.namespace, grace_period_seconds=0
-                )
+                await core.delete_namespaced_pod(name=name, namespace=ctx.namespace, grace_period_seconds=0)
             except k8s_exceptions.ApiException:
                 pass
         self._helper_pod_names = []
@@ -2027,20 +1988,12 @@ def _parse_k8s_quantity(s: str) -> int:
     """Parse a k8s resource quantity like '123Mi', '12345Ki', '1Gi' to bytes."""
     if not s:
         return 0
-    suffixes = {
-        "Ki": 1024,
-        "Mi": 1024**2,
-        "Gi": 1024**3,
-        "Ti": 1024**4,
-        "K": 1000,
-        "M": 1000**2,
-        "G": 1000**3,
-        "T": 1000**4,
-    }
+    suffixes = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4,
+                "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4}
     for suf, mult in suffixes.items():
         if s.endswith(suf):
             try:
-                return int(float(s[: -len(suf)]) * mult)
+                return int(float(s[:-len(suf)]) * mult)
             except ValueError:
                 return 0
     try:
@@ -2082,7 +2035,6 @@ class PodMemoryPoller(Event):
 
     async def execute(self, ctx: "ScenarioContext") -> None:
         import os
-
         log_dir = getattr(ctx, "log_dir", None)
         if not log_dir:
             ctx.logger.warning("PodMemoryPoller: no ctx.log_dir; skipping")
@@ -2102,11 +2054,8 @@ class PodMemoryPoller(Event):
             """metrics.k8s.io -> dict[container_name, working_set_bytes]."""
             try:
                 obj = await custom.get_namespaced_custom_object(
-                    group="metrics.k8s.io",
-                    version="v1beta1",
-                    namespace=ctx.namespace,
-                    plural="pods",
-                    name=pod_name,
+                    group="metrics.k8s.io", version="v1beta1",
+                    namespace=ctx.namespace, plural="pods", name=pod_name,
                 )
             except k8s_exceptions.ApiException:
                 return {}
@@ -2125,7 +2074,8 @@ class PodMemoryPoller(Event):
                     ["sh", "-c", "grep VmRSS /proc/1/status 2>/dev/null || true"],
                 )
                 stdout = (
-                    result.stdout.decode() if hasattr(result, "stdout") else str(result)
+                    result.stdout.decode()
+                    if hasattr(result, "stdout") else str(result)
                 )
                 for ln in stdout.splitlines():
                     if "VmRSS" in ln:
@@ -2138,14 +2088,13 @@ class PodMemoryPoller(Event):
 
         async def loop():
             import time
-
             while not self._stop.is_set():
                 try:
                     for svc in self.services:
                         pods_by_svc = await asyncio.to_thread(
                             ctx.deployment.get_pods, [svc]
                         )
-                        for pod in pods_by_svc.get(svc) or []:
+                        for pod in (pods_by_svc.get(svc) or []):
                             ws_by_container = await read_working_set(pod.name)
                             pid1_rss = await read_pid1_rss(pod)
                             ts = time.time()

@@ -409,10 +409,9 @@ class ServiceLogNotContains(Check):
 # - Reading pod status: `ctx.deployment.get_pods([service_name])` returns
 #   live Pod objects with `.raw['status']['containerStatuses']`.
 
-import json as _json  # noqa: E402
-import os as _os  # noqa: E402
-from glob import escape as _glob_escape  # noqa: E402
-from glob import glob as _glob  # noqa: E402
+import json as _json
+import os as _os
+from glob import escape as _glob_escape, glob as _glob
 
 
 def _get_service_logs(ctx) -> dict:
@@ -439,7 +438,9 @@ def _get_service_logs(ctx) -> dict:
             continue
         # Concatenate every <pod>*.log under this service dir.
         catted_parts = []
-        log_files = sorted(_glob(_os.path.join(_glob_escape(sub), "*.log")))
+        log_files = sorted(
+            _glob(_os.path.join(_glob_escape(sub), "*.log"))
+        )
         for f in log_files:
             try:
                 with open(f, "r", errors="replace") as fh:
@@ -1266,7 +1267,10 @@ class RequestCancellationOccurred(Check):
                 # earlier versions used top-level "type" / "error".
                 details = entry.get("error_details") or {}
                 tag = str(
-                    details.get("type") or entry.get("error") or entry.get("type") or ""
+                    details.get("type")
+                    or entry.get("error")
+                    or entry.get("type")
+                    or ""
                 ).lower()
                 if (
                     "cancel" in tag
