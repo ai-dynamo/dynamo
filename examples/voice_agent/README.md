@@ -48,6 +48,33 @@ PYTHON=/mnt/scratch/nealv/venvs/dynamo_realtime/bin/python
 The backend echoes appended audio bytes by streaming
 `response.output_audio.delta` events and then `response.done`.
 
+## Run the Pipecat realtime backend
+
+As an alternate backend, this example can route audio through a tiny Pipecat
+pipeline. For the local checkout at `/home/nealv/dynamo/pipecat`, install
+Pipecat and the minimal dependencies into the requested venv:
+
+```bash
+PYTHON=/mnt/scratch/nealv/venvs/dynamo_realtime/bin/python
+uv pip install --python "$PYTHON" --no-deps -e /home/nealv/dynamo/pipecat
+uv pip install --python "$PYTHON" \
+  loguru pydantic pydantic-core annotated-types typing-inspection wait_for2 \
+  docstring_parser aiofiles aiohttp numpy pyloudnorm resampy soxr protobuf \
+  Markdown Pillow openai nltk
+```
+
+Then run the Pipecat backend instead of `backend.py`:
+
+```bash
+PYTHON=/mnt/scratch/nealv/venvs/dynamo_realtime/bin/python
+"$PYTHON" examples/voice_agent/pipecat_backend.py --connect 127.0.0.1:8081
+```
+
+This keeps the Dynamo/OpenAI Realtime shape at the frontend. The backend maps
+`input_audio_buffer.append` into a Pipecat `InputAudioRawFrame`, sends it
+through a minimal pipeline, and streams the returned `OutputAudioRawFrame`
+bytes as `response.output_audio.delta` events.
+
 ## Run the Python client
 
 Install the only client dependency:
@@ -72,6 +99,8 @@ the original text.
 - This is an audio-event echo scaffold, not a full voice agent yet.
 - The frontend/backend bridge is local-only JSON and not the final Dynamo
   realtime request plane.
+- The Pipecat backend currently handles the same minimal event subset as the
+  simple Python backend: `session.update` and `input_audio_buffer.append`.
 - A true Python Dynamo realtime worker will need bindings and runtime support
   for bidirectional Realtime event streams once remote dispatch lands.
 - Audio is treated as opaque base64 payload for now; there is no capture,
