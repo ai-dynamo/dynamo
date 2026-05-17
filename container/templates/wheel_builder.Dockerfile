@@ -215,7 +215,7 @@ ENV VIRTUAL_ENV=/workspace/.venv
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit{% if device == "cuda" %} auditwheel{% endif %}
 
 ARG NIXL_UCX_REF
 
@@ -567,6 +567,11 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
+{% if device == "cuda" -%}
+# CUDA: bundle UCX shared libs and UCX/NIXL plugins into the wheel via auditwheel +
+# NIXL's contrib/wheel_add_ucx_plugins.py, so the installed nixl Python package
+# uses its own bundled UCX rather than the system /usr/local/ucx install.
+{% endif -%}
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -577,8 +582,35 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
+{% if device == "cuda" %}
+    source ${VIRTUAL_ENV}/bin/activate && \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    mkdir -p /opt/dynamo/dist/nixl && \
+    NIXL_WHEEL_TMP=$(mktemp -d) && \
+    cd /workspace/nixl && \
+    uv build . --wheel --out-dir "$NIXL_WHEEL_TMP" --python $PYTHON_VERSION && \
+    mkdir "$NIXL_WHEEL_TMP/repaired" && \
+    auditwheel repair \
+        --exclude 'libcuda*' \
+        --exclude 'libcufile*' \
+        --exclude 'libssl*' \
+        --exclude 'libcrypto*' \
+        --exclude 'libefa*' \
+        --exclude 'libhwloc*' \
+        --exclude 'libfabric*' \
+        --plat manylinux_2_28_${ARCH_ALT} \
+        --wheel-dir "$NIXL_WHEEL_TMP/repaired" \
+        "$NIXL_WHEEL_TMP"/nixl*.whl && \
+    ./contrib/wheel_add_ucx_plugins.py \
+        --ucx-plugins-dir /usr/local/ucx/lib/ucx \
+        --nixl-plugins-dir "$NIXL_PLUGIN_DIR" \
+        "$NIXL_WHEEL_TMP"/repaired/*.whl && \
+    cp "$NIXL_WHEEL_TMP"/repaired/*.whl /opt/dynamo/dist/nixl/ && \
+    rm -rf "$NIXL_WHEEL_TMP"
+{% else %}
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 # Copy source code (order matters for layer caching)
