@@ -92,11 +92,11 @@ impl ContextMetadata {
     }
 
     #[pyo3(signature = (key, default=None))]
-    fn pop(&self, key: &str, default: Option<String>) -> PyResult<Option<String>> {
+    fn pop(&self, key: &str, default: Option<Option<String>>) -> PyResult<Option<String>> {
         let mut guard = self.inner.lock().expect("metadata mutex poisoned");
         match guard.remove(key) {
             Some(value) => Ok(Some(value)),
-            None if default.is_some() => Ok(default),
+            None if default.is_some() => Ok(default.flatten()),
             None => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
                 key.to_string(),
             )),

@@ -206,14 +206,14 @@ where
                 let control_msg: RequestControlMessage = match serde_json::from_slice(&header) {
                     Ok(cm) => cm,
                     Err(err) => {
-                        let json_str = String::from_utf8_lossy(&header);
                         if let Some(m) = self.metrics() {
                             m.error_counter
                                 .with_label_values(&[work_handler::error_types::DESERIALIZATION])
                                 .inc();
                         }
                         return Err(PipelineError::DeserializationError(format!(
-                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
+                            "Failed deserializing to RequestControlMessage. err={err}, header_len={}",
+                            header.len()
                         )));
                     }
                 };
@@ -239,7 +239,11 @@ where
         }
 
         // extend request with context
-        tracing::trace!("received control message: {:?}", control_msg);
+        tracing::trace!(
+            request_id = %control_msg.id,
+            metadata_entries = control_msg.metadata.len(),
+            "received control message"
+        );
         tracing::trace!("received request: {:?}", request);
         let request: context::Context<T> =
             Context::with_id_and_metadata(request, control_msg.id, control_msg.metadata);
