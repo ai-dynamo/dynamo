@@ -41,10 +41,10 @@ from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 logger = logging.getLogger(__name__)
 
 
-def _is_cuda13() -> bool:
+def _is_cuda12() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
-    # handles "13", "13.0", "13.0.1", etc.
-    return v.startswith("13")
+    # handles "12", "12.9", "12.9.1", etc.
+    return v.startswith("12")
 
 
 def _is_aarch64() -> bool:
@@ -54,10 +54,10 @@ def _is_aarch64() -> bool:
 
 def _xfail_lmcache_upstream_container():
     return pytest.mark.xfail(
-        _is_cuda13() or _is_aarch64(),
+        _is_cuda12() or _is_aarch64(),
         reason=(
-            "LMCache is provided by the upstream vLLM image. The CUDA 13 image "
-            "ships LMCache c_ops linked against libcudart.so.12, and LMCache "
+            "LMCache is provided by the upstream vLLM image. The CUDA 12 image "
+            "ships LMCache c_ops linked against libcudart.so.13, and LMCache "
             "does not publish aarch64 wheels yet."
         ),
         strict=False,
