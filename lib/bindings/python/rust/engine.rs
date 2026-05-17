@@ -189,7 +189,7 @@ where
                         ctx_python.clone(),
                         current_trace_context,
                         None,
-                        Default::default(),
+                        context.metadata().clone(),
                     ),
                 )?;
 

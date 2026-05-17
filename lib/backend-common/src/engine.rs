@@ -10,9 +10,9 @@
 //! Object-safety: every instance method takes `&self`. `Arc<dyn LLMEngine>` is
 //! the handle `Worker` drives the lifecycle through.
 
+use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::{collections::BTreeMap};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
