@@ -259,6 +259,29 @@ class BaseConfigModifier:
         volume_mounts.append({"name": pvc_name, "mountPoint": mount_path})
         setattr(service, "volumeMounts", volume_mounts)
 
+    @staticmethod
+    def _ensure_service_hf_home_env(service: Any, hf_home: str) -> None:
+        eps = getattr(service, "extraPodSpec", None)
+        if eps is None:
+            return
+        mc = getattr(eps, "mainContainer", None)
+        if mc is None:
+            return
+
+        env_list = getattr(mc, "env", None)
+        if env_list is None:
+            env_list = []
+        if not isinstance(env_list, list):
+            env_list = []
+
+        env_list[:] = [
+            e
+            for e in env_list
+            if not (isinstance(e, dict) and e.get("name") == "HF_HOME")
+        ]
+        env_list.append({"name": "HF_HOME", "value": hf_home})
+        setattr(mc, "env", env_list)
+
     @classmethod
     def _update_container_args_preserving_shell_form(
         cls, container: Container, update_fn
@@ -543,17 +566,42 @@ class BaseConfigModifier:
 
         # Update model (handles worker args + frontend patching)
         effective_model_path = model_path or model_name
-        if pvc_name and pvc_mount_path:
-            # Derive pvc_path from effective_model_path by stripping the mount prefix
+        if pvc_name and pvc_mount_path and model_path:
+            # pvcModelPath was explicitly provided — model weights live at a
+            # known path inside the PVC.  Let update_model_from_pvc handle
+            # volume mount + CLI patching.
             pvc_path = ""
-            if effective_model_path and effective_model_path.startswith(pvc_mount_path):
+            if effective_model_path and (
+                effective_model_path == pvc_mount_path
+                or effective_model_path.startswith(pvc_mount_path + "/")
+            ):
                 pvc_path = effective_model_path[len(pvc_mount_path) :].strip("/")
-            result = cls.update_model_from_pvc(
+            if pvc_path:
+                result = cls.update_model_from_pvc(
+                    cfg.model_dump(),
+                    model_name=model_name,
+                    pvc_name=pvc_name,
+                    pvc_mount_path=pvc_mount_path,
+                    pvc_path=pvc_path,
+                )
+            else:
+                cls._ensure_spec_pvc(cfg, pvc_name)
+                for _svc_name, svc in cfg.spec.services.items():
+                    cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+                    cls._ensure_service_hf_home_env(svc, pvc_mount_path)
+                result = cls.update_model(
+                    cfg.model_dump(),
+                    model_name=model_name,
+                    model_path=effective_model_path,
+                )
+        elif pvc_name and pvc_mount_path:
+            cls._ensure_spec_pvc(cfg, pvc_name)
+            for _svc_name, svc in cfg.spec.services.items():
+                cls._ensure_service_volume_mount(svc, pvc_name, pvc_mount_path)
+                cls._ensure_service_hf_home_env(svc, pvc_mount_path)
+            result = cls.update_model(
                 cfg.model_dump(),
                 model_name=model_name,
-                pvc_name=pvc_name,
-                pvc_mount_path=pvc_mount_path,
-                pvc_path=pvc_path,
             )
         else:
             result = cls.update_model(
@@ -592,10 +640,11 @@ class BaseConfigModifier:
     ) -> None:
         """Apply CLI args, replicas, and GPU resources to a single worker service."""
         service.replicas = replicas
-        setup_worker_service_resources(service, gpus, num_gpus_per_node)
-
         if service.extraPodSpec and service.extraPodSpec.mainContainer:
             service.extraPodSpec.mainContainer.args = sanitize_cli_args(list(cli_args))
+
+        # Apply resources after args so multinode sizing can inspect final TP/PP flags.
+        setup_worker_service_resources(service, gpus, num_gpus_per_node)
 
     @classmethod
     def _apply_disagg_workers(
@@ -648,7 +697,7 @@ class BaseConfigModifier:
 
         In agg mode, the default config template may use a generic worker
         service name (e.g. ``TRTLLMWorker``) that does not match the disagg
-        naming convention (``TRTLLMDecodeWorker``).  We first try the standard
+        naming convention (``prefill`` / ``decode``).  We first try the standard
         DECODE lookup, then fall back to any non-Frontend/Planner service.
         """
         svc_name = cls._resolve_service_name(cfg, SubComponentType.DECODE)

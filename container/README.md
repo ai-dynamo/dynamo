@@ -40,19 +40,12 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /opt/dynamo/target/ | Cargo build output (→ runtime)
 |  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
 |  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
-| **STAGE: framework** | **FROM ${BASE_IMAGE}** |
-|  /opt/dynamo/venv/ | Created with uv venv (→ runtime)
-|  /${FRAMEWORK_INSTALL} | Built framework (→ runtime)
-| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE}** |
-|  /usr/local/cuda/{bin,include,nvvm}/ | COPY from dynamo_base |
+| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (multi-arch upstream runtime image)** |
 |  /usr/bin/nats-server | COPY from dynamo_base |
 |  /usr/local/bin/etcd/ | COPY from dynamo_base |
-|  /usr/local/ucx/ | COPY from wheel_builder |
-|  /opt/nvidia/nvda_nixl/ | COPY from wheel_builder |
 |  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
-|  /opt/dynamo/venv/ | COPY from framework |
-|  /opt/vllm/ | COPY from framework |
-|  /workspace/{tests,examples,deploy}/ |COPY from build context |
+|  upstream Python/site-packages | inherited from upstream `vllm/vllm-openai` (multi-arch tag selected by CUDA family) |
+|  /workspace/{tests,examples,components/src/dynamo/{common,vllm},lib,deploy/sanity_check.py} | COPY from build context |
 | **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
 |  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
 |  /usr/local/rustup/ | COPY from dynamo_tools |
@@ -99,7 +92,7 @@ The `run.sh` script and rendering scripts are conveniences that simplify common 
 | **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) |
 | **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
 | **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
-| **Python Env** | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) |
+| **Python Env** | system site-packages for vllm/sglang, venv (`/opt/dynamo/venv`) for trtllm | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) |
 
 **Note (SGLang)**: SGLang runtime uses system site-packages, but the `dev` and `local-dev` images create `/opt/dynamo/venv` with `--system-site-packages` for build tooling like `maturin` and `uv`.
 
@@ -114,23 +107,18 @@ The `run.sh` script and rendering scripts are conveniences that simplify common 
 
 ### 1. runtime target (runs as non-root dynamo user):
 ```bash
-# Generate Dockerfile with runtime and runtime_test stages
+# Build runtime image
 container/render.py --framework vllm --target runtime --output-short-filename
-
-# Build runtime stage
-docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile --target runtime .
+docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # Run runtime container
 container/run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
-### 2. test image (test deps layered on top of runtime, built from the same rendered Dockerfile):
+### 2. test image (layers test deps on top of runtime):
 ```bash
-# Generate the Dockerfile first (runtime_test stage is included automatically), then build
-container/render.py --target=runtime --framework=vllm --output-short-filename
-
-# Build runtime_test stage
-docker build -t dynamo:latest-vllm-test -f container/rendered.Dockerfile --target runtime_test .
+# Build test image from a runtime image (for running tests locally)
+docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=dynamo:latest-vllm-runtime -t dynamo:latest-vllm-test .
 ```
 
 ### 3. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):

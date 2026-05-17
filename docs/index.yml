@@ -47,27 +47,38 @@ navigation:
       - page: Glossary
         path: reference/glossary.md
 
-  # ==================== Blog ====================
-  - section: Blog
-    path: blogs/index.mdx
-    slug: blog
+  # ==================== Digest ====================
+  - section: Digest
+    path: digest/index.mdx
+    slug: digest
     contents:
+      - page: "Dynamo Day 0 support for TokenSpeed"
+        path: digest/tokenspeed/tokenspeed-day-0.md
+        slug: tokenspeed-day-0
+      - page: "Multi-Turn Agentic Harnesses"
+        path: digest/agentic-inference/agentic-harnesses.md
+        slug: agentic-harnesses
       - page: "Full-Stack Optimizations for Agentic Inference"
-        path: blogs/agentic-inference/agentic-inference.md
+        path: digest/agentic-inference/agentic-inference.md
         slug: agentic-inference
       - page: "Flash Indexer: Inter-Galactic KV Routing"
-        path: blogs/flash-indexer/flash-indexer.md
+        path: digest/flash-indexer/flash-indexer.md
         slug: flash-indexer
 
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
     contents:
       - section: Deployment Guide
-        path: kubernetes/README.md
         contents:
-          - page: Detailed Installation Guide
+          - page: Quickstart
+            path: kubernetes/README.md
+          - page: Installation Guide
             path: kubernetes/installation-guide.md
-          - page: Deploying Your First Model
+          - page: Model Deployment Guide
+            path: kubernetes/model-deployment-guide.md
+          - page: Model Caching
+            path: kubernetes/model-caching.md
+          - page: DGDR Reference
             path: kubernetes/dgdr.md
           - page: Dynamo Operator
             path: kubernetes/dynamo-operator.md
@@ -89,6 +100,8 @@ navigation:
             path: kubernetes/inference-gateway.md
           - page: Snapshot
             path: kubernetes/snapshot.md
+          - page: Shadow Engine Failover
+            path: kubernetes/shadow-engine-failover.md
           - page: Disagg Communication
             path: kubernetes/disagg-communication-guide.md
       - section: Observability (K8s)
@@ -107,6 +120,34 @@ navigation:
             path: kubernetes/grove.md
           - page: Topology Aware Scheduling
             path: kubernetes/topology-aware-scheduling.md
+      - section: Cloud Provider Guides
+        contents:
+          - section: AWS
+            contents:
+              - page: EKS Setup
+                path: kubernetes/cloud-providers/eks/eks.md
+              - page: EFA (RDMA over AWS Fabric)
+                path: kubernetes/cloud-providers/eks/efa.md
+              - page: EFS
+                path: kubernetes/cloud-providers/eks/efs.md
+              - page: ECS
+                path: kubernetes/cloud-providers/ecs/ecs.md
+          - section: Azure
+            contents:
+              - page: AKS Setup
+                path: kubernetes/cloud-providers/aks/aks.md
+              - page: RDMA / InfiniBand
+                path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+              - page: AKS Storage
+                path: kubernetes/cloud-providers/aks/storage.md
+              - page: Azure Lustre CSI Driver
+                path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+              - page: Spot VMs
+                path: kubernetes/cloud-providers/aks/spot-vms.md
+          - section: GCP
+            contents:
+              - page: GKE Setup
+                path: kubernetes/cloud-providers/gke/gke.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -117,6 +158,24 @@ navigation:
         path: components/router/router-guide.md
       - page: KV Cache Offloading
         path: components/kvbm/kvbm-guide.md
+      - section: Tool Calling
+        slug: tool-calling
+        path: tool-calling/README.md
+        contents:
+          - page: Tool Call Parsing (Dynamo)
+            path: tool-calling/dynamo.md
+          - page: Tool Call Parsing (Engine Fallback)
+            path: tool-calling/engine-fallback.md
+          - page: Troubleshooting Tool Calls
+            path: tool-calling/troubleshooting.md
+      - section: Reasoning
+        slug: reasoning
+        path: reasoning/README.md
+        contents:
+          - page: Reasoning Parsing (Dynamo)
+            path: reasoning/dynamo.md
+          - page: Reasoning Parsing (Engine Fallback)
+            path: reasoning/engine-fallback.md
       - section: Multimodal
         path: features/multimodal/README.md
         contents:
@@ -141,18 +200,18 @@ navigation:
             path: backends/trtllm/trtllm-diffusion.md
       - page: LoRA Adapters
         path: features/lora/README.md
+      - page: Fastokens Tokenizer
+        path: features/tokenizer/README.md
       - section: Agents
         slug: agents
-        path: features/agentic_workloads.md
+        path: agents/README.md
         contents:
+          - page: Agent Tracing
+            path: agents/agent-tracing.md
+          - page: Agent Hints
+            path: agents/agent-hints.md
           - page: SGLang for Agentic Workloads
             path: backends/sglang/agents.md
-      - page: Chat Processors
-        path: agents/chat-processor-options.md
-      - page: Tool Calling
-        path: agents/tool-calling.md
-      - page: Reasoning
-        path: agents/reasoning.md
       - section: Observability (Local)
         path: observability/README.md
         contents:
@@ -183,14 +242,18 @@ navigation:
             path: fault-tolerance/testing.md
       - page: Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Mocker
+      - section: Simulation with Mocker
         contents:
           - page: Testing with Mocker
             path: mocker/mocker.md
           - page: Mocker Offline Trace Replay
             path: benchmarks/mocker-trace-replay.md
-      - page: Writing Python Workers
+      - page: Writing Python Workers (lower-level)
         path: development/backend-guide.md
+      - page: Writing Python Unified Backends
+        path: development/python-backend-guide.md
+      - page: Writing Rust Unified Backends
+        path: development/rust-backend-guide.md
 
   # ==================== Backends ====================
   - section: Backends
@@ -200,7 +263,7 @@ navigation:
         contents:
           - page: Reference Guide
             path: backends/sglang/sglang-reference-guide.md
-          - page: Chat Processor
+          - page: Frontend Processor Fallback
             path: backends/sglang/sglang-chat-processor.md
           - page: Examples
             path: backends/sglang/sglang-examples.md
@@ -230,6 +293,8 @@ navigation:
         contents:
           - page: Reference Guide
             path: backends/vllm/vllm-reference-guide.md
+          - page: Frontend Processor Fallback
+            path: backends/vllm/vllm-chat-processor.md
           - page: Examples
             path: backends/vllm/vllm-examples.md
           - page: KV Cache Offloading
@@ -247,6 +312,8 @@ navigation:
         contents:
           - page: Frontend Guide
             path: components/frontend/frontend-guide.md
+          - page: Configuration Reference
+            path: components/frontend/configuration.md
           - page: Tokenizer
             path: components/frontend/Tokenizer.md
       - section: Router
@@ -273,6 +340,8 @@ navigation:
         contents:
           - page: Planner Guide
             path: components/planner/planner-guide.md
+          - page: Global Planner Guide
+            path: components/planner/global-planner.md
           - page: Planner Examples
             path: components/planner/planner-examples.md
       - section: Profiler
@@ -294,7 +363,7 @@ navigation:
       - page: LMCache
         path: integrations/lmcache-integration.md
       - page: SGLang HiCache
-        path: backends/sglang/sglang-hicache.md
+        path: integrations/sglang-hicache.md
       - page: FlexKV
         path: integrations/flexkv-integration.md
       - page: KV Events for Custom Engines
@@ -413,8 +482,8 @@ navigation:
       # -- Benchmarks --
       - page: KV Router A/B Testing
         path: benchmarks/kv-router-ab-testing.md
-      # -- Mocker --
-      - page: Mocker
+      # -- Simulation with Mocker --
+      - page: Simulation with Mocker
         path: mocker/mocker.md
       # -- Templates --
       - section: Templates

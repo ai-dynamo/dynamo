@@ -6,6 +6,7 @@
 //! The `dynamo.llm` crate is a Rust library that provides a set of traits and types for building
 //! distributed LLM inference solutions.
 
+pub mod agents;
 pub mod backend;
 pub mod common;
 pub mod discovery;

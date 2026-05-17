@@ -64,6 +64,7 @@ mod registry;
 pub mod service;
 
 pub use client::Client;
+pub(crate) use client::EndpointDiscoverySource;
 pub(crate) use client::RoutingOccupancyState;
 pub(crate) use client::get_or_create_routing_occupancy_state;
 pub use endpoint::build_transport_type;
@@ -75,6 +76,16 @@ pub enum TransportType {
     Nats(String),
     Http(String),
     Tcp(String),
+}
+
+impl TransportType {
+    pub fn address(&self) -> &str {
+        match self {
+            TransportType::Nats(address)
+            | TransportType::Http(address)
+            | TransportType::Tcp(address) => address,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -109,11 +120,21 @@ impl Instance {
     pub fn id(&self) -> u64 {
         self.instance_id
     }
+
     pub fn endpoint_id(&self) -> EndpointId {
         EndpointId {
             namespace: self.namespace.clone(),
             component: self.component.clone(),
             name: self.endpoint.clone(),
+        }
+    }
+
+    pub fn endpoint_instance_id(&self) -> crate::discovery::EndpointInstanceId {
+        crate::discovery::EndpointInstanceId {
+            namespace: self.namespace.clone(),
+            component: self.component.clone(),
+            endpoint: self.endpoint.clone(),
+            instance_id: self.instance_id,
         }
     }
 }

@@ -222,6 +222,77 @@ env:
     value: "3"           # RoCE v2 GID index (cluster-specific)
 ```
 
+### InfiniBand Configuration
+
+For clusters with InfiniBand RDMA (e.g., ConnectX NICs), use UCX with the `rc` (Reliable Connection) transport. This is the standard path for on-premises and bare-metal Kubernetes clusters.
+
+**RDMA Resources:**
+
+Request one `rdma/ib` device per GPU. The RDMA device plugin injects `/dev/infiniband/*` devices automatically:
+
+```yaml
+resources:
+  limits:
+    gpu: "4"
+    custom:
+      rdma/ib: "4"
+```
+
+No pod annotations are needed. InfiniBand devices are injected by the device plugin.
+
+**Security Context:**
+
+Add `IPC_LOCK` and `SYS_RESOURCE` capabilities. `IPC_LOCK` allows RDMA memory pinning, `SYS_RESOURCE` allows memlock limit escalation:
+
+```yaml
+securityContext:
+  runAsUser: 0
+  capabilities:
+    add:
+      - IPC_LOCK
+      - SYS_RESOURCE
+```
+
+**Environment Variables (worker containers):**
+
+```yaml
+env:
+  # --- UCX (RDMA transport) ---
+  - name: UCX_TLS
+    value: "rc_x,rc,cuda_copy,cuda_ipc"
+  - name: UCX_NET_DEVICES
+    value: "<ib-device>:1"       # e.g. "mlx5_0:1" — run `ibv_devinfo` to find your device
+  - name: UCX_IB_ADDR_TYPE
+    value: "eth"                 # required for cross-pod IB on Kubernetes
+  - name: UCX_RNDV_SCHEME
+    value: "get_zcopy"
+  - name: UCX_RNDV_THRESH
+    value: "0"
+  - name: UCX_RC_TIMEOUT
+    value: "600s"
+  - name: UCX_KEEPALIVE_INTERVAL
+    value: "300s"
+```
+
+| Variable | Description |
+|----------|-------------|
+| `UCX_TLS` | `rc_x` (accelerated RC) listed first for optimal RDMA performance |
+| `UCX_NET_DEVICES` | Bind to a specific IB device. Run `ibv_devinfo` inside a pod to list available devices. Use a non-bonded device with a valid LID. |
+| `UCX_IB_ADDR_TYPE` | Must be `eth` for cross-pod communication on Kubernetes. Without this, UCX uses LID-based addressing which does not route between pods. |
+| `UCX_RNDV_SCHEME` | `get_zcopy` enables zero-copy RDMA GET, optimal for large KV cache transfers |
+
+> **Note**: `UCX_IB_ADDR_TYPE=eth` is the most common missing setting when bringing up NIXL disagg on InfiniBand clusters. If NIXL init succeeds but transfers fail with `NIXL_ERR_REMOTE_DISCONNECT`, this is likely the cause.
+
+**Known Issue — Bonded IB devices:**
+
+Some clusters expose bonded InfiniBand devices (e.g., `mlx5_bond_0`) with LID=0. If UCX selects a bonded device, transfers may fail. Verify device LIDs and select a non-bonded device:
+
+```bash
+# Inside a pod with rdma/ib resources:
+ibv_devinfo | grep -E "hca_id|lid"
+# Use a device with a non-zero LID in UCX_NET_DEVICES
+```
+
 ### AWS EFA Configuration
 
 NIXL supports **libfabric** as the backend for AWS EFA deployments. This is the **recommended approach** for disaggregated inference on AWS, achieving ~9.6 GB/s KV transfer bandwidth. See the [AWS EFA with NIXL documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start-nixl.html) for complete setup instructions.
@@ -230,7 +301,7 @@ NIXL supports **libfabric** as the backend for AWS EFA deployments. This is the 
 - EFA installer version **1.47.0** or later
 - Libfabric (installed via EFA installer at `/opt/amazon/efa`)
 - GDRCopy for GPU Direct RDMA operations (GPU Operator v26.x installs this automatically)
-- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1-efa-amd64`)
+- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64`)
 
 **Kernel Compatibility:**
 
@@ -645,6 +716,47 @@ VllmDecodeWorker:
 ```
 
 > **Note**: Use `nvidia.com/dynamo-component` as the label key, not `app.kubernetes.io/component`. The Dynamo operator uses this label to identify component types.
+
+### Problem: NIXL_ERR_BACKEND at create_backend on InfiniBand
+
+**Symptoms**: NIXL backend creation fails immediately with `NIXL_ERR_BACKEND`. UCX logs show:
+
+```text
+mlx5dv_devx_obj_destroy(SRQ) failed: Invalid argument
+mlx5dv_devx_obj_destroy(CQ) failed: Invalid argument
+```
+
+Or:
+
+```text
+select.c: no active messages transport: Unsupported operation
+```
+
+**Root Causes**:
+
+1. **Bonded IB device with LID=0**: UCX selects `mlx5_bond_0` by default, but bonded devices may have LID=0 (invalid for UD transport). Fix: set `UCX_NET_DEVICES` to a non-bonded device with a valid LID.
+
+2. **UCX/OFED version mismatch**: The container's UCX mlx5 library may be compiled against a different devx ABI than the host kernel driver. Any transport using IB (rc, cuda_ipc with IB) triggers the devx crash.
+
+3. **Missing RDMA device injection**: If `rdma/ib` is not requested in the pod spec, no IB devices are injected into the container.
+
+**Diagnosis**:
+
+```bash
+# Check which IB devices are visible and their LIDs
+ibv_devinfo | grep -E "hca_id|lid"
+
+# Verify rdma/ib was requested
+kubectl get pod <pod> -o jsonpath='{.spec.containers[0].resources}'
+
+# Check /dev/infiniband exists
+ls -la /dev/infiniband/
+```
+
+**Solutions**:
+1. Request `rdma/ib` resources (1 per GPU) in the pod spec
+2. Set `UCX_NET_DEVICES` to a non-bonded device if `mlx5_bond_0` has LID=0
+3. Ensure the container image's UCX build matches the host OFED version
 
 ### Problem: Intermittent transfer failures
 

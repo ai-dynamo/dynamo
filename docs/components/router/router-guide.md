@@ -27,7 +27,7 @@ This command:
 - Exposes the service on port 8000 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
-Backend workers register themselves using the `register_model` API, after which the KV Router automatically tracks worker state and makes routing decisions based on KV cache overlap.
+Backend workers register themselves using the `register_model` API. For accurate prefix-cache state, workers must also publish KV cache events with the backend-specific event flags; otherwise the router can run in approximate mode with `--no-router-kv-events`.
 
 #### CLI Arguments
 
@@ -37,63 +37,19 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
-| `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+| `--load-aware` / `--no-load-aware` | `--no-load-aware` | Route by active load without cache-reuse signals; implies `--router-mode kv` on the frontend |
+| `--router-kv-overlap-score-credit <float>` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
+| `--router-prefill-load-scale <float>` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
-| `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model. `aic` decays only the oldest active prefill using an AIC-predicted duration |
-| `--router-queue-threshold <float>` | `4.0` | Queue threshold fraction; enables priority scheduling via `priority` |
+| `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model; see [Routing Concepts](router-concepts.md#active-load-modeling) and [Configuration and Tuning](router-configuration.md#aic-prefill-load-model) |
+| `--router-queue-threshold <float>` | `16.0` | Queue threshold fraction; enables priority scheduling via `priority` |
 | `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--serve-indexer` | `false` | Serve the Dynamo-native remote indexer from this frontend/router on the worker component |
 | `--use-remote-indexer` | `false` | Query the worker component's served remote indexer instead of maintaining a local overlap indexer |
 
 For all available options: `python -m dynamo.frontend --help`
 
-For detailed configuration options and tuning parameters, see [Configuration and Tuning](router-configuration.md).
-
-#### AIC Prefill Load Model
-
-The KV router can use AIC to estimate the expected duration of the selected worker's prompt-side prefill work. When enabled, the router:
-
-- computes `prefix = overlap_blocks * block_size` for the chosen worker
-- computes `effective_isl = input_tokens - prefix`
-- stores one prompt-load hint for the admitted request
-- decays only the **oldest** active prefill request on each worker over time
-
-This affects router-side prompt load accounting only. It does not change backend execution or decode-side accounting.
-
-Enable it on the frontend like this:
-
-```bash
-python -m dynamo.frontend \
-    --router-mode kv \
-    --router-prefill-load-model aic \
-    --aic-backend vllm \
-    --aic-system h200_sxm \
-    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
-```
-
-The standalone router uses the same AIC flags:
-
-```bash
-python -m dynamo.router \
-    --endpoint dynamo.prefill.generate \
-    --router-prefill-load-model aic \
-    --aic-backend vllm \
-    --aic-system h200_sxm \
-    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
-```
-
-Required when `--router-prefill-load-model=aic` is enabled:
-
-- `--router-mode kv` on the frontend
-- `--router-track-prefill-tokens`
-- `--aic-backend`
-- `--aic-system`
-- `--aic-model-path`
-
-Optional AIC knobs:
-
-- `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
-- `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
+For detailed configuration options and tuning parameters, see [Configuration and Tuning](router-configuration.md). For how the router models prefill and decode load in the cost function, see [Routing Concepts](router-concepts.md#active-load-modeling).
 
 ### Kubernetes Deployment
 
@@ -107,7 +63,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: my-namespace
       componentType: frontend
       replicas: 1
       envs:
@@ -117,8 +72,8 @@ spec:
 
 **Key Points:**
 - Set `DYN_ROUTER_MODE=kv` on the **Frontend** service only
-- Workers automatically report KV cache events to the router
-- No worker-side configuration changes needed
+- Configure worker-side KV event publishing when you want event-driven prefix-cache state
+- Use `--no-router-kv-events` for approximate cache-state prediction when workers are not publishing events
 
 #### Environment Variables
 
@@ -127,10 +82,12 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | CLI Argument | Environment Variable | Default |
 |--------------|---------------------|---------|
 | `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round-robin` |
+| `--load-aware` | `DYN_ROUTER_LOAD_AWARE=true` | `false` |
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` |
 | `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
 | `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
-| `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
+| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` |
+| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` |
 | `DYN_ENCODER_CUDA_TO_CPU_RATIO` | `8` | Throughput ratio of a non-CPU worker relative to one CPU worker for `device-aware-weighted` routing |
 
@@ -146,7 +103,7 @@ You can also run the KV router as a standalone service (without the Dynamo front
 | Deployment | Process | Metrics Port | Use Case |
 |------------|---------|--------------|----------|
 | **Frontend-embedded** | `python -m dynamo.frontend --router-mode kv` | Frontend HTTP port (default 8000) | Standard deployment; router runs inside the frontend process |
-| **Standalone** | `python -m dynamo.router` | `DYN_SYSTEM_PORT` (if set) | Multi-tier architectures, SGLang disagg prefill routing, custom pipelines |
+| **Standalone** | `python -m dynamo.router` | `DYN_SYSTEM_PORT` (if set) | Multi-tier architectures, advanced disaggregated prefill routing, custom pipelines |
 
 The standalone router does not include the HTTP frontend (no `/v1/chat/completions` endpoint). It exposes only the `RouterRequestMetrics` via the system status server. See the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
 
@@ -198,7 +155,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 
 | Event Mode | How to Enable | Description |
 |------------|---------------|-------------|
-| **NATS Core (local indexer)** | Default (no extra flags) | Workers maintain a local indexer; router queries workers on startup and receives events via NATS Core |
+| **NATS Core (local indexer)** | Router default (no router flag) | Workers maintain a local indexer; configure backend-side KV event publishing so the router can recover state and receive events via NATS Core |
 | **JetStream (durable)** | `--router-durable-kv-events` | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
 | **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; the standalone `dynamo.indexer` service aggregates events |
 | **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |

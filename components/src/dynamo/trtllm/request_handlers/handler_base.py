@@ -1007,7 +1007,10 @@ class HandlerBase(BaseGenerativeHandler):
             logging.error(f"DECODE: Request keys: {list(request.keys())}")
             raise ValueError("Disaggregated params are required for decode mode")
 
-        num_output_tokens_so_far = 0
+        # TensorRT-LLM streams cumulative token_ids per output. For n>1 those
+        # outputs are interleaved by choice index, so maintain one cursor per
+        # choice and emit only the new slice for each Dynamo chunk.
+        output_tokens_per_choice: dict[int, int] = {}
 
         sampling_params = self._override_sampling_params(
             self.default_sampling_params, request
@@ -1138,90 +1141,122 @@ class HandlerBase(BaseGenerativeHandler):
                         yield {"finish_reason": "error", "token_ids": []}
                         break
 
-                    output = res.outputs[0]
-                    # The engine returns all tokens generated so far. We must calculate the new
-                    # tokens generated in this iteration to create the "delta".
-                    next_total_toks = len(output.token_ids)
+                    for output in res.outputs:
+                        output_idx = getattr(output, "index", 0) or 0
+                        tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
+                        next_total_toks = len(output.token_ids)
 
-                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-
-                    # Extract logprobs from the output
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far
-                    )
-                    if log_probs:
-                        out["log_probs"] = log_probs
-                    if top_logprobs:
-                        out["top_logprobs"] = top_logprobs
-
-                    if output.finish_reason:
-                        out["finish_reason"] = output.finish_reason
-                    if output.stop_reason:
-                        out["stop_reason"] = output.stop_reason
-                    if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                        # Return the disaggregated params only when operating in prefill mode.
-                        params_dict = self._encode_and_pack_disaggregated_params(
-                            output, disaggregated_params, request, res, processed_input
-                        )
-                        if params_dict is not None:
-                            out["disaggregated_params"] = params_dict
-
-                    if out.get("finish_reason"):
-                        num_input_tokens = len(request.get("token_ids", []))
-
-                        prompt_tokens_details = None
-                        if prefill_prompt_tokens_details:
-                            prompt_tokens_details = prefill_prompt_tokens_details
-                        else:
-                            if output.request_perf_metrics is not None:
-                                kv_cache_metrics = (
-                                    output.request_perf_metrics.kv_cache_metrics
-                                )
-                                cached_tokens = min(
-                                    num_input_tokens,
-                                    kv_cache_metrics.num_reused_blocks
-                                    * self.kv_block_size,
-                                )
-                                if cached_tokens > 0:
-                                    prompt_tokens_details = {
-                                        "cached_tokens": int(cached_tokens),
-                                    }
-
-                        out["completion_usage"] = {
-                            "prompt_tokens": int(num_input_tokens),
-                            "completion_tokens": int(next_total_toks),
-                            "total_tokens": int(num_input_tokens + next_total_toks),
-                            "prompt_tokens_details": prompt_tokens_details,
+                        # The engine returns all tokens generated so far for
+                        # this choice. Calculate only the new tokens generated
+                        # in this iteration to create the delta.
+                        out = {
+                            "token_ids": output.token_ids[tokens_so_far:],
+                            "index": output_idx,
                         }
 
-                    if res.finished and not out.get("finish_reason"):
-                        out["finish_reason"] = "unknown"
-                        logging.warning(
-                            "Request finished with no finish reason set - this indicates a possible bug"
+                        # Extract logprobs from the output. Logprobs are
+                        # aligned with the cumulative token list, so use the
+                        # same per-choice cursor as token_ids.
+                        log_probs, top_logprobs = self._extract_logprobs(
+                            output, tokens_so_far
                         )
+                        if log_probs:
+                            out["log_probs"] = log_probs
+                        if top_logprobs:
+                            out["top_logprobs"] = top_logprobs
 
-                    # Record additional metrics on request finish
-                    if res.finished and metrics_collector and out.get("finish_reason"):
-                        try:
-                            # KV transfer metrics from request_perf_metrics
-                            if output.request_perf_metrics is not None:
-                                # Record KV transfer latency/bytes/speed from timing_metrics
-                                tm = output.request_perf_metrics.timing_metrics
-                                if tm is not None:
-                                    # record_kv_transfer_perf() only returns True on the
-                                    # decode worker (the receiver), which observes non-zero
-                                    # kv_cache_transfer_{start,end} in timing_metrics. Count
-                                    # the success counter on the same signal so it stays in
-                                    # lock-step with the sibling histograms' _count. DYN-2781.
-                                    if metrics_collector.record_kv_transfer_perf(tm):
-                                        metrics_collector.record_kv_transfer_success()
-                        except Exception as e:
-                            logging.warning(
-                                "Additional metrics (request finish): %s", e
+                        if output.finish_reason:
+                            out["finish_reason"] = output.finish_reason
+                        if output.stop_reason:
+                            out["stop_reason"] = output.stop_reason
+                        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                            # Return the disaggregated params only when
+                            # operating in prefill mode.
+                            params_dict = self._encode_and_pack_disaggregated_params(
+                                output,
+                                disaggregated_params,
+                                request,
+                                res,
+                                processed_input,
+                            )
+                            if params_dict is not None:
+                                out["disaggregated_params"] = params_dict
+
+                        if out.get("finish_reason") or res.finished:
+                            if not out.get("finish_reason"):
+                                out["finish_reason"] = "unknown"
+                                logging.warning(
+                                    "Request finished with no finish reason set - "
+                                    "this indicates a possible bug"
+                                )
+
+                            num_input_tokens = len(request.get("token_ids", []))
+                            total_completion_tokens = sum(
+                                len(o.token_ids) for o in res.outputs
                             )
 
-                    # Log metrics to TensorRT-LLM MetricsCollector when request finishes
-                    # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
+                            prompt_tokens_details = None
+                            if prefill_prompt_tokens_details:
+                                prompt_tokens_details = prefill_prompt_tokens_details
+                            else:
+                                if output.request_perf_metrics is not None:
+                                    kv_cache_metrics = (
+                                        output.request_perf_metrics.kv_cache_metrics
+                                    )
+                                    cached_tokens = min(
+                                        num_input_tokens,
+                                        kv_cache_metrics.num_reused_blocks
+                                        * self.kv_block_size,
+                                    )
+                                    if cached_tokens > 0:
+                                        prompt_tokens_details = {
+                                            "cached_tokens": int(cached_tokens),
+                                        }
+
+                            out["completion_usage"] = {
+                                "prompt_tokens": int(num_input_tokens),
+                                "completion_tokens": int(total_completion_tokens),
+                                "total_tokens": int(
+                                    num_input_tokens + total_completion_tokens
+                                ),
+                                "prompt_tokens_details": prompt_tokens_details,
+                            }
+
+                        # Yield the chunk to the client and update the token
+                        # count for this output choice.
+                        yield out
+                        output_tokens_per_choice[output_idx] = next_total_toks
+
+                    # Record additional metrics on request finish once per iteration.
+                    if res.finished and metrics_collector:
+                        output = next(
+                            (
+                                output
+                                for output in res.outputs
+                                if getattr(output, "finish_reason", None)
+                            ),
+                            None,
+                        )
+                        if output is not None:
+                            try:
+                                if output.request_perf_metrics is not None:
+                                    tm = output.request_perf_metrics.timing_metrics
+                                    if tm is not None:
+                                        # record_kv_transfer_perf() only returns True on
+                                        # the decode worker (the receiver), which observes
+                                        # non-zero kv_cache_transfer_{start,end} in timing
+                                        # metrics. Count the success counter on the same
+                                        # signal so it stays in lock-step with the sibling
+                                        # histograms' _count for the same transfer event.
+                                        if metrics_collector.record_kv_transfer_perf(
+                                            tm
+                                        ):
+                                            metrics_collector.record_kv_transfer_success()
+                            except Exception as e:
+                                logging.warning(
+                                    "Additional metrics (request finish): %s", e
+                                )
+
                     if (
                         res.finished
                         and self.metrics_collector
@@ -1241,10 +1276,6 @@ class HandlerBase(BaseGenerativeHandler):
                                 )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
-
-                    # Yield the chunk to the client and update the token count for the next iteration.
-                    yield out
-                    num_output_tokens_so_far = next_total_toks
 
         # 1. Client cancellation - don't shutdown
         except asyncio.CancelledError:
@@ -1321,6 +1352,21 @@ class HandlerBase(BaseGenerativeHandler):
                 json_object=guided_decoding.get("json_object", False),
                 structural_tag=guided_decoding.get("structural_tag"),
             )
+
+        n = overrides.get("n")
+        if (
+            isinstance(n, int)
+            and not isinstance(n, bool)
+            and n > 1
+            and hasattr(sampling_params, "best_of")
+        ):
+            # Dynamo does not expose best_of here, but TRT-LLM validates that
+            # its internal best_of is at least n when cloning SamplingParams.
+            # Keep that private field in lockstep so OpenAI n>1 requests do
+            # not fail before generation starts.
+            best_of = getattr(sampling_params, "best_of", None)
+            if best_of is None or best_of < n:
+                overrides["best_of"] = n
 
         # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
         # 1. it catches unsupported fields / attributes.

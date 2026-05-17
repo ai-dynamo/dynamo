@@ -76,6 +76,8 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
+    # Total number of LLM requests accepted by the frontend handler
+    REQUESTS_STARTED_TOTAL = "requests_started_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
@@ -161,6 +163,14 @@ class kv_publisher:
 
     # Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     ENGINES_DROPPED_EVENTS_TOTAL = "kv_publisher_engines_dropped_events_total"
+    # Total number of ZMQ KV events seen by the relay, labeled by stage and event type
+    ZMQ_EVENTS_TOTAL = "kv_publisher_zmq_events_total"
+    # Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
+    ZMQ_FILTERED_EVENTS_TOTAL = "kv_publisher_zmq_filtered_events_total"
+    # Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
+    ZMQ_CONVERSION_ISSUES_TOTAL = "kv_publisher_zmq_conversion_issues_total"
+    # Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    ZMQ_SUSPICIOUS_EVENTS_TOTAL = "kv_publisher_zmq_suspicious_events_total"
 
 
 class kvbm:

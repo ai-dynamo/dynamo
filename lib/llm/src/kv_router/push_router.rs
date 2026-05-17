@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
     metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
@@ -302,6 +302,9 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
+        let routing_constraints = routing
+            .and_then(|r| r.routing_constraints.clone())
+            .unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
@@ -318,6 +321,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     None,
                     allowed_worker_ids,
+                    routing_constraints.clone(),
                 )
                 .await?;
             let best_worker = selection.worker;
@@ -329,9 +333,7 @@ impl KvPushRouter {
                 let total_blocks = routing_token_ids
                     .len()
                     .div_ceil(self.chooser.block_size() as usize);
-                // NOTE: tests/mm_router/test_vllm_mm_router_e2e.py parses this log line.
-                // Keep the "[ROUTING] ... with X/Y blocks overlap" shape stable unless
-                // router tests are updated together.
+                // tests/utils/router_logs.py parses the structured fields on this event.
                 tracing::debug!(
                     request_id = %context_id,
                     worker_id = best_worker.worker_id,
@@ -374,6 +376,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     Some(pinned_worker),
                     allowed_worker_ids,
+                    routing_constraints.clone(),
                 )
                 .await?;
             let best_worker = selection.worker;
@@ -403,6 +406,30 @@ impl KvPushRouter {
             ?phase,
             "Routing to specified worker"
         );
+
+        if routing_constraints.has_hard_constraints() {
+            let configs = self.chooser.workers_with_configs.borrow();
+            match configs.get(&pinned_worker_id) {
+                Some(config)
+                    if !routing_constraints.is_compatible_with_worker_taints(config.taints()) =>
+                {
+                    return Err(anyhow::anyhow!(
+                        "Pinned worker {} does not satisfy required taints {:?}; worker taints: {:?}",
+                        pinned_worker_id,
+                        routing_constraints.required_taints,
+                        config.taints()
+                    ));
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "Pinned worker {} could not be validated against required taints {:?} because worker config was unavailable",
+                        pinned_worker_id,
+                        routing_constraints.required_taints
+                    ));
+                }
+                _ => {}
+            }
+        }
 
         // Build a WorkerWithDpRank; use 0 as a fallback dp_rank when it
         // couldn't be resolved -- this is only used for the cache-hit
@@ -538,10 +565,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             scheduler_tracked,
         } = selection;
 
-        // In approximate mode (use_kv_events=false), record the routing decision
-        // so the indexer can track cache state based on routing decisions.
-        // This covers both pre-selected workers and find_best_match selections.
-        if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
+        // Record the routing decision into the indexer when:
+        //   - approximate mode (use_kv_events=false): primary indexer is the
+        //     only cache-state signal, so record there, or
+        //   - predict-on-route: Indexer dispatches the write to a side
+        //     approximate indexer whose entries expire after a short TTL.
+        // In event-only mode with no predicted TTL we
+        // skip recording — the engine's KV events are the source of truth.
+        let cfg = self.chooser.kv_router_config();
+        let should_record =
+            !is_query_only && (!cfg.use_kv_events || cfg.predict_on_route_enabled());
+        if should_record {
             let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
             let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
@@ -564,7 +598,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     worker_id = instance_id,
                     dp_rank = dp_rank,
                     error = %e,
-                    "Failed to record routing decision in approximate mode"
+                    "Failed to record routing decision"
                 );
             }
         }

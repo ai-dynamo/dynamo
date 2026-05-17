@@ -32,6 +32,15 @@ pub struct JsonParserConfig {
     /// `tool_call_end_tokens` are ignored.
     #[serde(default)]
     pub bare_json_mode: bool,
+
+    /// Allow recovery when the outer end-token is missing (max_tokens / EOS
+    /// truncation). Streaming jails MUST leave this `false` — otherwise the
+    /// parser claims "complete tool call" before the end-token has actually
+    /// arrived and `should_exit_jail_early` fires too aggressively. Finalize
+    /// / aggregate paths set it to `true` so a real but unterminated call
+    /// isn't silently dropped.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -44,6 +53,7 @@ impl Default for JsonParserConfig {
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
             parser_type: JsonParserType::Basic,
             bare_json_mode: false,
+            allow_eof_recovery: false,
         }
     }
 }
@@ -62,6 +72,39 @@ pub struct XmlParserConfig {
     pub parameter_start_token: String,
     /// End token for parameter (e.g., `</parameter>`)
     pub parameter_end_token: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
+
+    /// When true, the function- and parameter-regex omit the `|$` end-of-block
+    /// fallback (so missing `</function>` / `</parameter>` causes the match to
+    /// fail rather than being silently recovered), AND `detect_and_parse_tool_
+    /// call_with_recovery` does not flip `allow_eof_recovery=true` for this
+    /// config. Used by families whose official reference parser is
+    /// strict-match (e.g. MiniMax-M2 — see
+    /// https://huggingface.co/MiniMaxAI/MiniMax-M2/blob/main/docs/tool_calling_guide.md).
+    #[serde(default)]
+    pub strict_match: bool,
+
+    /// When true, if `function_start_token` is absent anywhere in the input,
+    /// short-circuit `try_tool_call_parse_xml` and return
+    /// `(calls=[], normal_text=<input>)`. Matches the early-return passthrough
+    /// in Qwen3-Coder's official reference parser
+    /// (https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct/blob/main/qwen3coder_tool_parser.py).
+    #[serde(default)]
+    pub passthrough_when_no_function: bool,
+
+    /// When true, if `tool_call_start_token` is absent but `function_start_
+    /// token` is present, parse the entire input as a single tool-call block
+    /// (back-off strategy). Matches the `if len(raw_tool_calls) == 0:
+    /// raw_tool_calls = [model_output]` back-off in Qwen3-Coder's reference
+    /// parser. Independent of `passthrough_when_no_function` (different
+    /// trigger: this one fires when function tags exist but the outer wrapper
+    /// does not).
+    #[serde(default)]
+    pub backoff_when_no_wrapper: bool,
 }
 
 impl Default for XmlParserConfig {
@@ -73,7 +116,25 @@ impl Default for XmlParserConfig {
             function_end_token: "</function>".to_string(),
             parameter_start_token: "<parameter=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
+            allow_eof_recovery: false,
+            strict_match: false,
+            passthrough_when_no_function: false,
+            backoff_when_no_wrapper: false,
         }
+    }
+}
+
+impl XmlParserConfig {
+    /// Returns true when the chunk lacks the outer `<tool_call>` wrapper but
+    /// contains `<function=...>`, and the family opts into back-off parsing
+    /// (qwen3_coder, nemotron_nano). In this mode the function-level tokens
+    /// act as the tool-call boundary for both start detection and end-position
+    /// search, mirroring the wrapped path's behavior so streaming and batch
+    /// agree on what counts as a tool call.
+    pub fn is_bare_function_mode(&self, chunk: &str) -> bool {
+        self.backoff_when_no_wrapper
+            && !chunk.contains(self.tool_call_start_token.as_str())
+            && chunk.contains(self.function_start_token.as_str())
     }
 }
 
@@ -125,6 +186,11 @@ pub struct Glm47ParserConfig {
     pub arg_value_start: String,
     /// End token for argument value (e.g., "</arg_value>")
     pub arg_value_end: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for Glm47ParserConfig {
@@ -136,6 +202,7 @@ impl Default for Glm47ParserConfig {
             arg_key_end: "</arg_key>".to_string(),
             arg_value_start: "<arg_value>".to_string(),
             arg_value_end: "</arg_value>".to_string(),
+            allow_eof_recovery: false,
         }
     }
 }
@@ -203,6 +270,10 @@ pub enum ParserConfig {
     Dsml(DsmlParserConfig),
     KimiK2(KimiK2ParserConfig),
     Glm47(Glm47ParserConfig),
+    /// Gemma 4 uses a custom non-JSON grammar with bare keys, `<|"|>` string
+    /// delimiters, and fixed `<|tool_call>...<tool_call|>` markers. No
+    /// configuration is required at runtime — markers are not user-tunable.
+    Gemma4,
 }
 
 impl ParserConfig {
@@ -218,6 +289,7 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_start.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
             ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()],
         }
     }
 
@@ -233,6 +305,7 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_end.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
             ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_END.to_string()],
         }
     }
 }
@@ -366,8 +439,17 @@ impl ToolCallConfig {
 
     pub fn qwen3_coder() -> Self {
         // <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+        // Behavior aligned with Qwen3-Coder's official reference parser
+        // (huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct/.../qwen3coder_tool_parser.py):
+        //  - passthrough: when no `<function=` in input, return raw input as content
+        //  - back-off: when `<function=` present but no `<tool_call>` wrapper,
+        //              parse the entire input as a tool block
         Self {
-            parser_config: ParserConfig::Xml(XmlParserConfig::default()),
+            parser_config: ParserConfig::Xml(XmlParserConfig {
+                passthrough_when_no_function: true,
+                backoff_when_no_wrapper: true,
+                ..XmlParserConfig::default()
+            }),
         }
     }
 
@@ -419,6 +501,13 @@ impl ToolCallConfig {
         // </invoke>
         // </minimax:tool_call>
         // Reference: https://huggingface.co/MiniMaxAI/MiniMax-M2.1/blob/main/docs/tool_calling_guide.md
+        //
+        // MiniMax's official reference parser is strict-match — its three
+        // regexes (outer/invoke/parameter) all require paired fences and
+        // return [] on any mismatch. `strict_match=true` enforces that:
+        // it drops the `|$` end-of-block fallback from the function- and
+        // parameter-regex AND prevents the PyO3 `with_recovery` shim from
+        // flipping `allow_eof_recovery=true`.
         Self {
             parser_config: ParserConfig::Xml(XmlParserConfig {
                 tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -427,6 +516,10 @@ impl ToolCallConfig {
                 function_end_token: "</invoke>".to_string(),
                 parameter_start_token: "<parameter name=".to_string(),
                 parameter_end_token: "</parameter>".to_string(),
+                allow_eof_recovery: false,
+                strict_match: true,
+                passthrough_when_no_function: false,
+                backoff_when_no_wrapper: false,
             }),
         }
     }
@@ -448,6 +541,20 @@ impl ToolCallConfig {
         // Reference: https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md
         Self {
             parser_config: ParserConfig::KimiK2(KimiK2ParserConfig::default()),
+        }
+    }
+
+    /// Gemma 4 tool-call format (custom non-JSON grammar):
+    ///
+    /// ```text
+    /// <|tool_call>call:func_name{location:<|"|>Tokyo<|"|>,count:42}<tool_call|>
+    /// ```
+    ///
+    /// Bare unquoted keys, `<|"|>`-delimited strings, supports nested objects /
+    /// arrays. Multiple tool calls are concatenated without separators.
+    pub fn gemma4() -> Self {
+        Self {
+            parser_config: ParserConfig::Gemma4,
         }
     }
 }

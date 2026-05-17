@@ -48,7 +48,7 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wh
 
 USER dynamo
 
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv venv ${VIRTUAL_ENV} --python ${PYTHON_VERSION}
 
@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 # aiperf is required by the thorough profiler path (profiler/utils/aiperf.py).
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.planner.txt \
@@ -99,17 +99,3 @@ WORKDIR /workspace
 USER dynamo
 
 CMD []
-
-# planner_test stage: test image with full shell access
-# Extends planner_builder (not the distroless planner stage) so test tools
-# (bash, tar, grep, etc.) are already present without copying individual binaries
-# into the distroless runtime layer.
-FROM planner_builder AS planner_test
-
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install --requirement /tmp/requirements.test.txt
-
-COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/

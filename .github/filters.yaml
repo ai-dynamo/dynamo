@@ -3,6 +3,7 @@
 # Filters that trigger CI jobs:
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
+#   snapshot -> snapshot-agent build and test
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -30,6 +31,8 @@ docs:
   - 'LICENSE'
   - 'CODEOWNERS'
   - '.coveragerc'
+  - '.claude/**'
+  - '.agents/**'
 
 examples:
   - 'recipes/**'
@@ -69,7 +72,7 @@ ci: &ci
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
-  - 'container/templates/test_stage.Dockerfile'
+  - 'container/Dockerfile.test'
 
 core:
   - *ci
@@ -90,6 +93,9 @@ core:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
+  # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
+  # TokenSpeed Docker images and backend-specific build/test jobs.
+  - 'components/src/dynamo/tokenspeed/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
@@ -106,9 +112,16 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  # Operator imports the local snapshot module.
+  - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
+
+snapshot:
+  - *ci
+  - 'deploy/snapshot/**'
+  - 'deploy/snapshot/.*'
 
 deploy:
   - *ci
@@ -148,6 +161,16 @@ trtllm:
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+# sample -> sample-unified-test (framework-agnostic CPU-only backend
+# reference implementation). Piggybacks on the vllm image, so a sample-only
+# change triggers vllm-build + sample-unified-test. The common/backend ABC
+# already triggers `core`; this filter is for the launch scripts and tests
+# that are specific to the sample backend.
+sample:
+  - 'examples/backends/sample/**'
   - '!**/*.md'
   - '!**/*.rst'
 

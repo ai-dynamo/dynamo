@@ -7,12 +7,13 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
-    protocols::{BlockExtraInfo, WorkerId},
+    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::agents::context::AgentContext;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -66,6 +67,10 @@ pub struct RoutingHints {
     /// When set, only workers in this set are considered during scoring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+
+    /// Request routing constraints used for worker compatibility and soft preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_constraints: Option<RoutingConstraints>,
 
     /// Session control for subagent KV isolation and sticky routing.
     /// Contains session_id (for affinity) and optional action (open/close).
@@ -194,6 +199,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Optional agent identity metadata forwarded from nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<AgentContext>,
 
     /// Multimodal processor kwargs forwarded to the backend engine
     /// (e.g. `{"use_audio_in_video": true}` for omni models).
