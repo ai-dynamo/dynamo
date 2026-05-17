@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Minimal Pipecat-backed echo backend for Dynamo's realtime bridge."""
+"""Minimal Pipecat/NVIDIA ASR backend for Dynamo's realtime bridge."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+from dataclasses import dataclass
 import io
 import json
 import os
@@ -17,38 +18,60 @@ from typing import Any
 
 os.environ.setdefault("LOGURU_LEVEL", "WARNING")
 
+PIPECAT_SRC = os.environ.get("PIPECAT_SRC", "/home/nealv/dynamo/pipecat/src")
+if os.path.isdir(PIPECAT_SRC):
+    sys.path.insert(0, PIPECAT_SRC)
+
 DEFAULT_CONNECT = "127.0.0.1:8081"
-DEFAULT_CHUNK_LEN = 64
-DEFAULT_SAMPLE_RATE = 24000
+DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
-SESSION_ID = "voice-agent-pipecat-backend"
+DEFAULT_NVIDIA_SERVER = "grpc.nvcf.nvidia.com:443"
+DEFAULT_PARAKEET_FUNCTION_ID = "d8dd4e9b-fbf5-4fb0-9dba-8cf436c8d965"
+DEFAULT_PARAKEET_MODEL_NAME = "parakeet-ctc-0.6b-asr"
+SESSION_ID = "voice-agent-pipecat-asr"
 
 _IMPORT_STDERR = io.StringIO()
 try:
     with contextlib.redirect_stderr(_IMPORT_STDERR):
         from pipecat.frames.frames import (
+            ErrorFrame,
             Frame,
             InputAudioRawFrame,
-            OutputAudioRawFrame,
+            InterimTranscriptionFrame,
+            TranscriptionFrame,
+            VADUserStartedSpeakingFrame,
+            VADUserStoppedSpeakingFrame,
         )
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.runner import PipelineRunner
         from pipecat.pipeline.task import PipelineParams, PipelineTask
         from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-except ImportError as exc:  # pragma: no cover - exercised by humans.
+        from pipecat.services.nvidia.stt import NvidiaSegmentedSTTService
+except Exception as exc:  # pragma: no cover - exercised by humans.
     import_stderr = _IMPORT_STDERR.getvalue().strip()
     detail = f"\n\nImport stderr:\n{import_stderr}" if import_stderr else ""
     raise SystemExit(
-        "Missing Pipecat dependency. Install the local checkout into the requested venv, "
-        "for example:\n"
+        "Missing Pipecat/NVIDIA ASR dependencies. Install the local checkout and "
+        "NVIDIA extra dependencies into the requested venv, for example:\n"
         "  uv pip install --python /mnt/scratch/nealv/venvs/dynamo_realtime/bin/python "
         "--no-deps -e /home/nealv/dynamo/pipecat\n"
         "  uv pip install --python /mnt/scratch/nealv/venvs/dynamo_realtime/bin/python "
         "loguru pydantic pydantic-core annotated-types typing-inspection wait_for2 "
         "docstring_parser aiofiles aiohttp numpy pyloudnorm resampy soxr protobuf "
-        "Markdown Pillow openai nltk"
+        "Markdown Pillow openai nltk grpcio grpcio-tools nvidia-riva-client"
         f"{detail}"
     ) from exc
+
+
+@dataclass
+class TranscriptResult:
+    text: str
+    final: bool
+
+
+@dataclass
+class PipelineFailure:
+    message: str
 
 
 def parse_host_port(raw: str) -> tuple[str, int]:
@@ -79,38 +102,66 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait before reconnecting to the frontend bridge.",
     )
     parser.add_argument(
-        "--chunk-len",
-        type=int,
-        default=DEFAULT_CHUNK_LEN,
-        help="Maximum base64 characters per response.output_audio.delta event.",
-    )
-    parser.add_argument(
         "--sample-rate",
         type=int,
         default=DEFAULT_SAMPLE_RATE,
-        help="PCM sample rate to use when wrapping input bytes as Pipecat audio.",
+        help=f"Input PCM sample rate [default: {DEFAULT_SAMPLE_RATE}].",
     )
     parser.add_argument(
         "--channels",
         type=int,
         default=DEFAULT_CHANNELS,
-        help="PCM channel count to use when wrapping input bytes as Pipecat audio.",
+        help=f"Input PCM channel count [default: {DEFAULT_CHANNELS}].",
     )
     parser.add_argument(
         "--pipeline-timeout",
         type=float,
-        default=5.0,
-        help="Seconds to wait for the Pipecat pipeline to emit output audio.",
+        default=30.0,
+        help="Seconds to wait for the Pipecat ASR pipeline to emit a transcript.",
+    )
+    parser.add_argument(
+        "--nvidia-api-key",
+        default=os.environ.get("NVIDIA_API_KEY"),
+        help="NVIDIA API key [default: NVIDIA_API_KEY].",
+    )
+    parser.add_argument(
+        "--nvidia-server",
+        default=os.environ.get("NVIDIA_ASR_SERVER", DEFAULT_NVIDIA_SERVER),
+        help=f"NVIDIA ASR gRPC server [default: {DEFAULT_NVIDIA_SERVER}].",
+    )
+    parser.add_argument(
+        "--nvidia-function-id",
+        default=os.environ.get("NVIDIA_ASR_FUNCTION_ID", DEFAULT_PARAKEET_FUNCTION_ID),
+        help="NVIDIA ASR function id.",
+    )
+    parser.add_argument(
+        "--nvidia-model-name",
+        default=os.environ.get("NVIDIA_ASR_MODEL_NAME", DEFAULT_PARAKEET_MODEL_NAME),
+        help=f"NVIDIA ASR model name [default: {DEFAULT_PARAKEET_MODEL_NAME}].",
+    )
+    parser.add_argument(
+        "--nvidia-language",
+        default=os.environ.get("NVIDIA_ASR_LANGUAGE", "en-US"),
+        help="NVIDIA ASR language code [default: en-US].",
+    )
+    parser.add_argument(
+        "--nvidia-no-ssl",
+        action="store_true",
+        help="Disable SSL when connecting to a local NVIDIA ASR deployment.",
     )
     args = parser.parse_args()
-    if args.chunk_len < 1:
-        parser.error("--chunk-len must be >= 1")
     if args.sample_rate < 1:
         parser.error("--sample-rate must be >= 1")
     if args.channels < 1:
         parser.error("--channels must be >= 1")
     if args.pipeline_timeout <= 0:
         parser.error("--pipeline-timeout must be > 0")
+    if (
+        not args.nvidia_no_ssl
+        and args.nvidia_server == DEFAULT_NVIDIA_SERVER
+        and not args.nvidia_api_key
+    ):
+        parser.error("--nvidia-api-key or NVIDIA_API_KEY is required for NVIDIA cloud ASR")
     return args
 
 
@@ -118,14 +169,14 @@ def annotated_event(frame: int, event: dict[str, Any]) -> dict[str, Any]:
     return {"id": str(frame), "data": event}
 
 
-def echo_response(response_id: str, status: str) -> dict[str, Any]:
+def response_payload(response_id: str, status: str) -> dict[str, Any]:
     return {
         "audio": None,
         "id": response_id,
         "max_output_tokens": "inf",
         "object": "realtime.response",
         "output": [],
-        "output_modalities": ["audio"],
+        "output_modalities": ["text"],
         "status": status,
         "status_details": None,
         "usage": None,
@@ -135,7 +186,7 @@ def echo_response(response_id: str, status: str) -> dict[str, Any]:
 def error_event(
     frame: int,
     message: str,
-    code: str = "pipecat_backend_error",
+    code: str = "pipecat_asr_backend_error",
 ) -> dict[str, Any]:
     return annotated_event(
         frame,
@@ -157,8 +208,8 @@ def unsupported_event(frame: int, event: dict[str, Any]) -> dict[str, Any]:
     event_type = event.get("type", "<missing type>")
     return error_event(
         frame,
-        f"voice-agent Pipecat backend does not support client event {event_type}",
-        code="pipecat_backend_unsupported",
+        f"voice-agent Pipecat ASR backend does not support client event {event_type}",
+        code="pipecat_asr_backend_unsupported",
     )
 
 
@@ -168,61 +219,60 @@ async def write_chunk(writer: asyncio.StreamWriter, chunk: dict[str, Any]) -> No
     await writer.drain()
 
 
-class EchoAudioProcessor(FrameProcessor):
-    """Tiny Pipecat processor that turns input audio frames into output audio frames."""
+class TranscriptCollector(FrameProcessor):
+    """Collect transcript frames emitted by the Pipecat STT service."""
 
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-
-        if isinstance(frame, InputAudioRawFrame):
-            await self.push_frame(
-                OutputAudioRawFrame(
-                    audio=frame.audio,
-                    sample_rate=frame.sample_rate,
-                    num_channels=frame.num_channels,
-                ),
-                direction,
-            )
-            return
-
-        await self.push_frame(frame, direction)
-
-
-class OutputCollector(FrameProcessor):
-    """Collect output audio frames emitted by the Pipecat pipeline."""
-
-    def __init__(self, output_queue: asyncio.Queue[OutputAudioRawFrame]):
+    def __init__(
+        self,
+        output_queue: asyncio.Queue[TranscriptResult | PipelineFailure],
+    ):
         super().__init__()
         self._output_queue = output_queue
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, OutputAudioRawFrame):
-            await self._output_queue.put(frame)
+        if isinstance(frame, TranscriptionFrame):
+            await self._output_queue.put(TranscriptResult(frame.text, final=True))
+        elif isinstance(frame, InterimTranscriptionFrame):
+            await self._output_queue.put(TranscriptResult(frame.text, final=False))
+        elif isinstance(frame, ErrorFrame):
+            await self._output_queue.put(PipelineFailure(frame.error))
 
         await self.push_frame(frame, direction)
 
 
-class PipecatEchoSession:
-    def __init__(self, *, sample_rate: int, channels: int, timeout: float):
-        self._sample_rate = sample_rate
-        self._channels = channels
-        self._timeout = timeout
-        self._output_queue: asyncio.Queue[OutputAudioRawFrame] = asyncio.Queue()
+class PipecatASRSession:
+    def __init__(self, args: argparse.Namespace):
+        self._sample_rate = args.sample_rate
+        self._channels = args.channels
+        self._timeout = args.pipeline_timeout
+        self._output_queue: asyncio.Queue[TranscriptResult | PipelineFailure] = (
+            asyncio.Queue()
+        )
         self._runner_task: asyncio.Task | None = None
 
-        pipeline = Pipeline(
-            [
-                EchoAudioProcessor(),
-                OutputCollector(self._output_queue),
-            ]
+        stt = NvidiaSegmentedSTTService(
+            api_key=args.nvidia_api_key,
+            server=args.nvidia_server,
+            model_function_map={
+                "function_id": args.nvidia_function_id,
+                "model_name": args.nvidia_model_name,
+            },
+            sample_rate=args.sample_rate,
+            use_ssl=not args.nvidia_no_ssl,
+            audio_passthrough=False,
+            settings=NvidiaSegmentedSTTService.Settings(
+                language=args.nvidia_language,
+                automatic_punctuation=True,
+            ),
         )
+        pipeline = Pipeline([stt, TranscriptCollector(self._output_queue)])
         self._task = PipelineTask(
             pipeline,
             params=PipelineParams(
-                audio_in_sample_rate=sample_rate,
-                audio_out_sample_rate=sample_rate,
+                audio_in_sample_rate=args.sample_rate,
+                audio_out_sample_rate=args.sample_rate,
             ),
             enable_rtvi=False,
             enable_turn_tracking=False,
@@ -235,8 +285,12 @@ class PipecatEchoSession:
             self._runner_task = asyncio.create_task(self._runner.run(self._task))
             await asyncio.sleep(0)
 
-    async def process_audio(self, audio: bytes) -> OutputAudioRawFrame:
+    async def transcribe_audio(self, audio: bytes) -> TranscriptResult:
         await self.start()
+        while not self._output_queue.empty():
+            self._output_queue.get_nowait()
+
+        await self._task.queue_frame(VADUserStartedSpeakingFrame())
         await self._task.queue_frame(
             InputAudioRawFrame(
                 audio=audio,
@@ -244,7 +298,20 @@ class PipecatEchoSession:
                 num_channels=self._channels,
             )
         )
-        return await asyncio.wait_for(self._output_queue.get(), timeout=self._timeout)
+        await self._task.queue_frame(VADUserStoppedSpeakingFrame())
+
+        while True:
+            result = await asyncio.wait_for(
+                self._output_queue.get(),
+                timeout=self._timeout,
+            )
+            if isinstance(result, PipelineFailure):
+                raise RuntimeError(result.message)
+            if result.final:
+                return result
+
+    def audio_duration_seconds(self, audio: bytes) -> float:
+        return len(audio) / (self._sample_rate * self._channels * 2)
 
     async def close(self) -> None:
         if self._runner_task is None:
@@ -259,10 +326,9 @@ class PipecatEchoSession:
 
 async def handle_event(
     writer: asyncio.StreamWriter,
-    session: PipecatEchoSession,
+    session: PipecatASRSession,
     event: dict[str, Any],
     frame: int,
-    chunk_len: int,
 ) -> int:
     event_type = event.get("type")
 
@@ -293,7 +359,7 @@ async def handle_event(
                 {
                     "type": "response.created",
                     "event_id": f"event_{SESSION_ID}_{frame}",
-                    "response": echo_response(response_id, "in_progress"),
+                    "response": response_payload(response_id, "in_progress"),
                 },
             ),
         )
@@ -304,33 +370,16 @@ async def handle_event(
 
         try:
             input_audio = base64.b64decode(audio_base64, validate=False)
-            output_frame = await session.process_audio(input_audio)
+            transcript = await session.transcribe_audio(input_audio)
         except Exception as exc:
             frame += 1
             await write_chunk(
                 writer,
-                error_event(frame, f"Pipecat pipeline failed: {exc}"),
+                error_event(frame, f"Pipecat ASR pipeline failed: {exc}"),
             )
             return frame
 
-        output_audio = base64.b64encode(output_frame.audio).decode("ascii")
-        for start in range(0, len(output_audio), chunk_len):
-            frame += 1
-            await write_chunk(
-                writer,
-                annotated_event(
-                    frame,
-                    {
-                        "type": "response.output_audio.delta",
-                        "event_id": f"event_{SESSION_ID}_{frame}",
-                        "response_id": response_id,
-                        "item_id": item_id,
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": output_audio[start : start + chunk_len],
-                    },
-                ),
-            )
+        audio_seconds = session.audio_duration_seconds(input_audio)
 
         frame += 1
         await write_chunk(
@@ -338,12 +387,50 @@ async def handle_event(
             annotated_event(
                 frame,
                 {
-                    "type": "response.output_audio.done",
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "event_id": f"event_{SESSION_ID}_{frame}",
+                    "item_id": item_id,
+                    "content_index": 0,
+                    "transcript": transcript.text,
+                    "logprobs": None,
+                    "usage": {
+                        "type": "duration",
+                        "seconds": audio_seconds,
+                    },
+                },
+            ),
+        )
+
+        frame += 1
+        await write_chunk(
+            writer,
+            annotated_event(
+                frame,
+                {
+                    "type": "response.output_text.delta",
                     "event_id": f"event_{SESSION_ID}_{frame}",
                     "response_id": response_id,
                     "item_id": item_id,
                     "output_index": 0,
                     "content_index": 0,
+                    "delta": transcript.text,
+                },
+            ),
+        )
+
+        frame += 1
+        await write_chunk(
+            writer,
+            annotated_event(
+                frame,
+                {
+                    "type": "response.output_text.done",
+                    "event_id": f"event_{SESSION_ID}_{frame}",
+                    "response_id": response_id,
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": transcript.text,
                 },
             ),
         )
@@ -356,7 +443,7 @@ async def handle_event(
                 {
                     "type": "response.done",
                     "event_id": f"event_{SESSION_ID}_{frame}",
-                    "response": echo_response(response_id, "completed"),
+                    "response": response_payload(response_id, "completed"),
                 },
             ),
         )
@@ -373,15 +460,11 @@ async def serve_connection(
     args: argparse.Namespace,
 ) -> None:
     frame = 0
-    session = PipecatEchoSession(
-        sample_rate=args.sample_rate,
-        channels=args.channels,
-        timeout=args.pipeline_timeout,
-    )
+    session = PipecatASRSession(args)
     try:
         while line := await reader.readline():
             event = json.loads(line)
-            frame = await handle_event(writer, session, event, frame, args.chunk_len)
+            frame = await handle_event(writer, session, event, frame)
     finally:
         await session.close()
 
@@ -399,7 +482,7 @@ async def run_backend(args: argparse.Namespace) -> None:
             await asyncio.sleep(args.reconnect_delay)
             continue
 
-        print(f"Connected Pipecat realtime backend to tcp://{host}:{port}")
+        print(f"Connected Pipecat ASR backend to tcp://{host}:{port}")
         try:
             await serve_connection(reader, writer, args)
         except Exception as exc:
