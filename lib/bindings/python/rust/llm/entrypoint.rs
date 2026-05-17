@@ -253,11 +253,6 @@ impl KvRouterConfig {
         Ok(KvRouterConfig { inner })
     }
 
-    fn dump_json(&self) -> PyResult<String> {
-        serde_json::to_string(&self.inner)
-            .map_err(|e| PyException::new_err(format!("Failed to serialize KvRouterConfig: {e}")))
-    }
-
     fn copy(&self) -> Self {
         self.clone()
     }
