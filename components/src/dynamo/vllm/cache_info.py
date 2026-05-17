@@ -21,6 +21,7 @@ MAIN_ATTENTION_KV_CACHE_KINDS = {
 
 
 def _find_main_attention_block_size(group_metadata: list[dict[str, Any]]) -> int | None:
+    """Return the block_size of the first main-attention cache group, or None if absent."""
     for group in group_metadata:
         if group.get("kind") in MAIN_ATTENTION_KV_CACHE_KINDS:
             return group.get("block_size")

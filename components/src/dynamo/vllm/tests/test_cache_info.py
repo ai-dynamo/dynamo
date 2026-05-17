@@ -23,6 +23,7 @@ pytestmark = [
 
 
 def _make_vllm_config(block_size: int = 16, additional_config=None):
+    """Build a minimal VllmConfig-like namespace for testing."""
     return SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
         additional_config=additional_config,
@@ -30,6 +31,7 @@ def _make_vllm_config(block_size: int = 16, additional_config=None):
 
 
 def _make_engine(side_effect=None, return_value=None):
+    """Build a minimal AsyncLLM-like namespace with a mocked engine_core."""
     engine_core = Mock()
     engine_core.call_utility_async = AsyncMock(
         side_effect=side_effect,
@@ -39,10 +41,14 @@ def _make_engine(side_effect=None, return_value=None):
 
 
 class TestSelectMainAttentionBlockSize:
+    """Tests for select_main_attention_block_size."""
+
     def test_returns_fallback_when_metadata_empty(self):
+        """Empty metadata returns the fallback block size."""
         assert select_main_attention_block_size([], 16) == 16
 
     def test_selects_main_attention_cache_group(self):
+        """Block size is taken from the first main-attention group, ignoring others."""
         group_metadata = [
             {"kind": "mamba_state", "block_size": 512},
             {"kind": "full_attention", "block_size": 2096},
@@ -52,12 +58,16 @@ class TestSelectMainAttentionBlockSize:
 
 
 class TestGetConfiguredKvEventBlockSize:
+    """Tests for get_configured_kv_event_block_size."""
+
     def test_reads_env_override(self, monkeypatch):
+        """DYN_VLLM_KV_EVENT_BLOCK_SIZE env var takes highest precedence."""
         monkeypatch.setenv("DYN_VLLM_KV_EVENT_BLOCK_SIZE", "4096")
 
         assert get_configured_kv_event_block_size(_make_vllm_config()) == 4096
 
     def test_falls_back_to_additional_config_then_cache_config(self):
+        """additional_config key takes precedence over cache_config.block_size."""
         assert (
             get_configured_kv_event_block_size(
                 _make_vllm_config(
@@ -70,8 +80,11 @@ class TestGetConfiguredKvEventBlockSize:
 
 
 class TestConfigureKvEventBlockSize:
+    """Tests for configure_kv_event_block_size."""
+
     @pytest.mark.asyncio
     async def test_preserves_existing_additional_config_override(self):
+        """Existing additional_config value is not overwritten by engine metadata."""
         vllm_config = _make_vllm_config(
             additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 2048}
         )
@@ -86,6 +99,7 @@ class TestConfigureKvEventBlockSize:
 
     @pytest.mark.asyncio
     async def test_uses_env_override(self, monkeypatch):
+        """DYN_VLLM_KV_EVENT_BLOCK_SIZE skips engine metadata fetch entirely."""
         monkeypatch.setenv("DYN_VLLM_KV_EVENT_BLOCK_SIZE", "4096")
         vllm_config = _make_vllm_config()
         engine = _make_engine(
@@ -100,6 +114,7 @@ class TestConfigureKvEventBlockSize:
 
     @pytest.mark.asyncio
     async def test_raises_when_exact_match_required_and_metadata_unavailable(self):
+        """require_exact_match=True raises RuntimeError when engine call fails."""
         vllm_config = _make_vllm_config()
         engine = _make_engine(side_effect=AttributeError("missing method"))
 
@@ -118,6 +133,7 @@ class TestConfigureKvEventBlockSize:
         self,
         group_metadata,
     ):
+        """require_exact_match=True raises RuntimeError when no main-attention group is found."""
         vllm_config = _make_vllm_config()
         engine = _make_engine(return_value=group_metadata)
 
@@ -130,6 +146,7 @@ class TestConfigureKvEventBlockSize:
 
     @pytest.mark.asyncio
     async def test_warns_and_falls_back_when_exact_match_not_required(self, caplog):
+        """Without require_exact_match, a failed metadata call logs a warning and falls back."""
         vllm_config = _make_vllm_config()
         engine = _make_engine(side_effect=AttributeError("missing method"))
 
