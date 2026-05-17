@@ -333,9 +333,7 @@ impl KvPushRouter {
                 let total_blocks = routing_token_ids
                     .len()
                     .div_ceil(self.chooser.block_size() as usize);
-                // NOTE: tests/mm_router/test_vllm_mm_router_e2e.py parses this log line.
-                // Keep the "[ROUTING] ... with X/Y blocks overlap" shape stable unless
-                // router tests are updated together.
+                // tests/utils/router_logs.py parses the structured fields on this event.
                 tracing::debug!(
                     request_id = %context_id,
                     worker_id = best_worker.worker_id,

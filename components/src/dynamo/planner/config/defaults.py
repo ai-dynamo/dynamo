@@ -54,6 +54,15 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     # that rotate, use a token_file knob instead (separate config field
     # planned as follow-up).
     metric_pulling_prometheus_token = os.environ.get("PROMETHEUS_TOKEN")
+    # Verify the upstream Prometheus TLS certificate. Default False preserves
+    # the previous PrometheusConnect(disable_ssl=True) behavior so existing
+    # deployments are unaffected. Set to True (or env PROMETHEUS_SSL_VERIFY=1)
+    # for hardened monitoring stacks where you want the request to fail
+    # closed on a bad cert. Pair with PROMETHEUS_CA_BUNDLE if the upstream
+    # uses a private CA.
+    metric_pulling_prometheus_ssl_verify = os.environ.get(
+        "PROMETHEUS_SSL_VERIFY", "false"
+    ).lower() in ("1", "true", "yes")
     profile_results_dir = "profiling_results"
 
     isl = 3000  # in number of tokens
