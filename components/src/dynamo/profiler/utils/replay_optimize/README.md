@@ -24,14 +24,15 @@ configurations.
 
 The public API takes a single [`ReplayOptimizeSpec`](specs.py) composed of:
 
-- `EngineSpec` — model, backend, engine args (prefill + decode for disagg; single `baseEngineArgs`
-  for agg)
+- `EngineSpec` — model, backend, JSON-like engine-arg inputs (prefill + decode for disagg; single
+  `baseEngineArgs` for agg)
 - `HardwareSpec` — GPU SKU + total GPU budget
 - `WorkloadSpec` — synthetic workload knobs (isl/osl/concurrency/...) **or** a trace source
   (`traceFile`/`arrivalSpeedupRatio`), discriminated by whether `traceFile` is set
 - `SLASpec` — latency bounds (`ttft`, `itl`, `e2eLatency`, plus p95 variants); each is independent
   and optional
-- `RouterSpec` — router mode, overlap-score-credit sweep, prefill-load-scale sweep, KV-router base config
+- `RouterSpec` — router mode, overlap-score-credit sweep, prefill-load-scale sweep, KV-router base
+  config input
 - `objective` — `ReplayObjective.THROUGHPUT` (default), `MEAN_TTFT`, or `MEAN_E2E_LATENCY`
 - `maxParallelEvals` — how many replay evaluations to run concurrently
 
@@ -128,9 +129,11 @@ matter:
 The base engine args stay conservative:
 
 - `block_size=512`
-- `num_gpu_blocks=20000`
 - `enable_prefix_caching=True`
 - explicit `worker_type` for prefill vs decode
+
+It intentionally omits `num_gpu_blocks`; AIC-backed replay estimates capacity
+for each candidate TP shape unless a base input explicitly pins it.
 
 This setup does not force scheduler-specific bottlenecks such as:
 
