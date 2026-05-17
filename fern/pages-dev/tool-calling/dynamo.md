@@ -153,3 +153,10 @@ OpenAI-compatible `tool_calls` entries on the response:
   ...
 }
 ```
+
+<Tip>
+If a tool call comes back wrong, add `"logprobs": true` to a single repro
+request and share the response. See
+[Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
+include when reporting an issue.
+</Tip>
