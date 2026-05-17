@@ -108,8 +108,8 @@ Then send one request:
 ```
 
 The client base64-encodes `--text` into an `input_audio_buffer.append` event,
-collects echoed `response.output_audio.delta` events, decodes them, and prints
-the original text.
+prints streamed text deltas as they arrive, and decodes echoed
+`response.output_audio.delta` events incrementally for the echo backend.
 
 To exercise the Pipecat ASR backend, send a 16-bit mono PCM WAV file. The
 backend defaults to 16 kHz input and does not resample:
