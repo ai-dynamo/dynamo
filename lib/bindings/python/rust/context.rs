@@ -97,7 +97,9 @@ impl ContextMetadata {
         match guard.remove(key) {
             Some(value) => Ok(Some(value)),
             None if default.is_some() => Ok(default),
-            None => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.to_string())),
+            None => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.to_string(),
+            )),
         }
     }
 
