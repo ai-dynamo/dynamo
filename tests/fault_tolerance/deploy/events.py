@@ -400,6 +400,57 @@ class Wait(Event):
 
 
 @dataclass
+class SetBusyThreshold(Event):
+    """POST /busy_threshold to the Frontend service. Affects only the named
+    model. Subsequent requests will receive 503 once *all* workers for the
+    model exceed the thresholds."""
+
+    model_name: str
+    active_decode_blocks_threshold: float = 0.85
+    active_prefill_tokens_threshold_frac: float = 0.85
+    name: str = ""
+    results: dict[str, Any] | None = field(default=None, init=False)
+
+    async def execute(self, ctx) -> None:
+        import json
+
+        pods = (await asyncio.to_thread(ctx.deployment.get_pods, ["Frontend"])).get(
+            "Frontend"
+        ) or []
+        if not pods:
+            raise RuntimeError("SetBusyThreshold: no Frontend pods")
+        fe = pods[0]
+        body = {
+            "model": self.model_name,
+            "active_decode_blocks_threshold": self.active_decode_blocks_threshold,
+            "active_prefill_tokens_threshold_frac": self.active_prefill_tokens_threshold_frac,
+        }
+        pf = await asyncio.to_thread(ctx.deployment.port_forward, fe, 8000)
+        if pf is None or pf.local_port == 0:
+            raise RuntimeError(
+                f"SetBusyThreshold: port-forward to {fe.name}:8000 failed"
+            )
+        url = f"http://127.0.0.1:{pf.local_port}/busy_threshold"
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(url, json=body, timeout=30) as r:
+                txt = await r.text()
+                if r.status != 200:
+                    raise RuntimeError(
+                        f"SetBusyThreshold: POST returned {r.status}: {txt}"
+                    )
+                ctx.logger.info(f"SetBusyThreshold: {self.model_name} -> {txt}")
+                self.results = json.loads(txt)
+
+    @property
+    def description(self) -> str:
+        return (
+            f"SetBusyThreshold(model={self.model_name}, "
+            f"decode_frac={self.active_decode_blocks_threshold}, "
+            f"prefill_frac={self.active_prefill_tokens_threshold_frac})"
+        )
+
+
+@dataclass
 class DeletePod(Event):
     """Delete pods for specified services."""
 
