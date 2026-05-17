@@ -20,9 +20,19 @@ import pytest
 from tests.fault_tolerance.deploy.scenarios import scenarios
 
 
-@pytest.fixture(autouse=True)
-def _route_outputs_to_repo(monkeypatch):
+def pytest_configure(config):
     """Route this dir's tests' outputs to ``<cwd>/test_outputs/<test>/``.
+
+    Implemented as a ``pytest_configure`` hook (not an autouse fixture)
+    so the env var is set BEFORE any fixture runs — in particular before
+    the root ``tests/conftest.py``'s autouse ``logger`` fixture opens
+    its ``test.log.txt`` FileHandler. With a same-stage fixture, the
+    root fixture fires first, sees ``DYN_TEST_OUTPUT_PATH`` unset, and
+    points the FileHandler at the default ``/tmp/dynamo_tests/`` —
+    while everything inside the test body (scenario log_dir, reports)
+    correctly resolves under ``test_outputs/`` because the env var is
+    set by then. Net effect of the old fixture: ``test.log.txt``
+    ends up in a different directory from the rest of the run.
 
     The shared ``resolve_test_output_path`` defaults to
     ``/tmp/dynamo_tests/`` to keep outputs out of the git tree, which is
@@ -33,15 +43,172 @@ def _route_outputs_to_repo(monkeypatch):
     and k8s tests get one host-visible per-test directory holding load,
     services, pod yaml, test.log.txt, and the report together.
 
-    The user-set ``DYN_TEST_OUTPUT_PATH`` always wins (we use
-    ``setdefault`` semantics via the ``not in`` guard).
+    The user-set ``DYN_TEST_OUTPUT_PATH`` always wins.
     """
     if "DYN_TEST_OUTPUT_PATH" not in os.environ:
-        monkeypatch.setenv(
-            "DYN_TEST_OUTPUT_PATH",
-            os.path.join(os.getcwd(), "test_outputs"),
-        )
+        os.environ["DYN_TEST_OUTPUT_PATH"] = os.path.join(os.getcwd(), "test_outputs")
+
+
+@pytest.fixture(autouse=True)
+def _refresh_kubeconfig_if_requested():
+    """Refresh the in-container kubeconfig before each test if requested.
+
+    Gated on ``DYN_TEST_REFRESH_KUBECONFIG`` for two reasons:
+      * Most environments don't need it (k3s local kubeconfigs don't
+        rotate; gcloud / Nebius creds use a different model).
+      * Only AWS-dev via Teleport hands out short-lived (≤7h) certs that
+        a multi-hour parametrized sweep can outrun mid-run.
+
+    Set ``DYN_TEST_REFRESH_KUBECONFIG=/path/to/script`` to run that
+    script before every test. The script is expected to refresh
+    ``/root/.kube/aws-dev-stripped`` (or whatever kubeconfig the dev
+    container is using) in-place — see
+    ``~/dynamo-dev/scripts/refresh-aws-kubeconfig.sh`` for the AWS-dev
+    case. Failure is logged but does not block the test (so a
+    no-network probe doesn't hard-fail the suite).
+    """
+    script = os.environ.get("DYN_TEST_REFRESH_KUBECONFIG")
+    if script:
+        import logging
+        import subprocess
+
+        logger = logging.getLogger(__name__)
+        try:
+            r = subprocess.run([script], capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                logger.warning(
+                    f"DYN_TEST_REFRESH_KUBECONFIG script {script!r} failed "
+                    f"(rc={r.returncode}): {r.stderr.strip()[:500]}"
+                )
+            else:
+                logger.info(
+                    f"kubeconfig refreshed via {script}: "
+                    f"{r.stdout.strip().splitlines()[-1] if r.stdout.strip() else 'ok'}"
+                )
+        except Exception as e:
+            logger.warning(f"DYN_TEST_REFRESH_KUBECONFIG hook failed: {e}")
     yield
+
+
+@pytest.fixture
+def fault_pod(request):
+    """Resolve the pod-selection for fault-injection tests.
+
+    Source order: ``--fault-pod`` CLI flag → ``DYN_TEST_FAULT_POD`` env →
+    default ``"0"``. Returns the raw string; tests interpret it via
+    ``_parse_index_env`` (or the equivalent) so ``"all"``, ``"random"``,
+    and a specific integer all work.
+    """
+    cli = request.config.getoption("--fault-pod")
+    if cli is not None:
+        return cli
+    return os.environ.get("DYN_TEST_FAULT_POD", "0")
+
+
+@pytest.fixture
+def fault_rank(request):
+    """Resolve the rank-selection for fault-injection tests. See ``fault_pod``."""
+    cli = request.config.getoption("--fault-rank")
+    if cli is not None:
+        return cli
+    return os.environ.get("DYN_TEST_FAULT_RANK", "0")
+
+
+def _parse_concurrency_list(value):
+    """Parse a ``--fault-concurrency`` value (CSV of ints) → list[int]."""
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    out = [int(p) for p in parts]
+    if not out:
+        raise pytest.UsageError("--fault-concurrency cannot be empty")
+    if any(n < 1 for n in out):
+        raise pytest.UsageError(f"--fault-concurrency values must be >= 1, got {out}")
+    return out
+
+
+@pytest.fixture
+def fault_concurrency(request):
+    """Single concurrency value for a fault-injection scenario run.
+
+    If ``--fault-concurrency=N1,N2,...`` is passed, tests that consume
+    this fixture are auto-parametrized one-per-value via the
+    ``pytest_generate_tests`` hook below (each parametrization gets its
+    own ``test_outputs/<test>[N]/`` directory). The fixture itself
+    just returns the int that pytest dispatched for this run.
+    """
+    return (
+        request.param
+        if hasattr(request, "param")
+        else _resolve_fault_concurrency_default(request.config)
+    )
+
+
+def _resolve_fault_concurrency_default(config):
+    cli = config.getoption("--fault-concurrency")
+    raw = cli if cli is not None else os.environ.get("DYN_TEST_FAULT_CONCURRENCY", "18")
+    return _parse_concurrency_list(raw)[0]
+
+
+def _resolve_float_opt(config, cli_name: str, env_name: str, default: float | None):
+    """CLI > env > default. Returns float or None."""
+    cli = config.getoption(cli_name)
+    if cli is not None:
+        return float(cli)
+    env = os.environ.get(env_name)
+    if env is not None and env.strip():
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    return default
+
+
+@pytest.fixture
+def request_timeout_seconds(request):
+    """Per-request aiperf timeout, in seconds. CLI > env > 300s default."""
+    return _resolve_float_opt(
+        request.config,
+        "--request-timeout-seconds",
+        "DYN_TEST_REQUEST_TIMEOUT_SECONDS",
+        300.0,
+    )
+
+
+@pytest.fixture
+def goodput_slos(request):
+    """Resolved list of aiperf --goodput SLO strings, or None.
+
+    Builds from (CLI > env > none) for each of:
+      - request_latency:<ms>          via --goodput-request-latency-ms
+      - time_to_first_token:<ms>      via --goodput-ttft-ms
+      - inter_token_latency:<ms>      via --goodput-itl-ms
+    Returns None when no SLOs are set (so aiperf doesn't compute goodput).
+    """
+    slos = []
+    rl = _resolve_float_opt(
+        request.config,
+        "--goodput-request-latency-ms",
+        "DYN_TEST_GOODPUT_REQUEST_LATENCY_MS",
+        None,
+    )
+    if rl is not None:
+        slos.append(f"request_latency:{rl}")
+    ttft = _resolve_float_opt(
+        request.config,
+        "--goodput-ttft-ms",
+        "DYN_TEST_GOODPUT_TTFT_MS",
+        None,
+    )
+    if ttft is not None:
+        slos.append(f"time_to_first_token:{ttft}")
+    itl = _resolve_float_opt(
+        request.config,
+        "--goodput-itl-ms",
+        "DYN_TEST_GOODPUT_ITL_MS",
+        None,
+    )
+    if itl is not None:
+        slos.append(f"inter_token_latency:{itl}")
+    return slos or None
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
@@ -80,12 +247,24 @@ def pytest_addoption(parser):
         "--log-pvc",
         type=str,
         default=None,
-        help="Reuse an existing RWX PVC for log collection instead of "
-        "creating a fresh one. Skips both creation and cleanup. Useful "
-        "on clusters where PVC provisioning is slow (e.g. AWS FSx "
-        "takes ~7 min). The PVC must already exist in the test "
-        "namespace and be RWX. Logs accumulate across runs — clean "
-        "manually if needed.",
+        help="Reuse a named RWX PVC for log collection across multiple "
+        "tests / DGDs. If the PVC does not exist it is created on first "
+        "use; once created the framework never deletes it. Each test "
+        "writes to a unique sub-path inside the PVC, which is wiped "
+        "in-place after a successful extract. Useful on clusters where "
+        "PVC provisioning is slow (e.g. AWS FSx ≈ 7 min). Without this "
+        "flag the framework creates a fresh per-test PVC and deletes "
+        "it at teardown (current default behaviour).",
+    )
+    parser.addoption(
+        "--recreate-log-pvc",
+        action="store_true",
+        default=False,
+        help="When --log-pvc is set, delete the existing PVC first and "
+        "create a fresh one. Use this when the standing PVC is stuck "
+        "in Terminating, has accumulated other tests' data you no "
+        "longer want to keep, or you want to change its storage "
+        "class. Requires --log-pvc.",
     )
     parser.addoption(
         "--model-pvc",
@@ -116,6 +295,63 @@ def pytest_addoption(parser):
         help="Restart NATS and etcd before each test. "
         "Default is to skip restart (faster iteration).",
     )
+    parser.addoption(
+        "--fault-pod",
+        type=str,
+        default=None,
+        help="Target pod selection for fault-injection scenarios. "
+        "Accepts an integer index (e.g. '0'), 'random', or 'all'. "
+        "Overrides the DYN_TEST_FAULT_POD env var; default is '0' "
+        "(pod-0 of the targeted service).",
+    )
+    parser.addoption(
+        "--fault-rank",
+        type=str,
+        default=None,
+        help="Target rank/process selection within each pod for rank-level "
+        "fault-injection scenarios. Same grammar as --fault-pod: integer, "
+        "'random', or 'all'. Overrides DYN_TEST_FAULT_RANK; default is '0'.",
+    )
+    parser.addoption(
+        "--fault-concurrency",
+        type=str,
+        default=None,
+        help="Sustained-load concurrency for fault-injection scenarios. "
+        "Accepts a single integer (e.g. '4096') or a comma-separated list "
+        "('18,256,4096') for chained runs of the same scenario at "
+        "different load levels. Overrides DYN_TEST_FAULT_CONCURRENCY; "
+        "default is '18' (near-saturation on the N=3 prod-mirror DGD).",
+    )
+    parser.addoption(
+        "--request-timeout-seconds",
+        type=float,
+        default=None,
+        help="Per-request timeout passed to aiperf (--request-timeout-seconds). "
+        "Requests exceeding this are cancelled client-side and counted in "
+        "error_request_count. Overrides DYN_TEST_REQUEST_TIMEOUT_SECONDS.",
+    )
+    parser.addoption(
+        "--goodput-ttft-ms",
+        type=float,
+        default=None,
+        help="TTFT goodput SLO in ms (--goodput time_to_first_token:<ms>). "
+        "Requests are counted as 'good' only if TTFT ≤ this AND every other "
+        "configured goodput SLO holds. Overrides DYN_TEST_GOODPUT_TTFT_MS.",
+    )
+    parser.addoption(
+        "--goodput-itl-ms",
+        type=float,
+        default=None,
+        help="Inter-token latency goodput SLO in ms (--goodput "
+        "inter_token_latency:<ms>). Overrides DYN_TEST_GOODPUT_ITL_MS.",
+    )
+    parser.addoption(
+        "--goodput-request-latency-ms",
+        type=float,
+        default=None,
+        help="End-to-end request_latency goodput SLO in ms (--goodput "
+        "request_latency:<ms>). Overrides DYN_TEST_GOODPUT_REQUEST_LATENCY_MS.",
+    )
 
 
 def pytest_generate_tests(metafunc):
@@ -141,6 +377,19 @@ def pytest_generate_tests(metafunc):
             ids.append(scenario_name)
 
         metafunc.parametrize("scenario_name", argvalues, ids=ids)
+
+    # Expand --fault-concurrency=N1,N2,... into one parametrization per
+    # value for any test that asks for the ``fault_concurrency`` fixture.
+    # Single-value (default) still produces one test invocation as
+    # ``test[18]``; multi-value chains as ``test[18]/[256]/[4096]`` etc.
+    if "fault_concurrency" in metafunc.fixturenames:
+        raw = metafunc.config.getoption("--fault-concurrency")
+        if raw is None:
+            raw = os.environ.get("DYN_TEST_FAULT_CONCURRENCY", "18")
+        values = _parse_concurrency_list(raw)
+        metafunc.parametrize(
+            "fault_concurrency", values, indirect=True, ids=[str(n) for n in values]
+        )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -223,6 +472,12 @@ def log_pvc(request):
 
 
 @pytest.fixture
+def recreate_log_pvc(request):
+    """Drop + recreate the --log-pvc PVC before this run."""
+    return request.config.getoption("--recreate-log-pvc")
+
+
+@pytest.fixture
 def model_pvc(request):
     """Existing RWX PVC name to reuse as the HF model cache (mounted on workers)."""
     return request.config.getoption("--model-pvc")
@@ -241,6 +496,7 @@ def runtime_env(
     skip_service_restart,
     storage_class,
     log_pvc,
+    recreate_log_pvc,
     model_pvc,
     prefetch_model,
 ):
@@ -261,6 +517,7 @@ def runtime_env(
         skip_service_restart=skip_service_restart,
         storage_class=storage_class,
         log_pvc=log_pvc,
+        recreate_log_pvc=recreate_log_pvc,
         model_pvc=model_pvc,
         prefetch_model=prefetch_model,
     )

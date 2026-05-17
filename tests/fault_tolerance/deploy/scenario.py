@@ -48,6 +48,7 @@ class RuntimeEnv:
     skip_service_restart: bool = True
     storage_class: Optional[str] = None
     log_pvc: Optional[str] = None
+    recreate_log_pvc: bool = False
     model_pvc: Optional[str] = None
     prefetch_model: bool = False
 
@@ -74,6 +75,19 @@ class ScenarioContext:
     # context exits so reports can still read them (they run after the
     # deployment reference has been cleared).
     startup_seconds: Optional[float] = None
+    # Per-pod restart count + last terminated reason, snapshotted just
+    # before deployment teardown. Checks that need to inspect kubelet
+    # restart state (e.g. RestartCountIncreased) read from here because
+    # ctx.deployment is None at validate() time.
+    # Shape: {service_name: {pod_name: {"restartCount": int, "lastReason": str|None}}}
+    pod_restart_state: dict = field(default_factory=dict)
+    # Per-service catted pod logs, snapshotted just before deployment
+    # teardown. Checks that call ``collect_service_logs()`` from
+    # ``validate()`` (WorkerPanics, ServiceLogPatternRate,
+    # ServiceLogContains, ServiceLogNotContains, EngineDeathDetected)
+    # read from here when ``ctx.deployment is None``.
+    # Shape: {service_name: str}  (one big concatenated string per service)
+    service_logs: dict = field(default_factory=dict)
 
 
 # =============================================================================
@@ -95,6 +109,7 @@ async def run_scenario(
     skip_service_restart: bool = True,
     storage_class: str | None = None,
     log_pvc: str | None = None,
+    recreate_log_pvc: bool = False,
     model_pvc: str | None = None,
     prefetch_model: bool = False,
     reports: list[Report] | None = None,
@@ -133,6 +148,7 @@ async def run_scenario(
         skip_service_restart = runtime_env.skip_service_restart
         storage_class = runtime_env.storage_class
         log_pvc = runtime_env.log_pvc
+        recreate_log_pvc = runtime_env.recreate_log_pvc
         model_pvc = runtime_env.model_pvc
         prefetch_model = runtime_env.prefetch_model
     if namespace is None:
@@ -178,9 +194,12 @@ async def run_scenario(
     # Enable logging
     deployment_spec.set_logging(True, "info")
 
-    # Enable PVC-based log collection. If --log-pvc was passed, use
-    # that name (the framework will skip create + delete, just install
-    # the wrapper ConfigMap and verify the PVC is bound).
+    # Enable PVC-based log collection. The framework now always reuses a
+    # single canonical log PVC per DGD (`<dgd-name>-logs`) — created once
+    # on first run, kept bound across runs, contents cleared in-place
+    # after each extraction. The `--log-pvc` flag is retained for
+    # back-compat but no longer changes behaviour beyond overriding the
+    # PVC name.
     log_collection_kwargs = {
         "pvc_size": "500Mi",
         "container_log_dir": "/tmp/service_logs",
@@ -216,6 +235,7 @@ async def run_scenario(
         deployment_spec=deployment_spec,
         skip_service_restart=skip_service_restart,
         reuse_log_pvc=bool(log_pvc),
+        recreate_log_pvc=bool(log_pvc) and bool(recreate_log_pvc),
         model_pvc=model_pvc if prefetch_model else None,
     ) as deployment:
         ctx.deployment = deployment
@@ -281,6 +301,45 @@ async def run_scenario(
     # Cache deployment-level data on ctx before clearing the reference,
     # so reports (which run after __aexit__) can still see it.
     ctx.startup_seconds = getattr(ctx.deployment, "startup_seconds", None)
+
+    # Snapshot per-pod restart counts so post-teardown checks (e.g.
+    # RestartCountIncreased) can validate without a live deployment.
+    try:
+        services_seen = set()
+        for ev in events:
+            for attr in ("services", "service"):
+                v = getattr(ev, attr, None)
+                if isinstance(v, str):
+                    services_seen.add(v)
+                elif isinstance(v, list):
+                    services_seen.update(s for s in v if isinstance(s, str))
+        for chk in checks:
+            v = getattr(chk, "services", None)
+            if isinstance(v, list):
+                services_seen.update(s for s in v if isinstance(s, str))
+        if services_seen:
+            pods_by_svc = ctx.deployment.get_pods(list(services_seen))
+            for svc, pods in pods_by_svc.items():
+                bucket = ctx.pod_restart_state.setdefault(svc, {})
+                for pod in pods:
+                    statuses = (pod.raw.get("status", {}) or {}).get(
+                        "containerStatuses"
+                    ) or []
+                    if not statuses:
+                        continue
+                    rc = int(statuses[0].get("restartCount", 0))
+                    reason = (
+                        (statuses[0].get("lastState") or {}).get("terminated") or {}
+                    ).get("reason")
+                    bucket[pod.name] = {"restartCount": rc, "lastReason": reason}
+    except Exception as e:
+        logger.warning(f"Could not snapshot pod restart state: {e}")
+
+    # Per-service catted pod logs are NOT snapshotted in-memory pre-teardown:
+    # ManagedDeployment doesn't expose a collect_service_logs() helper.
+    # Instead the deployment's PVC extractor writes per-pod log files
+    # to <log_dir>/<service>/<pod>_<ts>.log during teardown, and
+    # _get_service_logs(ctx) in checks.py reads those files at check time.
 
     # Deployment context has exited - cleanup completed
     ctx.deployment = None  # Mark that deployment is no longer active
