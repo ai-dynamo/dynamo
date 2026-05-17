@@ -22,8 +22,10 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     completion_payload,
     completion_payload_default,
+    kv_events_metrics_payload,
     metric_payload_default,
     multimodal_payload_default,
+    router_selection_chat_payload_default,
 )
 from tests.utils.payloads import ImageGenerationPayload, VideoGenerationPayload
 
@@ -93,6 +95,7 @@ trtllm_configs = {
             pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(300),
             pytest.mark.pre_merge,
+            pytest.mark.unified,
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -203,16 +206,10 @@ trtllm_configs = {
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            chat_payload_default(
-                expected_log=[
-                    r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                ]
-            )
+            router_selection_chat_payload_default(),
+            kv_events_metrics_payload(),
         ],
-        env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",

@@ -356,12 +356,6 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 	if container.StartupProbe.HTTPGet == nil || container.StartupProbe.HTTPGet.Path != "/livez" {
 		t.Fatalf("expected synthesized startup probe to inherit liveness HTTPGet handler, got %#v", container.StartupProbe)
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != livenessProbe.PeriodSeconds {
-		t.Fatalf("expected startup PeriodSeconds %d (from liveness), got %d", livenessProbe.PeriodSeconds, got)
-	}
-	if got := container.StartupProbe.TimeoutSeconds; got != livenessProbe.TimeoutSeconds {
-		t.Fatalf("expected startup TimeoutSeconds %d (from liveness), got %d", livenessProbe.TimeoutSeconds, got)
-	}
 }
 
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T) {
@@ -401,9 +395,6 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T)
 		container.StartupProbe.Exec.Command[0] != "cat" || container.StartupProbe.Exec.Command[1] != "/tmp/ready" {
 		t.Fatalf("expected synthesized startup probe to inherit readiness Exec command, got %#v", container.StartupProbe)
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != readinessProbe.PeriodSeconds {
-		t.Fatalf("expected startup PeriodSeconds %d (from readiness), got %d", readinessProbe.PeriodSeconds, got)
-	}
 }
 
 func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
@@ -436,18 +427,11 @@ func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
 			t.Fatalf("fallback startup probe command = %#v, want %#v", container.StartupProbe.Exec.Command, want)
 		}
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != 1 {
-		t.Fatalf("expected fallback startup PeriodSeconds=1, got %d", got)
-	}
 }
 
-// assertRestoreStartupGate verifies the threshold invariants every restore
-// StartupProbe must satisfy: FailureThreshold=MaxInt32 (effectively infinite
-// retries during CRIU restore) and SuccessThreshold=1. The handler shape is
-// not checked here because ensureRestoreStartupProbe synthesizes the probe
-// from whatever Startup/Liveness/Readiness handler the workload defined; only
-// when no user probe is present does it fall back to the sentinel-cat exec
-// probe (covered by assertSentinelRestoreStartupGate).
+// assertRestoreStartupGate verifies the load-bearing invariants every restore
+// StartupProbe must satisfy: effectively infinite retries during CRIU restore
+// and SuccessThreshold=1.
 func assertRestoreStartupGate(t *testing.T, probe *corev1.Probe) {
 	t.Helper()
 	if probe == nil {

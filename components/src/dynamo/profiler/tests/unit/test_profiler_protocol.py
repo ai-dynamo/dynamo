@@ -48,7 +48,7 @@ def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="Qwen/Qwen3-30B-A3B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -73,7 +73,7 @@ def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="meta-llama/Llama-3-70B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -98,7 +98,7 @@ def test_build_dgd_config_multinode_parses_shell_joined_parallelism_args() -> No
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="meta-llama/Llama-3-70B",
-        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1",
         prefill_cli_args=["--max-running-requests", "1"],
         prefill_replicas=1,
         prefill_gpus=1,
@@ -468,7 +468,7 @@ def test_build_dgd_config_pvc_without_model_path_uses_hf_model_name(
     dgd_config = modifier.build_dgd_config(
         mode="agg",
         model_name=model_name,
-        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.0",
+        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.1",
         agg_cli_args=["--tp", "4"],
         agg_replicas=1,
         agg_gpus=4,
@@ -520,7 +520,7 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
     dgd_config = modifier.build_dgd_config(
         mode="agg",
         model_name=model_name,
-        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.0",
+        image=f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:1.1.1",
         agg_cli_args=["--tp", "4"],
         agg_replicas=1,
         agg_gpus=4,
@@ -541,3 +541,67 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
             f"Worker '{svc_name}' should use PVC model path '{model_path}'. "
             f"args={args}"
         )
+
+
+def test_build_dgd_config_pvc_without_model_path_sets_hf_home() -> None:
+    """When pvc_name is set but model_path doesn't point inside the PVC,
+    HF_HOME must be set to pvc_mount_path so HuggingFace finds cached weights."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    mount = "/opt/model-cache"
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-32B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--tp", "4"],
+        decode_replicas=1,
+        decode_gpus=4,
+        pvc_name="model-cache",
+        pvc_mount_path=mount,
+    )
+
+    for svc_name, svc in dgd_config["spec"]["services"].items():
+        eps = svc.get("extraPodSpec", {})
+        mc = eps.get("mainContainer", {})
+        env_list = mc.get("env", [])
+        hf_homes = [
+            e for e in env_list if isinstance(e, dict) and e.get("name") == "HF_HOME"
+        ]
+        assert (
+            len(hf_homes) == 1
+        ), f"Expected exactly one HF_HOME env on {svc_name}, got {len(hf_homes)}"
+        assert hf_homes[0]["value"] == mount, f"HF_HOME on {svc_name} should be {mount}"
+
+
+def test_build_dgd_config_pvc_with_model_path_no_hf_home() -> None:
+    """When pvc_name is set and model_path points inside the PVC,
+    HF_HOME should NOT be injected — model is loaded by explicit path."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    mount = "/opt/model-cache"
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-32B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.0",
+        prefill_cli_args=["--max-running-requests", "1"],
+        prefill_replicas=1,
+        prefill_gpus=1,
+        decode_cli_args=["--tp", "4"],
+        decode_replicas=1,
+        decode_gpus=4,
+        pvc_name="model-cache",
+        pvc_mount_path=mount,
+        model_path=f"{mount}/qwen3-32b",
+    )
+
+    for svc_name, svc in dgd_config["spec"]["services"].items():
+        eps = svc.get("extraPodSpec", {})
+        mc = eps.get("mainContainer", {})
+        env_list = mc.get("env", [])
+        hf_homes = [
+            e for e in env_list if isinstance(e, dict) and e.get("name") == "HF_HOME"
+        ]
+        assert (
+            len(hf_homes) == 0
+        ), f"HF_HOME should not be set on {svc_name} when model_path is a PVC subpath"

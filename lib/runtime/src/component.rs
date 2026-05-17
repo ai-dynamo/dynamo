@@ -78,6 +78,16 @@ pub enum TransportType {
     Tcp(String),
 }
 
+impl TransportType {
+    pub fn address(&self) -> &str {
+        match self {
+            TransportType::Nats(address)
+            | TransportType::Http(address)
+            | TransportType::Tcp(address) => address,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceType {

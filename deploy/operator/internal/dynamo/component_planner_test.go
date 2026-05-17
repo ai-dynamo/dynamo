@@ -82,7 +82,6 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					FailureThreshold: 720,
 				},
 				Env: []corev1.EnvVar{
-					{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
 					{Name: commonconsts.DynamoNamespaceEnvVar, Value: "dynamo-namespace"},
 					{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypePlanner},
 					{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "name"},

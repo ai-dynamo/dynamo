@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: deepseek_v3
+model_label: DeepSeek V3
 mode: batch
 cases:
   PARSER.batch.1:
@@ -12,7 +13,7 @@ cases:
       {"location": "NYC"}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -20,145 +21,36 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.2:
-    description: Multiple tool calls (parallel)
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-      ```json
-      {"location": "NYC"}
-      ```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
-      ```json
-      {"timezone": "EST"}
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - *id001
-    - name: get_time
-      parameters:
-        type: object
-        properties:
-          timezone:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: Hello, how can I help you today?
-  PARSER.batch.4:
-    description: Malformed JSON args (missing close brace)
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-      ```json
-      {"location": "NYC"
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-        ```json
-        {"location": "NYC"
-        ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-  PARSER.batch.5:
-    description: Missing calls_end / call_end markers
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-      ```json
-      {"location": "NYC"}
-      ```
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-        ```json
-        {"location": "NYC"}
-        ```
-  PARSER.batch.6:
-    description: Empty args (no-arg call)
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
-      ```json
-      {}
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - name: get_time
-      parameters:
-        type: object
-        properties: {}
-    expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.7:
-    description: Complex args (nested object + array)
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>process_data
-      ```json
-      {"items": [1, 2, 3], "config": {"nested": true}}
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - name: process_data
-      parameters:
-        type: object
-        properties:
-          items:
-            type: array
-          config:
-            type: object
-    expected:
-      calls:
-      - name: process_data
-        arguments:
-          items:
-          - 1
-          - 2
-          - 3
-          config:
-            nested: true
-      normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: |-
-      The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-      ```json
-      {"location": "New York"}
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: New York
-      normal_text: 'The following tool call retrieves weather information: '
+      dynamo: &id003
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.9:
     description: Empty input
     model_text: ''
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: ''
+      dynamo: &id004
+        calls: []
+        normal_text: ''
+      vllm: *id004
+      sglang: *id004
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: |-
@@ -170,13 +62,56 @@ cases:
       {"location": "LA"}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id005
+      sglang: *id005
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets grammar-level call separators embedded inside argument string values. deepseek_v3 frames each call with begin/end tokens; its <｜tool▁sep｜> token separates the function name from the JSON argument block, not calls from each other or values inside the argument JSON. Generic escaped/string-value coverage remains in PARSER.batch.7.b.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets grammar-level call separators embedded inside argument string values. deepseek_v3 frames each call with begin/end tokens; its <｜tool▁sep｜> token separates the function name from the JSON argument block, not calls from each other or values inside the argument JSON. Generic escaped/string-value coverage remains in PARSER.batch.7.b. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>unknown_tool
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.

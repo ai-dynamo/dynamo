@@ -28,6 +28,7 @@ async fn process_output_signal(
     };
 
     if state.mark_first_token_once() {
+        tracing::debug!(uuid = %output.uuid, "replay_diag: demux on_first_token start");
         match router.on_first_token(output.uuid).await {
             Ok(true) => stats.record_prefill_marked(),
             Ok(false) => {}
@@ -43,6 +44,7 @@ async fn process_output_signal(
         return;
     }
 
+    tracing::debug!(uuid = %output.uuid, "replay_diag: demux on_complete start");
     match router.on_complete(output.uuid).await {
         Ok(true) => stats.record_freed(),
         Ok(false) => {}

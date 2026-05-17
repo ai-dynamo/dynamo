@@ -133,9 +133,10 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 			},
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
-			Phase:              v1beta1.DGDRPhaseDeployed,
+			Phase:              v1beta1.DGDRPhaseProfiling,
 			ObservedGeneration: 2,
 			DGDName:            "hub-dgd",
+			ProfilingPhase:     v1beta1.ProfilingPhaseSweepingDecode,
 			ProfilingJobName:   "profiling-job-1",
 			ProfilingResults: &v1beta1.ProfilingResultsStatus{
 				SelectedConfig: &runtime.RawExtension{Raw: rawDGD},
@@ -217,18 +218,18 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	}
 
 	// EnableGPUDiscovery → annotation
-	if dst.Annotations[annDGDREnableGPUDisc] != "true" {
-		t.Errorf("annDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[annDGDREnableGPUDisc], "true")
+	if dst.Annotations[legacyAnnDGDREnableGPUDisc] != "true" {
+		t.Errorf("legacyAnnDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[legacyAnnDGDREnableGPUDisc], "true")
 	}
 
 	// OutputPVC → annotation
-	if dst.Annotations[annDGDROutputPVC] != "output-pvc" {
-		t.Errorf("annDGDROutputPVC annotation: got %q, want %q", dst.Annotations[annDGDROutputPVC], "output-pvc")
+	if dst.Annotations[legacyAnnDGDROutputPVC] != "output-pvc" {
+		t.Errorf("legacyAnnDGDROutputPVC annotation: got %q, want %q", dst.Annotations[legacyAnnDGDROutputPVC], "output-pvc")
 	}
 
 	// DeploymentOverrides → annotation
-	if dst.Annotations[annDGDRDeployOverrides] == "" {
-		t.Error("annDGDRDeployOverrides annotation is empty")
+	if dst.Annotations[legacyAnnDGDRDeployOverrides] == "" {
+		t.Error("legacyAnnDGDRDeployOverrides annotation is empty")
 	}
 }
 
@@ -255,13 +256,13 @@ func TestConvertTo_StatusFields(t *testing.T) {
 	}
 
 	// Backend → annotation
-	if dst.Annotations[annDGDRStatusBackend] != "vllm" {
-		t.Errorf("annDGDRStatusBackend annotation: got %q, want %q", dst.Annotations[annDGDRStatusBackend], "vllm")
+	if dst.Annotations[legacyAnnDGDRStatusBackend] != "vllm" {
+		t.Errorf("legacyAnnDGDRStatusBackend annotation: got %q, want %q", dst.Annotations[legacyAnnDGDRStatusBackend], "vllm")
 	}
 
 	// ProfilingResults → annotation
-	if dst.Annotations[annDGDRProfilingResults] != "configmap/profiling-cm" {
-		t.Errorf("annDGDRProfilingResults annotation: got %q, want %q", dst.Annotations[annDGDRProfilingResults], "configmap/profiling-cm")
+	if dst.Annotations[legacyAnnDGDRProfilingResults] != "configmap/profiling-cm" {
+		t.Errorf("legacyAnnDGDRProfilingResults annotation: got %q, want %q", dst.Annotations[legacyAnnDGDRProfilingResults], "configmap/profiling-cm")
 	}
 }
 
@@ -309,7 +310,7 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	if blob["extra_key"] != "preserved" {
 		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "preserved")
 	}
-	// Planner round-trip via applyPlannerFromBlob / mergePlannerIntoBlob
+	// Planner round-trip via profiling-config projection helpers.
 	plannerMap, _ := blob["planner"].(map[string]interface{})
 	if plannerMap == nil {
 		t.Fatal("planner key missing in restored JSON blob")
@@ -346,11 +347,7 @@ func TestHubRoundTrip(t *testing.T) {
 	}
 
 	// --- Status checks ---
-	// Phase is intentionally lossy: DGDRPhaseDeployed → Ready → Ready
-	if restored.Status.Phase != v1beta1.DGDRPhaseReady {
-		t.Errorf("Status.Phase: got %q, want %q (Deployed→Ready is lossy)", restored.Status.Phase, v1beta1.DGDRPhaseReady)
-	}
-	if diff := cmp.Diff(original.Status, restored.Status, cmpopts.IgnoreFields(v1beta1.DynamoGraphDeploymentRequestStatus{}, "Phase")); diff != "" {
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
 		t.Errorf("Status mismatch after round-trip (-want +got):\n%s", diff)
 	}
 	// GeneratedDeployment round-trip via ProfilingResults.SelectedConfig
@@ -370,6 +367,334 @@ func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("ConvertTo() expected error for invalid JSON, got nil")
 	}
+}
+
+func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
+	original := newV1alpha1DGDR()
+	hub, err := legacyDGDRConvertToHubForTest(original)
+	if err != nil {
+		t.Fatalf("legacy convert to hub: %v", err)
+	}
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	if diff := cmp.Diff(original.Spec, restored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
+		t.Fatalf("spec mismatch after legacy read (-want +got):\n%s", diff)
+	}
+	assertProfilingConfigBlobHas(t, restored.Spec.ProfilingConfig.Config, map[string]any{
+		"extra_key": "preserved",
+	})
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
+		t.Fatalf("status mismatch after legacy read (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDRWritesLegacyAnnotationsReadableByOldConverter(t *testing.T) {
+	original := newV1alpha1DGDR()
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := original.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	for _, key := range []string{
+		legacyAnnDGDREnableGPUDisc,
+		legacyAnnDGDRProfilingConfig,
+		legacyAnnDGDRConfigMapRef,
+		legacyAnnDGDROutputPVC,
+		legacyAnnDGDRDeployOverrides,
+		legacyAnnDGDRStatusBackend,
+		legacyAnnDGDRProfilingResults,
+		legacyAnnDGDRDeploymentStatus,
+	} {
+		if hub.Annotations[key] == "" {
+			t.Fatalf("legacy annotation %q was not written", key)
+		}
+	}
+
+	legacyRestored := legacyDGDRConvertFromHubForTest(hub)
+	if diff := cmp.Diff(original.Spec, legacyRestored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
+		t.Fatalf("legacy restored spec mismatch (-want +got):\n%s", diff)
+	}
+	assertProfilingConfigBlobHas(t, legacyRestored.Spec.ProfilingConfig.Config, map[string]any{
+		"extra_key": "preserved",
+	})
+	if diff := cmp.Diff(original.Status, legacyRestored.Status); diff != "" {
+		t.Fatalf("legacy restored status mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDGDRLegacyProfilingConfigDoesNotOverrideLiveHubFields(t *testing.T) {
+	legacyBlob, err := json.Marshal(map[string]any{
+		"sla": map[string]any{
+			"ttft": 100,
+			"itl":  10,
+			"isl":  200,
+			"osl":  20,
+		},
+		"deployment": map[string]any{
+			"modelCache": map[string]any{
+				"pvcName": "stale-pvc",
+			},
+		},
+		"planner":   map[string]any{"stale": true},
+		"extra_key": "keep",
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy blob: %v", err)
+	}
+	hub := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "edited",
+			Annotations: map[string]string{
+				legacyAnnDGDRProfilingConfig: string(legacyBlob),
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model: "model",
+		},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	if restored.Spec.SLA != nil {
+		t.Fatalf("stale legacy SLA restored into live hub spec: %#v", restored.Spec.SLA)
+	}
+	if restored.Spec.Workload != nil {
+		t.Fatalf("stale legacy workload restored into live hub spec: %#v", restored.Spec.Workload)
+	}
+	if restored.Spec.ModelCache != nil {
+		t.Fatalf("stale legacy model cache restored into live hub spec: %#v", restored.Spec.ModelCache)
+	}
+	if restored.Spec.Features != nil && restored.Spec.Features.Planner != nil {
+		t.Fatalf("stale legacy planner restored into live hub spec: %#v", restored.Spec.Features.Planner)
+	}
+	assertProfilingConfigBlobHas(t, spoke.Spec.ProfilingConfig.Config, map[string]any{
+		"extra_key": "keep",
+	})
+}
+
+func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
+	original := newV1beta1DGDR()
+	concurrency := float64(8)
+	requestRate := float64(2.5)
+	e2eLatency := float64(900)
+	totalGPUs := int32(8)
+	replicas := int32(3)
+	availableReplicas := int32(2)
+	original.Spec.Workload.Concurrency = &concurrency
+	original.Spec.Workload.RequestRate = &requestRate
+	original.Spec.SLA.E2ELatency = &e2eLatency
+	original.Spec.Hardware = &v1beta1.HardwareSpec{
+		GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
+		TotalGPUs: &totalGPUs,
+	}
+	original.Spec.SearchStrategy = v1beta1.SearchStrategyThorough
+	original.Status.Phase = v1beta1.DGDRPhaseDeployed
+	original.Status.ProfilingPhase = ""
+	original.Status.ProfilingJobName = ""
+	original.Status.DeploymentInfo = &v1beta1.DeploymentInfoStatus{
+		Replicas:          &replicas,
+		AvailableReplicas: &availableReplicas,
+	}
+	original.Status.ProfilingResults.Pareto = []v1beta1.ParetoConfig{
+		{Config: runtime.RawExtension{Raw: []byte(`{"candidate":"a"}`)}},
+	}
+
+	spoke := &DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertFrom(original); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	restored := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(restored); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	if diff := cmp.Diff(original.Spec, restored.Spec); diff != "" {
+		t.Fatalf("spec mismatch after sparse hub-only round-trip (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
+		t.Fatalf("status mismatch after sparse hub-only round-trip (-want +got):\n%s", diff)
+	}
+}
+
+func TestStripDGDRTypedProfilingConfig(t *testing.T) {
+	const (
+		customKey         = "custom"
+		deployKey         = "deployment"
+		islKey            = "isl"
+		itlKey            = "itl"
+		keepValue         = "keep"
+		modelCache        = "modelCache"
+		modelPathInPvcKey = "modelPathInPvc"
+		optimizationType  = "optimizationType"
+		oslKey            = "osl"
+		plannerKey        = "planner"
+		pvcMountPathKey   = "pvcMountPath"
+		pvcNameKey        = "pvcName"
+		slaKey            = "sla"
+		ttftKey           = "ttft"
+		unrelatedKey      = "unrelated"
+	)
+	tests := []struct {
+		name string
+		in   dgdrProfilingConfigBlob
+		want dgdrProfilingConfigBlob
+	}{
+		{
+			name: "strips projected leaves and keeps opaque siblings",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          float64(10),
+					itlKey:           float64(20),
+					optimizationType: string(v1beta1.OptimizationTypeLatency),
+					islKey:           float64(30),
+					oslKey:           float64(40),
+					customKey:        keepValue,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        "cache-pvc",
+						modelPathInPvcKey: "/models",
+						pvcMountPathKey:   "/cache",
+						customKey:         keepValue,
+					},
+					unrelatedKey: keepValue,
+				},
+				plannerKey: map[string]any{"enabled": true},
+				"top":      keepValue,
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					customKey: keepValue,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						customKey: keepValue,
+					},
+					unrelatedKey: keepValue,
+				},
+				"top": keepValue,
+			},
+		},
+		{
+			name: "preserves typed-looking values that projection skips",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          "not-a-number",
+					itlKey:           false,
+					optimizationType: "priority",
+					islKey:           "1024",
+					oslKey:           nil,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        float64(123),
+						modelPathInPvcKey: "",
+						pvcMountPathKey:   false,
+					},
+				},
+				plannerKey: []any{},
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey:          "not-a-number",
+					itlKey:           false,
+					optimizationType: "priority",
+					islKey:           "1024",
+					oslKey:           nil,
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey:        float64(123),
+						modelPathInPvcKey: "",
+						pvcMountPathKey:   false,
+					},
+				},
+				plannerKey: []any{},
+			},
+		},
+		{
+			name: "removes empty containers only when projected leaves were stripped",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{
+					ttftKey: float64(10),
+				},
+				deployKey: map[string]any{
+					modelCache: map[string]any{
+						pvcNameKey: "cache-pvc",
+					},
+				},
+				plannerKey: map[string]any{"enabled": true},
+			},
+			want: dgdrProfilingConfigBlob{},
+		},
+		{
+			name: "preserves explicit empty maps that were not projected",
+			in: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{},
+				deployKey: map[string]any{
+					modelCache: map[string]any{},
+				},
+				plannerKey: map[string]any{},
+			},
+			want: dgdrProfilingConfigBlob{
+				slaKey: map[string]any{},
+				deployKey: map[string]any{
+					modelCache: map[string]any{},
+				},
+				plannerKey: map[string]any{},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := mustDGDRJSON(t, tt.in)
+			got := stripDGDRTypedProfilingConfig(tt.in)
+
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("stripped config mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(string(before), string(mustDGDRJSON(t, tt.in))); diff != "" {
+				t.Fatalf("input was mutated (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func assertProfilingConfigBlobHas(t *testing.T, raw *apiextensionsv1.JSON, want map[string]any) {
+	t.Helper()
+	if raw == nil {
+		t.Fatal("profiling config is nil")
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw.Raw, &got); err != nil {
+		t.Fatalf("unmarshal profiling config: %v", err)
+	}
+	for key, wantValue := range want {
+		if diff := cmp.Diff(wantValue, got[key]); diff != "" {
+			t.Fatalf("profiling config %q mismatch (-want +got):\n%s", key, diff)
+		}
+	}
+}
+
+func mustDGDRJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return data
 }
 
 func TestRestoreDGDRDeploymentStatusValidatesRequestState(t *testing.T) {

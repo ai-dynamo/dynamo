@@ -4,8 +4,29 @@
 """Parser-mode parity tests — Method 2 of the cross-impl parity (parser) effort.
 
 For each fixture, run the same input through Dynamo's Rust parser (via PyO3)
-and the upstream Python parsers (vLLM + SGLang). Diff against the recorded
-expected output and against each other.
+and the upstream Python parsers (vLLM + SGLang). Each case's YAML carries an
+`expected:` block with ALL THREE impl keys (Variant A):
+
+    expected:
+      dynamo: &d_8_a                   # always present (oracle)
+        calls: [...]
+        normal_text: '...'
+      vllm: *d_8_a                     # anchor ref when engine matches dynamo
+      sglang:                          # concrete override when engine differs
+        calls: [...]
+        normal_text: '...'
+
+Per-impl spec is one of:
+  - `{calls, normal_text}` — concrete expected output. The test asserts the
+    impl produces this exact output (whether via anchor ref to dynamo or as
+    an inline divergent block, the test is the same).
+  - `{unavailable: <msg>}` — impl has no parser for this family; skip.
+  - `{error: <msg>}` — impl is expected to crash with this error string
+    (substring match).
+
+If the impl's actual output drifts away from the recorded spec, the assertion
+fails noisily — the YAML edit needed is obvious from the diff. There's no
+xfail/XPASS-strict bookkeeping because the spec IS the truth.
 
 Run:
     pytest tests/parity/parser/test_parity_parser.py -v
@@ -22,17 +43,20 @@ import yaml
 
 from tests.parity import common
 
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.core,
+]
 
 FIXTURES_ROOT = Path(__file__).parent / "fixtures"
-
 
 # Impl name → optional package whose absence is a legitimate skip. Anything
 # else that fails inside the wrapper module (e.g. a stale `from vllm.X import
 # Y` after vLLM renamed Y) is a real bug and must surface as a test ERROR,
 # not a green skip — so we use `pytest.importorskip` inline rather than a
 # blanket `try: import X except ImportError`.
-IMPL_NAMES: tuple[str, ...] = ("dynamo", "vllm", "sglang")
 _PACKAGE: dict[str, str] = {
     "dynamo": "dynamo._core",
     "vllm": "vllm",
@@ -40,234 +64,97 @@ _PACKAGE: dict[str, str] = {
 }
 
 
-# (impl, family, case_id) -> reason. Surfaced findings from running the harness;
-# each entry is a real behavioral divergence we've chosen to document rather
-# than fix. Promote to a tracked bug before removing.
-#
-# Pattern: vLLM and SGLang both truncate normal_text at the *end* of the
-# tool-call wrapper across all XML-style parsers (kimi_k2, qwen3_coder, glm47).
-# Only Dynamo preserves text that appears after the closing wrapper token.
-_TRAILING_NORMAL_TEXT_DROP = "drops trailing normal_text after tool-call wrapper end"
-_HARMONY_REQUIRES_ASSISTANT_PREFIX = (
-    "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' "
-    "envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
-)
-# PARSER.batch.4 (malformed JSON) and PARSER.batch.5 (missing end-token) are
-# impl-defined recovery contracts per PARSER_CASES.md. Each parser picks its
-# own behavior (drop, recover-best-effort, fall back to string args, surface
-# error). Cross-impl parity is not expected; we record divergences as a map
-# of "what each impl does" rather than asserting one truth.
-_RECOVERY_CONTRACT = "impl-defined recovery contract (see PARSER_CASES.md)"
+def _case_sort_key(case_id: str) -> tuple[int, str]:
+    """Sort key for case IDs that may carry a sub-letter.
 
-KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
-    # vLLM and SGLang both truncate normal_text at the *end* of the tool-call
-    # wrapper across all XML-style parsers. Only Dynamo preserves text after
-    # the closing wrapper token.
-    ("vllm", "kimi_k2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "qwen3_coder", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "glm47", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "kimi_k2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "qwen3_coder", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    # SGLang's GptOssDetector requires a strict '<|start|>assistant<|channel|>commentary'
-    # bot_token; bare '<|channel|>commentary' variants (PARSER.batch.1, .6, .13)
-    # are not detected at all.
-    ("sglang", "harmony", "PARSER.batch.1"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.6"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.8"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    # SGLang's GptOssDetector drops the analysis-channel preamble entirely;
-    # Dynamo surfaces it as normal_text.
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.7",
-    ): "drops analysis-channel content from normal_text",
-    # Inverse of the bare-envelope finding: when the input *does* have the
-    # assistant prefix and contains back-to-back commentary blocks, SGLang
-    # extracts both calls — Dynamo's harmony parser drops them and treats the
-    # raw input as normal_text. Dynamo bug class; see harmony_parser.rs comment
-    # block above test_parse_harmony_multiple_calls_recovers.
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.2",
-    ): "Dynamo drops back-to-back commentary blocks; SGLang extracts them",
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.10",
-    ): "Dynamo drops back-to-back commentary blocks; SGLang extracts them",
-    # Whitespace handling on text immediately preceding the bot_token:
-    # - SGLang on deepseek_v3_1: trims one trailing space; Dynamo keeps it
-    # - vLLM on minimax_m2: keeps trailing space; Dynamo trims it (opposite
-    #   direction from deepseek)
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.8",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.8",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "pythonic",
-        "PARSER.batch.8",
-    ): _TRAILING_NORMAL_TEXT_DROP,
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.5",
-    ): _RECOVERY_CONTRACT,
-    (
-        "vllm",
-        "deepseek_v3",
-        "PARSER.batch.4",
-    ): _RECOVERY_CONTRACT,
-    (
-        "vllm",
-        "deepseek_v3",
-        "PARSER.batch.5",
-    ): _RECOVERY_CONTRACT,
-    (
-        "vllm",
-        "gemma4",
-        "PARSER.batch.8",
-    ): _TRAILING_NORMAL_TEXT_DROP,
-    # vLLM's pythonic parser rejects the whole input when the bracket-call form
-    # is surrounded by interleaved text — calls=[], normal_text=raw input.
-    # Dynamo's pythonic parser extracts the call and surfaces the surrounding
-    # text in normal_text (matches the upstream Llama 4 / pythonic_detector
-    # behavior — vLLM is the outlier here).
-    (
-        "vllm",
-        "pythonic",
-        "PARSER.batch.8",
-    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
-    (
-        "vllm",
-        "minimax_m2",
-        "PARSER.batch.8",
-    ): "preserves trailing space; Dynamo trims it",
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.8",
-    ): "preserves trailing space; Dynamo trims it",
-    # PARSER.batch.4 (malformed) — impl-defined recovery contract.
-    ("vllm", "deepseek_v3_1", "PARSER.batch.4"): _RECOVERY_CONTRACT,
-    ("vllm", "minimax_m2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
-    ("sglang", "kimi_k2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
-    ("sglang", "harmony", "PARSER.batch.4"): _RECOVERY_CONTRACT,
-    # PARSER.batch.5 (missing end-token recovery) — impl-defined. Dynamo's
-    # PyO3 batch binding now uses `detect_and_parse_tool_call_with_recovery`
-    # so the registered `expected` reflects the recovered call; impls that
-    # still drop on the missing end-token diverge here.
-    # vllm/sglang qwen3_coder.batch.5 both recover to the same call as
-    # Dynamo and match the new expected — intentionally NOT registered.
-    ("vllm", "glm47", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("vllm", "minimax_m2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_1", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("sglang", "glm47", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("sglang", "minimax_m2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("sglang", "deepseek_v3_1", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("sglang", "harmony", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-}
+    `PARSER.batch.5`   → (5, "")
+    `PARSER.batch.5.d` → (5, "d")
+    `PARSER.batch.8.a` → (8, "a")
+    """
+    parts = case_id.split(".")
+    top = int(parts[2])
+    sub = parts[3] if len(parts) > 3 else ""
+    return (top, sub)
 
 
 def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
     """Yields (family, case_id, case_dict) for every case across all families.
 
-    Schema: <family>/PARSER.<mode>.yaml holds
-        {family: "...", mode: "batch", cases: {PARSER.batch.1: {...}, ...}}
-    Case keys are the full PARSER_CASES.md ID (e.g. `PARSER.batch.1`)
-    so they match KNOWN_DIVERGENCES keys and parametrize IDs directly.
+    Two file layouts coexist:
+      <family>/PARSER.<mode>.yaml       — legacy flat: holds 1, 2, ..., 10
+      <family>/PARSER.<mode>.<n>.yaml   — per-top-level-case: holds n.a, n.b, ...
+
+    Both schemas are
+        {family: "...", mode: "batch", cases: {PARSER.batch.<id>: {...}, ...}}
     """
     out = []
     for fp in sorted(FIXTURES_ROOT.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text())
         for case_id, case in doc["cases"].items():
             out.append((doc["family"], case_id, case))
-    out.sort(key=lambda t: (t[0], int(t[1].rsplit(".", 1)[1])))
+    out.sort(key=lambda t: (t[0], *_case_sort_key(t[1])))
     return out
 
 
 FIXTURES = _load_fixtures()
 
 
-def _marks_for(impl: str) -> list:
-    """Per-param marks. Only the impl marker (`vllm`/`sglang`) — used by CI
-    shards to filter via `-m vllm` / `-m sglang`. `dynamo` gets no marker so
-    it runs in every shard (it's the reference we compare against).
-
-    Known-divergence xfail handling is intentionally NOT a parametrize-time
-    mark — it lives inline in the test body (see `XPASS-strict` block) so a
-    parser/runtime crash on a known-divergence case still hits `pytest.fail`
-    hard instead of being swallowed by an outer `xfail` wrapper."""
-    if impl in ("vllm", "sglang"):
-        return [getattr(pytest.mark, impl)]
-    return []
+def _is_na_stub(fixture: dict[str, Any]) -> bool:
+    return set(fixture) == {"description", "reason"} and all(
+        isinstance(fixture[key], str) and fixture[key].strip()
+        for key in ("description", "reason")
+    )
 
 
-@pytest.mark.parametrize(
-    "family,case_id,fixture,impl_name",
-    [
-        pytest.param(
-            f,
-            c,
-            fx,
-            impl,
-            marks=_marks_for(impl),
-            id=f"{f}/{c}#{impl}",
-        )
-        for (f, c, fx) in FIXTURES
-        for impl in IMPL_NAMES
-    ],
-)
-def test_parity(
+def _run_parity_case(
     family: str,
     case_id: str,
     fixture: dict[str, Any],
     impl_name: str,
 ) -> None:
+    """Single-case parity assertion shared by all three entry points
+    (the all-impls `test_parity` plus the impl-specific
+    `test_parity_vllm` / `test_parity_sglang`)."""
     # Skip ONLY when the optional package itself is missing — wrapper-internal
     # ImportError (e.g. a stale upstream API ref after a vLLM/SGLang rename)
     # propagates as a real test ERROR rather than a silent green skip.
     pytest.importorskip(_PACKAGE[impl_name])
+    if "expected" not in fixture:
+        if not _is_na_stub(fixture):
+            pytest.fail(
+                f"{impl_name}/{family}/{case_id}: fixture is missing expected: "
+                "but is not an explicit n/a stub. n/a stubs must contain only "
+                "non-empty description: and reason: fields."
+            )
+        pytest.skip(
+            f"{impl_name}/{family}/{case_id}: n/a stub (no expected: block): "
+            f"{fixture['reason']}"
+        )
     parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
     got = parse_mod.parse(family, fixture["model_text"], fixture.get("tools"))
 
-    # Runtime / parser errors fail HARD. Wrappers prefix the env-shaped case
-    # ("impl has no parser registered for this family") with `UNAVAILABLE:`
-    # so we can still skip those cleanly. This check runs *before* the
-    # known-divergence xfail block below, so a crash on a known-divergence
-    # case is not masked.
+    spec = fixture["expected"][impl_name]
+
+    if "unavailable" in spec:
+        pytest.skip(f"{impl_name} unavailable for {family}: {spec['unavailable']}")
+
+    if "error" in spec:
+        if got.error and spec["error"] in got.error:
+            return  # PASS — engine emitted the recorded error as expected
+        pytest.fail(
+            f"{impl_name}/{family}/{case_id}: expected error {spec['error']!r}, "
+            f"got {got.error!r}"
+        )
+
     if got.error:
-        if got.error.startswith("UNAVAILABLE:"):
-            pytest.skip(f"{impl_name} unavailable for {family}: {got.error}")
         pytest.fail(f"{impl_name} crashed on {family}/{case_id}: {got.error}")
 
     expected = common.ParseResult(
-        calls=fixture["expected"]["calls"],
-        normal_text=fixture["expected"].get("normal_text"),
+        calls=spec["calls"],
+        normal_text=spec.get("normal_text"),
     )
     got_canonical = common.canonical(got.to_dict())
     expected_canonical = common.canonical(expected.to_dict())
-
-    # Known divergences: xfail the value-diff assertion only. If the values
-    # now match, surface that as a registry-staleness failure (XPASS-strict
-    # equivalent) instead of silently passing.
-    div = KNOWN_DIVERGENCES.get((impl_name, family, case_id))
-    if div is not None:
-        if got_canonical == expected_canonical:
-            pytest.fail(
-                f"XPASS-strict: known divergence ({impl_name},{family},{case_id}) "
-                f"now matches expected — remove from KNOWN_DIVERGENCES. "
-                f"Reason was: {div}"
-            )
-        pytest.xfail(f"known divergence: {div}")
-
     assert got_canonical == expected_canonical, (
         f"\nimpl:     {impl_name}\n"
         f"family:   {family}\n"
@@ -275,3 +162,48 @@ def test_parity(
         f"expected: {expected_canonical}\n"
         f"got:      {got_canonical}\n"
     )
+
+
+# Dynamo-only entry. No engine marker → runs in the default (dynamo-runtime)
+# CI lane. vLLM and SGLang have their own dedicated test functions below.
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "dynamo")
+
+
+# vLLM-only entry: function-level `vllm` marker lets the vllm-runtime CI
+# lane select this with `pytest -m vllm`. Each parametrized case targets
+# the same fixture set but only the vllm path; dynamo/sglang are not
+# exercised here.
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity_vllm(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "vllm")
+
+
+# SGLang-only entry (sibling of test_parity_vllm; same shape).
+@pytest.mark.sglang
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity_sglang(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "sglang")

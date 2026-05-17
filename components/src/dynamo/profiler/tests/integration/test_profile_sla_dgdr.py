@@ -161,6 +161,18 @@ class TestRapidSupported:
         assert "Planner" in dgd.get("spec", {}).get(
             "services", {}
         ), "Planner service should be added"
+        services = dgd.get("spec", {}).get("services", {})
+        worker_services = {
+            name: svc
+            for name, svc in services.items()
+            if svc.get("componentType") == "worker"
+        }
+        assert worker_services, "Planner DGD should include worker services"
+        for name, service in worker_services.items():
+            assert (
+                service.get("scalingAdapter", {}).get("enabled") is True
+            ), f"Planner worker {name} should enable DGDSA"
+        assert "scalingAdapter" not in services["Planner"]
 
 
 class TestRapidUnsupported:
@@ -340,13 +352,13 @@ def _save_dummy_npz(output_dir: str):
 _DECODE_SVC_NAMES = {
     "sglang": "decode",
     "vllm": "VllmDecodeWorker",
-    "trtllm": "TRTLLMDecodeWorker",
+    "trtllm": "decode",
 }
 
 
 def _make_thorough_patches(backend: str = "trtllm"):
     """Build mock-patches for thorough mode, parameterised by backend."""
-    svc_name = _DECODE_SVC_NAMES.get(backend, "TRTLLMDecodeWorker")
+    svc_name = _DECODE_SVC_NAMES.get(backend, "decode")
     return [
         patch(
             "dynamo.profiler.thorough.DynamoDeploymentClient",

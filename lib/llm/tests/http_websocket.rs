@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[path = "common/ports.rs"]
 mod ports;
-use ports::get_random_port;
+use ports::bind_random_port;
 
 /// Engine slot is process-global; ensure we install the echo mock at most once
 /// across all tests in this binary.
@@ -54,10 +54,10 @@ async fn wait_for_health(port: u16) {
 /// join-handle pair the caller cleans up at the end of the test.
 async fn spawn_test_service() -> (u16, CancellationToken, JoinHandle<Result<()>>) {
     ensure_echo_engine_installed();
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
     let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
+    let handle = service.spawn_with_listener(token.clone(), listener).await;
     wait_for_health(port).await;
     (port, token, handle)
 }
