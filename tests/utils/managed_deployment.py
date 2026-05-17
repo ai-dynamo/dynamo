@@ -241,9 +241,15 @@ class ServiceSpec:
             self._spec["envs"].append(env)
 
     # ----- Log collection -----
-    def enable_log_collection(self, log_dir: str, pvc_name: str):
+    def enable_log_collection(self, log_dir: str, pvc_name: str, run_id: str = ""):
         """Capture stdout+stderr to a per-pod log file on the PVC without
         parsing the user's command.
+
+        ``run_id`` is an optional sub-path prefix used in reuse-PVC mode
+        so multiple tests sharing the same PVC don't overwrite each
+        other's logs. When non-empty, the per-pod log directory becomes
+        ``<log_dir>/<run_id>/service_logs/<component>/`` instead of
+        ``<log_dir>/service_logs/<component>/``.
 
         Strategy: prepend a fixed wrapper at argv[0]. The user's original
         command + args are concatenated (raw, no shell parsing) into
@@ -278,7 +284,8 @@ class ServiceSpec:
         main_container["command"] = [self._WRAPPER_PATH]
         main_container["args"] = list(original_command) + list(original_args)
 
-        service_log_dir = f"{log_dir}/service_logs/{self._name.lower()}"
+        prefix = f"{run_id}/" if run_id else ""
+        service_log_dir = f"{log_dir}/{prefix}service_logs/{self._name.lower()}"
 
         # The log PVC is operator-managed: service-level volumeMounts
         # tells the operator to provision the corresponding volume on
@@ -742,15 +749,25 @@ class DeploymentSpec:
         else:
             target_services = [self[name] for name in (service_names or [])]
 
+        # Per-test "run id" — a unique sub-path inside the log PVC.
+        # In default mode (auto-named per-test PVC) this is redundant
+        # but harmless. In reuse mode (user-supplied PVC shared across
+        # tests / DGDs) it provides per-test isolation: each run writes
+        # to `<run_id>/aiperf/...` and `<run_id>/service_logs/<comp>/...`,
+        # so concurrent or sequential tests on the same PVC don't
+        # overwrite each other. Cleared in-place after extract.
+        timestamp = int(time.time())
+        rand_suffix = secrets.randbelow(9000) + 1000
+        run_id = f"{self.name}-{timestamp}-{rand_suffix}"
+
         if pvc_name is None:
-            timestamp = int(time.time())
-            rand_suffix = secrets.randbelow(9000) + 1000
             pvc_name = f"{self.name}-logs-{timestamp}-{rand_suffix}"
 
         self._log_collection_pvc_name = pvc_name
         self._log_collection_pvc_size = pvc_size
         self._log_collection_storage_class = storage_class
         self._log_collection_container_dir = container_log_dir
+        self._log_collection_run_id = run_id
 
         if "pvcs" not in self._deployment_spec["spec"]:
             self._deployment_spec["spec"]["pvcs"] = []
@@ -768,7 +785,7 @@ class DeploymentSpec:
         )
 
         for service in target_services:
-            service.enable_log_collection(container_log_dir, pvc_name)
+            service.enable_log_collection(container_log_dir, pvc_name, run_id)
 
     def enable_model_cache(
         self,
@@ -883,11 +900,21 @@ class ManagedDeployment:
     # the service containing component_type: Frontend determines what is actually the frontend service
     frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
-    # When True, the log-collection PVC is assumed to already exist;
-    # _create_log_collection_pvc skips create + verify (just installs
-    # the wrapper ConfigMap), and _cleanup_log_collection_pvc skips
-    # delete. Set when the user passes --log-pvc.
+    # When True, the log-collection PVC is shared across tests:
+    #   - on first use, framework auto-creates it (404 → create + verify)
+    #   - each test writes to a unique sub-path `<dgd>-<ts>-<rand>`
+    #     within the PVC, so concurrent / sequential tests don't collide
+    #   - after extraction, that sub-path is wiped in-place; PVC binding
+    #     is preserved across runs (no 7-min FSx provisioning per test)
+    #   - PVC is never deleted at teardown
+    # Triggered by `--log-pvc <name>` on the CLI. Default-off keeps the
+    # legacy per-test ephemeral-PVC flow that other tests still rely on.
     reuse_log_pvc: bool = False
+    # When True (only meaningful with reuse_log_pvc=True), the existing
+    # named PVC is deleted and re-provisioned before this test starts.
+    # Use to break out of stuck-Terminating state, to switch storage
+    # classes, or to drop accumulated data from prior runs.
+    recreate_log_pvc: bool = False
     # When set, run a one-shot prefetch Job before applying the DGD
     # that downloads every non-frontend service's model into this
     # PVC. Avoids the lock-thrash when N worker pods hit HF
@@ -1914,6 +1941,15 @@ class ManagedDeployment:
         """
         return getattr(self.deployment_spec, "_log_collection_pvc_name", None)
 
+    def get_log_run_id(self) -> str:
+        """Return the per-test run-id used as a sub-path prefix inside the
+        shared log PVC. Empty string in default ephemeral-PVC mode (no
+        sub-path isolation needed).
+        """
+        if not self.reuse_log_pvc:
+            return ""
+        return getattr(self.deployment_spec, "_log_collection_run_id", "") or ""
+
     async def apply_service_changes(self, service_names: list[str]):
         """Push whatever in-memory mutations have been made on the named
         services to the cluster, in a single merge-patch.
@@ -1988,35 +2024,75 @@ class ManagedDeployment:
         assert self._core_api is not None, "Kubernetes API not initialized"
 
         if self.reuse_log_pvc:
-            self._logger.info(
-                f"Reusing existing log-collection PVC {pvc_name} "
-                f"(skip create + verify; --log-pvc was set)"
-            )
+            if self.recreate_log_pvc:
+                self._logger.info(
+                    f"--recreate-log-pvc set: dropping {pvc_name} before "
+                    f"re-provisioning..."
+                )
+                try:
+                    await self._core_api.delete_namespaced_persistent_volume_claim(
+                        name=pvc_name, namespace=self.namespace
+                    )
+                except exceptions.ApiException as e:
+                    if e.status != 404:
+                        raise
+                # Wait for the delete to complete. PVC has a
+                # pvc-protection finalizer; if any pod still references
+                # it the delete won't finish — surface that loudly so
+                # the user can clean up rather than silently re-using.
+                for _ in range(120):
+                    try:
+                        await self._core_api.read_namespaced_persistent_volume_claim(
+                            name=pvc_name, namespace=self.namespace
+                        )
+                        await asyncio.sleep(1)
+                    except exceptions.ApiException as e:
+                        if e.status == 404:
+                            break
+                        raise
+                else:
+                    raise RuntimeError(
+                        f"--recreate-log-pvc: {pvc_name} did not drop "
+                        f"within 120s. Likely a pod is still mounting "
+                        f"it — delete the referencing pods and retry."
+                    )
+
             try:
                 pvc = await self._core_api.read_namespaced_persistent_volume_claim(
                     name=pvc_name, namespace=self.namespace
                 )
-            except exceptions.ApiException as e:
-                if e.status == 404:
-                    raise RuntimeError(
-                        f"--log-pvc {pvc_name!r} does not exist in namespace "
-                        f"{self.namespace!r}; either create it first or omit "
-                        f"the flag to let the framework provision a fresh one."
-                    ) from None
-                raise
-            # If the PVC was just created or hasn't bound yet (FSx-Lustre
-            # provisioning takes ~5-7 min on AWS dev clusters), poll for
-            # Bound the same way the create path does — don't fail fast
-            # on Pending.
-            if pvc.status.phase != "Bound":
+                pvc_exists = True
                 self._logger.info(
-                    f"--log-pvc {pvc_name!r} is {pvc.status.phase}; waiting for Bound..."
+                    f"Reusing existing log-collection PVC {pvc_name} "
+                    f"(skip create + verify; in-place clear after extract)"
                 )
-                await self._verify_pvc_binding(pvc_name)
-            await self._install_log_wrapper_configmap()
-            self._log_collection_pvc_created = True
-            self._log_collection_pvc_verified = True
-            return pvc_name
+            except exceptions.ApiException as e:
+                if e.status != 404:
+                    raise
+                pvc_exists = False
+                self._logger.info(
+                    f"Log-collection PVC {pvc_name} does not exist — "
+                    f"creating once for reuse across all future runs "
+                    f"({pvc_size}, sc={storage_class or 'cluster-default'}, RWX)"
+                )
+
+            if not pvc_exists:
+                # Fall through to create path; verify-bind handles the
+                # 5-7 min FSx provisioning wait. After this run the PVC
+                # stays bound forever (never deleted at teardown).
+                pass
+            else:
+                # Already exists — handle the rare case where prior bind
+                # is still in flight.
+                if pvc.status.phase != "Bound":
+                    self._logger.info(
+                        f"Log PVC {pvc_name!r} is {pvc.status.phase}; waiting for Bound..."
+                    )
+                    await self._verify_pvc_binding(pvc_name)
+                await self._install_log_wrapper_configmap()
+                self._log_collection_pvc_created = True
+                self._log_collection_pvc_verified = True
+                return pvc_name
 
         self._logger.info(
             f"Creating log-collection PVC {pvc_name} ({pvc_size}, "
@@ -2363,12 +2439,17 @@ class ManagedDeployment:
         extractor = PvcExtractor(namespace=self.namespace, logger=self._logger)
         await extractor.init()
 
+        # See the _extract_logs_from_pvc docstring: run_id prefix is
+        # always present on the PVC, regardless of reuse mode.
+        run_id = getattr(self.deployment_spec, "_log_collection_run_id", "")
+        sub_path = f"{run_id}/service_logs" if run_id else "service_logs"
         return await extractor.extract(
             pvc_name=pvc_name,
-            sub_path="service_logs",
+            sub_path=sub_path,
             container_path=self.container_log_dir,
             file_patterns=["*.log"],
             local_output_dir=local_output_dir,
+            # clear_after_extract defaults to True
         )
 
     async def _verify_pvc_binding(self, pvc_name: str, timeout: int = 600):
@@ -2555,15 +2636,16 @@ class ManagedDeployment:
         """
         Clean up the log collection PVC if we created it.
 
-        Skipped when ``reuse_log_pvc`` is set — the PVC was provided by
-        the user; we don't own its lifecycle.
+        Skipped when ``reuse_log_pvc`` is set — the PVC is shared
+        across tests; we leave it bound. Per-test isolation comes from
+        unique sub-paths cleared in-place by pvc_extractor.
         """
         if not self._log_collection_pvc_created:
             return
         if self.reuse_log_pvc:
             self._logger.info(
                 "Skipping log-collection PVC delete (--log-pvc set; "
-                "reusing user-managed PVC)"
+                "shared PVC, per-test sub-path was cleared after extract)"
             )
             return
 
@@ -2635,12 +2717,23 @@ class ManagedDeployment:
             extractor = PvcExtractor(namespace=self.namespace, logger=self._logger)
             await extractor.init()
 
+            # The on-PVC path is ALWAYS `<run_id>/service_logs/<comp>/<pod>.log`
+            # because `DeploymentSpec.enable_log_collection` always assigns
+            # a `run_id` (timestamp+rand) regardless of reuse mode — see
+            # the `run_id = f"{self.name}-{timestamp}-{rand}"` block at the
+            # top of that method. Previously this branch fell back to a
+            # bare `service_logs` sub-path in non-reuse mode, which never
+            # exists on the PVC → `0 files matched for extraction` and
+            # every per-pod log was silently lost at teardown.
+            run_id = getattr(self.deployment_spec, "_log_collection_run_id", "")
+            sub_path = f"{run_id}/service_logs" if run_id else "service_logs"
             result = await extractor.extract(
                 pvc_name=pvc_name,
-                sub_path="service_logs",
+                sub_path=sub_path,
                 container_path=self.container_log_dir,
                 file_patterns=["*.log"],
                 local_output_dir=self.log_dir,
+                # clear_after_extract defaults to True
             )
 
             if result.get("success"):

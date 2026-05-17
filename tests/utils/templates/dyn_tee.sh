@@ -17,6 +17,30 @@
 #   POD_NAME     — pod name (Downward API ref)
 #
 set -euo pipefail
+
+# Optional per-pod resource-limit override.
+# Set DYN_TEST_NOFILE_LIMIT to the desired soft+hard nofile limit (e.g. 1024)
+# to force file-descriptor exhaustion at small scale — useful for
+# reproducing the F-1 frontend FD-exhaustion incident class.
+# Defaults to whatever the container runtime grants (typically ~1M).
+if [ -n "${DYN_TEST_NOFILE_LIMIT:-}" ]; then
+    # Reduce both soft and hard limits. Without -H the soft limit can
+    # be raised again at runtime; we want a hard ceiling.
+    ulimit -n "${DYN_TEST_NOFILE_LIMIT}" || true
+    ulimit -Hn "${DYN_TEST_NOFILE_LIMIT}" 2>/dev/null || true
+    echo "[dyn_tee] DYN_TEST_NOFILE_LIMIT applied: soft=$(ulimit -n) hard=$(ulimit -Hn)" >&2
+fi
+
+# Raise RLIMIT_MEMLOCK so UCX/NIXL can allocate IB completion queues.
+# On AKS clusters with the cri-containerd AppArmor profile + 64KB default
+# memlock, only a root container with privileged + IPC_LOCK + appArmor
+# Unconfined can actually call ulimit -l. See OPS-4332.
+if [ -n "${DYN_TEST_MEMLOCK_UNLIMITED:-}" ]; then
+    ulimit -l unlimited 2>/dev/null && \
+        echo "[dyn_tee] memlock raised: $(ulimit -l)" >&2 || \
+        echo "[dyn_tee] WARN: ulimit -l unlimited failed (cap=$(ulimit -l))" >&2
+fi
+
 mkdir -p "$DYN_LOG_DIR"
 TS=$(date +%s)
 LOG_FILE="$DYN_LOG_DIR/${POD_NAME:-pod}_${TS}.log"
