@@ -48,6 +48,16 @@ bash .claude/skills/disagg-bench/lognormal-bench.sh
 - `--num-prompts` controls request count (not `--num-requests`).
 - `--osl` without `--extra-inputs ignore_eos:true` is advisory only (model may stop early).
 
+### Cache configuration: Pyxis vs Docker
+
+This benchmark uses `cache: {host: {cache_size_gb: N}}` which relies on UCX/POSIX NIXL plugins.
+These plugins **are available in Pyxis/srun containers** (injected from the host at runtime) but
+**are NOT available in plain Docker** on dlcluster. If you run this outside Pyxis:
+
+- Use `cache: {device: {}}` instead (CUDA IPC, no UCX required)
+- Remove explicit `nixl.backends` from the worker config
+- Set `NIXL_PLUGIN_DIR` and `LD_LIBRARY_PATH` to the wheel's NIXL (see `launch-kvbm-docker.sh`)
+
 ### dlcluster-specific traps
 
 On dlcluster H100x8 nodes (`viking-prod-*`, `4u8g-gen-*`):

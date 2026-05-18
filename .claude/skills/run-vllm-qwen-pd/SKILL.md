@@ -27,9 +27,14 @@ debugging decode startup. Run this with `role=decode` and watch its log.
 | `gpu` | `0` | `CUDA_VISIBLE_DEVICES` |
 | `mem-util` | `0.25` | `--gpu-memory-utilization` (GB10 unified memory: 0.25 fits two instances; 0.35 OOMs) |
 | `port` | `8000` (prefill), `8001` (decode) | vLLM OpenAI API port |
-| `host-cache-gb` | `2` | `DYN_KVBM_CPU_CACHE_GB` plus mirrored in `cache.host.cache_size_gb` |
+| `host-cache-gb` | `2` | `DYN_KVBM_CPU_CACHE_GB` plus mirrored in `cache.host.cache_size_gb` — **Pyxis only** (see below) |
 | `max-model-len` | `2048` | smaller KV per slot so two instances fit |
 | `max-num-seqs` | `16` | concurrent sequences |
+
+> **Context**: This skill targets Pyxis/srun containers on dlcluster where NIXL plugins are
+> injected from the host at runtime. `cache.host` works here because the UCX/POSIX plugins
+> are available. For Docker-only environments (no plugin injection), use `cache: {device: {}}`
+> instead — see `disagg-bringup/launch-kvbm-docker.sh`.
 
 ## Prerequisites (don't skip)
 

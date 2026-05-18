@@ -1,6 +1,10 @@
 #!/bin/bash
 # KVBM disagg bringup for Docker-based nodes (dlcluster b100_preprod, 4u4g, etc.)
 #
+# ⚠️  DOCKER vs PYXIS context — choose the right script:
+#   - This script (Docker): no NIXL plugin injection → must use cache.device + wheel NIXL path
+#   - launch-prefill.sh + launch-decode.sh (Pyxis/srun): NIXL plugins injected from host → use cache.host
+#
 # Hard-won lessons from 2026-05-15 session:
 #
 # 7. Use `cache: {device: {}}` NOT `cache: {host: {...}}` in Docker on dlcluster.
