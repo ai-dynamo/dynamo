@@ -43,8 +43,35 @@ impl<Sel> KvScheduler<Sel>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
 {
+    /// Start the scheduler. Preserves the pre-overlap-refresh signature so downstream callers
+    /// don't break. Use [`Self::start_with_overlap_refresh`] to enable dequeue-time refresh.
     #[expect(clippy::too_many_arguments)]
     pub async fn start(
+        component: Component,
+        block_size: u32,
+        workers_with_configs: RuntimeConfigWatch,
+        selector: Sel,
+        kv_router_config: &KvRouterConfig,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_type: &'static str,
+    ) -> Result<Self, KvSchedulerError> {
+        Self::start_with_overlap_refresh(
+            component,
+            block_size,
+            workers_with_configs,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            None,
+            worker_type,
+        )
+        .await
+    }
+
+    /// Like [`Self::start`] but wires an [`OverlapScoresRefresh`] into the scheduler queue so
+    /// long-waiting requests can be re-scored at dequeue time.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn start_with_overlap_refresh(
         component: Component,
         block_size: u32,
         workers_with_configs: RuntimeConfigWatch,
@@ -80,7 +107,7 @@ where
             kv_router_config.router_queue_policy
         );
 
-        let inner = Arc::new(LocalScheduler::new(
+        let inner = Arc::new(LocalScheduler::new_with_overlap_refresh(
             slots,
             workers_with_configs.clone(),
             kv_router_config.router_queue_threshold,

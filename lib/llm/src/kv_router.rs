@@ -482,7 +482,7 @@ where
             )
             .map(|r| Arc::new(r) as Arc<dyn OverlapScoresRefresh>);
 
-        let scheduler = KvScheduler::start(
+        let scheduler = KvScheduler::start_with_overlap_refresh(
             component.clone(),
             block_size,
             workers_with_configs.clone(),

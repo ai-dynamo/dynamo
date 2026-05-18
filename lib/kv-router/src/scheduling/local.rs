@@ -59,8 +59,45 @@ where
             .collect()
     }
 
+    /// Construct a scheduler. Preserves the pre-overlap-refresh signature so downstream
+    /// callers of the exported scheduling API don't break. Use
+    /// [`Self::new_with_overlap_refresh`] when dequeue-time overlap-score refresh is wanted.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new_with_overlap_refresh(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+
+    /// Like [`Self::new`] but wires in an [`OverlapScoresRefresh`] so the scheduler queue
+    /// can re-query overlap scores at dequeue time for long-waiting requests.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_overlap_refresh(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
@@ -449,7 +486,6 @@ mod tests {
             DefaultWorkerSelector::new(None, "test"),
             FcfsPolicy,
             prefill_load_estimator,
-            None,
             Duration::from_secs(60),
             true,
             cancel_token.clone(),

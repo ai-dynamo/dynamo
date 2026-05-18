@@ -28,10 +28,17 @@ use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRe
 /// Override with `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS`. A value of `0` disables refresh.
 const DEFAULT_OVERLAP_REFRESH_AFTER_SECS: f64 = 10.0;
 
+fn default_overlap_refresh_after() -> Duration {
+    // DEFAULT_OVERLAP_REFRESH_AFTER_SECS is a small finite literal; try_from_secs_f64
+    // cannot fail here but we still avoid the panicking constructor for consistency.
+    Duration::try_from_secs_f64(DEFAULT_OVERLAP_REFRESH_AFTER_SECS)
+        .unwrap_or(Duration::from_secs(10))
+}
+
 fn read_overlap_refresh_after() -> Option<Duration> {
     let raw = match std::env::var("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS") {
         Ok(v) => v,
-        Err(_) => return Some(Duration::from_secs_f64(DEFAULT_OVERLAP_REFRESH_AFTER_SECS)),
+        Err(_) => return Some(default_overlap_refresh_after()),
     };
     let parsed: f64 = match raw.parse() {
         Ok(v) => v,
@@ -40,13 +47,25 @@ fn read_overlap_refresh_after() -> Option<Duration> {
                 value = %raw,
                 "invalid DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS, falling back to default {DEFAULT_OVERLAP_REFRESH_AFTER_SECS}s"
             );
-            return Some(Duration::from_secs_f64(DEFAULT_OVERLAP_REFRESH_AFTER_SECS));
+            return Some(default_overlap_refresh_after());
         }
     };
-    if !parsed.is_finite() || parsed <= 0.0 {
+    if parsed <= 0.0 {
         return None;
     }
-    Some(Duration::from_secs_f64(parsed))
+    // try_from_secs_f64 rejects NaN, negatives, and values that don't fit in u64 seconds,
+    // so an env value like 1e100 disables the refresh instead of panicking in Duration::from_secs_f64.
+    match Duration::try_from_secs_f64(parsed) {
+        Ok(d) => Some(d),
+        Err(err) => {
+            tracing::warn!(
+                value = %raw,
+                error = %err,
+                "DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS is out of range; disabling overlap refresh"
+            );
+            None
+        }
+    }
 }
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -288,7 +307,7 @@ impl<
         }
 
         loop {
-            let _admission = self.admission_gate.lock().await;
+            let admission = self.admission_gate.lock().await;
             let decay_now = Instant::now();
             let mut heap = self.pending.lock().await;
             let Some(front) = heap.peek() else {
@@ -307,16 +326,62 @@ impl<
             self.pending_isl_tokens
                 .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             let mut request = entry.request;
-            self.maybe_refresh_overlap(
-                &mut request,
-                entry.block_hashes.as_deref(),
-                entry.enqueue_at,
-                decay_now,
-            )
-            .await;
-            tracing::debug!("scheduling request from pending queue");
-            self.admit_one(request, decay_now).await;
+            let block_hashes = entry.block_hashes;
+            let enqueue_at = entry.enqueue_at;
+
+            if self.should_refresh_overlap(block_hashes.as_deref(), enqueue_at, decay_now) {
+                // The indexer lookup may take milliseconds; release the admission gate so
+                // concurrent `enqueue` calls aren't stalled behind this request's refresh.
+                drop(admission);
+                self.maybe_refresh_overlap(
+                    &mut request,
+                    block_hashes.as_deref(),
+                    enqueue_at,
+                    decay_now,
+                )
+                .await;
+                // Reacquire the gate before admit_one so worker-state mutations stay serialized.
+                // Use a fresh decay_now and recheck capacity for visibility — we already
+                // committed to admitting this entry, but a concurrent enqueue may have filled
+                // the slot while we awaited the refresh.
+                let _admission = self.admission_gate.lock().await;
+                let admit_now = Instant::now();
+                if self.all_workers_busy(threshold, request.eligibility(), admit_now) {
+                    tracing::debug!(
+                        "all workers busy after overlap refresh; admitting refreshed request anyway"
+                    );
+                }
+                tracing::debug!("scheduling refreshed request from pending queue");
+                self.admit_one(request, admit_now).await;
+            } else {
+                tracing::debug!("scheduling request from pending queue");
+                self.admit_one(request, decay_now).await;
+            }
         }
+    }
+
+    /// Cheap predicate that mirrors the conditions inside [`Self::maybe_refresh_overlap`].
+    /// Used by [`Self::update`] to decide whether to drop the admission gate around the
+    /// (potentially slow) indexer lookup.
+    fn should_refresh_overlap(
+        &self,
+        block_hashes: Option<&[LocalBlockHash]>,
+        enqueue_at: Instant,
+        decay_now: Instant,
+    ) -> bool {
+        let Some(refresh_after) = self.overlap_refresh_after else {
+            return false;
+        };
+        if self.overlap_scores_refresh.is_none() {
+            return false;
+        }
+        let Some(block_hashes) = block_hashes else {
+            return false;
+        };
+        if block_hashes.is_empty() {
+            return false;
+        }
+        decay_now.saturating_duration_since(enqueue_at) >= refresh_after
     }
 
     /// If the queue is configured for overlap-score refresh and the dequeued request waited
