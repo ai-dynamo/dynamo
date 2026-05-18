@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Dynamo Power Agent DaemonSet.
+#
+# Runs on every GPU node and enforces per-GPU NVML power caps by reading
+# dynamo.nvidia.com/gpu-power-limit annotations from worker pods.
+#
+# Required:
+#   - SAFE_DEFAULT_WATTS must be set to ~70% of the SKU's TDP (e.g. 500 for H200 SXM)
+#   - hostPID: true (required to read /proc/{pid}/cgroup for pod-UID extraction)
+#   - privileged: true (required for nvmlDeviceSetPowerManagementLimit)
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dynamo-power-agent
+  namespace: default
+  labels:
+    app: dynamo-power-agent
+spec:
+  selector:
+    matchLabels:
+      app: dynamo-power-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: dynamo-power-agent
+    spec:
+      serviceAccountName: dynamo-power-agent
+      hostPID: true
+      terminationGracePeriodSeconds: 30
+
+      # NVIDIA Container Toolkit injects libnvidia-ml.so via the `nvidia`
+      # runtime class.  Pairing with `NVIDIA_VISIBLE_DEVICES=all` in the
+      # container env exposes every GPU on the node WITHOUT consuming a
+      # `nvidia.com/gpu` resource claim — the same pattern DCGM exporter
+      # uses.  Required for nvmlInit() to succeed.
+      runtimeClassName: nvidia
+
+      # Only schedule on GPU nodes
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      containers:
+        - name: power-agent
+          # Replace with your registry/image
+          image: nvcr.io/nvidia/dynamo/power-agent:latest
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - python
+            - /app/power_agent.py
+            - --safe-default-watts=$(SAFE_DEFAULT_WATTS)
+            - --node-name=$(NODE_NAME)
+            - --prometheus-port=9100
+
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SAFE_DEFAULT_WATTS
+              value: "500"  # Override per SKU: H200 SXM ~500W, H100 SXM ~490W
+            # See runtimeClassName comment above; both must be set.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+
+          securityContext:
+            privileged: true
+            readOnlyRootFilesystem: false
+            # NVML power-cap writes require root, and the agent persists
+            # managed-GPU UUID state to /var/lib/dynamo-power-agent
+            # (a hostPath mount) — non-root images cannot write there.
+            runAsUser: 0
+
+          ports:
+            - name: metrics
+              containerPort: 9100
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: power-agent-state
+              mountPath: /var/lib/dynamo-power-agent
+
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: power-agent-state
+          hostPath:
+            path: /var/lib/dynamo-power-agent
+            type: DirectoryOrCreate

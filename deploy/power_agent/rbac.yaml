@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RBAC for the Dynamo Power Agent DaemonSet.
+#
+# Grants cluster-scoped read access to Pods (needed to enumerate pods on the
+# node and read their annotations).
+#
+# Apply with an explicit namespace flag:
+#     kubectl apply -n <your-namespace> -f deploy/power_agent/rbac.yaml
+#
+# The ClusterRoleBinding subject below references that same namespace via
+# `${POWER_AGENT_NAMESPACE}` — substitute it manually or pipe through envsubst:
+#     POWER_AGENT_NAMESPACE=<your-namespace> envsubst < rbac.yaml | kubectl apply -f -
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dynamo-power-agent
+  labels:
+    app: dynamo-power-agent
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dynamo-power-agent
+  labels:
+    app: dynamo-power-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dynamo-power-agent
+  labels:
+    app: dynamo-power-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dynamo-power-agent
+subjects:
+  - kind: ServiceAccount
+    name: dynamo-power-agent
+    namespace: ${POWER_AGENT_NAMESPACE}
