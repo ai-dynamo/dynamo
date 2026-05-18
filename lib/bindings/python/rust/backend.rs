@@ -776,11 +776,14 @@ impl LLMEngine for PyLLMEngine {
                 return Ok(cfg.inner);
             }
             // capabilities is optional on the duck-typed object. Missing
-            // attribute or `None` → empty. Items extract as the typed
-            // `Capability` PyO3 enum; anything else raises TypeError.
+            // attribute or `None` → empty. Accept any iterable yielding
+            // typed `Capability` enum values (list, tuple, set, frozenset);
+            // the Python ABC's `EngineConfig.capabilities` is a `set`.
             let capabilities: HashSet<RsCapability> = match bound.getattr("capabilities") {
                 Ok(value) if !value.is_none() => value
-                    .extract::<Vec<Capability>>()?
+                    .try_iter()?
+                    .map(|item| item.and_then(|c| c.extract::<Capability>()))
+                    .collect::<PyResult<Vec<Capability>>>()?
                     .into_iter()
                     .map(Into::into)
                     .collect(),
