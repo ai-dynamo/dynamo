@@ -1521,6 +1521,115 @@ mod tests {
         rt.shutdown();
     }
 
+    /// End-to-end bidirectional round trip with the full Rust stack: a real
+    /// `Ingress<ManyIn<u64>, ManyOut<EchoResponse>>` is registered on the
+    /// component, the client builds a `PushRouter`, and a three-frame
+    /// `ManyIn` produces three matching response frames. Exercises the
+    /// `PushRouter::generate(ManyIn<T>)` → `bidirectional_dispatch` →
+    /// `AddressedPushRouter::generate_bidirectional` → request-stream TCP
+    /// transport → `Ingress<ManyIn<T>, ManyOut<U>>::handle_payload` →
+    /// engine path end to end.
+    ///
+    /// `#[ignore]` because the test stands up a full DistributedRuntime with
+    /// a real request-plane TCP server, and under parallel test execution
+    /// the OS resource pressure (concurrent DRT setups, TCP binds, in-memory
+    /// KV churn) intermittently produces a "Connection refused" on the
+    /// first dispatch. Passes deterministically in isolation
+    /// (`cargo test -p dynamo-runtime bidirectional_end_to_end_echo`) and
+    /// under serial execution (`cargo test -- --test-threads=1`).
+    #[tokio::test]
+    #[ignore = "stands up full DRT; flakes under parallel cargo test load"]
+    async fn bidirectional_end_to_end_echo() {
+        use crate::pipeline::network::Ingress;
+
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        struct EchoResponse {
+            value: Option<u64>,
+            #[serde(default)]
+            error: Option<DynamoError>,
+        }
+
+        impl MaybeError for EchoResponse {
+            fn from_err(err: impl std::error::Error + 'static) -> Self {
+                Self {
+                    value: None,
+                    error: Some(DynamoError::from(
+                        Box::new(err) as Box<dyn std::error::Error + 'static>
+                    )),
+                }
+            }
+
+            fn err(&self) -> Option<DynamoError> {
+                self.error.clone()
+            }
+        }
+
+        struct EchoEngine;
+
+        #[async_trait]
+        impl AsyncEngine<ManyIn<u64>, ManyOut<EchoResponse>, Error> for EchoEngine {
+            async fn generate(&self, input: ManyIn<u64>) -> Result<ManyOut<EchoResponse>, Error> {
+                let ctx = input.context();
+                let mapped = futures::StreamExt::map(input, |v| EchoResponse {
+                    value: Some(v),
+                    error: None,
+                });
+                let stream: crate::engine::DataStream<EchoResponse> = Box::pin(mapped);
+                Ok(ResponseStream::new(stream, ctx))
+            }
+        }
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_bidi_e2e".to_string()).unwrap();
+        let component = ns.component("echo_component".to_string()).unwrap();
+        let endpoint = component.endpoint("echo_endpoint".to_string());
+
+        // Spawn the worker side: a real Ingress<ManyIn<u64>, ManyOut<EchoResponse>>
+        // wired to the EchoEngine, registered through the standard
+        // endpoint_builder().handler(ingress).start() pipeline.
+        let ingress = Ingress::for_engine(Arc::new(EchoEngine)).unwrap();
+        let endpoint_for_server = endpoint.clone();
+        tokio::spawn(async move {
+            let _ = endpoint_for_server
+                .endpoint_builder()
+                .handler(ingress)
+                .start()
+                .await;
+        });
+
+        // Client side: wait for the worker to be discoverable, then build the
+        // bidirectional PushRouter and exercise it.
+        let client = endpoint.client().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+        // Bridge the brief window where the discovery announcement reaches the
+        // client before the request-plane server has accepted the endpoint
+        // registration. Under heavy parallel test load this can otherwise race
+        // and produce a "Connection refused" on the first dispatch.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let router = PushRouter::<u64, EchoResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let ctx: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let input: ManyIn<u64> =
+            ResponseStream::new(Box::pin(tokio_stream::iter(vec![1u64, 2, 3])), ctx);
+        let response_stream = router.generate(input).await.unwrap();
+        let responses: Vec<EchoResponse> = futures::StreamExt::collect(response_stream).await;
+
+        let values: Vec<u64> = responses.iter().filter_map(|r| r.value).collect();
+        assert_eq!(
+            values,
+            vec![1u64, 2, 3],
+            "echo engine should reflect each input frame back; got {responses:?}"
+        );
+
+        rt.shutdown();
+    }
+
     #[tokio::test]
     async fn least_loaded_select_and_peek_return_none_with_available_worker() {
         let rt = Runtime::from_current().unwrap();

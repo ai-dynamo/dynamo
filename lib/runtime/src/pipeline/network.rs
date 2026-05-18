@@ -495,10 +495,7 @@ impl<Req: PipelineIO, Resp: PipelineIO> Ingress<Req, Resp> {
         Ok(ingress)
     }
 
-    pub fn for_engine(engine: ServiceEngine<Req, Resp>) -> Result<Arc<Self>>
-    where
-        Req: Sync,
-    {
+    pub fn for_engine(engine: ServiceEngine<Req, Resp>) -> Result<Arc<Self>> {
         let frontend = SegmentSource::<Req, Resp>::new();
         let backend = ServiceBackend::from_engine(engine);
 
