@@ -15,7 +15,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
+from typing import Any, AsyncIterator, Dict, Final, Generic, NoReturn, Optional, TypeVar
 
 import torch
 from vllm.config import ModelConfig, VllmConfig
@@ -46,6 +46,13 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsTransferMetadata,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.rl import (
+    RLAdminValidationError,
+    RLRouteRegistry,
+    env_bool,
+    require_lora_load_request,
+    require_lora_unload_request,
+)
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
@@ -515,7 +522,7 @@ def get_lora_manager():
     if _lora_manager is not None:
         return _lora_manager
 
-    if os.environ.get("DYN_LORA_ENABLED", "").lower() in ("true", "1", "yes"):
+    if env_bool("DYN_LORA_ENABLED"):
         try:
             from dynamo.common.lora import LoRAManager
 
@@ -870,6 +877,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
         # Guard lock-map access in case handlers are invoked from multiple threads.
         self._lora_load_locks_guard = threading.Lock()
+        self._paused: bool = False
+        self._weight_version: str = "initial"
 
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding
@@ -923,6 +932,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
+        # Request-plane RL method map served by rl_dispatch on
+        # dyn://<namespace>.<component>.rl when --enable-rl / DYN_ENABLE_RL is set.
+        self.rl_route_registry = RLRouteRegistry(self.runtime, logger_=logger)
+
+    def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
+        logger.error(f"vLLM EngineDeadError: {e}")
+        logger.warning("Initiating Dynamo Runtime shutdown.")
+        self.runtime.shutdown()
+        os._exit(1)
 
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
@@ -1181,6 +1199,208 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.error(f"Failed to stop profiling: {e}")
             return {"status": "error", "message": str(e)}
 
+    async def rl_dispatch(self, request=None):
+        """Request-plane dispatcher for the worker's ``rl`` endpoint."""
+        async for response in self.rl_route_registry.dispatch_stream(request):
+            yield response
+
+    async def liveness_probe(self, body: dict) -> dict:
+        """Engine event-loop liveness probe."""
+        body = body or {}
+        try:
+            if hasattr(self.engine_client, "check_health"):
+                await self.engine_client.check_health()
+            else:
+                await self.engine_client.collective_rpc("liveness_probe", kwargs={})
+            return {"status": "ok", "alive": True}
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.warning(f"[RL] liveness_probe failed: {e}")
+            return {"status": "error", "alive": False, "message": str(e)}
+
+    async def pause_generation(self, body: dict) -> dict:
+        """Pause generation before a weight update."""
+        body = body or {}
+        mode = body.get("mode", "keep")
+        clear_cache = bool(body.get("clear_cache", False))
+        if mode not in ("keep", "wait", "abort"):
+            return {
+                "status": "error",
+                "message": f"Invalid mode '{mode}'; expected keep|wait|abort",
+            }
+        try:
+            try:
+                await self.engine_client.pause_generation(
+                    mode=mode, clear_cache=clear_cache
+                )
+            except TypeError:
+                await self.engine_client.pause_generation()
+                if clear_cache:
+                    await self.engine_client.reset_prefix_cache()
+            self._paused = True
+            logger.info(f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})")
+            return {
+                "status": "ok",
+                "message": "Engine paused",
+                "mode": mode,
+                "clear_cache": clear_cache,
+            }
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.error(f"[RL] Failed to pause: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_generation(self, body: dict) -> dict:
+        """Resume generation after a weight update."""
+        body = body or {}
+        try:
+            await self.engine_client.resume_generation()
+            self._paused = False
+            logger.info("[RL] Engine resumed")
+            return {"status": "ok", "message": "Engine resumed"}
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.error(f"[RL] Failed to resume: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def flush_cache(self, body: dict) -> dict:
+        """Invalidate prefix / KV cache."""
+        body = body or {}
+        try:
+            await self.engine_client.reset_prefix_cache()
+            logger.debug("[RL] Prefix cache flushed")
+            return {"status": "ok", "message": "Cache flushed"}
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.error(f"[RL] Failed to flush cache: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def abort_request(self, body: dict) -> dict:
+        """Abort a single in-flight request by request_id."""
+        body = body or {}
+        request_id = body.get("request_id")
+        if not request_id:
+            return {"status": "error", "message": "Missing 'request_id' in body"}
+        try:
+            await self.engine_client.abort(request_id)
+            logger.debug(f"[RL] Aborted request {request_id}")
+            return {"status": "ok", "request_id": request_id}
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.error(f"[RL] Failed to abort request {request_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def get_weight_version(self, body: dict) -> dict:
+        """Return the current weight version tag."""
+        body = body or {}
+        return {"status": "ok", "version": getattr(self, "_weight_version", "initial")}
+
+    async def update_weights_from_disk(self, body: dict) -> dict:
+        """Load weights from a shared filesystem checkpoint."""
+        body = body or {}
+        if not getattr(self, "_paused", False):
+            return {
+                "status": "error",
+                "message": (
+                    "Worker must be paused via pause_generation() before updating "
+                    "weights. Call pause_generation() first, then update, then "
+                    "resume_generation()."
+                ),
+            }
+        path = body.get("model_path")
+        if not path:
+            return {"status": "error", "message": "Missing 'model_path' in body"}
+        version = body.get("weight_version", "unknown")
+        rpc = body.get("engine_rpc", "reload_weights")
+        kwargs = (
+            {"weights_path": path} if rpc == "reload_weights" else {"weight_path": path}
+        )
+        try:
+            await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+            self._weight_version = version
+            logger.info(
+                f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
+            )
+            return {"status": "ok", "version": version}
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.error(f"[RL] update_weights_from_disk failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def update_weights_from_distributed(self, body: dict) -> dict:
+        """Receive weights via a distributed transport such as NCCL."""
+        body = body or {}
+        if not getattr(self, "_paused", False):
+            return {
+                "status": "error",
+                "message": (
+                    "Worker must be paused via pause_generation() before updating "
+                    "weights. Call pause_generation() first, then update, then "
+                    "resume_generation()."
+                ),
+            }
+        version = body.get("weight_version", "unknown")
+        rpc = body.get("engine_rpc", "update_weights_from_path")
+        rpc_kwargs = {
+            k: v for k, v in body.items() if k not in ("engine_rpc", "weight_version")
+        }
+        try:
+            await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
+            self._weight_version = version
+            logger.info(
+                f"[RL] Weights received via distributed (version={version}, rpc={rpc})"
+            )
+            return {"status": "ok", "version": version}
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.error(f"[RL] update_weights_from_distributed failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def update_weights_from_tensor(self, body: dict) -> dict:
+        """Not implemented: in-process tensor transfer is not yet supported."""
+        body = body or {}
+        return {
+            "status": "error",
+            "message": "update_weights_from_tensor is not implemented",
+        }
+
+    async def init_weights_update_group(self, body: dict) -> dict:
+        """Initialize the distributed weight-update communication group."""
+        body = body or {}
+        rpc = body.get("engine_rpc", "init_broadcaster")
+        kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
+        try:
+            await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+            logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
+            return {"status": "ok", "message": "Weight update group initialized"}
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.error(f"[RL] init_weights_update_group failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def destroy_weights_update_group(self, body: dict) -> dict:
+        """Tear down the distributed weight-update communication group."""
+        body = body or {}
+        rpc = body.get("engine_rpc", "destroy_broadcaster")
+        kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
+        try:
+            await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+            logger.info(f"[RL] Weight update group destroyed (rpc={rpc})")
+            return {"status": "ok", "message": "Weight update group destroyed"}
+        except EngineDeadError as e:
+            self._shutdown_on_engine_dead(e)
+        except Exception as e:
+            logger.error(f"[RL] destroy_weights_update_group failed: {e}")
+            return {"status": "error", "message": str(e)}
+
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError
@@ -1351,45 +1571,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         }
 
-        This method is idempotent - concurrent calls for the same LoRA will be
-        serialized and only one load operation will happen.
+        Concurrent calls for the same LoRA are serialized. Re-loading an already
+        loaded LoRA is idempotent by default. Set
+        ``DYN_LORA_HOTSWAP_ENABLED=true`` to replace an already loaded LoRA with
+        a new URI.
         """
         try:
-            if request is None:
-                yield {
-                    "status": "error",
-                    "message": "Request is required with 'lora_name' and 'source.uri'",
-                }
-                return
-
-            lora_name = request.get("lora_name")
-            if not lora_name:
-                yield {
-                    "status": "error",
-                    "message": "'lora_name' is required in request",
-                }
+            try:
+                lora_name, lora_uri = require_lora_load_request(request)
+            except RLAdminValidationError as e:
+                yield {"status": "error", "message": str(e)}
                 return
 
             # Debug: Log the incoming request
             logger.debug(f"load_lora request keys: {list(request.keys())}")
             logger.debug(f"load_lora request: {request}")
-
-            # Check for URI-based API format (source.uri)
-            source = request.get("source")
-            if not source or not isinstance(source, dict):
-                yield {
-                    "status": "error",
-                    "message": "'source' object is required in request",
-                }
-                return
-
-            lora_uri = source.get("uri")
-            if not lora_uri:
-                yield {
-                    "status": "error",
-                    "message": "'source.uri' is required in request",
-                }
-                return
 
             # Use LoRAManager to download from URI
             lora_manager = get_lora_manager()
@@ -1404,19 +1600,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lock = self._get_lora_lock(lora_name)
             async with lock:
                 try:
-                    # Check if already loaded (idempotency check after acquiring lock).
-                    # Another concurrent request may have loaded this LoRA while we waited.
-                    if lora_name in self.loaded_loras:
-                        lora_id = self.loaded_loras[lora_name].id
+                    old_info = self.loaded_loras.get(lora_name)
+                    hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
+                    is_hot_swap = old_info is not None and hot_swap_enabled
+
+                    if old_info is not None and not hot_swap_enabled:
                         logger.info(
-                            f"LoRA adapter already loaded (concurrent request completed): "
-                            f"{lora_name} with ID {lora_id}"
+                            f"LoRA adapter already loaded: {lora_name} "
+                            f"with ID {old_info.id}"
                         )
                         yield {
                             "status": "success",
                             "message": f"LoRA adapter '{lora_name}' already loaded",
                             "lora_name": lora_name,
-                            "lora_id": lora_id,
+                            "lora_id": old_info.id,
+                            "hot_swap": False,
                         }
                         return
 
@@ -1438,25 +1636,81 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Generate deterministic ID from lora_name before using it
                     lora_id = lora_name_to_id(lora_name)
 
-                    # Add the LoRA to the engine
-                    await self.engine_client.add_lora(
-                        LoRARequest(
-                            lora_name=lora_name,
-                            lora_int_id=lora_id,
-                            lora_path=lora_path,
+                    if is_hot_swap and old_info is not None:
+                        try:
+                            await self.engine_client.remove_lora(old_info.id)
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to remove existing LoRA '{lora_name}' "
+                                f"before hot-swap: {e}"
+                            )
+                            yield {
+                                "status": "error",
+                                "message": (
+                                    f"Failed to remove existing LoRA '{lora_name}' "
+                                    f"before hot-swap: {e}"
+                                ),
+                                "lora_name": lora_name,
+                            }
+                            return
+
+                    try:
+                        await self.engine_client.add_lora(
+                            LoRARequest(
+                                lora_name=lora_name,
+                                lora_int_id=lora_id,
+                                lora_path=lora_path,
+                            )
                         )
-                    )
+                    except Exception as e:
+                        if is_hot_swap and old_info is not None:
+                            try:
+                                await self.engine_client.add_lora(
+                                    LoRARequest(
+                                        lora_name=lora_name,
+                                        lora_int_id=old_info.id,
+                                        lora_path=old_info.path,
+                                    )
+                                )
+                            except Exception as rollback_error:
+                                self.loaded_loras.pop(lora_name, None)
+                                logger.exception(
+                                    f"Rollback failed for LoRA {lora_name}: "
+                                    f"{rollback_error}"
+                                )
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to add LoRA '{lora_name}': {e}",
+                            "lora_name": lora_name,
+                        }
+                        return
 
                     # Track the LoRA
                     self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
                     logger.info(
-                        f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+                        f"Successfully {'hot-swapped' if is_hot_swap else 'loaded'} "
+                        f"LoRA adapter: {lora_name} with ID {lora_id}"
                     )
+
+                    if is_hot_swap:
+                        try:
+                            await self.engine_client.reset_prefix_cache()
+                        except Exception as e:
+                            yield {
+                                "status": "error",
+                                "message": (
+                                    f"LoRA '{lora_name}' loaded but prefix cache "
+                                    f"reset failed: {e}"
+                                ),
+                                "lora_name": lora_name,
+                                "lora_id": lora_id,
+                            }
+                            return
 
                     # Publish LoRA as a ModelDeploymentCard with format:
                     # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
                     # This allows the frontend to discover it and route correctly to the worker instance
-                    if self.generate_endpoint is not None:
+                    if not is_hot_swap and self.generate_endpoint is not None:
                         logger.debug(
                             f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
                         )
@@ -1521,16 +1775,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 "lora_name": lora_name,
                             }
                             return
-                    else:
+                    elif not is_hot_swap:
                         logger.debug(
                             f"Cannot publish LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}, config={self.config}"
                         )
 
                     yield {
                         "status": "success",
-                        "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                        "message": (
+                            f"LoRA adapter '{lora_name}' "
+                            f"{'hot-swapped' if is_hot_swap else 'loaded'} successfully"
+                        ),
                         "lora_name": lora_name,
                         "lora_id": lora_id,
+                        "hot_swap": is_hot_swap,
                     }
                 finally:
                     # Avoid lock-map growth on failed loads: if this attempt did not leave the LoRA
@@ -1554,18 +1812,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
         """
         try:
-            if request is None:
-                yield {
-                    "status": "error",
-                    "message": "Request is required with 'lora_name' field",
-                }
-                return
-            lora_name = request.get("lora_name")
-            if not lora_name:
-                yield {
-                    "status": "error",
-                    "message": "'lora_name' is required in request",
-                }
+            try:
+                lora_name = require_lora_unload_request(request)
+            except RLAdminValidationError as e:
+                yield {"status": "error", "message": str(e)}
                 return
 
             # Serialize load/unload operations per lora_name.

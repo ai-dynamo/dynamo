@@ -740,6 +740,22 @@ impl DistributedRuntime {
         self.event_loop.clone()
     }
 
+    /// Return the local system status server URL if this runtime started one.
+    ///
+    /// Workers use this in their RL request-plane route descriptor so the
+    /// frontend does not need to derive worker system URLs from static env vars.
+    fn system_status_server_url(&self) -> Option<String> {
+        self.inner.system_status_server_info().map(|info| {
+            let socket_addr = info.socket_addr;
+            if socket_addr.ip().is_unspecified() {
+                let host = dynamo_runtime::utils::ip_resolver::get_local_ip_for_advertise();
+                format!("http://{host}:{}", socket_addr.port())
+            } else {
+                format!("http://{socket_addr}")
+            }
+        })
+    }
+
     /// Register an async Python callback for /engine/{route_name}
     ///
     /// Args:
