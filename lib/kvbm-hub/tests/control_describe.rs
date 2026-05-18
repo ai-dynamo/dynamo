@@ -93,6 +93,7 @@ fn canned_description(instance_id: &str) -> InstanceDescription {
             pid: 1234,
         },
         started_at: SystemTime::UNIX_EPOCH,
+        layout_compat: None,
     }
 }
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use velo_ext::InstanceId;
 
 use super::super::ModuleId;
+use super::super::layout_compat::LayoutCompatPayload;
 
 // ---------------------------------------------------------------------------
 // register_leader
@@ -102,6 +103,18 @@ pub struct InstanceDescription {
     // ---------- Process ----------
     pub host: HostInfo,
     pub started_at: SystemTime,
+
+    // ---------- Layout compatibility ----------
+    /// Operative layout-compat payload — same shape as the one carried in
+    /// `Feature::P2P` at register time. The hub's `P2pManager` stores the
+    /// register-time payload as the baseline; describe-push validates
+    /// `Some(payload)` against that baseline via `check_layout_compat`.
+    ///
+    /// `None` is the legacy / pre-stamping snapshot path and bypasses the
+    /// check — matches the existing `block_size` / `parallelism` optionality
+    /// contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_compat: Option<LayoutCompatPayload>,
 }
 
 /// Per-worker detail in [`InstanceDescription`].

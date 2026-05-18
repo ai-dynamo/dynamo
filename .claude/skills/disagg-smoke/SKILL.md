@@ -93,13 +93,21 @@ for the marker — see the inline comments in
 
 ```bash
 SKILL=/home/ryan/repos/dynamo/.claude/skills/disagg-smoke
-bash "$SKILL/two-request-smoke.sh"                              # legacy (default)
-KVBM_DISAGG_LEADER=unified bash "$SKILL/two-request-smoke.sh"   # unified
+bash "$SKILL/two-request-smoke.sh"                                       # operational (default)
+KVBM_DISAGG_LEADER=unified bash "$SKILL/two-request-smoke.sh"           # unified leader, operational layout
+KVBM_BLOCK_LAYOUT=universal bash "$SKILL/two-request-smoke.sh"          # universal layout
+KVBM_DISAGG_LEADER=unified KVBM_BLOCK_LAYOUT=universal bash "$SKILL/two-request-smoke.sh"  # both
 ```
 
 Output goes to `/tmp/kvbm-experiments/<ts>-two-request/`:
 - `hub.log` / `prefill.log` / `decode.log`
 - `trace.html` (rendered if `disagg-trace` is available)
+
+### Universal-mode block layout
+
+`KVBM_BLOCK_LAYOUT=universal` activates Universal G2 layout (mode-dominant G2 pinning, fused permute kernels). The value is injected into `kv_connector_extra_config.default.block_layout` in the JSON config rather than relying on env-var propagation — vLLM's EngineCore subprocess does not inherit the parent environment, so the env-var path is silently dropped before the connector runs.
+
+The smoke verifies the requested layout is actually active: after bringup it queries the hub's describe endpoint for both instances and fails loudly on a mode mismatch (exit 1). This assertion would have failed on every pre-fix smoke run that claimed Universal mode.
 
 ### Audit-equivalence
 

@@ -70,6 +70,40 @@ impl P2pManager {
     pub fn has_baseline(&self) -> bool {
         self.inner.read().layout_baseline.is_some()
     }
+
+    /// Validate a describe-push `layout_compat` candidate against the stored
+    /// baseline.
+    ///
+    /// Returns `Ok(())` when:
+    /// - The baseline matches the candidate under `check_layout_compat`.
+    ///
+    /// Returns `Err(FeatureError::InvalidConfig)` when:
+    /// - No baseline is present (instance registered without `Feature::P2P`
+    ///   or the hub restarted since last register) — this is a protocol
+    ///   violation (describe-before-register or missing re-register after
+    ///   hub restart).
+    /// - The candidate diverges from the baseline (mode, canonical, or
+    ///   per-worker fields differ under the operative mode's predicate).
+    pub fn check_describe_layout(
+        &self,
+        instance_id: velo_ext::InstanceId,
+        candidate: &LayoutCompatPayload,
+    ) -> Result<(), FeatureError> {
+        let inner = self.inner.read();
+        let baseline = inner.layout_baseline.as_ref().ok_or_else(|| {
+            FeatureError::InvalidConfig(format!(
+                "describe for instance {instance_id} carries layout_compat but \
+                 this instance has no P2P baseline (describe before register, \
+                 or hub restarted without re-register?)"
+            ))
+        })?;
+        check_layout_compat(baseline, candidate).map_err(|e| {
+            FeatureError::InvalidConfig(format!(
+                "describe-push layout_compat for {instance_id} diverges from \
+                 P2P baseline: {e}"
+            ))
+        })
+    }
 }
 
 impl FeatureManager for P2pManager {

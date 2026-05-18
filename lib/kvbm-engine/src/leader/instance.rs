@@ -139,6 +139,14 @@ pub struct InstanceLeader {
     /// that have not yet configured cross-parallelism.
     parallelism_template: Option<ParallelismTemplate>,
 
+    /// The block-layout mode this leader operates in (Operational or
+    /// Universal). Stored at build time from
+    /// [`InstanceLeaderBuilder::block_layout_mode`] so [`Self::describe`] can
+    /// include the same mode in the `layout_compat` payload that
+    /// [`register_with_hub`] emitted at register time — matching by
+    /// construction instead of re-deriving from exports.
+    block_layout_mode: kvbm_common::BlockLayoutMode,
+
     // ========================================================================
     // Disagg control plane
     // ========================================================================
@@ -414,6 +422,7 @@ impl InstanceLeaderBuilder {
             session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
             parallelism_template: self.parallelism_template,
+            block_layout_mode: self.block_layout_mode,
             session_manager: SessionManager::with_default_watchdog(runtime),
             session_factory: Arc::new(OnceLock::new()),
             role: self.role,
@@ -673,6 +682,7 @@ impl InstanceLeader {
             to_disagg_role, to_layout_config_description, to_parallelism_description,
             to_storage_kind_description, to_tier_kind,
         };
+        use super::layout_compat::build_layout_compat_payload_with_template;
 
         let exports: Vec<SerializedLayout> = self
             .assemble_export_metadata()
@@ -731,6 +741,33 @@ impl InstanceLeader {
         // briefly during a cold restart and that's acceptable.
         let modules = self.modules.get().cloned().unwrap_or_default();
 
+        // Build the layout-compat payload using the same sources as the register-time path
+        // (`init.rs` connector): cached_worker_metadata[0] + parallelism_template.
+        // If either is absent (standalone leader / no P2P) the field stays None and
+        // the hub's describe-push validation is skipped (legacy path).
+        let layout_compat = self
+            .cached_worker_metadata
+            .as_ref()
+            .and_then(|v| v.first())
+            .and_then(|worker| {
+                match build_layout_compat_payload_with_template(
+                    self.block_layout_mode,
+                    worker,
+                    self.parallelism_template.as_ref(),
+                ) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            mode = ?self.block_layout_mode,
+                            "describe: failed to build layout_compat payload; \
+                             sending None (hub will skip describe-push validation)"
+                        );
+                        None
+                    }
+                }
+            });
+
         Ok(InstanceDescription {
             instance_id: self.messenger.instance_id().to_string(),
             worker_ids: workers.iter().map(|w| w.worker_id).collect(),
@@ -747,6 +784,7 @@ impl InstanceLeader {
                 pid: std::process::id(),
             },
             started_at: self.started_at,
+            layout_compat,
         })
     }
 

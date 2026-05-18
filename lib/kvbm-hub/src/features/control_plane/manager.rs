@@ -41,9 +41,12 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use velo_ext::{InstanceId, PeerInfo};
 
+use crate::features::p2p::P2pManager;
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
-use crate::protocol::{self, Feature, FeatureKey, MetricsFanoutResponse, MetricsInstanceEntry};
+use crate::protocol::{
+    self, ErrorBody, ErrorCode, Feature, FeatureKey, MetricsFanoutResponse, MetricsInstanceEntry,
+};
 use crate::registry::PeerRegistry;
 
 /// Periodic refresh interval for the modules cache. Picks up module-set
@@ -131,6 +134,15 @@ pub struct ControlPlaneManager {
     /// Periodic refresh task handle. Set in `attach`; aborted on hub
     /// shutdown via `cancel`.
     refresh_task: OnceLock<JoinHandle<()>>,
+
+    /// Optional reference to the hub's `P2pManager`. Set post-construction
+    /// via [`Self::set_p2p_manager`] by the production binary and test
+    /// fixtures that need describe-push layout-compat validation.
+    ///
+    /// When `None` the P2P feature isn't wired (or this is a hub built
+    /// without it) and `post_describe` skips the layout-compat check
+    /// with a warn-level log. Graceful degradation.
+    p2p_manager: OnceLock<Arc<P2pManager>>,
 }
 
 impl Default for ControlPlaneManager {
@@ -149,7 +161,18 @@ impl ControlPlaneManager {
             describe_cache: Arc::new(RwLock::new(HashMap::new())),
             registered_at: Arc::new(RwLock::new(HashMap::new())),
             refresh_task: OnceLock::new(),
+            p2p_manager: OnceLock::new(),
         }
+    }
+
+    /// Wire the hub's [`P2pManager`] into this manager so that
+    /// `post_describe` can validate `layout_compat` against the stored
+    /// P2P baseline.
+    ///
+    /// Call once at construction time (production binary, test fixture).
+    /// Subsequent calls after the first are no-ops (OnceLock semantics).
+    pub fn set_p2p_manager(&self, p2p: Arc<P2pManager>) {
+        let _ = self.p2p_manager.set(p2p);
     }
 
     /// Snapshot of the cached describe payload for `instance_id`. Returns
@@ -433,6 +456,11 @@ async fn core_describe_instance(
     };
     match client.core().describe().await {
         Ok(payload) => {
+            if let Err(resp) =
+                validate_describe_layout(&mgr, instance_id, &payload, "core_describe_instance")
+            {
+                return *resp;
+            }
             commit_describe_if_registered(
                 &mgr.describe_cache,
                 mgr.registry.get(),
@@ -853,6 +881,9 @@ async fn post_describe(
             );
         }
     }
+    if let Err(resp) = validate_describe_layout(&mgr, instance_id, &payload, "post_describe") {
+        return *resp;
+    }
     commit_describe_if_registered(
         &mgr.describe_cache,
         Some(registry),
@@ -925,6 +956,11 @@ async fn get_describe(
     };
     match client.core().describe().await {
         Ok(payload) => {
+            if let Err(resp) =
+                validate_describe_layout(&mgr, instance_id, &payload, "get_describe_force")
+            {
+                return *resp;
+            }
             commit_describe_if_registered(
                 &mgr.describe_cache,
                 mgr.registry.get(),
@@ -949,6 +985,44 @@ async fn get_describe(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// c5: validate a describe payload's `layout_compat` against the
+/// `P2pManager` baseline. Common to every code path that lands an
+/// `InstanceDescription` in the cache — `post_describe` (leader push),
+/// `get_describe` with `force=true` (operator-triggered velo pull),
+/// and `core_describe_instance` (typed velo pull endpoint). Without
+/// this single source of truth a force-pull would stuff a divergent
+/// payload past the c5 gate.
+///
+/// Returns `Ok(())` to proceed with `commit_describe_if_registered`,
+/// or `Err(Response)` carrying the structured HTTP 400 rejection.
+///
+/// `None` payload → legacy / pre-stamping snapshot → skip (matches
+/// the existing `block_size` / `parallelism` optionality contract).
+///
+/// `p2p_manager` not wired → P2P feature not enabled on this hub →
+/// fall through with a warn so standalone hubs are unaffected.
+fn validate_describe_layout(
+    mgr: &Arc<ControlPlaneManager>,
+    instance_id: InstanceId,
+    payload: &InstanceDescription,
+    call_site: &'static str,
+) -> Result<(), Box<Response>> {
+    let Some(candidate) = payload.layout_compat.as_ref() else {
+        return Ok(());
+    };
+    let Some(p2p) = mgr.p2p_manager.get() else {
+        tracing::warn!(
+            instance = %instance_id,
+            site = call_site,
+            "describe: layout_compat present but P2pManager not wired; \
+             skipping validation (P2P feature not enabled on this hub?)"
+        );
+        return Ok(());
+    };
+    p2p.check_describe_layout(instance_id, candidate)
+        .map_err(|e| Box::new(error_response(StatusCode::BAD_REQUEST, &e.to_string())))
+}
 
 /// Insert a freshly fetched `modules` list into the cache **only** if the
 /// target is still registered at the moment of insertion.
@@ -1086,11 +1160,20 @@ fn service_unavailable(msg: &str) -> Response {
 }
 
 fn error_response(status: StatusCode, msg: &str) -> Response {
+    let code = match status {
+        StatusCode::NOT_FOUND => ErrorCode::NotFound,
+        StatusCode::BAD_REQUEST => ErrorCode::BadRequest,
+        StatusCode::SERVICE_UNAVAILABLE => ErrorCode::Internal,
+        _ => ErrorCode::Internal,
+    };
+    let body = ErrorBody {
+        code,
+        message: msg.to_owned(),
+    };
     json_response(
         status,
-        serde_json::json!({
-            "error": msg,
-        }),
+        serde_json::to_value(body)
+            .unwrap_or_else(|_| serde_json::json!({ "code": "internal", "message": msg })),
     )
 }
 

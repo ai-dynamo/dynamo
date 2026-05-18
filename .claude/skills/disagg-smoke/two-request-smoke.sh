@@ -6,6 +6,9 @@
 # Honors:
 #   KVBM_REPO           (default: /home/ryan/repos/dynamo)  → repo root
 #   KVBM_DISAGG_LEADER  (legacy | unified ; default legacy)  → exported into launches
+#   KVBM_BLOCK_LAYOUT   (operational | universal ; default operational)
+#                         → injected into kv_connector_extra_config JSON; verified
+#                           post-bringup against the hub describe endpoint
 #   KVBM_EXPERIMENT_LABEL (default: two-request)             → folded into experiment dir name
 #
 # R1: prompt P1 (~54 tokens / 3 full blocks). Cold caches on both sides.
@@ -24,6 +27,8 @@ DYNAMO=${KVBM_REPO:-/home/ryan/repos/dynamo}
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
 SKILL_TRACE=$DYNAMO/.claude/skills/disagg-trace
 LABEL=${KVBM_EXPERIMENT_LABEL:-two-request}
+KVBM_BLOCK_LAYOUT=${KVBM_BLOCK_LAYOUT:-operational}
+export KVBM_BLOCK_LAYOUT
 
 ROOT=${1:-$(bash $SKILL_BRINGUP/new-experiment.sh "$LABEL")}
 echo "EXP=$ROOT"
@@ -59,6 +64,15 @@ INSTS=$(curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances)
 PREFILL_ID=$(echo "$INSTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prefill"][0])')
 DECODE_ID=$(echo "$INSTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["decode"][0])')
 echo "PREFILL_ID=$PREFILL_ID DECODE_ID=$DECODE_ID"
+
+# Verify block layout mode matches requested mode.  This assertion fails
+# before the JSON-injection fix: the env-var is stripped by vLLM's EngineCore
+# subprocess spawn, so the connector falls back to Operational regardless of
+# what KVBM_BLOCK_LAYOUT was set to.
+echo "--- block layout verification (expected: $KVBM_BLOCK_LAYOUT) ---"
+bash "$SKILL_BRINGUP/verify-block-layout.sh" "$PREFILL_ID" "$KVBM_BLOCK_LAYOUT"
+bash "$SKILL_BRINGUP/verify-block-layout.sh" "$DECODE_ID"  "$KVBM_BLOCK_LAYOUT"
+echo "--- block layout OK ---"
 
 # Clear both caches before R1.
 curl -sS -X PUT http://127.0.0.1:8337/v1/instances/$PREFILL_ID/reset \

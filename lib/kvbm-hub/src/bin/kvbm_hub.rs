@@ -139,6 +139,12 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Construct P2pManager first so CPM can be wired to it for describe-push
+    // layout-compat validation (c5).
+    let p2p_manager = Arc::new(kvbm_hub::P2pManager::new());
+    let cpm = Arc::new(kvbm_hub::ControlPlaneManager::new());
+    cpm.set_p2p_manager(Arc::clone(&p2p_manager));
+
     let mut builder = kvbm_hub::create_server_builder()
         .bind_addr(config.bind_addr)
         .discovery_port(config.discovery_port)
@@ -147,9 +153,9 @@ async fn main() -> anyhow::Result<()> {
         .prune_interval(Duration::from_secs(config.prune_interval_secs))
         .heartbeat_interval(Duration::from_secs(config.heartbeat_interval_secs))
         .heartbeat_max_failures(config.heartbeat_max_failures)
-        .add_feature_manager(Arc::new(kvbm_hub::P2pManager::new()))
-        .add_feature_manager(Arc::new(cd_manager))
-        .add_feature_manager(Arc::new(kvbm_hub::ControlPlaneManager::new()));
+        .add_feature_manager(p2p_manager as Arc<dyn kvbm_hub::FeatureManager>)
+        .add_feature_manager(Arc::new(cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
+        .add_feature_manager(cpm as Arc<dyn kvbm_hub::FeatureManager>);
 
     if let Some(velo_port) = config.velo_port {
         let bind = SocketAddr::new(config.bind_addr, velo_port);

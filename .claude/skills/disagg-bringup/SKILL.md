@@ -15,11 +15,34 @@ returns one entry under `prefill` and one under `decode`.
 |---|---|
 | `env.sh` | Source-able CUDA + venv exports for non-interactive bash. |
 | `start-hub.sh` | Launches `kvbm_hub` with `--prefill-vllm-url` + `--prefill-vllm-model` baked in. |
-| `launch-prefill.sh` | Single-instance vLLM prefill launcher (port 8000, role=prefill). Inherits `KVBM_DISAGG_LEADER` from caller's env. |
-| `launch-decode.sh` | Single-instance vLLM decode launcher (port 8001, role=decode). Inherits `KVBM_DISAGG_LEADER` from caller's env. |
+| `launch-prefill.sh` | Single-instance vLLM prefill launcher (port 8000, role=prefill). Honors `KVBM_BLOCK_LAYOUT`. |
+| `launch-decode.sh` | Single-instance vLLM decode launcher (port 8001, role=decode). Honors `KVBM_BLOCK_LAYOUT`. |
+| `verify-block-layout.sh` | Post-bringup assertion: confirms a registered instance's G2 layout matches the requested mode (via hub describe). |
 | `new-experiment.sh` | Mints `/tmp/kvbm-experiments/<ts>-<label>/` and prints the path. |
 
 The `KVBM_DISAGG_LEADER` env var (recognized by `kvbm-connector::init`) selects between the legacy `ConditionalDisaggLeader` (default / unset / `legacy`) and the new `UnifiedDisaggLeader` (`unified`). Set it in the caller's environment before invoking `launch-{prefill,decode}.sh`; the scripts inherit it.
+
+### Universal-mode launch
+
+`KVBM_BLOCK_LAYOUT=universal` activates Universal G2 layout (fused permute kernels, cross-TP/PP canonical equality). **Do not rely on the env var reaching vLLM's EngineCore subprocess** — vLLM spawns EngineCore in a new process that does not inherit the parent environment. The connector reads `KvbmConfig` in the EngineCore process, not in `api_server`, so the env var is absent when `kvbm-config`'s figment merge runs.
+
+The fix: inject `block_layout` into the `--kv-transfer-config` JSON under `kv_connector_extra_config.default.block_layout`. vLLM serializes the config object and re-loads it on the worker side, so JSON injection survives the spawn boundary.
+
+```bash
+KVBM_BLOCK_LAYOUT=universal bash launch-prefill.sh > prefill.log 2>&1 &
+KVBM_BLOCK_LAYOUT=universal bash launch-decode.sh  > decode.log  2>&1 &
+```
+
+The launch scripts inject the value into `"default": { "block_layout": "..." }` inside `kv_connector_extra_config`. Because `KvbmRuntime.build_leader/build_worker` calls `from_figment_with_json_for_leader/worker` with `.nested()`, the `default` profile applies to both leader and worker roles.
+
+After bringup, `verify-block-layout.sh` confirms the connector actually registered in the requested mode:
+
+```bash
+bash verify-block-layout.sh "$PREFILL_ID" universal
+bash verify-block-layout.sh "$DECODE_ID"  universal
+```
+
+This is the reproducer for the env-var stripping bug: the assertion fails when only env-var propagation is used and passes after JSON injection.
 
 ## Prerequisites
 

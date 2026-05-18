@@ -16,16 +16,19 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use kvbm_common::shape::CanonicalBlockShape;
 use kvbm_common::{BlockLayoutMode, KvBlockLayout};
 use kvbm_hub::protocol::{
     ConditionalDisaggConfig, ConditionalDisaggRole, ErrorBody, Feature, P2pConfig, RegisterRequest,
-    paths, peers_by_instance,
+    instance_by_id, instance_describe, paths, peers_by_instance,
 };
-use kvbm_hub::{ConditionalDisaggManager, FeatureManager, HubServer, P2pManager};
-use kvbm_protocols::control::LayoutConfigDescription;
+use kvbm_hub::{
+    ConditionalDisaggManager, ControlPlaneManager, FeatureManager, HubServer, P2pManager,
+};
 use kvbm_protocols::control::layout_compat::LayoutCompatPayload;
+use kvbm_protocols::control::{HostInfo, InstanceDescription, LayoutConfigDescription};
 use velo_ext::{InstanceId, PeerInfo, WorkerAddress};
 
 // ---- fixtures --------------------------------------------------------------
@@ -138,7 +141,12 @@ fn payload_with_topology(
 fn cd_features(role: ConditionalDisaggRole, layout: Option<LayoutCompatPayload>) -> Vec<Feature> {
     let cd = Feature::ConditionalDisagg(ConditionalDisaggConfig { role });
     match layout {
-        Some(payload) => vec![Feature::P2P(P2pConfig { layout_compat: payload }), cd],
+        Some(payload) => vec![
+            Feature::P2P(P2pConfig {
+                layout_compat: payload,
+            }),
+            cd,
+        ],
         None => vec![cd],
     }
 }
@@ -372,7 +380,11 @@ async fn p2p_register_with_self_inconsistent_payload_is_rejected() {
         .await
         .expect("POST /v1/instances");
 
-    assert_eq!(resp.status(), 400, "self-inconsistent P2P payload must reject");
+    assert_eq!(
+        resp.status(),
+        400,
+        "self-inconsistent P2P payload must reject"
+    );
     let body: ErrorBody = resp.json().await.unwrap();
     let msg = body.message.to_lowercase();
     assert!(
@@ -793,4 +805,455 @@ async fn resp_to_body(resp: reqwest::Response) -> ErrorBody {
     resp.json::<ErrorBody>()
         .await
         .expect("error response must deserialize as ErrorBody")
+}
+
+// ---- c5: describe-push layout_compat re-validation -------------------------
+//
+// `InstanceDescription` gains `Option<LayoutCompatPayload>`. The hub's
+// `POST /v1/instances/{id}/describe` re-validates a `Some(payload)` against
+// the stored `P2pManager` baseline. Defence-in-depth on top of the c2
+// register-time gate: catches drift between a leader's register-time
+// announcement and its describe-time announcement.
+//
+// Decision (per c5 plan): describe-with-Some-payload but no baseline
+// registered is a protocol violation (HTTP 400). `None` payload is the
+// legacy / pre-stamping snapshot path and bypasses validation.
+
+async fn start_server_with_cpm_and_p2p() -> (HubServer, Arc<ControlPlaneManager>, Arc<P2pManager>) {
+    let cpm: Arc<ControlPlaneManager> = Arc::new(ControlPlaneManager::new());
+    let p2p: Arc<P2pManager> = Arc::new(P2pManager::new());
+    cpm.set_p2p_manager(Arc::clone(&p2p));
+    let server = kvbm_hub::create_server_builder()
+        .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .discovery_port(0)
+        .control_port(0)
+        .add_feature_manager(Arc::clone(&p2p) as Arc<dyn FeatureManager>)
+        .add_feature_manager(Arc::clone(&cpm) as Arc<dyn FeatureManager>)
+        .serve()
+        .await
+        .expect("start hub with CPM + P2P");
+    (server, cpm, p2p)
+}
+
+fn describe_payload(
+    instance_id: InstanceId,
+    layout_compat: Option<LayoutCompatPayload>,
+) -> InstanceDescription {
+    InstanceDescription {
+        instance_id: instance_id.to_string(),
+        worker_ids: vec![1],
+        hub_instance_id: None,
+        block_size: Some(16),
+        parallelism: None,
+        tier_capacity: Vec::new(),
+        workers: Vec::new(),
+        modules: Vec::new(),
+        role: None,
+        config: None,
+        host: HostInfo {
+            hostname: "c5-test".into(),
+            pid: 1,
+        },
+        started_at: SystemTime::UNIX_EPOCH,
+        layout_compat,
+    }
+}
+
+async fn post_p2p_register(
+    server: &HubServer,
+    peer: &PeerInfo,
+    layout: LayoutCompatPayload,
+) -> reqwest::Response {
+    let req = RegisterRequest {
+        peer_info: peer.clone(),
+        features: vec![Feature::P2P(P2pConfig {
+            layout_compat: layout,
+        })],
+    };
+    http()
+        .post(control_url(server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .expect("POST /v1/instances")
+}
+
+async fn post_bare_register(server: &HubServer, peer: &PeerInfo) -> reqwest::Response {
+    let req = RegisterRequest {
+        peer_info: peer.clone(),
+        features: vec![],
+    };
+    http()
+        .post(control_url(server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .expect("POST /v1/instances")
+}
+
+async fn post_describe(
+    server: &HubServer,
+    instance_id: InstanceId,
+    body: &InstanceDescription,
+) -> reqwest::Response {
+    http()
+        .post(control_url(server, &instance_describe(instance_id)))
+        .json(body)
+        .send()
+        .await
+        .expect("POST /describe")
+}
+
+#[tokio::test]
+async fn describe_push_with_baseline_match_accepts() {
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer = make_peer();
+    let baseline = payload(BlockLayoutMode::Operational);
+
+    let resp = post_p2p_register(&server, &peer, baseline.clone()).await;
+    assert_eq!(resp.status(), 200, "P2P register sets baseline");
+
+    let descr = describe_payload(peer.instance_id(), Some(baseline));
+    let resp = post_describe(&server, peer.instance_id(), &descr).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "describe with matching layout_compat must accept"
+    );
+}
+
+#[tokio::test]
+async fn describe_push_with_baseline_divergence_rejects() {
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer = make_peer();
+    let baseline = payload_with_topology(BlockLayoutMode::Operational, 2, 1);
+
+    let resp = post_p2p_register(&server, &peer, baseline).await;
+    assert_eq!(resp.status(), 200);
+
+    // Divergent tp_size — operational mode treats tp_size as part of
+    // equality (per check_layout_compat doc).
+    let divergent = payload_with_topology(BlockLayoutMode::Operational, 4, 1);
+    let descr = describe_payload(peer.instance_id(), Some(divergent));
+    let resp = post_describe(&server, peer.instance_id(), &descr).await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "describe with divergent tp_size must reject under operational"
+    );
+    let body = resp_to_body(resp).await;
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("tp_size") || msg.contains("baseline") || msg.contains("diverge"),
+        "rejection should reference the divergence; got: {}",
+        body.message
+    );
+}
+
+#[tokio::test]
+async fn describe_push_with_mode_divergence_rejects() {
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer = make_peer();
+    let baseline = payload(BlockLayoutMode::Universal);
+
+    let resp = post_p2p_register(&server, &peer, baseline).await;
+    assert_eq!(resp.status(), 200);
+
+    let divergent = payload(BlockLayoutMode::Operational);
+    let descr = describe_payload(peer.instance_id(), Some(divergent));
+    let resp = post_describe(&server, peer.instance_id(), &descr).await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "describe with divergent mode must reject"
+    );
+    let body = resp_to_body(resp).await;
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("mode") || msg.contains("universal") || msg.contains("operational"),
+        "rejection should reference the mode mismatch; got: {}",
+        body.message
+    );
+}
+
+#[tokio::test]
+async fn describe_push_without_baseline_rejects() {
+    // Decision 1: describe carrying Some(layout_compat) but the
+    // instance has no P2P baseline (= no prior register with
+    // Feature::P2P) is a protocol violation. HTTP 400.
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer = make_peer();
+
+    let resp = post_bare_register(&server, &peer).await;
+    assert_eq!(resp.status(), 200, "bare register (no P2P) succeeds");
+
+    let descr = describe_payload(
+        peer.instance_id(),
+        Some(payload(BlockLayoutMode::Operational)),
+    );
+    let resp = post_describe(&server, peer.instance_id(), &descr).await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "describe with layout_compat but no P2P baseline must reject"
+    );
+    let body = resp_to_body(resp).await;
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("baseline") || msg.contains("p2p") || msg.contains("before register"),
+        "rejection should reference the missing baseline; got: {}",
+        body.message
+    );
+}
+
+#[tokio::test]
+async fn describe_push_none_layout_compat_passes() {
+    // Pre-stamping snapshot — None on layout_compat skips the
+    // validation hook. Matches the existing Option-for-pre-stamping
+    // contract on block_size / parallelism.
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer = make_peer();
+    let baseline = payload(BlockLayoutMode::Operational);
+
+    let resp = post_p2p_register(&server, &peer, baseline).await;
+    assert_eq!(resp.status(), 200);
+
+    let descr = describe_payload(peer.instance_id(), None);
+    let resp = post_describe(&server, peer.instance_id(), &descr).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "describe with None layout_compat must accept (pre-stamping path)"
+    );
+}
+
+#[tokio::test]
+async fn describe_push_none_without_baseline_passes() {
+    // Legacy describe path: instance has no P2P registration AND
+    // describe carries no layout_compat. Validation is a no-op.
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer = make_peer();
+
+    let resp = post_bare_register(&server, &peer).await;
+    assert_eq!(resp.status(), 200);
+
+    let descr = describe_payload(peer.instance_id(), None);
+    let resp = post_describe(&server, peer.instance_id(), &descr).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "legacy describe (None + no baseline) must accept"
+    );
+}
+
+#[tokio::test]
+async fn describe_push_after_p2p_unregister_not_found() {
+    // Regression safety net: P2pManager::on_unregister clears the
+    // baseline when the last P2P instance leaves. The base registry
+    // entry is also evicted on DELETE. POST /describe for an
+    // unregistered instance returns 404 (existing behaviour) — proves
+    // the post_describe handler keeps the registry-recheck guard ahead
+    // of the new layout_compat hook.
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer = make_peer();
+    let baseline = payload(BlockLayoutMode::Operational);
+
+    let resp = post_p2p_register(&server, &peer, baseline.clone()).await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = http()
+        .delete(control_url(&server, &instance_by_id(peer.instance_id())))
+        .send()
+        .await
+        .expect("DELETE /v1/instances/{id}");
+    assert!(
+        resp.status().is_success(),
+        "unregister should succeed, got {}",
+        resp.status()
+    );
+
+    let descr = describe_payload(peer.instance_id(), Some(baseline));
+    let resp = post_describe(&server, peer.instance_id(), &descr).await;
+    assert_eq!(
+        resp.status(),
+        404,
+        "describe for unregistered instance returns 404"
+    );
+}
+
+// ---- c5 follow-on: force-pull describe must NOT bypass the gate -----------
+//
+// post_describe (the leader-push path) was the original c5 site. Two
+// velo-pull paths bypassed the gate by writing the pulled payload
+// directly to the cache:
+//   - GET /v1/instances/{id}/describe?force=true (operator refresh)
+//   - POST /v1/instances/{id}/control/core/describe_instance
+// Both call commit_describe_if_registered directly. A force-pull
+// returning a divergent layout_compat would slip past the c5 gate.
+//
+// The fix factored a shared `validate_describe_layout` helper invoked
+// from all three sites. These reproducers exercise both velo-pull
+// paths against a peer whose velo handler returns a divergent
+// payload, asserting HTTP 400.
+
+use kvbm_protocols::control::{ControlReply, DESCRIBE_INSTANCE_HANDLER, DescribeInstanceRequest};
+use std::time::Duration;
+use velo::Handler;
+use velo::transports::tcp::TcpTransportBuilder;
+
+fn new_velo_transport() -> Arc<velo::transports::tcp::TcpTransport> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    Arc::new(
+        TcpTransportBuilder::new()
+            .from_listener(listener)
+            .unwrap()
+            .build()
+            .unwrap(),
+    )
+}
+
+async fn new_velo_peer() -> Arc<velo::Velo> {
+    velo::Velo::builder()
+        .add_transport(new_velo_transport())
+        .build()
+        .await
+        .unwrap()
+}
+
+/// Hub fixture wiring CPM + P2P + velo transport — needed for the
+/// force-pull reproducers. The plain `start_server_with_cpm_and_p2p`
+/// fixture omits velo, which makes force-pull return 500 before
+/// reaching the gate; the bypass concern only exists when velo IS
+/// wired and the pull succeeds.
+async fn start_server_with_cpm_and_p2p_and_velo()
+-> (HubServer, Arc<ControlPlaneManager>, Arc<P2pManager>) {
+    let transport = new_velo_transport();
+    let cpm: Arc<ControlPlaneManager> = Arc::new(ControlPlaneManager::new());
+    let p2p: Arc<P2pManager> = Arc::new(P2pManager::new());
+    cpm.set_p2p_manager(Arc::clone(&p2p));
+    let server = kvbm_hub::create_server_builder()
+        .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .discovery_port(0)
+        .control_port(0)
+        .add_transport(transport as Arc<dyn velo::Transport>)
+        .add_feature_manager(Arc::clone(&p2p) as Arc<dyn FeatureManager>)
+        .add_feature_manager(Arc::clone(&cpm) as Arc<dyn FeatureManager>)
+        .heartbeat_interval(Duration::from_secs(3600))
+        .heartbeat_max_failures(u32::MAX)
+        .registration_ttl(Duration::from_secs(3600))
+        .serve()
+        .await
+        .expect("start hub with CPM + P2P + velo");
+    (server, cpm, p2p)
+}
+
+fn install_canned_describe(peer: &velo::Velo, payload: InstanceDescription) {
+    peer.register_handler(
+        Handler::typed_unary_async::<DescribeInstanceRequest, _, _, _>(
+            DESCRIBE_INSTANCE_HANDLER,
+            move |_ctx| {
+                let payload = payload.clone();
+                async move { Ok(ControlReply::Ok(payload)) }
+            },
+        )
+        .build(),
+    )
+    .unwrap();
+}
+
+async fn register_peer_with_p2p(
+    server: &HubServer,
+    peer: &velo::Velo,
+    layout: LayoutCompatPayload,
+) {
+    let req = RegisterRequest {
+        peer_info: peer.peer_info(),
+        features: vec![Feature::P2P(P2pConfig {
+            layout_compat: layout,
+        })],
+    };
+    let resp = http()
+        .post(control_url(server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .expect("POST /v1/instances");
+    assert_eq!(resp.status(), 200, "register peer with P2P feature");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn force_pull_describe_with_baseline_divergence_rejects() {
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p_and_velo().await;
+    let peer = new_velo_peer().await;
+
+    // Baseline: register peer with P1.
+    let baseline = payload_with_topology(BlockLayoutMode::Operational, 2, 1);
+    register_peer_with_p2p(&server, &peer, baseline).await;
+
+    // Install velo handler returning a payload with divergent layout_compat (P2).
+    let divergent = payload_with_topology(BlockLayoutMode::Operational, 4, 1);
+    let pulled = describe_payload(peer.instance_id(), Some(divergent));
+    install_canned_describe(&peer, pulled);
+
+    // Force-pull. Hub fetches from peer's velo handler; the validator
+    // must reject before commit.
+    let url = control_url(
+        &server,
+        &format!("{}?force=true", instance_describe(peer.instance_id())),
+    );
+    let resp = http().get(&url).send().await.expect("GET /describe?force");
+    assert_eq!(
+        resp.status(),
+        400,
+        "force-pull with divergent layout_compat must reject"
+    );
+    let body = resp_to_body(resp).await;
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("tp_size") || msg.contains("baseline") || msg.contains("diverge"),
+        "rejection should reference the divergence; got: {}",
+        body.message
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn core_describe_instance_with_baseline_divergence_rejects() {
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p_and_velo().await;
+    let peer = new_velo_peer().await;
+
+    let baseline = payload(BlockLayoutMode::Universal);
+    register_peer_with_p2p(&server, &peer, baseline).await;
+
+    // Divergent mode: Operational against Universal baseline.
+    let divergent = payload(BlockLayoutMode::Operational);
+    let pulled = describe_payload(peer.instance_id(), Some(divergent));
+    install_canned_describe(&peer, pulled);
+
+    // POST /v1/instances/{id}/control/core/describe_instance — the
+    // typed velo-pull endpoint. Same bypass concern as force=true.
+    let url = control_url(
+        &server,
+        &format!(
+            "/v1/instances/{}/control/core/describe_instance",
+            peer.instance_id()
+        ),
+    );
+    let resp = http()
+        .post(&url)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("POST /control/core/describe_instance");
+    assert_eq!(
+        resp.status(),
+        400,
+        "core_describe_instance pull with divergent layout_compat must reject"
+    );
+    let body = resp_to_body(resp).await;
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("mode") || msg.contains("universal") || msg.contains("operational"),
+        "rejection should reference the mode mismatch; got: {}",
+        body.message
+    );
 }
