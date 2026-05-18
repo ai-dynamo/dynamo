@@ -419,8 +419,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_preserves_text_strings_comments_and_terminal_lookup() {
-        let template =
-            r#"text m.content.0.type {{ "m.content.0.type" }} {# m.content.0.type #} {{ items.0 }}"#;
+        let template = r#"text m.content.0.type {{ "m.content.0.type" }} {# m.content.0.type #} {{ items.0 }}"#;
         let result = rewrite_midchain_dotted_integer_lookup(template);
         assert_eq!(result, template);
     }
