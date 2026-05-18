@@ -504,6 +504,48 @@ impl TransferManager {
         self.registry.read().unwrap().get_layout(handle).cloned()
     }
 
+    /// Read the prepared-plan cache statistics: entries, hits, misses,
+    /// approximate bytes. Safe to call concurrently with active transfers.
+    pub fn prepared_plan_cache_stats(&self) -> crate::transfer::prepared::PreparedPlanCacheStats {
+        self.context.prepared_plan_cache().stats()
+    }
+
+    /// Prewarm the prepared-plan cache for both directions of a local
+    /// (G1↔G2-style) handle pair.
+    ///
+    /// Builds and caches a prepared transfer plan for `src→dst` and `dst→src`
+    /// using the strategy that [`crate::transfer::strategy::select_strategy`]
+    /// would pick for each direction. No-op when the prepared-plan cache is
+    /// disabled or when either handle is not local to this worker.
+    ///
+    /// Safe to call multiple times — subsequent calls are cache hits.
+    /// `axis_slices` is always empty for prewarm (full transfers); sliced
+    /// transfers populate the cache lazily on first use.
+    ///
+    /// Returns `Ok(stats)` reporting prepared-plan cache state after warmup
+    /// so callers can verify the prewarm landed.
+    pub fn prewarm_local_pair(
+        &self,
+        a_handle: LayoutHandle,
+        b_handle: LayoutHandle,
+    ) -> Result<crate::transfer::prepared::PreparedPlanCacheStats> {
+        let registry = self.registry.read().unwrap();
+        let a_layout = registry
+            .get_layout(a_handle)
+            .ok_or_else(|| anyhow!("prewarm_local_pair: invalid handle: {}", a_handle))?
+            .clone();
+        let b_layout = registry
+            .get_layout(b_handle)
+            .ok_or_else(|| anyhow!("prewarm_local_pair: invalid handle: {}", b_handle))?
+            .clone();
+        drop(registry);
+        self.context
+            .prewarm_prepared_plan(a_handle, &a_layout, b_handle, &b_layout)?;
+        self.context
+            .prewarm_prepared_plan(b_handle, &b_layout, a_handle, &a_layout)?;
+        Ok(self.context.prepared_plan_cache().stats())
+    }
+
     /// Create a bounce buffer specification from a layout handle and block IDs.
     ///
     /// This resolves the layout handle to a physical layout and wraps it in a

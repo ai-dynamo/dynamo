@@ -60,7 +60,7 @@ pub(crate) enum KernelKind {
 /// (1) the `block_layout` field discriminates NHD vs HND for the
 /// operational side without re-projecting; (2) the executor doesn't
 /// need to re-parse the `LayoutConfig` to issue a launch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct KernelInvocation {
     pub kind: KernelKind,
     pub num_layers: usize,

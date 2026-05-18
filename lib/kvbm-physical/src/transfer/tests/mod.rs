@@ -15,6 +15,7 @@ mod local_transfers;
 mod planner_graph_replay;
 mod planner_nixl;
 mod planner_path;
+mod prepared_plan;
 
 /// Skip test if stub kernels are in use (no real CUDA available).
 ///

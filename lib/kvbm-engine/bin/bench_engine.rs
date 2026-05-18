@@ -338,6 +338,11 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = BenchLayout::Fc)]
     g2_layout: BenchLayout,
 
+    /// Enable the prepared-plan cache (default: on). Set to `false` to
+    /// measure the legacy per-call allocation path for comparison.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    prepared_cache: bool,
+
     /// Optional TOML config file (overridden by CLI args)
     #[arg(long)]
     config: Option<PathBuf>,
@@ -374,6 +379,12 @@ struct BenchConfig {
     g1_layout: BenchLayout,
     #[serde(default)]
     g2_layout: BenchLayout,
+    #[serde(default = "default_prepared_cache")]
+    prepared_cache: bool,
+}
+
+fn default_prepared_cache() -> bool {
+    true
 }
 
 impl From<Cli> for BenchConfig {
@@ -402,6 +413,7 @@ impl From<Cli> for BenchConfig {
             weak_scale: cli.weak_scale,
             g1_layout: cli.g1_layout,
             g2_layout: cli.g2_layout,
+            prepared_cache: cli.prepared_cache,
         }
     }
 }
@@ -604,6 +616,7 @@ fn spawn_worker_thread(
     let disk_path = config.disk_path.clone();
     let g1_layout = config.g1_layout;
     let g2_layout = config.g2_layout;
+    let prepared_cache = config.prepared_cache;
 
     let join_handle = std::thread::Builder::new()
         .name(format!("bench-gpu-{device_id}"))
@@ -646,11 +659,15 @@ fn spawn_worker_thread(
                     eprintln!("[GPU {device_id}] GDS_MT backend unavailable");
                 }
 
-                // Create TransferManager
+                // Create TransferManager. The prepared-plan cache is
+                // enabled by default; `--prepared-cache=false` toggles
+                // it off to measure the legacy per-call allocation
+                // path for comparison.
                 let manager = TransferManager::builder()
                     .event_system(event_system)
                     .nixl_agent(agent.clone())
                     .cuda_device_id(device_id as usize)
+                    .prepared_plan_cache_enabled(prepared_cache)
                     .build()?;
 
                 // Build layout config. num_heads is only set when at
@@ -1626,6 +1643,14 @@ fn main() -> Result<()> {
         eprintln!("    Batch sizes: {:?}", config.offload_batch_sizes);
         eprintln!("    Concurrency: {:?}", config.offload_concurrency);
     }
+    eprintln!(
+        "  Prepared-plan cache: {}",
+        if config.prepared_cache {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     eprintln!();
 
     // Build a main-thread tokio runtime for the leader
@@ -1656,6 +1681,25 @@ fn main() -> Result<()> {
 
             let instance = BenchInstance::new(resolved, page_size).await?;
             let results = instance.run_benchmarks().await?;
+            // Report prepared-plan cache stats per-worker before
+            // shutdown — useful for empirical validation of the cache:
+            // post-warmup, `local_misses` should equal the number of
+            // unique handle pairs traversed and `approximate_bytes`
+            // should stay bounded across iterations.
+            for (i, handle) in instance.worker_handles.iter().enumerate() {
+                let stats = handle.worker.transfer_manager().prepared_plan_cache_stats();
+                eprintln!(
+                    "  [worker {i}] prepared-plan cache: entries={local}+{remote} \
+                     hits={lh}/{rh} misses={lm}/{rm} approx_bytes={b}",
+                    local = stats.local_entries,
+                    remote = stats.remote_entries,
+                    lh = stats.local_hits,
+                    rh = stats.remote_hits,
+                    lm = stats.local_misses,
+                    rm = stats.remote_misses,
+                    b = stats.approximate_bytes,
+                );
+            }
             all_results.extend(results);
             instance.shutdown();
         }

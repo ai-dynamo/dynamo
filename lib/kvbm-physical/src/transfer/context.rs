@@ -176,6 +176,19 @@ impl TransferConfigBuilderWithAgent {
         self.builder = self.builder.cuda_device_id(cuda_device_id);
         self
     }
+
+    /// Override the prepared-plan cache enabled flag after the agent
+    /// has been wired. Forwarded to the underlying builder.
+    pub fn prepared_plan_cache_enabled(mut self, on: bool) -> Self {
+        self.builder = self.builder.prepared_plan_cache_enabled(on);
+        self
+    }
+
+    /// Override the remote-LRU capacity after the agent has been wired.
+    pub fn prepared_plan_remote_capacity(mut self, capacity: usize) -> Self {
+        self.builder = self.builder.prepared_plan_remote_capacity(capacity);
+        self
+    }
 }
 
 fn get_tokio_runtime() -> TokioRuntime {
@@ -459,6 +472,49 @@ impl TransferContext {
     /// Get the compact prepared-plan cache.
     pub(crate) fn prepared_plan_cache(&self) -> &Arc<PreparedPlanCache> {
         &self.prepared_plan_cache
+    }
+
+    /// Eagerly build and cache a prepared transfer plan for one direction
+    /// of a `(src, dst)` handle pair using the strategy that
+    /// [`crate::transfer::strategy::select_strategy`] would pick.
+    ///
+    /// No-op when the cache is disabled. Sliced transfers (`axis_slices`)
+    /// still populate the cache lazily on first use.
+    pub(crate) fn prewarm_prepared_plan(
+        &self,
+        src_handle: crate::manager::LayoutHandle,
+        src_layout: &crate::transfer::PhysicalLayout,
+        dst_handle: crate::manager::LayoutHandle,
+        dst_layout: &crate::transfer::PhysicalLayout,
+    ) -> anyhow::Result<()> {
+        use crate::transfer::prepared::{PreparedPlanKey, PreparedTransferPlan};
+        use crate::transfer::strategy::{TransferPlan, select_strategy};
+        if !self.prepared_plan_cache.is_enabled() {
+            return Ok(());
+        }
+        let plan = select_strategy(src_layout, dst_layout, self)?;
+        let strategy = match plan {
+            TransferPlan::Direct(strategy) => strategy,
+            // Two-hop plans bypass the prepared-plan cache (per-call
+            // bounce layout). Nothing to prewarm.
+            TransferPlan::TwoHop { .. } => return Ok(()),
+        };
+        let key = PreparedPlanKey::new(src_handle, dst_handle, strategy, &[]);
+        self.prepared_plan_cache
+            .get_or_insert_with(self.worker_id(), key, || {
+                let src_kv = src_layout.layout().block_layout();
+                let dst_kv = dst_layout.layout().block_layout();
+                if src_kv.requires_transform(&dst_kv) {
+                    let invocation =
+                        crate::transfer::executor::planner::build_transform_invocation(
+                            src_layout, dst_layout,
+                        )?;
+                    PreparedTransferPlan::build_transform(invocation, src_layout, dst_layout)
+                } else {
+                    PreparedTransferPlan::build_direct(src_layout, dst_layout)
+                }
+            })?;
+        Ok(())
     }
 
     /// PR-7.5.1: Benchmark a set of candidates for a given layout-pair key

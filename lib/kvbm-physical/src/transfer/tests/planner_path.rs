@@ -609,14 +609,7 @@ async fn auto_promote_layer_range_plus_transform_rejects_loudly() -> Result<()> 
     let options = TransferOptionsInternal::builder()
         .layer_range(0..1)
         .build()?;
-    let result = execute_transfer(
-        &src,
-        &dst,
-        &src_blocks,
-        &dst_blocks,
-        options,
-        ctx.context(),
-    );
+    let result = execute_transfer(&src, &dst, &src_blocks, &dst_blocks, options, ctx.context());
     let err = match result {
         Ok(_) => panic!("layer_range + requires_transform must reject, but call succeeded"),
         Err(e) => e,

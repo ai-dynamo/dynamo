@@ -3,23 +3,45 @@
 
 //! Prepared transfer-plan cache.
 //!
-//! The cache stores compact, handle-keyed templates only. It deliberately does
-//! not store block-list-specific pointer tables or `CopyOp` vectors: CUDA and
-//! NIXL backends still need final per-call materialisation, so the useful cache
-//! boundary is the address-free/static layout work.
+//! Two-tier cache keyed by `(src_handle, dst_handle, strategy, axis_slices)`
+//! storing compact handle-keyed templates:
+//!
+//! * **Transform** plans (G1↔G2 + remote operational↔universal via the kernel
+//!   catalog) cache the resolved [`KernelInvocation`], universal-side base
+//!   address, `bytes_per_block`, and a per-plan scratch pool of
+//!   pointer-array `Vec`s. Per-call work is reduced to filling the leased
+//!   scratch via [`PointerSink`] — steady-state same-or-smaller block lists
+//!   reuse capacity, so the hot path allocates only the device-side copy.
+//!
+//! * **Direct** plans (same-layout / sliced copies) cache the projected
+//!   [`AnnotatedLayout`] pair so repeated calls skip layout-view projection.
+//!   Block-list-specific `CopyOp`s are still produced per call via
+//!   `plan_copy`; downstream NIXL/CUDA paths can consume them through a
+//!   [`DescSink`] (see [`NixlDescPairSink`], [`CopyOpVecSink`],
+//!   [`CountingDescSink`]).
+//!
+//! The cache values are wrapped in [`Arc`] so cache hits cost only a refcount
+//! bump — scratch pools are shared by definition across concurrent calls.
 
 use std::collections::{HashMap, VecDeque};
 use std::mem::{size_of, size_of_val};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
+use dynamo_memory::nixl::XferDescList;
 use kvbm_common::{AxisIntersection, KvDim};
 
+use crate::BlockId;
 use crate::manager::LayoutHandle;
-use crate::transfer::kernel_catalog::KernelInvocation;
-use crate::transfer::plan::AnnotatedLayout;
+use crate::transfer::PhysicalLayout;
+use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
+use crate::transfer::plan::{AnnotatedLayout, CopyOp};
 use crate::transfer::strategy::TransferStrategy;
+
+// ============================================================================
+// Cache keys
+// ============================================================================
 
 /// Hashable form of [`AxisIntersection`] for prepared-plan cache keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -44,6 +66,11 @@ impl From<&AxisIntersection> for AxisIntersectionKey {
 }
 
 /// Cache key for a reusable prepared transfer template.
+///
+/// Handle stability invariant: `LayoutHandle` is immutable for the lifetime
+/// of a [`TransferManager`] — once issued, a handle always identifies the
+/// same physical layout shape. This invariant is what makes the cached
+/// `AnnotatedLayout` / `KernelInvocation` / `univ_base` values safe to reuse.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PreparedPlanKey {
     src_handle: LayoutHandle,
@@ -105,14 +132,232 @@ impl From<TransferStrategy> for StrategyKey {
     }
 }
 
-/// Cached template for a prepared transfer.
-#[derive(Clone)]
+// ============================================================================
+// Push-style sinks
+// ============================================================================
+
+/// Sink for raw pointer addresses. Implementors capture pointers emitted
+/// while walking a [`PreparedTransferPlan::Transform`] template.
+pub trait PointerSink {
+    fn push(&mut self, addr: usize);
+    fn reserve(&mut self, _additional: usize) {}
+}
+
+impl PointerSink for Vec<usize> {
+    fn push(&mut self, addr: usize) {
+        Vec::push(self, addr);
+    }
+    fn reserve(&mut self, additional: usize) {
+        Vec::reserve(self, additional);
+    }
+}
+
+/// Allocation-free pointer sink used for telemetry / benchmark counting.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CountingPointerSink {
+    pub count: usize,
+}
+
+impl PointerSink for CountingPointerSink {
+    fn push(&mut self, _addr: usize) {
+        self.count += 1;
+    }
+}
+
+/// Sink for `(src_addr, dst_addr, size)` descriptor triples. Used by
+/// downstream NIXL/CUDA paths to consume planner output without an
+/// intermediate `Vec<CopyOp>` (or via a `Vec` sink when one is still useful).
+pub trait DescSink {
+    fn push(&mut self, src_addr: usize, dst_addr: usize, size: usize);
+    fn reserve(&mut self, _additional: usize) {}
+}
+
+/// Allocation-free descriptor sink for telemetry / benchmark counting.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CountingDescSink {
+    pub count: usize,
+    pub total_bytes: usize,
+}
+
+impl DescSink for CountingDescSink {
+    fn push(&mut self, _src_addr: usize, _dst_addr: usize, size: usize) {
+        self.count += 1;
+        self.total_bytes += size;
+    }
+}
+
+/// `DescSink` that fills a `Vec<CopyOp>` — preserves the legacy planner
+/// shape for paths that still need an op vector (small-strided copies,
+/// CUDA batch dispatch, coalescing).
+pub struct CopyOpVecSink<'a>(pub &'a mut Vec<CopyOp>);
+
+impl DescSink for CopyOpVecSink<'_> {
+    fn push(&mut self, src_addr: usize, dst_addr: usize, size: usize) {
+        self.0.push(CopyOp {
+            src_addr,
+            dst_addr,
+            size,
+        });
+    }
+    fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+}
+
+/// `DescSink` that fills a NIXL `XferDescList` pair in lockstep. Each
+/// `push` adds one descriptor to each side with the configured device IDs.
+pub struct NixlDescPairSink<'a, 'b> {
+    pub src: &'a mut XferDescList<'b>,
+    pub dst: &'a mut XferDescList<'b>,
+    pub src_device_id: u64,
+    pub dst_device_id: u64,
+}
+
+impl DescSink for NixlDescPairSink<'_, '_> {
+    fn push(&mut self, src_addr: usize, dst_addr: usize, size: usize) {
+        self.src.add_desc(src_addr, size, self.src_device_id);
+        self.dst.add_desc(dst_addr, size, self.dst_device_id);
+    }
+}
+
+// ============================================================================
+// Transform scratch pool
+// ============================================================================
+
+/// Per-prepared-plan scratch tuple: `op_ptrs` and `univ_ptrs` host arrays
+/// reused across calls.
+#[derive(Debug, Default)]
+pub(crate) struct TransformScratch {
+    pub op_ptrs: Vec<usize>,
+    pub univ_ptrs: Vec<usize>,
+}
+
+/// Bounded pool of [`TransformScratch`] buffers. Concurrent transfers
+/// on the same prepared plan each acquire a lease; the lease returns the
+/// buffer (cleared but keeping capacity) on drop, so steady-state same-
+/// or-smaller block lists never reallocate.
+///
+/// Capacity is unbounded by entry count — in practice the pool grows to
+/// the maximum concurrency of the transfer dispatcher and stays there.
+#[derive(Debug, Default)]
+pub(crate) struct TransformScratchPool {
+    inner: Mutex<Vec<TransformScratch>>,
+    peak_op_capacity: AtomicUsize,
+    peak_univ_capacity: AtomicUsize,
+    high_water_lease_count: AtomicUsize,
+    current_lease_count: AtomicUsize,
+}
+
+impl TransformScratchPool {
+    pub(crate) fn acquire(self: &Arc<Self>) -> TransformScratchLease {
+        let scratch = self.inner.lock().unwrap().pop().unwrap_or_default();
+        let n = self.current_lease_count.fetch_add(1, Ordering::Relaxed) + 1;
+        self.high_water_lease_count.fetch_max(n, Ordering::Relaxed);
+        TransformScratchLease {
+            scratch: Some(scratch),
+            pool: self.clone(),
+        }
+    }
+
+    /// Peak observed capacity of any returned `op_ptrs` Vec. Used by
+    /// observability / bench reporting.
+    #[allow(dead_code)] // observability surface; consumed by tests + future bench reporting
+    pub fn peak_op_capacity(&self) -> usize {
+        self.peak_op_capacity.load(Ordering::Relaxed)
+    }
+
+    /// Peak observed capacity of any returned `univ_ptrs` Vec.
+    #[allow(dead_code)]
+    pub fn peak_univ_capacity(&self) -> usize {
+        self.peak_univ_capacity.load(Ordering::Relaxed)
+    }
+
+    /// Highest concurrent-lease count seen since pool creation. Equal to
+    /// the steady-state pool depth.
+    #[allow(dead_code)]
+    pub fn high_water_lease_count(&self) -> usize {
+        self.high_water_lease_count.load(Ordering::Relaxed)
+    }
+
+    fn approximate_bytes(&self) -> usize {
+        let guard = self.inner.lock().unwrap();
+        guard
+            .iter()
+            .map(|s| (s.op_ptrs.capacity() + s.univ_ptrs.capacity()) * size_of::<usize>())
+            .sum()
+    }
+}
+
+/// RAII lease for a [`TransformScratch`] from a [`TransformScratchPool`].
+/// The scratch is cleared on drop and returned to the pool.
+pub(crate) struct TransformScratchLease {
+    scratch: Option<TransformScratch>,
+    pool: Arc<TransformScratchPool>,
+}
+
+impl TransformScratchLease {
+    /// Disjoint mutable references to both scratch Vecs at once. Use when
+    /// you need to hand both into a sink-emitting call.
+    pub(crate) fn both_mut(&mut self) -> (&mut Vec<usize>, &mut Vec<usize>) {
+        let s = self.scratch.as_mut().expect("lease alive");
+        (&mut s.op_ptrs, &mut s.univ_ptrs)
+    }
+    pub(crate) fn op_ptrs(&self) -> &[usize] {
+        &self.scratch.as_ref().expect("lease alive").op_ptrs
+    }
+    pub(crate) fn univ_ptrs(&self) -> &[usize] {
+        &self.scratch.as_ref().expect("lease alive").univ_ptrs
+    }
+    #[cfg(test)]
+    pub(crate) fn op_ptrs_mut(&mut self) -> &mut Vec<usize> {
+        &mut self.scratch.as_mut().expect("lease alive").op_ptrs
+    }
+    #[cfg(test)]
+    pub(crate) fn univ_ptrs_mut(&mut self) -> &mut Vec<usize> {
+        &mut self.scratch.as_mut().expect("lease alive").univ_ptrs
+    }
+}
+
+impl Drop for TransformScratchLease {
+    fn drop(&mut self) {
+        if let Some(mut s) = self.scratch.take() {
+            self.pool
+                .peak_op_capacity
+                .fetch_max(s.op_ptrs.capacity(), Ordering::Relaxed);
+            self.pool
+                .peak_univ_capacity
+                .fetch_max(s.univ_ptrs.capacity(), Ordering::Relaxed);
+            s.op_ptrs.clear();
+            s.univ_ptrs.clear();
+            self.pool.inner.lock().unwrap().push(s);
+            self.pool
+                .current_lease_count
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+// ============================================================================
+// PreparedTransferPlan
+// ============================================================================
+
+/// Cached transfer template — value type for the prepared-plan cache.
+#[derive(Debug)]
 pub(crate) enum PreparedTransferPlan {
     /// Semantic-layout transform through the kernel catalog.
-    Transform { invocation: KernelInvocation },
-    /// Same-layout/sliced direct copy. The projected layouts are cached so
-    /// repeated calls avoid layout-view projection and `AnnotatedLayout`
-    /// construction; block-list-specific `CopyOp`s are still emitted per call.
+    Transform {
+        invocation: KernelInvocation,
+        /// Universal-side single-allocation base address. Always
+        /// `Some(_)` for `UniversalFromBlock`/`BlockFromUniversal`;
+        /// `None` for `NhdHndTranspose` (both sides operational).
+        univ_base: Option<usize>,
+        /// Universal-side bytes-per-block (constant; from `LayoutConfig`).
+        /// Paired with `univ_base`.
+        univ_bytes_per_block: Option<usize>,
+        /// Per-plan scratch pool of host pointer-array `Vec`s.
+        scratch_pool: Arc<TransformScratchPool>,
+    },
+    /// Same-layout / sliced direct copy.
     Direct {
         src: AnnotatedLayout,
         dst: AnnotatedLayout,
@@ -120,15 +365,235 @@ pub(crate) enum PreparedTransferPlan {
 }
 
 impl PreparedTransferPlan {
+    /// Build a `Transform` plan from the dispatched `KernelInvocation` and
+    /// the source/destination physical layouts.
+    pub(crate) fn build_transform(
+        invocation: KernelInvocation,
+        src: &PhysicalLayout,
+        dst: &PhysicalLayout,
+    ) -> Result<Self> {
+        let (univ_base, univ_bytes_per_block) = match invocation.kind {
+            KernelKind::NhdHndTranspose => (None, None),
+            KernelKind::UniversalFromBlock => extract_universal_base(dst)?,
+            KernelKind::BlockFromUniversal => extract_universal_base(src)?,
+        };
+        Ok(Self::Transform {
+            invocation,
+            univ_base,
+            univ_bytes_per_block,
+            scratch_pool: Arc::new(TransformScratchPool::default()),
+        })
+    }
+
+    /// Build a `Direct` plan from the source/destination physical layouts.
+    pub(crate) fn build_direct(src: &PhysicalLayout, dst: &PhysicalLayout) -> Result<Self> {
+        let src_view = crate::transfer::lower::physical_to_layout_view(src)?;
+        let dst_view = crate::transfer::lower::physical_to_layout_view(dst)?;
+        Ok(Self::Direct {
+            src: AnnotatedLayout::from_view(&src_view)?,
+            dst: AnnotatedLayout::from_view(&dst_view)?,
+        })
+    }
+
+    /// Acquire a scratch lease from a `Transform` plan's pool. Errors on
+    /// the `Direct` variant.
+    pub(crate) fn acquire_transform_scratch(&self) -> Result<TransformScratchLease> {
+        match self {
+            PreparedTransferPlan::Transform { scratch_pool, .. } => Ok(scratch_pool.acquire()),
+            PreparedTransferPlan::Direct { .. } => {
+                bail!("acquire_transform_scratch: prepared plan is Direct, not Transform")
+            }
+        }
+    }
+
+    /// Fill the operational-side pointer array (`block × layer × outer`)
+    /// and the universal-side pointer array (`block`) for a
+    /// universal-kind transform (`UniversalFromBlock` / `BlockFromUniversal`).
+    ///
+    /// `op_layout` is the operational-side `PhysicalLayout` (caller picks
+    /// based on `invocation.kind`). `op_block_ids` and `univ_block_ids`
+    /// are the projected block-id slices from `block_pairs`.
+    pub(crate) fn emit_universal_kind_pointers<O, U>(
+        &self,
+        op_layout: &PhysicalLayout,
+        op_block_ids: &[BlockId],
+        univ_block_ids: &[BlockId],
+        op_sink: &mut O,
+        univ_sink: &mut U,
+    ) -> Result<()>
+    where
+        O: PointerSink,
+        U: PointerSink,
+    {
+        let (invocation, univ_base, univ_bytes_per_block) = match self {
+            PreparedTransferPlan::Transform {
+                invocation,
+                univ_base: Some(b),
+                univ_bytes_per_block: Some(bpb),
+                ..
+            } => (invocation, *b, *bpb),
+            PreparedTransferPlan::Transform { .. } => bail!(
+                "emit_universal_kind_pointers: Transform plan has no universal base \
+                 (kind={:?}) — caller routed an op↔op transpose into the universal path",
+                self.kernel_kind().unwrap_or(KernelKind::NhdHndTranspose)
+            ),
+            PreparedTransferPlan::Direct { .. } => {
+                bail!("emit_universal_kind_pointers: prepared plan is Direct, not Transform")
+            }
+        };
+        if !matches!(
+            invocation.kind,
+            KernelKind::UniversalFromBlock | KernelKind::BlockFromUniversal
+        ) {
+            bail!(
+                "emit_universal_kind_pointers: invocation kind {:?} is not a universal kind",
+                invocation.kind
+            );
+        }
+        let nl = invocation.num_layers;
+        let no = invocation.outer_dim;
+        op_sink.reserve(op_block_ids.len() * nl * no);
+        univ_sink.reserve(univ_block_ids.len());
+        for &block_id in op_block_ids {
+            for layer in 0..nl {
+                for outer in 0..no {
+                    let region = op_layout
+                        .layout()
+                        .memory_region(block_id, layer, outer)
+                        .map_err(|e| {
+                            anyhow!(
+                                "emit_universal_kind_pointers: failed to read operational \
+                                 chunk (block={block_id}, layer={layer}, outer={outer}): {e:?}"
+                            )
+                        })?;
+                    op_sink.push(region.addr());
+                }
+            }
+        }
+        for &block_id in univ_block_ids {
+            univ_sink.push(univ_base + block_id * univ_bytes_per_block);
+        }
+        Ok(())
+    }
+
+    /// Fill the src/dst pointer arrays (both `block × layer × outer`) for
+    /// an `NhdHndTranspose` (op↔op) transform. Both sides are walked via
+    /// `Layout::memory_region`.
+    pub(crate) fn emit_oo_transpose_pointers<S, D>(
+        &self,
+        src_layout: &PhysicalLayout,
+        dst_layout: &PhysicalLayout,
+        src_block_ids: &[BlockId],
+        dst_block_ids: &[BlockId],
+        src_sink: &mut S,
+        dst_sink: &mut D,
+    ) -> Result<()>
+    where
+        S: PointerSink,
+        D: PointerSink,
+    {
+        let invocation = match self {
+            PreparedTransferPlan::Transform { invocation, .. } => invocation,
+            PreparedTransferPlan::Direct { .. } => {
+                bail!("emit_oo_transpose_pointers: prepared plan is Direct, not Transform")
+            }
+        };
+        if !matches!(invocation.kind, KernelKind::NhdHndTranspose) {
+            bail!(
+                "emit_oo_transpose_pointers: invocation kind {:?} is not NhdHndTranspose",
+                invocation.kind
+            );
+        }
+        if src_block_ids.len() != dst_block_ids.len() {
+            bail!(
+                "emit_oo_transpose_pointers: block id list length mismatch (src={}, dst={})",
+                src_block_ids.len(),
+                dst_block_ids.len()
+            );
+        }
+        let nl = invocation.num_layers;
+        let no = invocation.outer_dim;
+        let chunks_per_block = nl * no;
+        src_sink.reserve(src_block_ids.len() * chunks_per_block);
+        dst_sink.reserve(dst_block_ids.len() * chunks_per_block);
+        emit_op_table(src_layout, src_block_ids, nl, no, src_sink, "src")?;
+        emit_op_table(dst_layout, dst_block_ids, nl, no, dst_sink, "dst")?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn kernel_invocation(&self) -> Option<&KernelInvocation> {
+        match self {
+            PreparedTransferPlan::Transform { invocation, .. } => Some(invocation),
+            PreparedTransferPlan::Direct { .. } => None,
+        }
+    }
+
+    pub(crate) fn kernel_kind(&self) -> Option<KernelKind> {
+        self.kernel_invocation().map(|i| i.kind)
+    }
+
+    /// Access the cached annotated layouts for a `Direct` plan. Returns
+    /// `None` for `Transform`. Used by observability and tests.
+    #[allow(dead_code)]
+    pub(crate) fn annotated_layouts(&self) -> Option<(&AnnotatedLayout, &AnnotatedLayout)> {
+        match self {
+            PreparedTransferPlan::Direct { src, dst } => Some((src, dst)),
+            PreparedTransferPlan::Transform { .. } => None,
+        }
+    }
+
     fn approximate_heap_bytes(&self) -> usize {
         match self {
-            PreparedTransferPlan::Transform { .. } => size_of::<KernelInvocation>(),
+            PreparedTransferPlan::Transform { scratch_pool, .. } => {
+                size_of::<KernelInvocation>() + scratch_pool.approximate_bytes()
+            }
             PreparedTransferPlan::Direct { src, dst } => {
                 approximate_annotated_layout_heap_bytes(src)
                     + approximate_annotated_layout_heap_bytes(dst)
             }
         }
     }
+}
+
+fn emit_op_table<S: PointerSink>(
+    layout: &PhysicalLayout,
+    block_ids: &[BlockId],
+    nl: usize,
+    no: usize,
+    sink: &mut S,
+    side: &'static str,
+) -> Result<()> {
+    for &block_id in block_ids {
+        for layer in 0..nl {
+            for outer in 0..no {
+                let region = layout
+                    .layout()
+                    .memory_region(block_id, layer, outer)
+                    .map_err(|e| {
+                        anyhow!(
+                            "emit_op_table[{side}]: failed to read chunk \
+                             (block={block_id}, layer={layer}, outer={outer}): {e:?}"
+                        )
+                    })?;
+                sink.push(region.addr());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn extract_universal_base(univ_layout: &PhysicalLayout) -> Result<(Option<usize>, Option<usize>)> {
+    let buffers = univ_layout.layout().memory_regions();
+    if buffers.len() != 1 {
+        bail!(
+            "extract_universal_base: universal side expects 1 Buffer, got {}",
+            buffers.len()
+        );
+    }
+    let base = buffers[0].addr();
+    let bpb = univ_layout.layout().config().bytes_per_block();
+    Ok((Some(base), Some(bpb)))
 }
 
 fn approximate_annotated_layout_heap_bytes(layout: &AnnotatedLayout) -> usize {
@@ -138,8 +603,15 @@ fn approximate_annotated_layout_heap_bytes(layout: &AnnotatedLayout) -> usize {
         + size_of_val(layout.byte_strides().as_bytes())
 }
 
+// ============================================================================
+// Cache
+// ============================================================================
+
+/// Public read-only view of [`PreparedPlanCache`] state. Exposed so
+/// external callers (benchmark harnesses, observability) can inspect
+/// cache behaviour without touching cache internals.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct PreparedPlanCacheStats {
+pub struct PreparedPlanCacheStats {
     pub local_hits: usize,
     pub local_misses: usize,
     pub local_entries: usize,
@@ -149,11 +621,15 @@ pub(crate) struct PreparedPlanCacheStats {
     pub approximate_bytes: usize,
 }
 
-/// Small two-tier cache: unbounded local entries (G1↔G2 lifetime) plus a
+/// Compact prepared-plan cache: unbounded local map (G1↔G2 lifetime) plus a
 /// bounded remote LRU (remote G2↔G2 handle pairs).
+///
+/// Values are stored as `Arc<PreparedTransferPlan>` so cache hits cost only
+/// a refcount bump — scratch pools are shared by construction across
+/// concurrent transfers.
 pub(crate) struct PreparedPlanCache {
     enabled: bool,
-    local: Mutex<HashMap<PreparedPlanKey, PreparedTransferPlan>>,
+    local: Mutex<HashMap<PreparedPlanKey, Arc<PreparedTransferPlan>>>,
     remote: Mutex<BoundedLru>,
     local_hits: AtomicUsize,
     local_misses: AtomicUsize,
@@ -174,17 +650,21 @@ impl PreparedPlanCache {
         }
     }
 
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     pub(crate) fn get_or_insert_with<F>(
         &self,
         worker_id: u64,
         key: PreparedPlanKey,
         build: F,
-    ) -> Result<PreparedTransferPlan>
+    ) -> Result<Arc<PreparedTransferPlan>>
     where
         F: FnOnce() -> Result<PreparedTransferPlan>,
     {
         if !self.enabled {
-            return build();
+            return Ok(Arc::new(build()?));
         }
 
         if key.is_local_for(worker_id) {
@@ -193,7 +673,7 @@ impl PreparedPlanCache {
                 return Ok(plan);
             }
             self.local_misses.fetch_add(1, Ordering::Relaxed);
-            let plan = build()?;
+            let plan = Arc::new(build()?);
             self.local.lock().unwrap().insert(key, plan.clone());
             return Ok(plan);
         }
@@ -203,12 +683,11 @@ impl PreparedPlanCache {
             return Ok(plan);
         }
         self.remote_misses.fetch_add(1, Ordering::Relaxed);
-        let plan = build()?;
+        let plan = Arc::new(build()?);
         self.remote.lock().unwrap().insert(key, plan.clone());
         Ok(plan)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn stats(&self) -> PreparedPlanCacheStats {
         let local = self.local.lock().unwrap();
         let remote = self.remote.lock().unwrap();
@@ -224,7 +703,7 @@ impl PreparedPlanCache {
     }
 }
 
-fn approximate_map_bytes(map: &HashMap<PreparedPlanKey, PreparedTransferPlan>) -> usize {
+fn approximate_map_bytes(map: &HashMap<PreparedPlanKey, Arc<PreparedTransferPlan>>) -> usize {
     map.iter()
         .map(|(key, plan)| key.approximate_heap_bytes() + plan.approximate_heap_bytes())
         .sum()
@@ -232,7 +711,7 @@ fn approximate_map_bytes(map: &HashMap<PreparedPlanKey, PreparedTransferPlan>) -
 
 struct BoundedLru {
     capacity: usize,
-    map: HashMap<PreparedPlanKey, PreparedTransferPlan>,
+    map: HashMap<PreparedPlanKey, Arc<PreparedTransferPlan>>,
     order: VecDeque<PreparedPlanKey>,
 }
 
@@ -245,13 +724,13 @@ impl BoundedLru {
         }
     }
 
-    fn get(&mut self, key: &PreparedPlanKey) -> Option<PreparedTransferPlan> {
+    fn get(&mut self, key: &PreparedPlanKey) -> Option<Arc<PreparedTransferPlan>> {
         let plan = self.map.get(key).cloned()?;
         self.touch(key);
         Some(plan)
     }
 
-    fn insert(&mut self, key: PreparedPlanKey, plan: PreparedTransferPlan) {
+    fn insert(&mut self, key: PreparedPlanKey, plan: Arc<PreparedTransferPlan>) {
         if self.capacity == 0 {
             return;
         }
@@ -298,7 +777,7 @@ mod tests {
     use super::*;
     use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
 
-    fn plan() -> PreparedTransferPlan {
+    fn transform_plan() -> PreparedTransferPlan {
         PreparedTransferPlan::Transform {
             invocation: KernelInvocation {
                 kind: KernelKind::UniversalFromBlock,
@@ -310,6 +789,9 @@ mod tests {
                 dtype: kvbm_kernels::TensorDataType::F16,
                 block_layout: kvbm_kernels::BlockLayout::NHD,
             },
+            univ_base: Some(0x1000),
+            univ_bytes_per_block: Some(64),
+            scratch_pool: Arc::new(TransformScratchPool::default()),
         }
     }
 
@@ -329,7 +811,7 @@ mod tests {
         for i in 0..4 {
             let k = key(100 + i, 0, worker, 1);
             cache
-                .get_or_insert_with(worker, k, || Ok(plan()))
+                .get_or_insert_with(worker, k, || Ok(transform_plan()))
                 .expect("insert");
         }
         assert_eq!(cache.stats().remote_entries, 2);
@@ -343,7 +825,7 @@ mod tests {
         let worker = 7;
         let k = key(worker, 0, worker, 1);
         cache
-            .get_or_insert_with(worker, k.clone(), || Ok(plan()))
+            .get_or_insert_with(worker, k.clone(), || Ok(transform_plan()))
             .expect("first");
         cache
             .get_or_insert_with(worker, k, || panic!("must hit"))
@@ -353,5 +835,87 @@ mod tests {
         assert_eq!(stats.local_hits, 1);
         assert_eq!(stats.local_entries, 1);
         assert!(stats.approximate_bytes > 0);
+    }
+
+    #[test]
+    fn arc_shares_scratch_pool_across_cache_hits() {
+        let cache = PreparedPlanCache::new(true, 2);
+        let worker = 7;
+        let k = key(worker, 0, worker, 1);
+        let first = cache
+            .get_or_insert_with(worker, k.clone(), || Ok(transform_plan()))
+            .unwrap();
+        let second = cache
+            .get_or_insert_with(worker, k, || panic!("must hit"))
+            .unwrap();
+        // Same Arc backing — scratch pools and pointer addresses match.
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn scratch_lease_reuses_capacity_across_drops() {
+        let pool = Arc::new(TransformScratchPool::default());
+        {
+            let mut lease = pool.acquire();
+            lease.op_ptrs_mut().reserve(128);
+            lease.univ_ptrs_mut().reserve(16);
+            // Push something so the Vecs are non-empty before drop.
+            for i in 0..32 {
+                lease.op_ptrs_mut().push(i as usize);
+            }
+            for i in 0..4 {
+                lease.univ_ptrs_mut().push(i as usize);
+            }
+        }
+        assert_eq!(pool.peak_op_capacity(), 128);
+        assert_eq!(pool.peak_univ_capacity(), 16);
+        // Second lease pops the previously released scratch with kept
+        // capacity but cleared length.
+        let mut lease = pool.acquire();
+        assert_eq!(lease.op_ptrs().len(), 0);
+        assert_eq!(lease.univ_ptrs().len(), 0);
+        assert!(lease.op_ptrs_mut().capacity() >= 128);
+        assert!(lease.univ_ptrs_mut().capacity() >= 16);
+    }
+
+    #[test]
+    fn counting_pointer_sink_counts() {
+        let mut sink = CountingPointerSink::default();
+        sink.push(1);
+        sink.push(2);
+        sink.push(3);
+        assert_eq!(sink.count, 3);
+    }
+
+    #[test]
+    fn counting_desc_sink_accumulates() {
+        let mut sink = CountingDescSink::default();
+        sink.push(0, 0, 10);
+        sink.push(0, 0, 20);
+        assert_eq!(sink.count, 2);
+        assert_eq!(sink.total_bytes, 30);
+    }
+
+    #[test]
+    fn copy_op_vec_sink_fills_vec() {
+        let mut ops = Vec::<CopyOp>::new();
+        let mut sink = CopyOpVecSink(&mut ops);
+        sink.push(1, 2, 10);
+        sink.push(3, 4, 20);
+        assert_eq!(
+            ops,
+            vec![
+                CopyOp {
+                    src_addr: 1,
+                    dst_addr: 2,
+                    size: 10
+                },
+                CopyOp {
+                    src_addr: 3,
+                    dst_addr: 4,
+                    size: 20
+                }
+            ]
+        );
     }
 }

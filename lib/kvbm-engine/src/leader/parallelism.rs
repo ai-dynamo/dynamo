@@ -805,7 +805,13 @@ mod tests {
             validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
                 .unwrap_err();
         assert!(
-            matches!(err, CompatError::MissingLogicalTier { tier: LogicalLayoutHandle::G2, .. }),
+            matches!(
+                err,
+                CompatError::MissingLogicalTier {
+                    tier: LogicalLayoutHandle::G2,
+                    ..
+                }
+            ),
             "bypass-host remote must reject when required_tier=G2 (no G2 present); got: {err:?}",
         );
     }

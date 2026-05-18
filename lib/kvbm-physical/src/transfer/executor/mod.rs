@@ -6,7 +6,7 @@
 pub(super) mod cuda;
 mod memcpy;
 mod nixl;
-mod planner;
+pub(crate) mod planner;
 
 use super::strategy::select_strategy;
 use super::strategy::{TransferPlan, TransferStrategy};

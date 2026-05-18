@@ -336,7 +336,10 @@ mod derive_dtype_tests {
     #[test]
     fn derive_covers_validated_widths() {
         assert_eq!(derive_tensor_dtype_from_width(1), Some(TensorDataType::FP8));
-        assert_eq!(derive_tensor_dtype_from_width(2), Some(TensorDataType::BF16));
+        assert_eq!(
+            derive_tensor_dtype_from_width(2),
+            Some(TensorDataType::BF16)
+        );
         assert_eq!(derive_tensor_dtype_from_width(4), Some(TensorDataType::F32));
         assert_eq!(derive_tensor_dtype_from_width(8), Some(TensorDataType::F64));
     }

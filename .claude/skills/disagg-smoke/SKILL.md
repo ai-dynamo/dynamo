@@ -1,18 +1,19 @@
 ---
 name: disagg-smoke
-description: KVBM conditional-disagg two-request smoke (R1 cold-cache + R2 warm-decode). Modes — single-leader (default, uses KVBM_DISAGG_LEADER from env) or audit-equiv (runs the smoke twice — legacy then unified — and diffs the per-side kvbm_audit streams via the audit_diff binary).
+description: KVBM conditional-disagg smokes — golden two-request flow (R1 cold + R2 warm), audit-equiv (legacy vs unified), and hub-side layout-mismatch rejection smoke. Golden modes use KVBM_DISAGG_LEADER / KVBM_BLOCK_LAYOUT from env; audit-equiv runs the smoke twice and diffs per-side kvbm_audit streams; incompat-smoke posts crafted P2P register payloads to a hub-only bringup and asserts each mismatch class is rejected with the expected error.
 ---
 
 # Skill: KVBM Disagg Smoke
 
-End-to-end two-request smoke against a live `kvbm-hub` + Prefill + Decode topology. Drives `R1` (cold-cache, prefill computes 3 blocks) followed by `R2` (warm decode, prefill G2 reset → decode forwards 3 cached hashes, prefill pulls + forward-passes net-new). Owns its scripts; depends on `disagg-bringup` for launch helpers.
+End-to-end smokes against a live `kvbm-hub` (+ Prefill + Decode topology, for the goldens). Owns its scripts; depends on `disagg-bringup` for launch helpers.
 
 ## Skill assets
 
 | File | Purpose |
 |---|---|
-| `two-request-smoke.sh` | Drive R1 + R2 against a single leader. Mints an experiment dir, brings up hub + Prefill + Decode (via `disagg-bringup` scripts), runs the two prompts, prints a validation grep digest, renders `trace.html` via `disagg-trace`. Inherits `KVBM_DISAGG_LEADER` from env. |
-| `audit-equiv.sh` | Run the smoke twice (`KVBM_DISAGG_LEADER=legacy` then `=unified`), then run `audit_diff` on per-side `kvbm_audit` streams to assert behavioral equivalence. |
+| `two-request-smoke.sh` | **Golden.** Drive R1 + R2 against a single leader. Mints an experiment dir, brings up hub + Prefill + Decode (via `disagg-bringup` scripts), runs the two prompts, prints a validation grep digest, renders `trace.html` via `disagg-trace`. Inherits `KVBM_DISAGG_LEADER` and `KVBM_BLOCK_LAYOUT` from env. |
+| `audit-equiv.sh` | **Golden.** Run the smoke twice (`KVBM_DISAGG_LEADER=legacy` then `=unified`), then run `audit_diff` on per-side `kvbm_audit` streams to assert behavioral equivalence. |
+| `incompat-smoke.sh` | **Failure-scenario.** Hub-only (no vLLM, no GPU). Brings up `kvbm_hub` on alt ports (28337/21337, velo disabled), POSTs crafted P2P + CD register payloads via curl, asserts each layout-mismatch class returns `400` with the expected error substring. Six scenarios: baseline-accept, cross-mode, universal canonical mismatch, operational NHD vs HND, operational page_size mismatch, CD without P2P. ~2s end-to-end. Exits 0 on all-pass, 1 on any failure with the failing scenario named on stderr. Run when the connector/hub gate is touched or as a fast regression check before merging changes to `layout_compat`. |
 
 ## Running via a subagent (recommended)
 
@@ -118,6 +119,31 @@ bash "$SKILL/audit-equiv.sh"
 Runs the smoke twice (legacy then unified). Per-side `audit_diff --normalize-request-ids --filter-prefixes session_factory_active_gauge` asserts the leader-emitted audit signatures match. Exit 0 on equivalence, 1 on divergence.
 
 Prerequisite: `cargo build -p kvbm-connector --bin audit_diff` (the binary lives at `target/debug/audit_diff`).
+
+### Layout-mismatch (incompat-smoke)
+
+```bash
+bash "$SKILL/incompat-smoke.sh"
+```
+
+Hub-only failure-scenario smoke. Builds + spawns a fresh `kvbm_hub` per scenario on alt ports (`28337`/`21337`, velo disabled). Posts crafted `RegisterRequest` JSON via curl and asserts each mismatch class produces the documented rejection.
+
+Six scenarios:
+
+| # | Setup | Expected |
+|---|---|---|
+| 1 | Universal baseline registers | HTTP 200 |
+| 2 | After universal baseline: operational candidate | HTTP 400, body mentions `mode` |
+| 3 | Universal baseline + universal candidate with `num_heads_total` 64 → 48 | HTTP 400, body mentions `canonical` or `head` |
+| 4 | Operational NHD baseline + operational HND candidate | HTTP 400, body mentions an operational/NHD/HND term |
+| 5 | Operational NHD both sides + `page_size` 16 → 32 | HTTP 400, body mentions `page_size` or `per_worker_config` |
+| 6 | CD-only register (no P2P feature) | HTTP 400, body mentions `p2p` or `conditional_disagg` |
+
+Each scenario starts a fresh hub so the baseline state is deterministic; total runtime ~2 s. Exit 0 on all-pass, 1 if any scenario produces an unexpected status or missing error keyword (the failing scenario is named on stderr).
+
+Run when the connector or hub gate is touched, before merging changes to `layout_compat`, or as a fast pre-flight before the goldens. Comprehensive Rust-side coverage of the gate lives in `lib/kvbm-hub/tests/cd_layout_compat.rs` (25+ cases) and remains the canonical reference; `incompat-smoke.sh` is the operator-facing one-command version.
+
+Prerequisite: `cargo build -p kvbm-hub --bin kvbm_hub` (no other components needed — no vLLM, no GPU).
 
 ## Prerequisites
 

@@ -82,12 +82,13 @@ pub fn build_layout_compat_payload_with_template(
     // In Universal mode the connector pins G2 to KvBlockLayout::Universal,
     // so peers must see G2's layout — not G1's operational layout — on the
     // wire.
-    let canonical_layout = select_transfer_canonical_layout(&unpacked.layouts).ok_or_else(|| {
-        anyhow!(
-            "build_layout_compat_payload: worker {} exported no layouts",
-            unpacked.worker_address.worker_id,
-        )
-    })?;
+    let canonical_layout =
+        select_transfer_canonical_layout(&unpacked.layouts).ok_or_else(|| {
+            anyhow!(
+                "build_layout_compat_payload: worker {} exported no layouts",
+                unpacked.worker_address.worker_id,
+            )
+        })?;
 
     let kv_layout = kv_block_layout_of(&canonical_layout.layout.layout_type_details);
     if mode == BlockLayoutMode::Universal && matches!(kv_layout, KvBlockLayout::Unknown) {

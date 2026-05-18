@@ -312,7 +312,12 @@ pub fn select_transfer_canonical_tier(
         .iter()
         .copied()
         .find(|t| *t == LogicalLayoutHandle::G2)
-        .or_else(|| tiers.iter().copied().find(|t| *t == LogicalLayoutHandle::G3))
+        .or_else(|| {
+            tiers
+                .iter()
+                .copied()
+                .find(|t| *t == LogicalLayoutHandle::G3)
+        })
         .or_else(|| tiers.first().copied())
 }
 

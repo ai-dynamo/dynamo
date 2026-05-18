@@ -450,12 +450,16 @@ fn dispatch_benchmark_candidate(
             block_pairs,
         } => {
             let t0 = std::time::Instant::now();
+            // Benchmark path bypasses the prepared-plan cache so timing
+            // reflects the raw kernel-dispatch + pointer-fill cost
+            // without conflating cache hit/miss state.
             crate::transfer::executor::dispatch_transform_kernel(
                 invocation,
                 src,
                 dst,
                 block_pairs,
                 stream,
+                None,
             )?;
             stream.synchronize()?;
             Ok(("TransformKernel", t0.elapsed().as_micros() as u64))

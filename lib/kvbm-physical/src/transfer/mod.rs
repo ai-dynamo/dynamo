@@ -50,7 +50,7 @@ pub(crate) mod notifications;
 pub(crate) mod options;
 pub(crate) mod plan;
 pub(crate) mod preferences;
-pub(crate) mod prepared;
+pub mod prepared;
 pub(crate) mod strategy;
 pub(crate) mod validation;
 
