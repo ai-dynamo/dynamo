@@ -45,7 +45,6 @@ where
 {
     /// Start the scheduler. Preserves the pre-overlap-refresh signature so downstream callers
     /// don't break. Use [`Self::start_with_overlap_refresh`] to enable dequeue-time refresh.
-    #[expect(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
