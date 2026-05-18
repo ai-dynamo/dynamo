@@ -152,9 +152,12 @@ def main() -> None:
     fig.add_annotation(
         x=72, y=1080, xref="x", yref="y",
         xanchor="center", yanchor="middle",
-        text="What GPUs run in hours, DynoSim runs in seconds.",
+        text="<i>What GPUs run in hours, DynoSim runs in seconds.</i>",
         showarrow=False,
-        font=dict(family=SANS, size=18, color=TEXT_MUTED, weight=300),
+        font=dict(
+            family="Iowan Old Style, Georgia, 'Times New Roman', serif",
+            size=22, color=TEXT_MUTED, weight=300,
+        ),
     )
 
     # --- Three story-block cards (full figure width) ---

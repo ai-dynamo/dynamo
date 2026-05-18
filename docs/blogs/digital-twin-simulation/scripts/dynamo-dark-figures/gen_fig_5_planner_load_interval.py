@@ -222,7 +222,7 @@ def main() -> None:
         ticks="", showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.5,
         tickvals=[1e3, 1e4, 1e5, 1e6],
         ticktext=["10³", "10⁴", "10⁵", "10⁶"],
-        range=[math.log10(1000), math.log10(500000)],
+        range=[math.log10(1000), math.log10(1e6)],
     )
 
     out_svg = HERE.parent / "images" / "fig-5-planner-load-interval.svg"

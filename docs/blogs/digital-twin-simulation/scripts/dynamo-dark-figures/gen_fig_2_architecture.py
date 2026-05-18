@@ -185,14 +185,17 @@ def build_svg() -> str:
         f'viewBox="0 0 {W} {H}" style="background:{BLACK};">',
         # Background
         f'<rect x="0" y="0" width="{W}" height="{H}" fill="{BLACK}"/>',
-        # Title band
+        # Title + subtitle. y values match the snug +2 px formula used in the
+        # Plotly figures: title_top = 0.04 * H, title_bottom = title_top +
+        # font_size, subtitle_top = title_bottom + 2 px. SVG dominant-baseline
+        # is "middle" so y = top + font_size/2.
         text(
-            0.02 * W, 60, "Anatomy of a Digital Twin",
+            0.02 * W, (0.04 * H) + 42 / 2, "Anatomy of a Digital Twin",
             family="Helvetica Neue, HelveticaNeue, sans-serif",
             size=42, weight="300", anchor="start",
         ),
         text(
-            0.02 * W, 88,
+            0.02 * W, (0.04 * H) + 42 + 2 + 22 / 2,
             "Engine cores, Router, Planner — one simulated clock, one harness.",
             family="Helvetica Neue, HelveticaNeue, sans-serif",
             size=22, weight="300", color=TEXT_MUTED, anchor="start",
@@ -202,8 +205,10 @@ def build_svg() -> str:
     # Y offsets within the diagram band.
     Y_BASE = TITLE_BAND_H
 
-    # Replay Harness outer frame.
-    HARNESS_X = 100
+    # Replay Harness outer frame. HARNESS_X=80 matches the plot-frame inset
+    # used by the Plotly figures (margin l=80), so fig-2's green frame lines
+    # up horizontally with the rest of the figure set.
+    HARNESS_X = 80
     HARNESS_Y = Y_BASE + 30
     HARNESS_W = W - 2 * HARNESS_X
     HARNESS_H = DIAG_H - 60

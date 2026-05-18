@@ -17,6 +17,7 @@ the engineer's rendered planner_exp_3.png in PR-9139.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import plotly.graph_objects as go
@@ -43,7 +44,7 @@ MONO = TY["font_family_mono"]
 # (still passing), 300s=242,000ms (perpetually backlogged). The rest are
 # approximated from planner_exp_3.png.
 ROWS = [
-    (0,     1900),
+    # x=0 dropped so x can render on a log axis without an undefined point.
     (30,    2000),
     (60,    2100),
     (90,    2100),
@@ -74,7 +75,7 @@ def main() -> None:
     # Light coral wash to the right of the cliff to reinforce the "SLA
     # broken" region without overpowering the data line.
     fig.add_vrect(
-        x0=CLIFF_S, x1=320,
+        x0=CLIFF_S, x1=380,
         fillcolor=rgba(CORAL, 0.10),
         line_width=0, layer="below",
     )
@@ -189,11 +190,14 @@ def main() -> None:
     )
 
     fig.update_xaxes(
-        title=dict(text="Engine Startup Time (s)",
+        type="log",
+        title=dict(text="Engine Startup Time (s, log)",
                    font=dict(family=SANS, size=11, color=TEXT_MUTED), standoff=8),
         showline=True, linecolor=BORDER_SUBTLE, linewidth=0.5, mirror=True,
         ticks="", showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.5,
-        range=[-10, 320],
+        tickvals=[30, 60, 100, 200, 300],
+        ticktext=["30", "60", "100", "200", "300"],
+        range=[math.log10(25), math.log10(380)],
     )
     fig.update_yaxes(
         type="log",
@@ -203,7 +207,7 @@ def main() -> None:
         ticks="", showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.5,
         tickvals=[1e3, 1e4, 1e5, 1e6],
         ticktext=["10³", "10⁴", "10⁵", "10⁶"],
-        range=[3.0, 5.6],
+        range=[math.log10(1000), math.log10(1e6)],
     )
 
     out_svg = HERE.parent / "images" / "fig-6-planner-cold-start.svg"

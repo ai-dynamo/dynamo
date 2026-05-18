@@ -76,10 +76,11 @@ def main() -> None:
         # three temporal phases (Before, Initial Verification, Feedback
         # Loop) read clearly without cluttering the intermediate steps.
         if phase:
-            # Kicker centered above the box with extra breathing room so the
-            # uppercase label reads as a header rather than crowding the box.
+            # Kicker centered just above the box -- tight enough that the
+            # label reads as a header attached to the box, not a free-floating
+            # title.
             fig.add_annotation(
-                x=xc, y=Y_C + BOX_H / 2 + 55,
+                x=xc, y=Y_C + BOX_H / 2 + 18,
                 xref="x", yref="y",
                 xanchor="center", yanchor="bottom",
                 text=f"<b>{phase.upper()}</b>",

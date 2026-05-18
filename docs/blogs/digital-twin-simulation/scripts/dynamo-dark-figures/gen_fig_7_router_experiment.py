@@ -122,11 +122,13 @@ def main() -> None:
             ),
             row=1, col=2,
         )
+        is_grey = (mode == "round_robin")
         for r in rows:
             fig.add_annotation(
                 x=r["tps_user"], y=r["tps_gpu"],
-                xanchor="left", yanchor="middle",
-                xshift=8,
+                xanchor="right" if is_grey else "left",
+                yanchor="middle",
+                xshift=-8 if is_grey else 8,
                 text=f"c={r['concurrency']}",
                 showarrow=False,
                 font=dict(family=MONO, size=9, color=s["color"]),

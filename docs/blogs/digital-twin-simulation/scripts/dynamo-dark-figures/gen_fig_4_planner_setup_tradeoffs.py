@@ -296,6 +296,8 @@ def main() -> None:
                      row=1, col=1)
     fig.update_yaxes(title=dict(text="p90 ITL (ms)",
                                 font=dict(family=SANS, size=11, color=TEXT_MUTED)),
+                     tickvals=[0, 200, 400, 600, 700],
+                     ticktext=["0", "200", "400", "600", "700"],
                      range=[-50, 750],
                      row=1, col=2)
 
