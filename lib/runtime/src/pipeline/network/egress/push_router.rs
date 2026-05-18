@@ -483,19 +483,42 @@ where
         Ok(router)
     }
 
+    /// Return the routable instance set, or the appropriate routing error
+    /// if it is empty. When the routable set is empty *and* the discovered
+    /// set is non-empty, every worker is over its per-worker admission
+    /// threshold; return `ResourceExhausted` / `ServiceOverloaded` so the
+    /// HTTP layer surfaces a 503 retry-later instead of a generic 5xx.
+    /// When the discovered set is also empty, return the existing
+    /// "no instances found" error (no workers registered at all).
+    fn routable_or_overloaded(&self) -> anyhow::Result<Vec<u64>> {
+        let routable = self.client.instance_ids_routable();
+        if !routable.is_empty() {
+            return Ok(routable);
+        }
+        if !self.client.instance_ids().is_empty() {
+            let cause = PipelineError::ServiceOverloaded(
+                "All workers are busy, please retry later".to_string(),
+            );
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::ResourceExhausted)
+                .message("All workers are busy, please retry later")
+                .cause(cause)
+                .build()
+                .into());
+        }
+        Err(anyhow::anyhow!(
+            "no instances found for endpoint {}",
+            self.client.endpoint.id()
+        ))
+    }
+
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let instance_id = {
-            let instance_ids = self.client.instance_ids_routable();
+            let instance_ids = self.routable_or_overloaded()?;
             let count = instance_ids.len();
-            if count == 0 {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
-            }
             instance_ids[counter % count]
         };
         tracing::trace!("round robin router selected {instance_id}");
@@ -507,14 +530,8 @@ where
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
-            let instance_ids = self.client.instance_ids_routable();
+            let instance_ids = self.routable_or_overloaded()?;
             let count = instance_ids.len();
-            if count == 0 {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
-            }
             let counter = rand::rng().random::<u64>() as usize;
             instance_ids[counter % count]
         };
@@ -529,13 +546,7 @@ where
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_id = {
-            let instance_ids = self.client.instance_ids_routable();
-            if instance_ids.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
-            }
+            let instance_ids = self.routable_or_overloaded()?;
             p2c_select_from(state.as_ref(), &instance_ids)
         };
         state.increment(instance_id);
@@ -586,14 +597,7 @@ where
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self.client.instance_ids_routable();
-
-        if instance_ids.is_empty() {
-            return Err(anyhow::anyhow!(
-                "no instances found for endpoint {}",
-                self.client.endpoint.id()
-            ));
-        }
+        let instance_ids = self.routable_or_overloaded()?;
 
         // Apply a unified policy for all endpoints.
         let endpoint_id = self.client.endpoint.id();
@@ -652,7 +656,7 @@ where
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self.client.instance_ids_routable();
+        let instance_ids = self.routable_or_overloaded()?;
         let instance_id = state
             .select_exact_min_and_increment(&instance_ids)
             .await
