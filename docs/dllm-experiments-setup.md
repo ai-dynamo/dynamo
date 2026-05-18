@@ -276,3 +276,105 @@ Each frontend mode is one curl + one `run_at_url.sh` away — keep the worker sh
 | `ModuleNotFoundError: dynamo._core` | Rust bindings not built | `cd lib/bindings/python && maturin develop --uv` |
 | Worker logs "kv_events_config missing 'endpoint'" but kv-events mode requested | Frontend mode is `kv-events` but worker has no `KV_EVENTS_CONFIG` | Either match the modes (RR ↔ RR, kv-events on both sides) or set the env var per `diffusion_llada_multi.sh` |
 | Both workers grab the same GPU | `CUDA_VISIBLE_DEVICES` not isolated | The launch script sets it per-invocation; re-check you passed distinct `--gpu-id` values |
+
+---
+
+## 7. Benchmark matrix
+
+The grid below is what to actually run on 8×H100 to answer "what does Dynamo-unique routing buy over plain RR." Each block builds on the launchers in §2–§3 and reuses the `BENCH_FLAGS` pattern from §2.3 so every row is apples-to-apples.
+
+```bash
+BENCH_FLAGS=(--reqs 200 --warmup 20 --prefix-length 2000 --osl 64)
+```
+
+### 7.1 Scaling baseline — RR only
+
+**Question**: how far does naive round-robin scaling get you, and where does each fleet size saturate?
+
+Same conc grid across all three fleet sizes — that's what makes it apples-to-apples (same total in-flight load, different parallelism).
+
+| # | Workers | Conc grid | prefix-pool |
+|---|---|---|---|
+| 1 | 1 | 8, 16, 32, 64, 128 | 4 |
+| 2 | 2 | 8, 16, 32, 64, 128 | 4 |
+| 3 | 8 | 8, 16, 32, 64, 128 | 4 |
+
+```bash
+# Example: 8-worker RR scaling sweep
+bash examples/backends/sglang/launch/diffusion_llada_multi.sh --gpu-ids 0,1,2,3,4,5,6,7 --mode round-robin &
+for CONC in 8 16 32 64 128; do
+  bash bench/llada-approx-kv/run_at_url.sh "8w-rr-c${CONC}" http://localhost:8001 \
+      --conc "$CONC" --prefix-pool 4 "${BENCH_FLAGS[@]}"
+done
+```
+
+**Reading the curves**: at low conc, 1w competes; at high conc, 1w queues (TTFT explodes, throughput plateaus around 0.9 req/s) while 8w absorbs. The crossover concs are the story.
+
+### 7.2 KV routing — does it move the needle at 8 workers?
+
+**Question**: at the conc where 8w-RR is in its sweet spot (probably 64), does KV-aware routing actually beat RR — and on which workload?
+
+The dial that matters is **prefix-pool diversity**. Per-worker KV cache holds ~25–30 prefixes at `prefix-length=2000`; sweep across that boundary.
+
+| # | Workers | Conc | prefix-pool | Modes | Expected |
+|---|---|---|---|---|---|
+| 4 | 8 | 64 | 4 | RR / kv-approx / kv-events | Cache-saturated — every worker holds every prefix → all modes tie. RR shouldn't lose. |
+| 5 | 8 | 64 | **40** | RR / kv-approx / kv-events | **Sweet spot** — pool exceeds per-worker capacity, RR misses ~38% of prefixes, KV routes around it. **This is where the win shows up.** |
+| 6 | 8 | 64 | 200 | RR / kv-approx / kv-events | High diversity — too much eviction churn, both modes degrade together. Confirms KV doesn't help when there's no reuse. |
+
+```bash
+# Workers stay up across mode swaps — only restart the frontend with --worker-only mode.
+bash examples/backends/sglang/launch/diffusion_llada_multi.sh --gpu-ids 0,1,2,3,4,5,6,7 --worker-only &
+sleep 60
+for POOL in 4 40 200; do
+  for MODE in round-robin kv-approx kv-events; do
+    bash examples/backends/sglang/launch/frontend_router.sh --mode "$MODE" &
+    FRONTEND_PID=$!
+    sleep 5
+    bash bench/llada-approx-kv/run_at_url.sh "8w-${MODE}-p${POOL}-c64" http://localhost:8001 \
+        --conc 64 --prefix-pool "$POOL" "${BENCH_FLAGS[@]}"
+    kill $FRONTEND_PID
+    wait $FRONTEND_PID 2>/dev/null
+  done
+done
+```
+
+### 7.3 OSL-load weighting — second Dynamo-unique lever
+
+**Question**: when output length varies across requests, does the router's OSL-aware load score (`--router-osl-load-weight`) beat plain KV routing?
+
+| # | Workers | Conc | prefix-pool | OSL stddev | Mode | OSL weight |
+|---|---|---|---|---|---|---|
+| 7a | 8 | 64 | 40 | 64 | kv-events | 0.0 (off) |
+| 7b | 8 | 64 | 40 | 64 | kv-events | 1.0 (on) |
+
+```bash
+# Add osl-stddev to BENCH_FLAGS for this block
+for OSL_W in 0.0 1.0; do
+  OSL_LOAD_WEIGHT=$OSL_W bash examples/backends/sglang/launch/frontend_router.sh --mode kv-events &
+  FRONTEND_PID=$!
+  sleep 5
+  bash bench/llada-approx-kv/run_at_url.sh "8w-kvevents-p40-osl-w${OSL_W}" http://localhost:8001 \
+      --conc 64 --prefix-pool 40 --osl-stddev 64 "${BENCH_FLAGS[@]}"
+  kill $FRONTEND_PID
+  wait $FRONTEND_PID 2>/dev/null
+done
+```
+
+### 7.4 What to report
+
+Focus on these per row — they're the metrics that mean what they say for a diffusion LM (§2.3 caveat block):
+
+- **tok/s** — primary throughput number.
+- **TTFT p95** — tail latency; this is what queuing looks like, and where 8w pulls away from 1w/2w.
+- **req/s** — sanity check.
+
+Skip **mean ITL** — bimodal for DLLM, meaningless without splitting by block-emit vs intra-block.
+
+### 7.5 Time budget
+
+- 7.1 (RR scaling, 3 fleets × 5 conc) = **15 runs ≈ 1.5 h** (includes one fleet restart between rows)
+- 7.2 (KV modes × pool) = **9 runs ≈ 45 min** (workers stay up, only frontend restarts)
+- 7.3 (OSL-load) = **2 runs ≈ 10 min**
+
+≈ **2.5–3 hours** total. If time is tight, skip 7.1 #1 / #2 (those are already covered by the 2-GPU run summarized in `docs/llada-dynamo-1pager.md`) and start with **7.1 #3 + 7.2 #5** — those two answer the central question.
