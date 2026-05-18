@@ -22,12 +22,14 @@ class MockServer:
     def __init__(self):
         self.context_is_stopped = False
         self.context_is_killed = False
+        self.context_metadata: dict[str, str] = {}
 
     async def generate(self, request, context):
         print("################## generate called ######################")
 
         self.context_is_stopped = False
         self.context_is_killed = False
+        self.context_metadata = {}
 
         method_name = request
         assert hasattr(
@@ -43,6 +45,8 @@ class MockServer:
         Checks for context.is_stopped() / context.is_killed() before each yield and raises
         CancelledError if stopped / killed
         """
+        include_metadata = request == "_generate_until_context_cancelled_with_metadata"
+
         for i in range(1000):
             print(f"Processing iteration {i}")
 
@@ -51,6 +55,7 @@ class MockServer:
                 print(f"Context stopped at iteration {i}")
                 self.context_is_stopped = True
                 self.context_is_killed = context.is_killed()
+                self.context_metadata = dict(context.metadata.items())
                 raise asyncio.CancelledError
 
             # Check if context is killed
@@ -58,12 +63,16 @@ class MockServer:
                 print(f"Context killed at iteration {i}")
                 self.context_is_stopped = context.is_stopped()
                 self.context_is_killed = True
+                self.context_metadata = dict(context.metadata.items())
                 raise asyncio.CancelledError
 
             await asyncio.sleep(0.1)
 
             print(f"Sending iteration {i}")
-            yield i
+            if include_metadata:
+                yield {"i": i, "metadata": dict(context.metadata.items())}
+            else:
+                yield i
 
         assert (
             False
@@ -198,6 +207,37 @@ async def test_client_context_cancel(temp_file_store, server, client):
     assert not handler.context_is_killed
 
     # TODO: Test with _generate_until_asyncio_cancelled server handler
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+async def test_client_context_cancel_preserves_metadata(temp_file_store, server, client):
+    # NIT: Baseten requires metadata in their fork. @michaelfeil if you need to change metadata handling in the future.
+    _, handler = server
+    context = Context(metadata={"tenant": "alpha", "region": "us-west"})
+    stream = await client.generate(
+        "_generate_until_context_cancelled_with_metadata", context=context
+    )
+
+    iteration_count = 0
+    async for annotated in stream:
+        payload = annotated.data()
+        print(f"Received iteration: {payload}")
+        assert payload["i"] == iteration_count
+        assert payload["metadata"] == {"region": "us-west", "tenant": "alpha"}
+
+        if iteration_count >= 2:
+            context.stop_generating()
+            break
+
+        iteration_count += 1
+
+    await asyncio.sleep(0.2)
+
+    assert handler.context_is_stopped
+    assert not handler.context_is_killed
+    assert handler.context_metadata == {"region": "us-west", "tenant": "alpha"}
 
 
 @pytest.mark.forked
