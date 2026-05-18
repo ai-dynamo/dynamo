@@ -209,6 +209,39 @@ impl Context {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
+
+    /// Build the `traceparent` header value. Prefers the engine.generate
+    /// OTel span context when valid so downstream engine spans nest under
+    /// `engine.generate`; falls back to the inbound trace context.
+    fn format_traceparent(&self) -> Option<String> {
+        self.bridged_traceparent()
+            .or_else(|| self.fallback_traceparent())
+    }
+
+    fn bridged_traceparent(&self) -> Option<String> {
+        let span = self.span.as_ref()?;
+        let otel_ctx = span.context();
+        let otel_span = otel_ctx.span();
+        let sc = otel_span.span_context();
+        if !sc.is_valid() {
+            return None;
+        }
+        let flags = if sc.trace_flags().is_sampled() {
+            "01"
+        } else {
+            "00"
+        };
+        Some(format!("00-{}-{}-{}", sc.trace_id(), sc.span_id(), flags))
+    }
+
+    fn fallback_traceparent(&self) -> Option<String> {
+        let tc = self.trace_context.as_ref()?;
+        if tc.trace_id.is_empty() || tc.span_id.is_empty() {
+            return None;
+        }
+        // Assumes sampled — inbound `DistributedTraceContext` doesn't carry flags.
+        Some(format!("00-{}-{}-01", tc.trace_id, tc.span_id))
+    }
 }
 
 #[pymethods]
@@ -367,27 +400,23 @@ impl Context {
     }
 
     /// Build W3C trace headers for propagating to downstream inference engines.
-    /// Returns `None` when no upstream trace context is present, in which case
-    /// callers should forward the value as-is — inference engines treat `None`
-    /// as "no upstream trace."
+    /// Returns `None` when no trace context is available (neither a captured
+    /// engine.generate span nor inbound trace headers); callers should
+    /// forward `None` as-is — inference engines treat it as "no upstream
+    /// trace."
     ///
     /// Prefers the OTel context of the `engine.generate` auto-span when the
     /// bridge is installed, so downstream engine internals (vLLM scheduler,
     /// TRT-LLM forward, SGLang KV transfer) nest UNDER `engine.generate`.
     /// Falls back to the inbound `DistributedTraceContext` for legacy
     /// callers, Python-instantiated test contexts, and non-JSONL deployments
-    /// without the bridge — in those cases downstream spans attach to the
-    /// upstream parent, which is the same behavior as before this change.
+    /// without the bridge.
     ///
     /// Always emits `traceparent`. Also emits `tracestate`, `x-request-id`,
     /// and `request-id` when the upstream propagated them.
     fn trace_headers(&self) -> Option<HashMap<String, String>> {
-        let (trace_id, span_id, flags) = self.traceparent_ids()?;
         let mut headers = HashMap::new();
-        headers.insert(
-            "traceparent".to_string(),
-            format!("00-{trace_id}-{span_id}-{flags}"),
-        );
+        headers.insert("traceparent".to_string(), self.format_traceparent()?);
         if let Some(tc) = self.trace_context.as_ref() {
             if let Some(ts) = &tc.tracestate {
                 headers.insert("tracestate".to_string(), ts.clone());
@@ -400,33 +429,6 @@ impl Context {
             }
         }
         Some(headers)
-    }
-}
-
-impl Context {
-    /// Resolve the `(trace_id, span_id, flags)` triple for the `traceparent`
-    /// header. Prefers the engine.generate OTel span context when valid so
-    /// downstream engine spans nest under `engine.generate`; falls back to
-    /// the inbound `DistributedTraceContext`.
-    fn traceparent_ids(&self) -> Option<(String, String, &'static str)> {
-        if let Some(span) = &self.span {
-            let otel_ctx = span.context();
-            let otel_span = otel_ctx.span();
-            let sc = otel_span.span_context();
-            if sc.is_valid() {
-                let flags = if sc.trace_flags().is_sampled() {
-                    "01"
-                } else {
-                    "00"
-                };
-                return Some((sc.trace_id().to_string(), sc.span_id().to_string(), flags));
-            }
-        }
-        let tc = self.trace_context.as_ref()?;
-        if tc.trace_id.is_empty() || tc.span_id.is_empty() {
-            return None;
-        }
-        Some((tc.trace_id.clone(), tc.span_id.clone(), "01"))
     }
 }
 
