@@ -28,10 +28,10 @@ use crate::kv_router::{
 mod batching;
 mod dedup;
 mod event_processor;
+mod multimodal_embedding_cache;
 mod sinks;
 #[cfg(test)]
 mod tests;
-mod multimodal_embedding_cache;
 mod worker_metrics;
 mod zmq_listener;
 
@@ -42,8 +42,10 @@ use dedup::EventDedupFilter;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::{start_event_processor, start_event_processor_jetstream};
+pub use multimodal_embedding_cache::{
+    MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
+};
 use sinks::EventPlanePublisher;
-pub use multimodal_embedding_cache::{MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher};
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 
