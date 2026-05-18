@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="860" viewBox="0 0 1240 860" style="background:#000000;">
+<rect x="0" y="0" width="1240" height="860" fill="#000000"/>
+<text x="24.8" y="60" font-family="Helvetica Neue, HelveticaNeue, sans-serif" font-size="42" font-weight="300" fill="#ffffff" text-anchor="start" dominant-baseline="middle">The whole Dynamo stack on one simulated clock</text>
+<text x="24.8" y="92" font-family="Helvetica Neue, HelveticaNeue, sans-serif" font-size="22" font-weight="300" fill="#767676" text-anchor="start" dominant-baseline="middle">Engine cores, Router, Planner — one simulated clock, one harness.</text>
+<rect x="100" y="190" width="1040" height="640" fill="#000000" stroke="#76b900" stroke-width="2" rx="0" ry="0"/>
+<text x="620.0" y="214" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="22" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">REPLAY HARNESS</text>
+<rect x="510.0" y="248.0" width="220" height="64" fill="#0a0a0a" stroke="#5d5d5d" stroke-width="2"/><line x1="716.0" y1="248.0" x2="716.0" y2="312.0" stroke="#5d5d5d" stroke-width="2"/>
+<text x="612.0" y="280" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="18" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">Load Driver</text>
+<rect x="180.0" y="382.0" width="880" height="220" fill="#0a0a0a" stroke="#5d5d5d" stroke-width="2" rx="0" ry="0"/>
+<text x="620.0" y="404.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">MULTI ENGINE SIMULATION</text>
+<rect x="252.39999999999998" y="453.0" width="200" height="90" fill="#1a1a1a" stroke="#636363" stroke-width="2" rx="0" ry="0"/>
+<rect x="245.39999999999998" y="460.0" width="200" height="90" fill="#1a1a1a" stroke="#636363" stroke-width="2" rx="0" ry="0"/>
+<rect x="238.39999999999998" y="467.0" width="200" height="90" fill="#1a1a1a" stroke="#636363" stroke-width="2" rx="0" ry="0"/>
+<text x="338.4" y="512.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="16" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">Single Engine Sim  x 4</text>
+<polygon points="595.6,512.0 572.6,551.8 526.6,551.8 503.6,512.0 526.6,472.2 572.6,472.2" fill="#151515" stroke="#fac200" stroke-width="2"/>
+<text x="549.5999999999999" y="512.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="17" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">Router</text>
+<rect x="660.6" y="474.0" width="130" height="76" fill="#1a1428" stroke="#9560cc" stroke-width="2" rx="0" ry="0"/>
+<text x="725.6" y="512.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="17" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">Planner</text>
+<rect x="854.1999999999999" y="474.0" width="130" height="76" fill="#142025" stroke="#3a7a70" stroke-width="2" rx="0" ry="0" stroke-dasharray="6,4"/>
+<text x="919.1999999999999" y="504.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="17" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">KVBM</text>
+<text x="919.1999999999999" y="526.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="12" font-weight="normal" fill="#767676" text-anchor="middle" dominant-baseline="middle">(optional)</text>
+<rect x="510.0" y="684.0" width="220" height="56.0" fill="#0a0a0a" stroke="#5d5d5d" stroke-width="2"/><ellipse cx="620.0" cy="684.0" rx="110.0" ry="12" fill="#0a0a0a" stroke="#5d5d5d" stroke-width="2"/><ellipse cx="620.0" cy="740.0" rx="110.0" ry="12" fill="#0a0a0a" stroke="#5d5d5d" stroke-width="2"/>
+<text x="620.0" y="712.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="18" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle">Trace Collector</text>
+<line x1="620.0" y1="312.0" x2="620.0" y2="372.0" stroke="#c08050" stroke-width="2"/><polygon points="614.0,370.0 626.0,370.0 620.0,378.0" fill="#c08050"/><text x="630.0" y="345.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="13" font-weight="bold" fill="#c08050" text-anchor="start" dominant-baseline="middle">events</text>
+<line x1="620.0" y1="602.0" x2="620.0" y2="654.0" stroke="#767676" stroke-width="2"/><polygon points="614.0,652.0 626.0,652.0 620.0,660.0" fill="#767676"/><text x="630.0" y="631.0" font-family="Geist, Inter, Helvetica Neue, sans-serif" font-size="13" font-weight="bold" fill="#767676" text-anchor="start" dominant-baseline="middle">metrics</text>
+</svg>
