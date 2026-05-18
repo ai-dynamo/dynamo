@@ -9,7 +9,7 @@ use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::watch;
 
 // Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
@@ -32,68 +32,55 @@ pub struct ContextMetadata {
     inner: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
+impl ContextMetadata {
+    fn lock_map(&self) -> MutexGuard<'_, BTreeMap<String, String>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[pymethods]
 impl ContextMetadata {
     fn __getitem__(&self, key: &str) -> PyResult<String> {
-        self.inner
-            .lock()
-            .expect("metadata mutex poisoned")
+        self.lock_map()
             .get(key)
             .cloned()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.to_string()))
     }
 
     fn __setitem__(&self, key: String, value: String) {
-        self.inner
-            .lock()
-            .expect("metadata mutex poisoned")
-            .insert(key, value);
+        self.lock_map().insert(key, value);
     }
 
     fn __delitem__(&self, key: &str) -> PyResult<()> {
-        self.inner
-            .lock()
-            .expect("metadata mutex poisoned")
+        self.lock_map()
             .remove(key)
             .map(|_| ())
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.to_string()))
     }
 
     fn __len__(&self) -> usize {
-        self.inner.lock().expect("metadata mutex poisoned").len()
+        self.lock_map().len()
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        self.inner
-            .lock()
-            .expect("metadata mutex poisoned")
-            .contains_key(key)
+        self.lock_map().contains_key(key)
     }
 
     fn __iter__<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
-        let keys = self
-            .inner
-            .lock()
-            .expect("metadata mutex poisoned")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let keys = self.lock_map().keys().cloned().collect::<Vec<_>>();
         PyList::new(py, keys)?.call_method0("__iter__")
     }
 
     #[pyo3(signature = (key, default=None))]
     fn get(&self, key: &str, default: Option<String>) -> Option<String> {
-        self.inner
-            .lock()
-            .expect("metadata mutex poisoned")
-            .get(key)
-            .cloned()
-            .or(default)
+        self.lock_map().get(key).cloned().or(default)
     }
 
     #[pyo3(signature = (key, default = None::<Option<String>>))]
     fn pop(&self, key: &str, default: Option<Option<String>>) -> PyResult<Option<String>> {
-        let mut guard = self.inner.lock().expect("metadata mutex poisoned");
+        let mut guard = self.lock_map();
         match guard.remove(key) {
             Some(value) => Ok(Some(value)),
             None if default.is_some() => Ok(default.flatten()),
@@ -104,32 +91,18 @@ impl ContextMetadata {
     }
 
     fn keys<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyList>> {
-        let keys = self
-            .inner
-            .lock()
-            .expect("metadata mutex poisoned")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let keys = self.lock_map().keys().cloned().collect::<Vec<_>>();
         PyList::new(py, keys)
     }
 
     fn values<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyList>> {
-        let values = self
-            .inner
-            .lock()
-            .expect("metadata mutex poisoned")
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let values = self.lock_map().values().cloned().collect::<Vec<_>>();
         PyList::new(py, values)
     }
 
     fn items<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyList>> {
         let items = self
-            .inner
-            .lock()
-            .expect("metadata mutex poisoned")
+            .lock_map()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Vec<_>>();
@@ -137,11 +110,11 @@ impl ContextMetadata {
     }
 
     fn clear(&self) {
-        self.inner.lock().expect("metadata mutex poisoned").clear();
+        self.lock_map().clear();
     }
 
     fn copy<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyDict>> {
-        let snapshot = self.inner.lock().expect("metadata mutex poisoned").clone();
+        let snapshot = self.lock_map().clone();
         let dict = PyDict::new(py);
         for (key, value) in snapshot {
             dict.set_item(key, value)?;
@@ -150,10 +123,7 @@ impl ContextMetadata {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "{:?}",
-            self.inner.lock().expect("metadata mutex poisoned").clone()
-        )
+        format!("{:?}", self.lock_map().clone())
     }
 }
 
@@ -184,7 +154,7 @@ impl Context {
     pub fn metadata_snapshot(&self) -> BTreeMap<String, String> {
         self.metadata
             .lock()
-            .expect("metadata mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 }
@@ -259,7 +229,10 @@ impl Context {
 
     #[setter]
     fn set_metadata(&mut self, metadata: BTreeMap<String, String>) {
-        *self.metadata.lock().expect("metadata mutex poisoned") = metadata;
+        *self
+            .metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = metadata;
     }
 
     // Expose trace information to Python for debugging

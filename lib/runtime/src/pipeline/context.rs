@@ -51,6 +51,20 @@ impl<T: Send + Sync + 'static> Context<T> {
         }
     }
 
+    pub fn with_controller_and_metadata(
+        current: T,
+        controller: Controller,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Context {
+            current,
+            controller: Arc::new(controller),
+            registry: Registry::new(),
+            stages: Vec::new(),
+            metadata,
+        }
+    }
+
     pub fn with_id(current: T, id: String) -> Self {
         Context {
             current,
@@ -536,6 +550,24 @@ mod tests {
         let (_, transferred) = ctx.transfer(Processed { length: 5 });
         assert_eq!(
             transferred.metadata().get("tenant").map(String::as_str),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn test_with_id_and_metadata_constructor() {
+        let metadata = BTreeMap::from([("tenant".to_string(), "alpha".to_string())]);
+        let ctx = Context::with_id_and_metadata(
+            Input {
+                value: "Hello".to_string(),
+            },
+            "request-123".to_string(),
+            metadata,
+        );
+
+        assert_eq!(ctx.id(), "request-123");
+        assert_eq!(
+            ctx.metadata().get("tenant").map(String::as_str),
             Some("alpha")
         );
     }
