@@ -297,6 +297,17 @@ baseline at every concurrency: throughput per GPU shifts modestly (+2–4%),
 while interactivity gains the most at c=64 where avoided prefill recompute
 frees decode capacity.
 
+The Hopper counterpart uses Kimi-K2.5 on H200 with the same TP=4,
+single-worker replay shape, vLLM 0.19.0 AIC timing, and explicit G2 transfer
+sizing:
+
+![Mocker simulation on H200 Kimi-K2.5, baseline vs G2-enabled (32K blocks). Left: mean TTFT vs concurrency (log y), with TTFT reduction at every concurrency. Right: throughput-vs-interactivity Pareto; G2 improves TPS/user and throughput per GPU at every point.](./images/h200_kvbm_g2_exp.png)
+
+On H200/Kimi, mean TTFT improves at every point (-21.0%, -28.8%, -32.4%, and
+-1.5%), and throughput per GPU also shifts upward (+6.6-9.2%). The
+highest-concurrency point is still a tradeoff: TPS/user nearly doubles at c=64,
+while TPOT increases because decode and transfer pressure are now more visible.
+
 Replay can also drive
 [NIXL (NVIDIA Inference tranXfer Library)](../../api/nixl-connect/README.md)
 reads and writes against a real distributed cache target. Those measurements
