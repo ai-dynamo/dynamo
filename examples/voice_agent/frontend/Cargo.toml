@@ -13,10 +13,6 @@ publish = false
 name = "voice-agent-realtime-frontend"
 path = "src/bin/frontend.rs"
 
-[[bin]]
-name = "voice-agent-realtime-backend"
-path = "src/bin/backend.rs"
-
 [dependencies]
 anyhow = "1"
 async-stream = "0.3"

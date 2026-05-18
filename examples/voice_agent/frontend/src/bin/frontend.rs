@@ -112,7 +112,7 @@ impl Args {
 fn print_help() {
     println!(
         "Run a local Dynamo realtime frontend\n\n\
-         Usage: cargo run --manifest-path examples/voice_agent/realtime/Cargo.toml \
+         Usage: cargo run --manifest-path examples/voice_agent/frontend/Cargo.toml \
          --bin voice-agent-realtime-frontend -- [OPTIONS]\n\n\
          Options:\n\
            --host <IP>           HTTP listen address [default: 127.0.0.1]\n\
@@ -320,7 +320,7 @@ async fn main() -> Result<()> {
     println!("Registered realtime model: {MODEL_NAME}");
     println!("Waiting for realtime backend on tcp://{backend_addr}");
     println!(
-        "Connect a client with: python examples/voice_agent/client.py --url ws://{}:{}/v1/realtime --model {MODEL_NAME}",
+        "Connect a client with: python examples/voice_agent/client/client.py --url ws://{}:{}/v1/realtime --model {MODEL_NAME}",
         args.host, args.port
     );
     println!("Press Ctrl-C to stop.");

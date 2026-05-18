@@ -1,68 +1,51 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
-"""Minimal Pipecat/NVIDIA ASR backend for Dynamo's realtime bridge."""
+"""Minimal Pipecat/Dynamo ASR backend for Dynamo's realtime bridge."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import base64
-import contextlib
-from dataclasses import dataclass
-import io
 import json
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any
-
-os.environ.setdefault("LOGURU_LEVEL", "WARNING")
 
 PIPECAT_SRC = os.environ.get("PIPECAT_SRC", "/home/nealv/dynamo/pipecat/src")
 if os.path.isdir(PIPECAT_SRC):
     sys.path.insert(0, PIPECAT_SRC)
+
+from asr_protocol import AsrRequest, AsrTranscript
+from pipecat.frames.frames import (
+    ErrorFrame,
+    Frame,
+    InputAudioRawFrame,
+    InterimTranscriptionFrame,
+    TranscriptionFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
+)
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.services.settings import STTSettings
+from pipecat.services.stt_service import SegmentedSTTService
+from pipecat.utils.time import time_now_iso8601
+
+from dynamo.runtime import DistributedRuntime
 
 DEFAULT_CONNECT = "127.0.0.1:8081"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_TRANSCRIPT_DRAIN_TIMEOUT = 0.25
-DEFAULT_NVIDIA_SERVER = "grpc.nvcf.nvidia.com:443"
-DEFAULT_PARAKEET_FUNCTION_ID = "d8dd4e9b-fbf5-4fb0-9dba-8cf436c8d965"
-DEFAULT_PARAKEET_MODEL_NAME = "parakeet-ctc-0.6b-asr"
+DEFAULT_ASR_ENDPOINT = "voice_agent.asr.transcribe"
 SESSION_ID = "voice-agent-pipecat-asr"
-
-_IMPORT_STDERR = io.StringIO()
-try:
-    with contextlib.redirect_stderr(_IMPORT_STDERR):
-        from pipecat.frames.frames import (
-            ErrorFrame,
-            Frame,
-            InputAudioRawFrame,
-            InterimTranscriptionFrame,
-            TranscriptionFrame,
-            VADUserStartedSpeakingFrame,
-            VADUserStoppedSpeakingFrame,
-        )
-        from pipecat.pipeline.pipeline import Pipeline
-        from pipecat.pipeline.runner import PipelineRunner
-        from pipecat.pipeline.task import PipelineParams, PipelineTask
-        from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-        from pipecat.services.nvidia.stt import NvidiaSegmentedSTTService
-except Exception as exc:  # pragma: no cover - exercised by humans.
-    import_stderr = _IMPORT_STDERR.getvalue().strip()
-    detail = f"\n\nImport stderr:\n{import_stderr}" if import_stderr else ""
-    raise SystemExit(
-        "Missing Pipecat/NVIDIA ASR dependencies. Install the local checkout and "
-        "NVIDIA extra dependencies into the requested venv, for example:\n"
-        "  uv pip install --python /mnt/scratch/nealv/venvs/dynamo_realtime/bin/python "
-        "--no-deps -e /home/nealv/dynamo/pipecat\n"
-        "  uv pip install --python /mnt/scratch/nealv/venvs/dynamo_realtime/bin/python "
-        "loguru pydantic pydantic-core annotated-types typing-inspection wait_for2 "
-        "docstring_parser aiofiles aiohttp numpy pyloudnorm resampy soxr protobuf "
-        "Markdown Pillow openai nltk grpcio grpcio-tools nvidia-riva-client"
-        f"{detail}"
-    ) from exc
 
 
 @dataclass
@@ -137,34 +120,19 @@ def parse_args() -> argparse.Namespace:
         help="Maximum newline-delimited JSON frame size accepted from the frontend.",
     )
     parser.add_argument(
-        "--nvidia-api-key",
-        default=os.environ.get("NVIDIA_API_KEY"),
-        help="NVIDIA API key [default: NVIDIA_API_KEY].",
+        "--asr-endpoint",
+        default=os.environ.get("DYN_ASR_ENDPOINT", DEFAULT_ASR_ENDPOINT),
+        help=f"Dynamo ASR endpoint path [default: {DEFAULT_ASR_ENDPOINT}].",
     )
     parser.add_argument(
-        "--nvidia-server",
-        default=os.environ.get("NVIDIA_ASR_SERVER", DEFAULT_NVIDIA_SERVER),
-        help=f"NVIDIA ASR gRPC server [default: {DEFAULT_NVIDIA_SERVER}].",
+        "--asr-language",
+        default=os.environ.get("DYN_ASR_LANGUAGE", "en-US"),
+        help="ASR language code [default: en-US].",
     )
     parser.add_argument(
-        "--nvidia-function-id",
-        default=os.environ.get("NVIDIA_ASR_FUNCTION_ID", DEFAULT_PARAKEET_FUNCTION_ID),
-        help="NVIDIA ASR function id.",
-    )
-    parser.add_argument(
-        "--nvidia-model-name",
-        default=os.environ.get("NVIDIA_ASR_MODEL_NAME", DEFAULT_PARAKEET_MODEL_NAME),
-        help=f"NVIDIA ASR model name [default: {DEFAULT_PARAKEET_MODEL_NAME}].",
-    )
-    parser.add_argument(
-        "--nvidia-language",
-        default=os.environ.get("NVIDIA_ASR_LANGUAGE", "en-US"),
-        help="NVIDIA ASR language code [default: en-US].",
-    )
-    parser.add_argument(
-        "--nvidia-no-ssl",
-        action="store_true",
-        help="Disable SSL when connecting to a local NVIDIA ASR deployment.",
+        "--asr-model",
+        default=os.environ.get("DYN_ASR_MODEL"),
+        help="Optional ASR model name to pass to the Dynamo ASR worker.",
     )
     args = parser.parse_args()
     if args.sample_rate < 1:
@@ -177,12 +145,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--transcript-drain-timeout must be > 0")
     if args.max_frame_bytes < 1:
         parser.error("--max-frame-bytes must be >= 1")
-    if (
-        not args.nvidia_no_ssl
-        and args.nvidia_server == DEFAULT_NVIDIA_SERVER
-        and not args.nvidia_api_key
-    ):
-        parser.error("--nvidia-api-key or NVIDIA_API_KEY is required for NVIDIA cloud ASR")
     return args
 
 
@@ -263,31 +225,121 @@ class TranscriptCollector(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+def runtime_from_env() -> DistributedRuntime:
+    return DistributedRuntime(
+        asyncio.get_running_loop(),
+        os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
+        os.environ.get("DYN_REQUEST_PLANE", "tcp"),
+    )
+
+
+def parse_asr_transcript(chunk: Any) -> AsrTranscript:
+    raw = chunk.data() if hasattr(chunk, "data") else chunk
+    if isinstance(raw, AsrTranscript):
+        return raw
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        return AsrTranscript.model_validate_json(raw)
+    return AsrTranscript.model_validate(raw)
+
+
+class DynamoASRService(SegmentedSTTService):
+    """Segmented Pipecat STT service backed by a Dynamo ASR endpoint."""
+
+    def __init__(
+        self,
+        *,
+        endpoint_path: str,
+        sample_rate: int,
+        channels: int,
+        language: str,
+        model: str | None,
+    ):
+        super().__init__(
+            sample_rate=sample_rate,
+            audio_passthrough=False,
+            settings=STTSettings(model=model, language=language),
+            ttfs_p99_latency=1.0,
+        )
+        self._endpoint_path = endpoint_path
+        self._channels = channels
+        self._language = language
+        self._model = model
+        self._runtime: DistributedRuntime | None = None
+        self._client: Any | None = None
+
+    async def _ensure_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+
+        self._runtime = runtime_from_env()
+        endpoint = self._runtime.endpoint(self._endpoint_path)
+        self._client = await endpoint.client()
+        await self._client.wait_for_instances()
+        return self._client
+
+    async def start(self, frame):
+        await super().start(frame)
+        await self._ensure_client()
+
+    async def run_stt(self, audio: bytes):
+        try:
+            client = await self._ensure_client()
+            request = AsrRequest(
+                audio_b64=base64.b64encode(audio).decode("ascii"),
+                encoding="wav",
+                sample_rate_hz=self._sample_rate,
+                channels=self._channels,
+                language=self._language,
+                model=self._model,
+            )
+            stream = await client.generate(request.model_dump_json())
+            async for chunk in stream:
+                transcript = parse_asr_transcript(chunk)
+                if not transcript.text:
+                    continue
+
+                result = transcript.model_dump()
+                if transcript.is_final:
+                    yield TranscriptionFrame(
+                        transcript.text,
+                        self._user_id,
+                        time_now_iso8601(),
+                        None,
+                        result,
+                    )
+                else:
+                    yield InterimTranscriptionFrame(
+                        transcript.text,
+                        self._user_id,
+                        time_now_iso8601(),
+                        None,
+                        result,
+                    )
+        except Exception as exc:
+            yield ErrorFrame(
+                error=f"Dynamo ASR endpoint {self._endpoint_path} failed: {exc}"
+            )
+
+
 class PipecatASRSession:
     def __init__(self, args: argparse.Namespace):
         self._sample_rate = args.sample_rate
         self._channels = args.channels
         self._timeout = args.pipeline_timeout
         self._drain_timeout = args.transcript_drain_timeout
-        self._output_queue: asyncio.Queue[TranscriptResult | PipelineFailure] = (
-            asyncio.Queue()
-        )
+        self._output_queue: asyncio.Queue[
+            TranscriptResult | PipelineFailure
+        ] = asyncio.Queue()
         self._runner_task: asyncio.Task | None = None
 
-        stt = NvidiaSegmentedSTTService(
-            api_key=args.nvidia_api_key,
-            server=args.nvidia_server,
-            model_function_map={
-                "function_id": args.nvidia_function_id,
-                "model_name": args.nvidia_model_name,
-            },
+        stt = DynamoASRService(
+            endpoint_path=args.asr_endpoint,
             sample_rate=args.sample_rate,
-            use_ssl=not args.nvidia_no_ssl,
-            audio_passthrough=False,
-            settings=NvidiaSegmentedSTTService.Settings(
-                language=args.nvidia_language,
-                automatic_punctuation=True,
-            ),
+            channels=args.channels,
+            language=args.asr_language,
+            model=args.asr_model,
         )
         pipeline = Pipeline([stt, TranscriptCollector(self._output_queue)])
         self._task = PipelineTask(

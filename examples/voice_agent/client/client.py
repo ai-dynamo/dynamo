@@ -20,7 +20,7 @@ except ImportError as exc:  # pragma: no cover - exercised by humans.
     raise SystemExit(
         "Missing dependency: websockets\n"
         "Install it with: uv pip install --python /path/to/python "
-        "-r examples/voice_agent/requirements.txt"
+        "-r examples/voice_agent/client/requirements.txt"
     ) from exc
 
 
@@ -174,7 +174,10 @@ async def run_client(args: argparse.Namespace) -> None:
                 elif event_type == "response.output_text.delta":
                     printer.write(event.get("delta", ""))
                     streamed_output = True
-                elif event_type == "conversation.item.input_audio_transcription.completed":
+                elif (
+                    event_type
+                    == "conversation.item.input_audio_transcription.completed"
+                ):
                     input_transcript = event.get("transcript")
                 elif event_type == "response.done":
                     if audio_base64:
