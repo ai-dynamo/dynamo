@@ -9,7 +9,7 @@ cases:
     ref: dynamo
     model_text: '[not a valid python call]'
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,23 +17,40 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: '[not a valid python call]'
+      dynamo: &id001
+        calls: []
+        normal_text: '[not a valid python call]'
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.4.b:
     description: Missing closing bracket
     ref: dynamo
     model_text: '[get_weather(location="NYC"'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: '[get_weather(location="NYC"'
+      dynamo: &id003
+        calls: []
+        normal_text: '[get_weather(location="NYC"'
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.4.d:
     description: Mismatched paren / bracket
     ref: dynamo
     model_text: '[get_weather(location="NYC"]'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: '[get_weather(location="NYC"]'
+      dynamo: &id004
+        calls: []
+        normal_text: '[get_weather(location="NYC"]'
+      vllm: *id004
+      sglang: *id004
+  PARSER.batch.4.c:
+    description: Malformed variant 4.c — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.c not yet authored for pythonic; see 4.a / 4.b / 4.d for this family's malformed-input scenarios.
+  PARSER.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in PARSER.batch.4.a through 4.d.

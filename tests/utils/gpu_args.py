@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 
-def build_gpu_mem_args(function_name: str) -> list[str]:
+def build_gpu_mem_args(
+    function_name: str, env: Mapping[str, str] | None = None
+) -> list[str]:
     """Call a backend memory-args function from examples/common/gpu_utils.sh."""
     repo_root = Path(__file__).resolve().parents[2]
     gpu_utils = repo_root / "examples" / "common" / "gpu_utils.sh"
@@ -19,6 +22,7 @@ def build_gpu_mem_args(function_name: str) -> list[str]:
         ["bash", "-lc", cmd],
         check=True,
         capture_output=True,
+        env=env,
         text=True,
     )
     return shlex.split(result.stdout.strip())

@@ -3,6 +3,7 @@
 
 use axum::http::HeaderMap;
 use derive_builder::Builder;
+use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_protocols::types::StopReason;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -284,6 +285,27 @@ impl NvExtResponseFieldSelection {
     }
 }
 
+/// OpenAPI-facing schema for request routing constraints.
+///
+/// Runtime serialization still uses `dynamo_kv_router::protocols::RoutingConstraints`;
+/// this mirror exists so `NvExt` can expose the concrete field shape without
+/// making the kv-router crate depend on utoipa.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct RoutingConstraintsSchema {
+    /// Worker taints that must be matched for the request to be eligible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_taints: Vec<String>,
+
+    /// Soft preference weights keyed by worker taint.
+    /// Positive weights prefer matching workers; negative weights avoid them.
+    /// A weight of 0.0 is neutral and has no effect.
+    /// Matching weights are summed and squashed with `tanh`, so opposite
+    /// preferences cancel before Dynamo converts the bounded bias into a
+    /// strictly positive score multiplier.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub preferred_taints: std::collections::HashMap<String, f32>,
+}
+
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -384,6 +406,12 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<SessionControl>,
+
+    /// Request routing constraints used to constrain or prefer tainted workers.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = RoutingConstraintsSchema)]
+    pub routing_constraints: Option<RoutingConstraints>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -514,6 +542,7 @@ mod tests {
         assert_eq!(nv_ext.agent_context, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
         assert_eq!(nv_ext.session_control, None);
+        assert_eq!(nv_ext.routing_constraints, None);
     }
 
     // Test valid builder configurations

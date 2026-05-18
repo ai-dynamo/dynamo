@@ -126,6 +126,8 @@ navigation:
             contents:
               - page: EKS Setup
                 path: kubernetes/cloud-providers/eks/eks.md
+              - page: EFA (RDMA over AWS Fabric)
+                path: kubernetes/cloud-providers/eks/efa.md
               - page: EFS
                 path: kubernetes/cloud-providers/eks/efs.md
               - page: ECS
@@ -174,6 +176,8 @@ navigation:
             path: tool-calling/dynamo.md
           - page: Tool Call Parsing (Engine Fallback)
             path: tool-calling/engine-fallback.md
+          - page: Troubleshooting Tool Calls
+            path: tool-calling/troubleshooting.md
       - section: Reasoning
         slug: reasoning
         path: reasoning/README.md
@@ -244,8 +248,12 @@ navigation:
             path: mocker/mocker.md
           - page: Mocker Offline Trace Replay
             path: benchmarks/mocker-trace-replay.md
-      - page: Writing Python Workers
+      - page: Writing Python Workers (lower-level)
         path: development/backend-guide.md
+      - page: Writing Python Unified Backends
+        path: development/python-backend-guide.md
+      - page: Writing Rust Unified Backends
+        path: development/rust-backend-guide.md
 
   # ==================== Backends ====================
   - section: Backends
