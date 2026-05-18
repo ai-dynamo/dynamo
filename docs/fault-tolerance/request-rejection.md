@@ -42,10 +42,11 @@ When all workers exceed their configured busy thresholds, new requests receive a
 
 ### Frontend Arguments
 
-Configure busy thresholds when starting the frontend:
+Configure busy thresholds when starting the frontend. `--admission-control token-capacity` is required to activate the thresholds; the default (`none`) leaves them disabled.
 
 ```bash
 python -m dynamo.frontend \
+    --admission-control token-capacity \
     --active-decode-blocks-threshold 0.85 \
     --active-prefill-tokens-threshold 10000
 ```
