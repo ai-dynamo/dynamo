@@ -94,6 +94,49 @@ impl PyConnectorWorker {
             .map_err(to_pyerr)
     }
 
+    /// Register a single cross-layer KV cache tensor with NIXL.
+    ///
+    /// Used when vLLM allocates a uniform cross-layer KV cache (a single
+    /// allocation whose physical byte layout is
+    /// `[num_blocks, num_layers, outer_dim, page_size, inner_dim]`). The
+    /// caller must validate the layout against the attention backend's
+    /// stride order before invoking this; the Rust side trusts the dims.
+    ///
+    /// Args:
+    ///     tensor: A single PyTorch CUDA tensor covering all layers.
+    ///     num_device_blocks: Number of device blocks from vLLM's cache config.
+    ///     num_layers: Number of attention layers fused into the tensor.
+    ///     outer_dim: K/V split dimension (typically 2 for standard attention).
+    ///     page_size: Block/page size (tokens per block).
+    ///     inner_dim: Flattened head dimension (num_kv_heads * head_size).
+    ///     dtype_width_bytes: Data type width in bytes (e.g. 2 for fp16).
+    #[pyo3(signature = (tensor, num_device_blocks, num_layers, outer_dim, page_size, inner_dim, dtype_width_bytes))]
+    pub fn register_cross_layers_kv_cache(
+        &self,
+        tensor: Py<PyAny>,
+        num_device_blocks: usize,
+        num_layers: usize,
+        outer_dim: usize,
+        page_size: usize,
+        inner_dim: usize,
+        dtype_width_bytes: usize,
+    ) -> PyResult<()> {
+        let rust_tensor = Tensor::new(tensor).map_err(to_pyerr)?;
+        let rust_tensor: Arc<dyn TensorDescriptor> = Arc::new(rust_tensor);
+
+        self.inner
+            .register_cross_layers_kv_cache(
+                rust_tensor,
+                num_device_blocks,
+                num_layers,
+                outer_dim,
+                page_size,
+                inner_dim,
+                dtype_width_bytes,
+            )
+            .map_err(to_pyerr)
+    }
+
     /// Get handshake metadata to send to the leader.
     ///
     /// Returns metadata bytes that can be all-gathered to the leader

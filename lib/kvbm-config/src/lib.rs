@@ -5,6 +5,23 @@
 //!
 //! Provides centralized configuration for Tokio, Rayon, Messenger, and NixL runtimes.
 //! Supports role-specific configuration for leader and worker components.
+//!
+//! # Settings deliberately *not* owned by this crate
+//!
+//! A handful of switches are resolved *outside* `kvbm-config` because they
+//! must be answered before a `KvbmConfig` (or even a `KvbmRuntime`) can be
+//! instantiated. They are intentionally surfaced as plain process-level
+//! environment variables and are listed here so the inventory is complete:
+//!
+//! - **`KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS`** *(default `true`)* — gates
+//!   `DynamoConnector.prefer_cross_layer_blocks` in
+//!   `lib/bindings/kvbm/python/kvbm/v2/vllm/schedulers/connector.py`. vLLM
+//!   queries that property during connector construction (before the
+//!   connector hands any JSON off to Rust), so the answer has to come from
+//!   somewhere that doesn't depend on a parsed `KvbmConfig`. Truthy values
+//!   (`true`/`1`/`yes`/`y`, case-insensitive) keep the cross-layer / FC
+//!   path; anything else falls back to the per-layer `register_kv_caches`
+//!   path.
 
 mod cache;
 mod debug;
@@ -367,36 +384,94 @@ impl KvbmConfig {
 
     /// Load leader config with JSON overrides and leader profile selected.
     ///
-    /// JSON top-level keys are treated as profile names when using `.nested()`.
-    /// Keys under `default` apply to all profiles, keys under `leader` only to leader.
+    /// Accepts either of two equivalent shapes (or any mix of both):
     ///
-    /// Example JSON:
-    /// ```json
-    /// {
-    ///   "leader": {
-    ///     "cache": {"host": {"cache_size_gb": 1.0}},
-    ///     "tokio": {"worker_threads": 2}
-    ///   }
-    /// }
-    /// ```
+    /// 1. **Flat config** — top-level keys are real `KvbmConfig` fields and
+    ///    apply to every role:
+    ///    ```json
+    ///    {"cache": {"host": {"cache_size_gb": 1.0}}, "tokio": {"worker_threads": 2}}
+    ///    ```
+    /// 2. **Role overlay** — top-level `leader` / `worker` keys hold
+    ///    role-specific overlays that override the flat layer for that role:
+    ///    ```json
+    ///    {"leader": {"tokio": {"worker_threads": 2}}}
+    ///    ```
+    /// 3. **Mixed** — flat as the default plus role overlays on top:
+    ///    ```json
+    ///    {
+    ///      "cache": {"host": {"cache_size_gb": 1.0}},
+    ///      "leader": {"tokio": {"worker_threads": 2}}
+    ///    }
+    ///    ```
+    ///
+    /// Precedence (highest to lowest): selected-role overlay → flat JSON →
+    /// TOML / env → defaults.
     pub fn from_figment_with_json_for_leader(json: &str) -> Result<Self, ConfigError> {
-        Self::extract_from(Self::figment_for_leader().merge(Json::string(json).nested()))
+        Self::from_role_json(json, Role::Leader)
     }
 
     /// Load worker config with JSON overrides and worker profile selected.
     ///
-    /// JSON top-level keys are treated as profile names when using `.nested()`.
-    /// Keys under `default` apply to all profiles, keys under `worker` only to worker.
-    ///
-    /// Example JSON:
-    /// ```json
-    /// {
-    ///   "worker": {"tokio": {"worker_threads": 8}}
-    /// }
-    /// ```
+    /// See [`Self::from_figment_with_json_for_leader`] for the accepted JSON
+    /// shapes.
     pub fn from_figment_with_json_for_worker(json: &str) -> Result<Self, ConfigError> {
-        Self::extract_from(Self::figment_for_worker().merge(Json::string(json).nested()))
+        Self::from_role_json(json, Role::Worker)
     }
+
+    /// Shared loader for role-specific JSON overrides.
+    ///
+    /// Splits the JSON object into a flat remainder (applied to the default
+    /// profile so every role sees it) and role overlays (applied via
+    /// figment's `.nested()` so the selected role's overlay overrides the
+    /// flat layer at extract time). This is the behaviour Codex flagged as
+    /// missing: previously a flat `{"cache": {...}}` was treated as a
+    /// profile named `cache` and silently ignored by the leader/worker
+    /// profiles.
+    fn from_role_json(json: &str, role: Role) -> Result<Self, ConfigError> {
+        use serde_json::Value;
+
+        let parsed: Value = serde_json::from_str(json)
+            .map_err(|e| ConfigError::Other(anyhow::anyhow!(e).context("invalid JSON")))?;
+        let Value::Object(mut obj) = parsed else {
+            return Err(ConfigError::Other(anyhow::anyhow!(
+                "kv_connector_extra_config must be a JSON object"
+            )));
+        };
+
+        // Pop figment profile keys — these go through `.nested()` so figment
+        // routes them to the matching profile. `default` is figment's special
+        // base profile (visible to every selected profile); `leader`/`worker`
+        // overlay it. Anything left in `obj` is treated as flat config and
+        // also lands in the default profile.
+        let mut overlays = serde_json::Map::new();
+        for key in ["default", "leader", "worker"] {
+            if let Some(v) = obj.remove(key) {
+                overlays.insert(key.to_string(), v);
+            }
+        }
+
+        let mut figment = match role {
+            Role::Leader => Self::figment_for_leader(),
+            Role::Worker => Self::figment_for_worker(),
+        };
+
+        if !obj.is_empty() {
+            let flat_json = Value::Object(obj).to_string();
+            figment = figment.merge(Json::string(&flat_json));
+        }
+        if !overlays.is_empty() {
+            let overlays_json = Value::Object(overlays).to_string();
+            figment = figment.merge(Json::string(&overlays_json).nested());
+        }
+
+        Self::extract_from(figment)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Role {
+    Leader,
+    Worker,
 }
 
 /// Implement Provider trait for KvbmConfig.
@@ -643,6 +718,93 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn test_flat_json_applies_to_both_roles() {
+        // Top-level keys that are real KvbmConfig fields (not "leader" /
+        // "worker" / "default") should be treated as flat config and apply
+        // to both roles. Regression for Codex's P2 finding that flat
+        // overrides were silently dropped by the role loaders.
+        temp_env::with_vars_unset(
+            vec!["KVBM_CONFIG_PATH", "KVBM_TOKIO_WORKER_THREADS"],
+            || {
+                let json = r#"{"cache": {"host": {"cache_size_gb": 2.5}}}"#;
+
+                let leader = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+                assert_eq!(
+                    leader.cache.host.cache_size_gb,
+                    Some(2.5),
+                    "flat JSON config should reach leader"
+                );
+
+                let worker = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+                assert_eq!(
+                    worker.cache.host.cache_size_gb,
+                    Some(2.5),
+                    "flat JSON config should reach worker"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_mixed_flat_and_role_overlay() {
+        // Flat layer applies to every role; role overlay refines for the
+        // selected role only.
+        temp_env::with_vars_unset(
+            vec!["KVBM_CONFIG_PATH", "KVBM_TOKIO_WORKER_THREADS"],
+            || {
+                let json = r#"{
+                    "cache": {"host": {"cache_size_gb": 1.0}},
+                    "leader": {"tokio": {"worker_threads": 2}},
+                    "worker": {"tokio": {"worker_threads": 8}}
+                }"#;
+
+                let leader = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+                assert_eq!(leader.cache.host.cache_size_gb, Some(1.0));
+                assert_eq!(leader.tokio.worker_threads, Some(2));
+
+                let worker = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+                assert_eq!(worker.cache.host.cache_size_gb, Some(1.0));
+                assert_eq!(worker.tokio.worker_threads, Some(8));
+            },
+        );
+    }
+
+    #[test]
+    fn test_role_overlay_overrides_flat_for_same_key() {
+        // When both flat and role overlay touch the same key, role overlay
+        // wins for the selected role; the other role sees the flat value.
+        temp_env::with_vars_unset(
+            vec!["KVBM_CONFIG_PATH", "KVBM_TOKIO_WORKER_THREADS"],
+            || {
+                let json = r#"{
+                    "tokio": {"worker_threads": 4},
+                    "leader": {"tokio": {"worker_threads": 2}}
+                }"#;
+
+                let leader = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+                assert_eq!(
+                    leader.tokio.worker_threads,
+                    Some(2),
+                    "leader overlay should beat flat tokio.worker_threads"
+                );
+
+                let worker = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+                assert_eq!(
+                    worker.tokio.worker_threads,
+                    Some(4),
+                    "worker has no overlay → flat value applies"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_non_object_json_rejected() {
+        let err = KvbmConfig::from_figment_with_json_for_leader("[]").unwrap_err();
+        assert!(err.to_string().contains("must be a JSON object"));
     }
 
     #[test]
