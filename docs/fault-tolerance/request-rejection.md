@@ -55,7 +55,7 @@ python -m dynamo.frontend \
 | `--active-decode-blocks-threshold` | float (0.0-1.0) | KV cache block utilization threshold |
 | `--active-prefill-tokens-threshold` | int | Prefill token count threshold |
 | `--active-prefill-tokens-threshold-frac` | float | Prefill token threshold as a fraction of `max_num_batched_tokens` |
-| `--no-admission-control` | bool | Clear all busy thresholds while leaving router queueing controlled by `--router-queue-threshold` |
+| `--admission-control` | `token-capacity` \| `none` | Admission control mode. `token-capacity` applies the busy thresholds above; `none` (the default) clears them while leaving router queueing controlled by `--router-queue-threshold`. To enable busy-worker admission, you must pass `--admission-control token-capacity` |
 
 ### Dynamic Configuration via API
 
