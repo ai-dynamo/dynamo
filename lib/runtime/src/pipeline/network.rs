@@ -28,8 +28,8 @@ use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Respons
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
-    ServiceBackend, ServiceEngine, SingleIn, Source, context,
+    AsyncTransportEngine, Context, Data, Error, ManyIn, ManyOut, PipelineError, PipelineIO,
+    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
 use crate::metrics::MetricsHierarchy;
 use ingress::push_handler::WorkHandlerMetrics;
@@ -441,6 +441,63 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+}
+
+/// Bidirectional analog of [`Ingress`]. The unary path stores an
+/// `Arc<SegmentSource<Req, Resp>>` so the pipeline operator graph can be
+/// extended later; the bidirectional path stores an
+/// `Arc<dyn AsyncEngine<ManyIn<T>, ManyOut<U>, Error>>` directly because
+/// `ManyIn<T> = Pin<Box<dyn AsyncEngineStream<T>>>` is not `Sync`, which
+/// would prevent threading the type through the `Frontend` / `SegmentSource`
+/// graph (whose `AsyncEngine` impl requires `Req: Sync`).
+///
+/// The engine trait object is `Send + Sync` independent of its type
+/// parameters, so this struct itself is unconditionally `Sync` and slots into
+/// the same `PushWorkHandler` registration paths as the unary `Ingress`.
+pub struct BidirectionalIngress<T: Data, U: Data> {
+    engine: OnceLock<crate::engine::Engine<ManyIn<T>, ManyOut<U>, Error>>,
+    metrics: OnceLock<Arc<WorkHandlerMetrics>>,
+    endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+}
+
+impl<T: Data, U: Data> BidirectionalIngress<T, U> {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            engine: OnceLock::new(),
+            metrics: OnceLock::new(),
+            endpoint_health_check_notifier: OnceLock::new(),
+        })
+    }
+
+    pub fn for_engine(engine: crate::engine::Engine<ManyIn<T>, ManyOut<U>, Error>) -> Arc<Self> {
+        let ingress = Self::new();
+        let _ = ingress.engine.set(engine);
+        ingress
+    }
+
+    pub fn metrics(&self) -> Option<&Arc<WorkHandlerMetrics>> {
+        self.metrics.get()
+    }
+
+    pub fn add_metrics(
+        &self,
+        endpoint: &crate::component::Endpoint,
+        metrics_labels: Option<&[(&str, &str)]>,
+    ) -> Result<()> {
+        let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
+            .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
+
+        crate::metrics::work_handler_perf::ensure_work_handler_perf_metrics_registered(
+            endpoint.get_metrics_registry(),
+        );
+        crate::metrics::work_handler_pool::ensure_work_handler_pool_metrics_registered(
+            endpoint.get_metrics_registry(),
+        );
+
+        self.metrics
+            .set(Arc::new(metrics))
+            .map_err(|_| anyhow::anyhow!("Metrics already set"))
+    }
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
