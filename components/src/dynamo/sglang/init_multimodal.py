@@ -47,7 +47,10 @@ async def init_multimodal_encode_worker(
     ).client()
 
     cache_publisher = None
-    if config.dynamo_args.multimodal_embedding_cache_capacity_gb > 0:
+    if (
+        config.dynamo_args.multimodal_embedding_cache_capacity_gb > 0
+        and config.dynamo_args.multimodal_embedding_cache_publisher
+    ):
         cache_publisher = MultimodalEmbeddingCachePublisher()
         await cache_publisher.create_endpoint(generate_endpoint)
         cache_publisher.publish([])
