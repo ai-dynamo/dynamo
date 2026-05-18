@@ -28,7 +28,7 @@ use crate::pipeline::network::StreamOptions;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
 use crate::pipeline::network::tcp;
-use crate::pipeline::{ManyOut, PipelineError, ResponseStream, SingleIn};
+use crate::pipeline::{ManyIn, ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
 use crate::traits::DistributedRuntimeProvider;
 
@@ -188,6 +188,296 @@ impl AddressedPushRouter {
         self.resp_transport
             .clear_instance_tombstone(instance_id)
             .await
+    }
+
+    /// Bidirectional sibling of the `AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>>`
+    /// impl: dispatch `first_frame` + a follow-on `ManyIn<T>` to a specific
+    /// `(instance, address)` pair, with subsequent request frames carried on
+    /// the request-stream half of the call-home TCP transport. The address /
+    /// instance pair has already been resolved by the caller (typically
+    /// `PushRouter`'s bidirectional impl which has selected a sticky worker
+    /// on first-frame arrival).
+    pub async fn generate_bidirectional<T, U>(
+        &self,
+        instance: Instance,
+        address: String,
+        first_frame: T,
+        mut rest: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error>
+    where
+        T: Data + Serialize,
+        U: Data + for<'de> Deserialize<'de> + MaybeError,
+    {
+        let queue_start = Instant::now();
+        REQUEST_PLANE_INFLIGHT.inc();
+        let inflight_guard = InflightGuard::new();
+
+        let engine_ctx = rest.context();
+        let request_id = engine_ctx.id().to_string();
+        let engine_ctx_for_stream = engine_ctx.clone();
+        let engine_ctx_for_forwarder = engine_ctx.clone();
+
+        // Register both halves on the response transport: a `send_stream`
+        // (upstream → worker, carrying subsequent request frames) and a
+        // `recv_stream` (worker → upstream, carrying response chunks).
+        let options = StreamOptions::builder()
+            .context(engine_ctx.clone())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending_connections: PendingConnections = self.resp_transport.register(options).await;
+
+        let (pending_send_stream, pending_recv_stream) = match pending_connections.into_parts() {
+            (Some(send), Some(recv)) => (send, recv),
+            _ => {
+                panic!("Invalid data plane registration for a ManyIn/ManyOut transport");
+            }
+        };
+
+        let (req_stream_conn_info, request_stream_provider) = pending_send_stream.into_parts();
+        let (resp_stream_conn_info, response_stream_provider) = pending_recv_stream.into_parts();
+
+        let recv_subject: Option<String> =
+            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&resp_stream_conn_info.info)
+                .ok()
+                .map(|ci| ci.subject);
+        let send_subject: Option<String> =
+            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&req_stream_conn_info.info)
+                .ok()
+                .map(|ci| ci.subject);
+
+        // Tombstone check (same semantics as the unary path) before any
+        // request-plane write.
+        let endpoint_instance_id = instance.endpoint_instance_id();
+        if let Some(subject) = &recv_subject
+            && !self
+                .resp_transport
+                .associate_instance(subject, &endpoint_instance_id)
+                .await
+        {
+            self.cancel_both(&recv_subject, &send_subject).await;
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::Disconnected)
+                    .message("Worker removed before request could be sent (tombstoned instance)")
+                    .build()
+            ));
+        }
+
+        let control_message = RequestControlMessage {
+            id: engine_ctx.id().to_string(),
+            request_type: RequestType::ManyIn,
+            response_type: ResponseType::ManyOut,
+            connection_info: resp_stream_conn_info,
+            frontend_send_ts_ns: None,
+            request_stream_connection_info: Some(req_stream_conn_info),
+        };
+
+        let ctrl = match serde_json::to_vec(&control_message) {
+            Ok(v) => v,
+            Err(e) => {
+                self.cancel_both(&recv_subject, &send_subject).await;
+                return Err(e.into());
+            }
+        };
+        let data = match serde_json::to_vec(&first_frame) {
+            Ok(v) => v,
+            Err(e) => {
+                self.cancel_both(&recv_subject, &send_subject).await;
+                return Err(e.into());
+            }
+        };
+
+        tracing::trace!(
+            request_id,
+            "packaging bidirectional two-part message; ctrl: {} bytes, first frame: {} bytes",
+            ctrl.len(),
+            data.len()
+        );
+
+        let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());
+        let codec = TwoPartCodec::default();
+        let buffer = match codec.encode_message(msg) {
+            Ok(v) => v,
+            Err(e) => {
+                self.cancel_both(&recv_subject, &send_subject).await;
+                return Err(e.into());
+            }
+        };
+
+        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+        let tx_start = Instant::now();
+
+        let mut headers = std::collections::HashMap::new();
+        inject_trace_headers_into_map(&mut headers);
+        headers.insert("request-id".to_string(), request_id.clone());
+        let send_ts_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
+
+        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send_bidirectional");
+        let send_result = self.req_client.send_request(address, buffer, headers).await;
+        drop(_nvtx_send);
+
+        if let Err(e) = send_result {
+            self.cancel_both(&recv_subject, &send_subject).await;
+            return Err(e);
+        }
+        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+
+        // Await both call-home dials. Response side first (worker's prologue
+        // is the synchronization point — error or success); request side
+        // second (no prologue, resolves as soon as the worker dials in).
+        let response_stream = match response_stream_provider.await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                self.cancel_both(&recv_subject, &send_subject).await;
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!(
+                            "Worker generate() failed before response stream: {e}"
+                        ))
+                        .build()
+                ));
+            }
+            Err(_) => {
+                self.cancel_both(&recv_subject, &send_subject).await;
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("Worker disconnected before response stream was established")
+                        .build()
+                ));
+            }
+        };
+
+        let request_sender = match request_stream_provider.await {
+            Ok(Ok(sender)) => sender,
+            Ok(Err(e)) => {
+                if let Some(subject) = &send_subject {
+                    self.resp_transport.cancel_send_stream(subject).await;
+                }
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!("Worker dial-in failed for request stream: {e}"))
+                        .build()
+                ));
+            }
+            Err(_) => {
+                if let Some(subject) = &send_subject {
+                    self.resp_transport.cancel_send_stream(subject).await;
+                }
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("Worker disconnected before request stream was established")
+                        .build()
+                ));
+            }
+        };
+
+        // Spawn the forwarder task that pumps `rest` to the worker via the
+        // request-stream send half. Exit on stream end, context kill/stop,
+        // or send error (worker dropped its receiver).
+        tokio::spawn(async move {
+            while let Some(item) = rest.next().await {
+                if engine_ctx_for_forwarder.is_stopped() || engine_ctx_for_forwarder.is_killed() {
+                    break;
+                }
+                let bytes = match serde_json::to_vec(&item) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to serialize bidirectional request frame; dropping");
+                        continue;
+                    }
+                };
+                if request_sender.send(bytes.into()).await.is_err() {
+                    tracing::debug!("worker request-stream receiver dropped; forwarder exiting");
+                    break;
+                }
+            }
+            // Dropping `request_sender` here closes the upstream's mpsc, which
+            // signals the server-side `request_stream_send_handler` to send
+            // Sentinel and close the wire.
+        });
+
+        // Build the response stream — same shape as the unary path.
+        let mut is_complete_final = false;
+        let mut first_response = true;
+        let stream = StreamNotifyClose::new(ReceiverStream::new(response_stream.rx)).filter_map(
+            move |res| {
+                if let Some(res_bytes) = res {
+                    if first_response {
+                        first_response = false;
+                        let roundtrip_ttft = tx_start.elapsed().as_secs_f64();
+                        REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(roundtrip_ttft);
+                        STAGE_DURATION_SECONDS
+                            .with_label_values(&["transport_roundtrip"])
+                            .observe(queue_start.elapsed().as_secs_f64());
+                    }
+                    if is_complete_final {
+                        let err = DynamoError::msg(
+                            "Response received after generation ended - this should never happen",
+                        );
+                        return Some(U::from_err(err));
+                    }
+                    match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
+                        Ok(item) => {
+                            is_complete_final = item.complete_final;
+                            if let Some(data) = item.data {
+                                Some(data)
+                            } else if is_complete_final {
+                                None
+                            } else {
+                                let err = DynamoError::msg(
+                                    "Empty response received - this should never happen",
+                                );
+                                Some(U::from_err(err))
+                            }
+                        }
+                        Err(err) => {
+                            let json_str = String::from_utf8_lossy(&res_bytes);
+                            tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                            Some(U::from_err(DynamoError::msg(err.to_string())))
+                        }
+                    }
+                } else if is_complete_final {
+                    None
+                } else if engine_ctx_for_stream.is_stopped() {
+                    tracing::debug!("Request cancelled and then trying to read a response");
+                    None
+                } else {
+                    let err = DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("Stream ended before generation completed")
+                        .build();
+                    tracing::debug!("{err}");
+                    Some(U::from_err(err))
+                }
+            },
+        );
+
+        inflight_guard.disarm();
+        let stream = InflightDecStream { inner: stream };
+        Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+    }
+
+    /// Cancel both halves of a bidirectional registration on the data plane.
+    /// Mirrors the single-`cancel_recv_stream` call the unary path makes on
+    /// every error exit, extended to also clear the `tx_subjects` entry.
+    async fn cancel_both(&self, recv_subject: &Option<String>, send_subject: &Option<String>) {
+        if let Some(s) = recv_subject {
+            self.resp_transport.cancel_recv_stream(s).await;
+        }
+        if let Some(s) = send_subject {
+            self.resp_transport.cancel_send_stream(s).await;
+        }
     }
 }
 
