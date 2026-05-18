@@ -92,7 +92,7 @@ spec:
           - python3
           - -m
           - dynamo.frontend
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0-post.1
           name: main
           volumeMounts:
           - mountPath: /models
@@ -126,7 +126,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0-post.1
           name: main
           resources:
             limits:
@@ -169,7 +169,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0-post.1
           name: main
           resources:
             limits:

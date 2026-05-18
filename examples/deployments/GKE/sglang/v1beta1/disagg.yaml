@@ -10,7 +10,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: my-registry/sglang-runtime:my-tag
+        - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1
           name: main
     replicas: 1
     type: frontend
@@ -31,7 +31,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1
           name: main
           resources:
             limits:
@@ -56,7 +56,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1
           name: main
           resources:
             limits:

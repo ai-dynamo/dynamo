@@ -21,7 +21,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1
     decode:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -37,7 +37,7 @@ spec:
         enabled: true
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1
           workingDir: /workspace/examples/backends/sglang
           command:
           - python3

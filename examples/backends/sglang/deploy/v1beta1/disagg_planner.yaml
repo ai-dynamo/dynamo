@@ -54,7 +54,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: my-registry/sglang-runtime:my-tag
+        - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1
           name: main
     replicas: 1
     type: frontend
@@ -80,7 +80,7 @@ spec:
           #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
           #   Dynamo <  1.1.0: use the backend runtime image
           #     <registry>/sglang-runtime:<version>.
-          image: my-registry/dynamo-planner:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0-post.1
           name: main
           volumeMounts:
           - mountPath: /workspace/profiling_results
@@ -122,7 +122,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1
           name: main
           resources:
             limits:
@@ -160,7 +160,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1
           name: main
           resources:
             limits:

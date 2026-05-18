@@ -17,7 +17,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: my-registry/dynamo:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo:1.2.0-post.1
           livenessProbe:
             exec:
               command:
@@ -58,7 +58,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: my-registry/dynamo:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo:1.2.0-post.1
           livenessProbe:
             exec:
               command:
