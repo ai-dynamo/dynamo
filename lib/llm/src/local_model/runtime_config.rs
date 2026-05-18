@@ -207,44 +207,35 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn populates_from_dyn_env() {
-        temp_env::with_vars(
-            [("DYN_STABLE_ROUTING_ID", Some("worker-3"))],
-            || {
-                let mut cfg = ModelRuntimeConfig::default();
-                cfg.populate_stable_routing_id_from_env();
-                assert_eq!(cfg.stable_routing_id.as_deref(), Some("worker-3"));
-            },
-        );
+        temp_env::with_vars([("DYN_STABLE_ROUTING_ID", Some("worker-3"))], || {
+            let mut cfg = ModelRuntimeConfig::default();
+            cfg.populate_stable_routing_id_from_env();
+            assert_eq!(cfg.stable_routing_id.as_deref(), Some("worker-3"));
+        });
     }
 
     #[test]
     #[serial_test::serial]
     fn preserves_caller_supplied_value() {
-        temp_env::with_vars(
-            [("DYN_STABLE_ROUTING_ID", Some("from-env"))],
-            || {
-                let mut cfg = ModelRuntimeConfig {
-                    stable_routing_id: Some("explicit".to_string()),
-                    ..Default::default()
-                };
-                cfg.populate_stable_routing_id_from_env();
-                assert_eq!(cfg.stable_routing_id.as_deref(), Some("explicit"));
-            },
-        );
+        temp_env::with_vars([("DYN_STABLE_ROUTING_ID", Some("from-env"))], || {
+            let mut cfg = ModelRuntimeConfig {
+                stable_routing_id: Some("explicit".to_string()),
+                ..Default::default()
+            };
+            cfg.populate_stable_routing_id_from_env();
+            assert_eq!(cfg.stable_routing_id.as_deref(), Some("explicit"));
+        });
     }
 
     #[test]
     #[serial_test::serial]
     fn no_meaningful_env_leaves_field_none() {
         // Whitespace-only is rejected…
-        temp_env::with_vars(
-            [("DYN_STABLE_ROUTING_ID", Some("   "))],
-            || {
-                let mut cfg = ModelRuntimeConfig::default();
-                cfg.populate_stable_routing_id_from_env();
-                assert!(cfg.stable_routing_id.is_none());
-            },
-        );
+        temp_env::with_vars([("DYN_STABLE_ROUTING_ID", Some("   "))], || {
+            let mut cfg = ModelRuntimeConfig::default();
+            cfg.populate_stable_routing_id_from_env();
+            assert!(cfg.stable_routing_id.is_none());
+        });
         // …as is having the var unset.
         temp_env::with_vars_unset(["DYN_STABLE_ROUTING_ID"], || {
             let mut cfg = ModelRuntimeConfig::default();
