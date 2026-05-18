@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/h200_disagg.yaml
+name: A6_coefficient_pegged_at_clamp
+description: >
+  Decode power bias = 3.0 (far above AIC prediction). Coefficient saturates
+  at clamp of 2.0. Planner does NOT auto-disable; pegged counter increments.
+
+fleet:
+  bias:
+    power_bias_decode: 3.0
+
+assertions:
+  - at_tick: 50
+    field: c_power_d
+    op: "within"
+    value: 2.0
+    tolerance: 0.05
+    description: "c_power_d pegged at clamp=2.0"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

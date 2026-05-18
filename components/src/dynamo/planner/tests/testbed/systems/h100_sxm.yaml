@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# H100 SXM — per-SKU constants for the testbed
+
+tdp_w: 700.0
+sku_min_w: 200.0
+sku_max_w: 700.0
+decode_power_floor_w: 280.0
+
+aic_ttft_ms: 140.0
+aic_itl_ms: 10.0
+aic_power_w_prefill: 420.0
+aic_power_w_decode: 340.0
+max_kv_tokens: 160000
+
+overlay_prefill_saturation_tokens: 8192
+overlay_decode_hbm_tokens: 160000

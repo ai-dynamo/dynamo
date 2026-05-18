@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/h200_disagg.yaml
+name: C16_warmup_power_spike
+description: >
+  New replica draws 0.7×TDP for first 15 simulated seconds (warmup period),
+  then settles at AIC-predicted. Models §6.5 warmup power concern. Validates
+  simultaneous-restart budget headroom (headroom_factor=0.85).
+
+ticks: 60
+
+fleet:
+  bias:
+    power_bias_prefill: 1.0
+    power_bias_decode: 1.0
+
+events:
+  - type: node_up
+    at_tick: 5
+    n_decode_restored: 2
+  - type: bias_step
+    at_tick: 5
+    signal: power_bias_decode
+    value: 0.7
+  - type: bias_step
+    at_tick: 8
+    signal: power_bias_decode
+    value: 1.0
+
+assertions:
+  - at_tick: 6
+    field: observed_power_w_d
+    op: "<"
+    value: 400.0
+    description: "Warmup: decode power below steady-state during warmup"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

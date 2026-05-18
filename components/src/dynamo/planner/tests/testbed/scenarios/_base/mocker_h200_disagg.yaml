@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+class: gamma
+seed: 42
+ticks: 60
+interval_s: 60
+
+planner:
+  mode: disagg
+  ttft: 500.0
+  itl: 50.0
+  enable_power_awareness: true
+  enable_aic_optimizer: true
+  total_gpu_power_limit: 4000
+  power_agent_safe_default_watts: 500
+  prefill_engine_gpu_power_limit: 500
+  decode_engine_gpu_power_limit: 425
+  aic_initial_c_power_prefill: 1.0
+  aic_initial_c_power_decode: 1.0
+  aic_initial_c_power_agg: 1.0
+  aic_initial_c_ttft: 1.0
+  aic_initial_c_itl: 1.0
+  aic_reoptimize_interval: 300
+  aic_drift_relative_threshold: 0.15
+  aic_drift_consecutive_ticks: 3
+  aic_max_consecutive_failures: 5
+  min_endpoint: 1
+  max_gpu_budget: 64
+  admission_mode: "off"   # MUST be quoted — YAML 1.1 coerces bare `off` to False.
+
+mocker:
+  trace_file: null
+  synthetic_workload: true
+  arrival_rate: 200.0
+  isl: 3000
+  osl: 150
+  num_prefill_workers: 1
+  num_decode_workers: 4
+  router_mode: kv_router
+  prefill_engine_args:
+    block_size: 64
+    max_num_batched_tokens: 8192
+    max_num_seqs: 256
+  decode_engine_args:
+    block_size: 64
+    max_num_batched_tokens: 8192
+    max_num_seqs: 256
+
+overlay:
+  system: h200_sxm
+  bias:
+    power_bias_prefill: 1.0
+    power_bias_decode: 1.0
+  noise:
+    power_per_gpu: { model: gaussian, sigma: 0.07 }
+
+load:
+  profile: constant
+  tokens_per_sec: 2000.0
+
+events: []
+assertions: []

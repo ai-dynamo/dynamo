@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/h200_disagg.yaml
+name: E23_aic_infeasible_at_startup
+description: >
+  AIC returns empty/infeasible Pareto at startup (tick 0). Optimizer
+  auto-disables with reason="infeasible_at_startup". Static
+  _apply_power_budget still functions.
+
+events:
+  - type: aic_failure
+    at_tick: 0
+    mode: empty_pareto
+    n_consecutive: 200
+
+assertions:
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

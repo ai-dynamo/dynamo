@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/mocker_h200_disagg.yaml
+name: G1_realistic_decode_drift
+description: >
+  Mocker replay + decode power bias 1.30 + one nvml_low fault at tick 30.
+  Validates controller closes the loop when load arrives from a real scheduler.
+  Latency and capacity from real mocker scheduling; power from overlay.
+  Pairs with A1 (same bias, real scheduler instead of synthetic fleet).
+
+overlay:
+  bias:
+    power_bias_decode: 1.30
+
+events:
+  - type: actuation_fault
+    at_tick: 30
+    duration_ticks: 5
+    mode: nvml_low
+
+assertions:
+  - at_tick: 25
+    field: c_power_d
+    op: "within"
+    value: 1.30
+    tolerance: 0.25
+    description: "c_power_d converges toward 1.30 with real mocker load (looser than α)"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

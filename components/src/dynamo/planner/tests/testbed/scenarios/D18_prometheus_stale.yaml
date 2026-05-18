@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/h200_disagg.yaml
+name: D18_prometheus_stale
+description: >
+  Prometheus stale with lag_ticks=5 for 20 ticks. EMA tracks lagged signal;
+  no overshoot/oscillation. Verifies EMA + hysteresis composition.
+
+events:
+  - type: bias_step
+    at_tick: 20
+    signal: power_bias_decode
+    value: 1.3
+  - type: prom_stale
+    at_tick: 20
+    duration_ticks: 20
+    lag_ticks: 5
+
+assertions:
+  - at_tick: 45
+    field: c_power_d
+    op: "within"
+    value: 1.15
+    tolerance: 0.20
+    description: "Lagged EMA converges to midpoint (5-tick lag on step)"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

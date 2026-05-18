@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/h100_pcie_disagg.yaml
+name: B8_nvml_clamp_high
+description: >
+  H100 PCIe with TDP=350W. Optimizer picks 750W cap (above SKU max).
+  FakeActuator clamps to 350W; cap_clamped_max counter increments.
+
+planner:
+  prefill_engine_gpu_power_limit: 750
+  decode_engine_gpu_power_limit: 750
+
+events:
+  - type: actuation_fault
+    at_tick: 0
+    duration_ticks: 200
+    mode: nvml_high
+
+assertions:
+  - at_tick: 5
+    field: cap_clamped_max
+    op: ">"
+    value: 0
+    description: "SKU max clamp counter increments"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

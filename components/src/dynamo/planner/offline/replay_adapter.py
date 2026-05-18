@@ -363,7 +363,14 @@ class ReplayPlannerAdapter:
         self, tick: ScheduledTick, result: dict[str, Any]
     ) -> TickInput:
         """Convert bridge result dict to planner TickInput."""
-        now_s = result["now_ms"] / 1000.0
+        # Use the scheduled tick time as the lower bound for now_s.  The Rust
+        # bridge returns now_ms = last-event-completion time, which can be well
+        # below tick.at_s when the trace is sparse (e.g., the placeholder trace
+        # has one event every 12 s but throughput ticks fire every 5 s).  If
+        # we used now_ms directly, the state machine would keep scheduling the
+        # next throughput tick at the same sub-second offset forever.
+        bridge_now_s = result["now_ms"] / 1000.0
+        now_s = max(tick.at_s, bridge_now_s)
 
         worker_counts = None
         if tick.need_worker_states:
