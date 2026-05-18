@@ -302,11 +302,6 @@ impl InstanceLeaderBuilder {
         self
     }
 
-    /// Set the object storage client for G4 search and load operations.
-    ///
-    /// The leader uses this client to:
-    /// - Query S3 for block presence via `has_blocks`
-    /// - Coordinate workers to load blocks from S3 via `get_blocks`
     /// Mark this leader as running in host-bypass mode. When set, disk hits
     /// are returned as G3 blocks for direct G3→G1 onboarding instead of being
     /// staged through G2. Set this when the cache config has
@@ -316,6 +311,11 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    /// Set the object storage client for G4 search and load operations.
+    ///
+    /// The leader uses this client to:
+    /// - Query S3 for block presence via `has_blocks`
+    /// - Coordinate workers to load blocks from S3 via `get_blocks`
     pub fn object_client(mut self, client: Arc<dyn ObjectBlockOps>) -> Self {
         self.object_client = Some(client);
         self
