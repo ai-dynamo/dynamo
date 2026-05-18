@@ -206,7 +206,7 @@ RUN set -eux; \
     rm -f /lib/aarch64-linux-gnu/libfabric.so* \
           /usr/lib/aarch64-linux-gnu/libfabric.so* 2>/dev/null || true
 
-# Overlay Sara-patched libfabric (+ matched aws-ofi-nccl, UCX, GDRCopy) onto
+# Overlay ibfabric (+ matched aws-ofi-nccl, UCX, GDRCopy) onto
 # the EFA-installer base. This keeps the new libefa from the apt-managed
 # rdma-core while replacing libfabric.so.1 with the CUDA-aware build.
 COPY --from=efa-builder /opt/amazon/efa/lib       /opt/amazon/efa/lib
@@ -230,7 +230,7 @@ RUN set -eux; \
 ENV PATH="/opt/amazon/efa/bin:/usr/local/ucx/bin:${PATH}" \
     LD_LIBRARY_PATH="/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib:${LD_LIBRARY_PATH}"
 
-# Verify the Sara patch is in the installed libfabric. Doesn't probe runtime
+# Verify the libfabric patch is in the installed libfabric. Doesn't probe runtime
 # behavior (that happens during sglang init) — just confirms the patch text
 # is present in the libfabric source bundled into share/ and that fi_info
 # can at least invoke without missing-symbol errors.
