@@ -1586,9 +1586,6 @@ mod tests {
         let component = ns.component("echo_component".to_string()).unwrap();
         let endpoint = component.endpoint("echo_endpoint".to_string());
 
-        // Spawn the worker side: a real Ingress<ManyIn<u64>, ManyOut<EchoResponse>>
-        // wired to the EchoEngine, registered through the standard
-        // endpoint_builder().handler(ingress).start() pipeline.
         let ingress = Ingress::for_engine(Arc::new(EchoEngine)).unwrap();
         let endpoint_for_server = endpoint.clone();
         tokio::spawn(async move {
@@ -1599,15 +1596,8 @@ mod tests {
                 .await;
         });
 
-        // Client side: wait for the worker to be discoverable, then build the
-        // bidirectional PushRouter and exercise it.
         let client = endpoint.client().await.unwrap();
         client.wait_for_instances().await.unwrap();
-        // Bridge the brief window where the discovery announcement reaches the
-        // client before the request-plane server has accepted the endpoint
-        // registration. Under heavy parallel test load this can otherwise race
-        // and produce a "Connection refused" on the first dispatch.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let router = PushRouter::<u64, EchoResponse>::from_client(client, RouterMode::RoundRobin)
             .await

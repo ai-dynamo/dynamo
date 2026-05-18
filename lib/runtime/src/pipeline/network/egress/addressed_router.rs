@@ -380,21 +380,35 @@ impl AddressedPushRouter {
             }
         };
 
-        // Spawn the forwarder task that pumps the remaining frames in
-        // `input` (after the first one we already packed into the envelope)
-        // to the worker via the request-stream send half. Exit on stream
-        // end, context kill/stop, or send error (worker dropped its
-        // receiver).
+        // Forwarder: pump every frame in `input` to the worker via the
+        // request-stream send half. Exit on stream end, context kill/stop,
+        // send error (worker dropped its receiver), or local serialize
+        // failure. Dropping `request_sender` on exit closes the upstream
+        // mpsc → server-side handler sends Sentinel → wire closes cleanly.
         tokio::spawn(async move {
-            while let Some(item) = input.next().await {
-                if engine_ctx_for_forwarder.is_stopped() || engine_ctx_for_forwarder.is_killed() {
-                    break;
-                }
+            loop {
+                let item = tokio::select! {
+                    biased;
+                    _ = engine_ctx_for_forwarder.killed() => break,
+                    _ = engine_ctx_for_forwarder.stopped() => break,
+                    item = input.next() => match item {
+                        Some(item) => item,
+                        None => break,
+                    },
+                };
                 let bytes = match serde_json::to_vec(&item) {
                     Ok(b) => b,
                     Err(e) => {
-                        tracing::warn!(error = %e, "failed to serialize bidirectional request frame; dropping");
-                        continue;
+                        // Stream-side framing failure: the engine sees a
+                        // partial input, so kill the context to abort both
+                        // directions consistently rather than silently
+                        // dropping frames.
+                        tracing::error!(
+                            error = %e,
+                            "failed to serialize bidirectional request frame; killing context"
+                        );
+                        engine_ctx_for_forwarder.kill();
+                        break;
                     }
                 };
                 if request_sender.send(bytes.into()).await.is_err() {
@@ -402,9 +416,6 @@ impl AddressedPushRouter {
                     break;
                 }
             }
-            // Dropping `request_sender` here closes the upstream's mpsc, which
-            // signals the server-side `request_stream_send_handler` to send
-            // Sentinel and close the wire.
         });
 
         // Build the response stream — same shape as the unary path.
