@@ -488,7 +488,7 @@ where
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let instance_id = {
-            let instance_ids = self.client.instance_ids_avail();
+            let instance_ids = self.client.instance_ids_routable();
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
@@ -507,7 +507,7 @@ where
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
-            let instance_ids = self.client.instance_ids_avail();
+            let instance_ids = self.client.instance_ids_routable();
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
@@ -529,12 +529,7 @@ where
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_id = {
-            let instance_ids = self
-                .client
-                .instance_ids_avail()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>();
+            let instance_ids = self.client.instance_ids_routable();
             if instance_ids.is_empty() {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {}",
@@ -591,12 +586,7 @@ where
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self
-            .client
-            .instance_ids_avail()
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let instance_ids = self.client.instance_ids_routable();
 
         if instance_ids.is_empty() {
             return Err(anyhow::anyhow!(
@@ -662,12 +652,7 @@ where
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self
-            .client
-            .instance_ids_avail()
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let instance_ids = self.client.instance_ids_routable();
         let instance_id = state
             .select_exact_min_and_increment(&instance_ids)
             .await
@@ -696,7 +681,7 @@ where
     /// Increments round-robin counter if applicable.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn select_next_worker(&self) -> Option<u64> {
-        let instance_ids = self.client.instance_ids_avail();
+        let instance_ids = self.client.instance_ids_routable();
         let count = instance_ids.len();
         if count == 0 {
             return None;
@@ -728,7 +713,7 @@ where
     /// Useful for checking if a worker is suitable before committing to it.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn peek_next_worker(&self) -> Option<u64> {
-        let instance_ids = self.client.instance_ids_avail();
+        let instance_ids = self.client.instance_ids_routable();
         let count = instance_ids.len();
         if count == 0 {
             return None;
@@ -876,9 +861,10 @@ where
                 result
             } else {
                 // Instance vanished — pick a different one from the current
-                // availability list and retry the lookup once.
-                let avail = self.client.instance_ids_avail();
-                let fallback_id = avail.iter().copied().find(|&id| id != instance_id);
+                // routable list (excludes both down and over-threshold workers)
+                // and retry the lookup once.
+                let routable = self.client.instance_ids_routable();
+                let fallback_id = routable.iter().copied().find(|&id| id != instance_id);
                 match fallback_id {
                     Some(id) => {
                         tracing::warn!(

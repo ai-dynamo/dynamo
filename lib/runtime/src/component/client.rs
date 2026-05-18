@@ -234,6 +234,25 @@ impl Client {
             .collect()
     }
 
+    /// Instances that load-balancing modes should consider as candidates:
+    /// the registry-alive set (`instance_ids_avail`) intersected with the
+    /// not-busy set (i.e. excluding instances flagged over the admission
+    /// threshold by the worker load monitor). When no monitor is attached
+    /// or no thresholds are configured, the busy set is empty and this
+    /// returns the same set as `instance_ids_avail`.
+    pub fn instance_ids_routable(&self) -> Vec<u64> {
+        let busy_ids = self.instance_busy.load();
+        if busy_ids.is_empty() {
+            return self.instance_ids_avail().iter().copied().collect();
+        }
+
+        self.instance_ids_avail()
+            .iter()
+            .copied()
+            .filter(|id| !busy_ids.contains(id))
+            .collect()
+    }
+
     /// Get a watcher for available instance IDs
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
         self.instance_avail_rx.clone()
@@ -605,6 +624,51 @@ mod tests {
         assert!(
             client.instance_ids_free().is_empty(),
             "discovery reconciliation should not affect recomputed free workers"
+        );
+
+        assert!(
+            client.instance_ids_routable().is_empty(),
+            "newly discovered busy worker should not be routable"
+        );
+
+        rt.shutdown();
+    }
+
+    /// `instance_ids_routable` must exclude both reported-down and busy
+    /// instances. `instance_ids_avail` filters down; `instance_ids_free`
+    /// filters busy; routable is the intersection.
+    #[tokio::test]
+    async fn test_instance_ids_routable_excludes_busy_and_down() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let worker_id = drt.connection_id();
+        let ns = drt.namespace("test_routable".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::new(endpoint.clone()).await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let _ = client.wait_for_instances().await.unwrap();
+
+        // Baseline: not busy, not down → routable contains the worker.
+        assert_eq!(client.instance_ids_routable(), vec![worker_id]);
+
+        // Busy → not routable.
+        client.set_busy_instances(&[worker_id]);
+        assert!(
+            client.instance_ids_routable().is_empty(),
+            "busy worker must not appear in routable set"
+        );
+
+        // Clear busy, then report-down → still not routable.
+        client.set_busy_instances(&[]);
+        assert_eq!(client.instance_ids_routable(), vec![worker_id]);
+        client.report_instance_down(worker_id);
+        assert!(
+            client.instance_ids_routable().is_empty(),
+            "reported-down worker must not appear in routable set"
         );
 
         rt.shutdown();
