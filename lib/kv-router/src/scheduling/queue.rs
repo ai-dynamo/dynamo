@@ -163,7 +163,6 @@ impl<
         let _admission = self.admission_gate.lock().await;
         let decay_now = Instant::now();
 
-
         let Some(threshold) = self.threshold_frac else {
             self.admit_one(request, decay_now).await;
             return;
@@ -586,6 +585,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
+            None,
             block_size,
             selector,
             FcfsPolicy,

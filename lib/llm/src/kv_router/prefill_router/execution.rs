@@ -9,13 +9,11 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
-use dynamo_runtime::{
-    error::{DynamoError, ErrorType as DynamoErrorType},
-    pipeline::SingleIn,
-    protocols::maybe_error::MaybeError,
-};
+use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
-use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
+use super::{
+    InnerPrefillRouter, PrefillError, PrefillQueryOutcome, PrefillResolveDecision, PrefillRouter,
+};
 use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
     preprocessor::{BootstrapInfo, PrefillResult},
@@ -80,7 +78,18 @@ impl PrefillRouter {
                 )
                 .await
             {
-                Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
+                Ok(PrefillQueryOutcome::Routed { worker_id, dp_rank }) => (worker_id, dp_rank),
+                Ok(PrefillQueryOutcome::Backpressure {
+                    reason,
+                    queue_depth,
+                    max_queue_depth,
+                }) => {
+                    return PrefillResolveDecision::Backpressure {
+                        reason,
+                        queue_depth,
+                        max_queue_depth,
+                    };
+                }
                 Err(_) => return PrefillResolveDecision::Unavailable,
             }
         };
@@ -270,10 +279,11 @@ impl PrefillRouter {
     }
 
     /// Query the best prefill worker without executing a request.
-    /// Returns (worker_id, dp_rank).
     ///
-    /// This is the shared worker selection logic used by both `resolve_prefill_worker`
-    /// and `query_route`.
+    /// Returns `PrefillQueryOutcome::Routed` for the selected worker, or
+    /// `PrefillQueryOutcome::Backpressure` when the prefill scheduler queue is
+    /// saturated. This is the shared worker selection logic used by both
+    /// `resolve_prefill_worker` and `query_route`.
     #[expect(clippy::too_many_arguments)]
     pub async fn query_prefill_worker(
         &self,
@@ -284,7 +294,7 @@ impl PrefillRouter {
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<(u64, Option<u32>)> {
+    ) -> Result<PrefillQueryOutcome> {
         let prefill_router = self
             .prefill_router
             .get()
@@ -308,27 +318,23 @@ impl PrefillRouter {
                         routing_constraints,
                     )
                     .await?;
-                let (worker, _overlap) = match outcome {
-                    crate::kv_router::FindBestMatchOutcome::Routed {
-                        worker,
-                        overlap_blocks,
-                        ..
-                    } => (worker, overlap_blocks),
+                match outcome {
+                    crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
+                        Ok(PrefillQueryOutcome::Routed {
+                            worker_id: worker.worker_id,
+                            dp_rank: Some(worker.dp_rank),
+                        })
+                    }
                     crate::kv_router::FindBestMatchOutcome::Backpressure {
                         reason,
                         queue_depth,
                         max_queue_depth,
-                    } => {
-                        return Err(DynamoError::builder()
-                            .error_type(DynamoErrorType::ResourceExhausted)
-                            .message(format!(
-                                "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
-                            ))
-                            .build()
-                            .into());
-                    }
-                };
-                Ok((worker.worker_id, Some(worker.dp_rank)))
+                    } => Ok(PrefillQueryOutcome::Backpressure {
+                        reason,
+                        queue_depth,
+                        max_queue_depth,
+                    }),
+                }
             }
             InnerPrefillRouter::SimpleRouter(r) => {
                 let worker_id = if update_states {
@@ -337,7 +343,10 @@ impl PrefillRouter {
                     r.peek_next_worker()
                 }
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                Ok((worker_id, None))
+                Ok(PrefillQueryOutcome::Routed {
+                    worker_id,
+                    dp_rank: None,
+                })
             }
         }
     }

@@ -318,9 +318,13 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MAX_QUEUE_DEPTH_PER_WORKER",
             default=None,
             help=(
-                "KV Router: Maximum queued requests allowed per worker slot. "
-                "Effective queue limit is this value multiplied by the current worker slot count. "
-                "When exceeded, requests that would otherwise queue return backpressure immediately."
+                "KV Router: Per-worker scaling heuristic for the router's quick-reject queue. "
+                "NOT a total frontend queue cap: the effective rejection threshold is this value "
+                "multiplied by the current worker count, so it scales with topology (e.g. a "
+                "10-worker pool with the flag set to 4 admits up to 40 queued requests; a 20-worker "
+                "pool admits up to 80). When the threshold is exceeded, requests that would "
+                "otherwise queue return backpressure (ResourceExhausted) immediately. "
+                "Leave unset to disable."
             ),
             arg_type=int,
         )

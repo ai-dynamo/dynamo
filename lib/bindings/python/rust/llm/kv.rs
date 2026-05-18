@@ -1121,7 +1121,7 @@ impl KvRouter {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let outcome = chooser
-                .find_best_match(
+                .find_best_match_details(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
@@ -1129,6 +1129,7 @@ impl KvRouter {
                     update_states,
                     lora_name.clone(),
                     0.0,
+                    None,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                     routing_constraints.map(Into::into).unwrap_or_default(),
@@ -1139,12 +1140,19 @@ impl KvRouter {
                 llm_rs::kv_router::FindBestMatchOutcome::Routed {
                     worker,
                     overlap_blocks,
+                    ..
                 } => (worker, overlap_blocks),
                 llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
                     reason,
                     queue_depth,
                     max_queue_depth,
                 } => {
+                    // TODO(DEP-8189 / ai-dynamo#8189): to_pyerr() currently
+                    // collapses every DynamoError into a generic PyException,
+                    // so Python callers cannot distinguish backpressure from
+                    // an ordinary routing failure for retry/backoff. Once the
+                    // shared rejection layer lands, surface a dedicated
+                    // exception subclass (e.g. DynamoBackpressureError).
                     return Err(to_pyerr(
                         DynamoError::builder()
                             .error_type(DynamoErrorType::ResourceExhausted)

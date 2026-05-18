@@ -30,7 +30,7 @@ mod inner;
 mod types;
 
 use inner::InnerPrefillRouter;
-pub use types::PrefillError;
+pub use types::{PrefillError, PrefillQueryOutcome};
 use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
@@ -167,6 +167,29 @@ impl
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
 
                 Ok(PrefillOutcome::Bootstrap(bootstrap_info))
+            }
+            PrefillResolveDecision::Backpressure {
+                reason,
+                queue_depth,
+                max_queue_depth,
+            } => {
+                // Quick-reject: bubble up as ResourceExhausted so the caller
+                // can return a retryable signal upstream instead of falling
+                // back to the synchronous prefill path (which would re-enter
+                // the saturated queue).
+                //
+                // TODO(DEP-8189 / ai-dynamo#8189): once the shared rejection
+                // layer lands, classify queue-depth saturation distinctly
+                // from generic resource exhaustion (operator-facing 429 vs
+                // 503) instead of stringifying through ResourceExhausted.
+                drop(prefill_phase_barrier);
+                return Err(dynamo_runtime::error::DynamoError::builder()
+                    .error_type(dynamo_runtime::error::ErrorType::ResourceExhausted)
+                    .message(format!(
+                        "router backpressure during prefill resolve: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+                    ))
+                    .build()
+                    .into());
             }
             PrefillResolveDecision::Unavailable
             | PrefillResolveDecision::NotActivated

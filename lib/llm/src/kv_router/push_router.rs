@@ -325,27 +325,37 @@ impl KvPushRouter {
                     routing_constraints.clone(),
                 )
                 .await?;
-            let (best_worker, effective_overlap_blocks, cached_tokens, overlap_amount) = match outcome {
-                crate::kv_router::FindBestMatchOutcome::Routed {
-                    worker,
-                    overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                } => (worker, effective_overlap_blocks, cached_tokens, overlap_blocks),
-                crate::kv_router::FindBestMatchOutcome::Backpressure {
-                    reason,
-                    queue_depth,
-                    max_queue_depth,
-                } => {
-                    return Err(DynamoError::builder()
+            let (best_worker, effective_overlap_blocks, cached_tokens, overlap_amount) =
+                match outcome {
+                    crate::kv_router::FindBestMatchOutcome::Routed {
+                        worker,
+                        overlap_blocks,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                    } => (
+                        worker,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                        overlap_blocks,
+                    ),
+                    crate::kv_router::FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queue_depth,
+                        max_queue_depth,
+                    } => {
+                        // TODO(DEP-8189 / ai-dynamo#8189): classify queue-depth
+                        // saturation distinctly from generic resource exhaustion
+                        // (operator-facing 429 vs 503) once the shared rejection
+                        // layer lands.
+                        return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::ResourceExhausted)
                         .message(format!(
                             "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
                         ))
                         .build()
                         .into());
-                }
-            };
+                    }
+                };
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
@@ -397,27 +407,35 @@ impl KvPushRouter {
                     routing_constraints.clone(),
                 )
                 .await?;
-            let (best_worker, effective_overlap_blocks, cached_tokens, overlap_amount) = match outcome {
-                crate::kv_router::FindBestMatchOutcome::Routed {
-                    worker,
-                    overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                } => (worker, effective_overlap_blocks, cached_tokens, overlap_blocks),
-                crate::kv_router::FindBestMatchOutcome::Backpressure {
-                    reason,
-                    queue_depth,
-                    max_queue_depth,
-                } => {
-                    return Err(DynamoError::builder()
+            let (best_worker, effective_overlap_blocks, cached_tokens, overlap_amount) =
+                match outcome {
+                    crate::kv_router::FindBestMatchOutcome::Routed {
+                        worker,
+                        overlap_blocks,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                    } => (
+                        worker,
+                        effective_overlap_blocks,
+                        cached_tokens,
+                        overlap_blocks,
+                    ),
+                    crate::kv_router::FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queue_depth,
+                        max_queue_depth,
+                    } => {
+                        // TODO(DEP-8189 / ai-dynamo#8189): same classification
+                        // refinement applies on the pinned-worker path.
+                        return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::ResourceExhausted)
                         .message(format!(
                             "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
                         ))
                         .build()
                         .into());
-                }
-            };
+                    }
+                };
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,

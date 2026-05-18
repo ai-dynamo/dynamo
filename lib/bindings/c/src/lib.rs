@@ -26,6 +26,7 @@ use dynamo_runtime::{DistributedRuntime, Worker};
 use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_runtime::pipeline::RouterMode;
 
@@ -465,7 +466,8 @@ impl RouterHandles {
             self.prefill_router.register_workers(ids);
         }
 
-        self.prefill_router
+        let outcome = self
+            .prefill_router
             .query_prefill_worker(
                 tokens,
                 block_mm_infos,
@@ -479,7 +481,23 @@ impl RouterHandles {
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
                 QueryRouterResult::ErrQueryFailed
-            })
+            })?;
+        match outcome {
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            PrefillQueryOutcome::Backpressure {
+                reason,
+                queue_depth,
+                max_queue_depth,
+            } => {
+                tracing::warn!(
+                    reason = ?reason,
+                    queue_depth,
+                    max_queue_depth = ?max_queue_depth,
+                    "Prefill query rejected due to router backpressure"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 
     /// Query optimal decode worker for a request.
@@ -524,7 +542,7 @@ impl RouterHandles {
 
         let outcome = self
             .decode_router
-            .find_best_match(
+            .find_best_match_details(
                 None,
                 tokens,
                 None,
@@ -532,6 +550,7 @@ impl RouterHandles {
                 false,
                 None,
                 priority_jump,
+                None,
                 None,
                 allowed_worker_ids,
                 routing_constraints,
@@ -545,6 +564,7 @@ impl RouterHandles {
             dynamo_llm::kv_router::FindBestMatchOutcome::Routed {
                 worker,
                 overlap_blocks,
+                ..
             } => Ok((worker, overlap_blocks)),
             dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
                 reason,
@@ -585,7 +605,13 @@ fn extract_priority_jump(
 /// Opaque handle for the router pair
 pub type RouterHandlesPtr = *mut RouterHandles;
 
-/// Result codes for query router C FFI
+/// Result codes for query router C FFI.
+///
+/// Numbering is append-only. Existing variants must keep their integer
+/// values so out-of-tree consumers (notably
+/// `deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer`, which pins
+/// these integers in a Go shim) keep working without recompilation. When
+/// adding a new variant, use the next free integer at the end.
 #[repr(u32)]
 pub enum QueryRouterResult {
     Ok = 0,
@@ -593,9 +619,9 @@ pub enum QueryRouterResult {
     ErrInvalidParam = 2,
     ErrInitFailed = 3,
     ErrQueryFailed = 4,
-    ErrBackpressure = 5,
-    ErrDisaggEnforced = 6,
-    ErrTimeout = 7,
+    ErrDisaggEnforced = 5,
+    ErrTimeout = 6,
+    ErrBackpressure = 7,
 }
 
 /// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.

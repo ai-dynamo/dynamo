@@ -1331,7 +1331,6 @@ class KvRouterConfig:
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
         router_queue_threshold: Optional[float] = 16.0,
-        router_max_queue_depth_per_worker: Optional[int] = None,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
         use_remote_indexer: bool = False,
@@ -1339,6 +1338,7 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
+        router_max_queue_depth_per_worker: Optional[int] = None,
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
@@ -1377,8 +1377,13 @@ class KvRouterConfig:
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
             router_max_queue_depth_per_worker: Maximum queued requests allowed per worker slot.
-                Effective queue limit is this value multiplied by the current worker slot count.
-                When exceeded, requests that would otherwise queue return backpressure immediately.
+                This is a per-worker scaling heuristic, NOT a total frontend queue cap:
+                the actual rejection threshold is `router_max_queue_depth_per_worker *
+                current_worker_count`, so a 10-worker pool with this set to 4 will admit
+                up to 40 queued requests, while a 20-worker pool will admit up to 80.
+                When the threshold is exceeded, requests that would otherwise queue return
+                backpressure immediately (surfaced as DynamoErrorType.ResourceExhausted, which
+                the frontend maps to a non-migratable rejection). Leave as None to disable.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.

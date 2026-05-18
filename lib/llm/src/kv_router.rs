@@ -68,7 +68,6 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
 };
 
-
 pub enum FindBestMatchOutcome {
     Routed {
         worker: WorkerWithDpRank,
@@ -82,7 +81,6 @@ pub enum FindBestMatchOutcome {
         max_queue_depth: Option<usize>,
     },
 }
-
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
@@ -535,7 +533,7 @@ where
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn find_best_match_details(
+    pub async fn find_best_match_details(
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
@@ -748,12 +746,18 @@ where
             )
             .await?;
         match result {
-            FindBestMatchOutcome::Routed { worker, overlap_blocks, .. } => Ok((worker, overlap_blocks)),
-            FindBestMatchOutcome::Backpressure { reason, queue_depth, max_queue_depth } => {
-                Err(anyhow::anyhow!(
-                    "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
-                ))
-            }
+            FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            FindBestMatchOutcome::Backpressure {
+                reason,
+                queue_depth,
+                max_queue_depth,
+            } => Err(anyhow::anyhow!(
+                "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+            )),
         }
     }
 
