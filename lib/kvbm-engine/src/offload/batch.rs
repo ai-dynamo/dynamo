@@ -447,7 +447,7 @@ impl<T: BlockMetadata> BatchCollector<T> {
 
     /// Flush the current batch to the output channel.
     async fn flush(&mut self) {
-        nvtx_range!("offload::batch");
+        nvtx_range!(kvbm_config::profiling::ranges::OFFLOAD_BATCH);
         if self.current_batch.is_empty() {
             return;
         }

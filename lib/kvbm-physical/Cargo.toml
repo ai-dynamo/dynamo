@@ -12,6 +12,7 @@ repository.workspace = true
 [dependencies]
 dynamo-memory = { workspace = true }
 kvbm-common = { workspace = true }
+kvbm-config = { workspace = true }
 kvbm-kernels = { workspace = true }
 kvbm-observability = { workspace = true }
 velo = { workspace = true }
@@ -39,6 +40,7 @@ static-kernels = ["kvbm-kernels/static-kernels"]
 testing = []
 testing-kvbm = []
 testing-nixl-gds = []
+nvtx = ["kvbm-config/nvtx"]
 
 [dev-dependencies]
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }

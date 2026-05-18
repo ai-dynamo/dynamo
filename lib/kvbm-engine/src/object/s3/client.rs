@@ -17,6 +17,7 @@ use futures::stream::StreamExt;
 use crate::object::{DefaultKeyFormatter, KeyFormatter, LayoutConfigExt, ObjectBlockOps};
 use crate::{BlockId, SequenceHash};
 use kvbm_common::LogicalLayoutHandle;
+use kvbm_config::profiling::{NvtxRange, ranges};
 use kvbm_physical::transfer::PhysicalLayout;
 use std::sync::Arc;
 
@@ -375,6 +376,8 @@ impl S3ObjectBlockClient {
     /// * `key` - Object key
     /// * `data` - Object data to write
     pub async fn put_object(&self, key: &str, data: Bytes) -> Result<()> {
+        let _nvtx = NvtxRange::new(ranges::OBJECT_S3_PUT_OBJECT);
+
         self.client
             .put_object()
             .bucket(&self.config.bucket)
@@ -405,6 +408,8 @@ impl S3ObjectBlockClient {
         layout: PhysicalLayout,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        let _nvtx = NvtxRange::new(ranges::OBJECT_PUT_BLOCKS_SUBMIT);
+
         let config = layout.layout().config();
         let block_size = config.block_size_bytes();
         let region_size = config.region_size();
@@ -415,6 +420,7 @@ impl S3ObjectBlockClient {
         let formatter = self.key_formatter.clone();
 
         Box::pin(async move {
+            let _nvtx = NvtxRange::new(ranges::OBJECT_PUT_BLOCKS);
             let work_items: Vec<_> = keys.into_iter().zip(block_ids).collect();
 
             let tasks = work_items.into_iter().map(|(key, block_id)| {
@@ -426,26 +432,32 @@ impl S3ObjectBlockClient {
                 async move {
                     let result: Result<(), anyhow::Error> = async {
                         // Copy block data to bytes on rayon thread pool
-                        let data = tokio_rayon::spawn(move || {
-                            copy_block_to_bytes(
-                                &layout,
-                                block_id,
-                                block_size,
-                                region_size,
-                                is_contiguous,
-                            )
-                        })
-                        .await?;
+                        let data = {
+                            let _nvtx_copy = NvtxRange::new(ranges::OBJECT_PUT_COPY_BLOCK_TO_BYTES);
+                            tokio_rayon::spawn(move || {
+                                copy_block_to_bytes(
+                                    &layout,
+                                    block_id,
+                                    block_size,
+                                    region_size,
+                                    is_contiguous,
+                                )
+                            })
+                            .await?
+                        };
 
                         // Upload to S3
-                        client
-                            .put_object()
-                            .bucket(&bucket)
-                            .key(&key_str)
-                            .body(ByteStream::from(data))
-                            .send()
-                            .await
-                            .map_err(|e| anyhow!("S3 put_object failed: {}", e))?;
+                        {
+                            let _nvtx_put = NvtxRange::new(ranges::OBJECT_PUT_S3_PUT_OBJECT);
+                            client
+                                .put_object()
+                                .bucket(&bucket)
+                                .key(&key_str)
+                                .body(ByteStream::from(data))
+                                .send()
+                                .await
+                                .map_err(|e| anyhow!("S3 put_object failed: {}", e))?;
+                        }
 
                         Ok(())
                     }
@@ -487,6 +499,8 @@ impl S3ObjectBlockClient {
         layout: PhysicalLayout,
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+        let _nvtx = NvtxRange::new(ranges::OBJECT_GET_BLOCKS_SUBMIT);
+
         let config = layout.layout().config();
         let block_size = config.block_size_bytes();
         let region_size = config.region_size();
@@ -497,6 +511,7 @@ impl S3ObjectBlockClient {
         let formatter = self.key_formatter.clone();
 
         Box::pin(async move {
+            let _nvtx = NvtxRange::new(ranges::OBJECT_GET_BLOCKS);
             let work_items: Vec<_> = keys.into_iter().zip(block_ids).collect();
 
             let tasks = work_items.into_iter().map(|(key, block_id)| {
@@ -508,33 +523,38 @@ impl S3ObjectBlockClient {
                 async move {
                     let result: Result<(), anyhow::Error> = async {
                         // Download from S3
-                        let resp = client
-                            .get_object()
-                            .bucket(&bucket)
-                            .key(&key_str)
-                            .send()
-                            .await
-                            .map_err(|e| anyhow!("S3 get_object failed: {}", e))?;
+                        let data = {
+                            let _nvtx_get = NvtxRange::new(ranges::OBJECT_GET_S3_GET_OBJECT);
+                            let resp = client
+                                .get_object()
+                                .bucket(&bucket)
+                                .key(&key_str)
+                                .send()
+                                .await
+                                .map_err(|e| anyhow!("S3 get_object failed: {}", e))?;
 
-                        let data = resp
-                            .body
-                            .collect()
-                            .await
-                            .map_err(|e| anyhow!("failed to collect S3 response body: {}", e))?
-                            .into_bytes();
+                            resp.body
+                                .collect()
+                                .await
+                                .map_err(|e| anyhow!("failed to collect S3 response body: {}", e))?
+                                .into_bytes()
+                        };
 
                         // Copy bytes to block on rayon thread pool
-                        tokio_rayon::spawn(move || {
-                            copy_bytes_to_block(
-                                &data,
-                                &layout,
-                                block_id,
-                                block_size,
-                                region_size,
-                                is_contiguous,
-                            )
-                        })
-                        .await?;
+                        {
+                            let _nvtx_copy = NvtxRange::new(ranges::OBJECT_GET_COPY_BYTES_TO_BLOCK);
+                            tokio_rayon::spawn(move || {
+                                copy_bytes_to_block(
+                                    &data,
+                                    &layout,
+                                    block_id,
+                                    block_size,
+                                    region_size,
+                                    is_contiguous,
+                                )
+                            })
+                            .await?;
+                        }
 
                         Ok(())
                     }

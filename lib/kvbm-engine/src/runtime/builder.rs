@@ -109,6 +109,8 @@ impl KvbmRuntimeBuilder {
     }
 
     async fn build_internal(self, role: &'static str) -> Result<super::KvbmRuntime> {
+        self.config.profiling.apply();
+
         // 1. Tokio runtime - use provided or build from config
         let runtime = match self.runtime {
             Some(rt) => rt,

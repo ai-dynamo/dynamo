@@ -16,6 +16,7 @@ mod nixl;
 mod object;
 mod offload;
 mod onboard;
+pub mod profiling;
 mod rayon;
 mod tokio;
 mod v1_compat;
@@ -34,6 +35,7 @@ pub use offload::{
     OffloadConfig, PolicyType, PresenceFilterConfig, PresenceLfuFilterConfig, TierOffloadConfig,
 };
 pub use onboard::{OnboardConfig, OnboardMode};
+pub use profiling::ProfilingConfig;
 pub use rayon::RayonConfig;
 pub use tokio::TokioConfig;
 pub use v1_compat::V1EnvCompat;
@@ -115,6 +117,11 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub debug: DebugConfig,
+
+    /// Profiling configuration (NVTX annotations, etc.).
+    #[validate(nested)]
+    #[serde(default)]
+    pub profiling: ProfilingConfig,
 }
 
 impl KvbmConfig {
@@ -201,6 +208,11 @@ impl KvbmConfig {
                 Env::prefixed("KVBM_DEBUG_")
                     .map(|k| format!("debug.{}", k.as_str().to_lowercase()).into()),
             )
+            // Profiling config: KVBM_PROFILING_NVTX_ENABLED
+            .merge(
+                Env::prefixed("KVBM_PROFILING_")
+                    .map(|k| format!("profiling.{}", k.as_str().to_lowercase()).into()),
+            )
             // Offload config: KVBM_OFFLOAD_G1_TO_G2_*, KVBM_OFFLOAD_G2_TO_G3_*
             .merge(
                 Env::prefixed("KVBM_OFFLOAD_G1_TO_G2_")
@@ -238,6 +250,7 @@ impl KvbmConfig {
             .map_err(|e| ConfigError::Extraction(Box::new(e)))?;
         config.auto_enable_nixl_backends_for_tiers();
         config.validate()?;
+        config.profiling.apply();
         Ok(config)
     }
 

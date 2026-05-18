@@ -12,6 +12,7 @@ use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
 use anyhow::{Result, anyhow};
 use dynamo_memory::nixl::{XferDescList, XferOp};
+use kvbm_config::profiling::{NvtxRange, ranges};
 use std::marker::PhantomData;
 use std::ops::Range;
 
@@ -198,6 +199,8 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
     /// This method is only available when all required fields have been set,
     /// enforced at compile time by the typestate pattern.
     pub(crate) fn execute(self, ctx: &TransferContext) -> Result<TransferCompleteNotification> {
+        let _nvtx = NvtxRange::new(ranges::NIXL_EXECUTE);
+
         // Unwrap all required fields (safe because typestate guarantees they're set)
         let src = self.src.unwrap();
         let dst = self.dst.unwrap();
@@ -285,59 +288,67 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         let src_device_id = src_metadata.device_id();
         let dst_device_id = dst_metadata.device_id();
 
-        // Build XferDescLists for source and destination
-        let mut src_dl = XferDescList::new(src_mem_type)?;
-        let mut dst_dl = XferDescList::new(dst_mem_type)?;
+        let (mut src_dl, mut dst_dl) = {
+            let _nvtx_desc = NvtxRange::new(ranges::NIXL_BUILD_DESC);
 
-        // Build descriptor lists - use whole-block or layer-wise depending on layout
-        if use_whole_block {
-            let bytes_per_block = src_layout.config().bytes_per_block();
-            tracing::debug!(
-                num_blocks = src_block_ids.len(),
-                bytes_per_block,
-                "Building whole-block NIXL descriptors"
-            );
+            // Build XferDescLists for source and destination
+            let mut src_dl = XferDescList::new(src_mem_type)?;
+            let mut dst_dl = XferDescList::new(dst_mem_type)?;
 
-            for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
-                let src_region = src.memory_region(src_block_id, 0, 0)?;
-                let dst_region = dst.memory_region(dst_block_id, 0, 0)?;
+            // Build descriptor lists - use whole-block or layer-wise depending on layout
+            if use_whole_block {
+                let bytes_per_block = src_layout.config().bytes_per_block();
+                tracing::debug!(
+                    num_blocks = src_block_ids.len(),
+                    bytes_per_block,
+                    "Building whole-block NIXL descriptors"
+                );
 
-                src_dl.add_desc(src_region.addr(), bytes_per_block, src_device_id);
-                dst_dl.add_desc(dst_region.addr(), bytes_per_block, dst_device_id);
-            }
-        } else {
-            tracing::debug!(
-                num_blocks = src_block_ids.len(),
-                layer_range = ?layers,
-                src_fc = src_layout.is_fully_contiguous(),
-                dst_fc = dst_layout.is_fully_contiguous(),
-                "Building layer-wise NIXL descriptors"
-            );
+                for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter())
+                {
+                    let src_region = src.memory_region(src_block_id, 0, 0)?;
+                    let dst_region = dst.memory_region(dst_block_id, 0, 0)?;
 
-            for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
-                for layer_id in layers.clone() {
-                    for outer_id in 0..src_layout.outer_dim() {
-                        let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
-                        let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+                    src_dl.add_desc(src_region.addr(), bytes_per_block, src_device_id);
+                    dst_dl.add_desc(dst_region.addr(), bytes_per_block, dst_device_id);
+                }
+            } else {
+                tracing::debug!(
+                    num_blocks = src_block_ids.len(),
+                    layer_range = ?layers,
+                    src_fc = src_layout.is_fully_contiguous(),
+                    dst_fc = dst_layout.is_fully_contiguous(),
+                    "Building layer-wise NIXL descriptors"
+                );
 
-                        if src_region.size() != dst_region.size() {
-                            return Err(anyhow!(
-                                "Size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
-                                src_block_id,
-                                dst_block_id,
-                                layer_id,
-                                outer_id,
-                                src_region.size(),
-                                dst_region.size()
-                            ));
+                for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter())
+                {
+                    for layer_id in layers.clone() {
+                        for outer_id in 0..src_layout.outer_dim() {
+                            let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
+                            let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+
+                            if src_region.size() != dst_region.size() {
+                                return Err(anyhow!(
+                                    "Size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
+                                    src_block_id,
+                                    dst_block_id,
+                                    layer_id,
+                                    outer_id,
+                                    src_region.size(),
+                                    dst_region.size()
+                                ));
+                            }
+
+                            src_dl.add_desc(src_region.addr(), src_region.size(), src_device_id);
+                            dst_dl.add_desc(dst_region.addr(), dst_region.size(), dst_device_id);
                         }
-
-                        src_dl.add_desc(src_region.addr(), src_region.size(), src_device_id);
-                        dst_dl.add_desc(dst_region.addr(), dst_region.size(), dst_device_id);
                     }
                 }
             }
-        }
+
+            (src_dl, dst_dl)
+        };
 
         // Note: Overlap detection was removed from nixl-sys 0.6.1
         // The NIXL library now handles overlap detection internally
@@ -358,17 +369,23 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
             XferOp::Read => src_metadata.agent_name(),
         };
 
-        let xfer_req = nixl_agent.create_xfer_req(
-            xfer_op,
-            &src_dl,
-            &dst_dl,
-            remote_agent,
-            None, // opt_args
-        )?;
+        let xfer_req = {
+            let _nvtx_create = NvtxRange::new(ranges::NIXL_CREATE_XFER_REQ);
+            nixl_agent.create_xfer_req(
+                xfer_op,
+                &src_dl,
+                &dst_dl,
+                remote_agent,
+                None, // opt_args
+            )?
+        };
 
         // Post transfer request
         // Note: Notification handling via OptArgs can be added later if needed
-        let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+        let still_pending = {
+            let _nvtx_post = NvtxRange::new(ranges::NIXL_POST_XFER_REQ);
+            nixl_agent.post_xfer_req(&xfer_req, None)?
+        };
 
         if still_pending {
             // Register for async completion via status polling

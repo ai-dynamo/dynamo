@@ -866,7 +866,7 @@ impl<T: BlockMetadata> PolicyEvaluator<T> {
     }
 
     async fn evaluate(&self, input: PipelineInput<T>) {
-        nvtx_range!("offload::policy");
+        nvtx_range!(kvbm_config::profiling::ranges::OFFLOAD_POLICY);
         let transfer_id = input.transfer_id;
 
         // Set total_expected_blocks for per-transfer sentinel flush
@@ -1224,7 +1224,7 @@ impl<T: BlockMetadata> PreconditionAwaiter<T> {
 
             // Spawn task for each batch - unbounded
             tokio::spawn(async move {
-                nvtx_range!("offload::precondition");
+                nvtx_range!(kvbm_config::profiling::ranges::OFFLOAD_PRECONDITION);
                 if let Some(event_handle) = batch.precondition {
                     tracing::debug!(?event_handle, "Awaiting precondition for batch");
 
@@ -1399,7 +1399,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
         shared: &SharedBlockExecutorState<Dst>,
         mut batch: ResolvedBatch<Src>,
     ) -> anyhow::Result<()> {
-        nvtx_range!("offload::transfer");
+        nvtx_range!(kvbm_config::profiling::ranges::OFFLOAD_TRANSFER);
         if batch.is_empty() {
             return Ok(());
         }
@@ -1704,7 +1704,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
         shared: &SharedObjectExecutorState,
         mut batch: ResolvedBatch<Src>,
     ) -> anyhow::Result<()> {
-        nvtx_range!("offload::transfer");
+        nvtx_range!(kvbm_config::profiling::ranges::OFFLOAD_TRANSFER);
         if batch.is_empty() {
             return Ok(());
         }
