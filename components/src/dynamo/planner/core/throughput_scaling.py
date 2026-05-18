@@ -176,6 +176,7 @@ class ThroughputScalingMixin:
             return None
 
         num_p, num_d = self._apply_global_budget(num_p, num_d)
+        num_p, num_d = self._apply_power_budget(num_p, num_d)  # Phase 2
         self._diag_throughput_reason = "scale"
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
