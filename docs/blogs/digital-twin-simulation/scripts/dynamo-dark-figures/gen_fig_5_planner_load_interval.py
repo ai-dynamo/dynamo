@@ -22,6 +22,7 @@ import math
 from pathlib import Path
 
 import plotly.graph_objects as go
+
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -170,7 +171,7 @@ def main() -> None:
     fig.update_layout(
         template=dynamo_template,
         title=dict(
-            text="Tuning the Planner's Load-Adjustment Interval",
+            text="Load-Adjustment Interval Sensitivity Sweep",
             x=0.02, xanchor="left",
             y=0.95, yanchor="top",
             font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
@@ -190,7 +191,7 @@ def main() -> None:
         x=-0.049, y=1.378,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
-        text="Qwen3-32B / TP=2 / H200 / vLLM — load-only Planner, startup_time=0.",
+        text="Qwen3-32B / TP=2 / H200 / vLLM — p90 TTFT is lowest at 5–10 s; shorter intervals add noise, longer miss load shifts.",
         showarrow=False,
         font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
                   size=22, color=TEXT_MUTED, weight=300),

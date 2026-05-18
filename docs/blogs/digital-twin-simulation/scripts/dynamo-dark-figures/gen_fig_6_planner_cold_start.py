@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import plotly.graph_objects as go
+
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -151,7 +152,7 @@ def main() -> None:
     fig.update_layout(
         template=dynamo_template,
         title=dict(
-            text="Cold-start: Planner holds SLA to ~180 s, then falls off a cliff",
+            text="Engine Startup Time Sensitivity Sweep",
             x=0.02, xanchor="left",
             y=0.95, yanchor="top",
             font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
@@ -181,7 +182,7 @@ def main() -> None:
         x=-0.049, y=1.378,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
-        text="Qwen3-32B / TP=2 / H200 — motivates predictive scaling and pre-warmed reserves.",
+        text="Qwen3-32B / TP=2 / H200 — p90 TTFT is flat through ~180 s of startup time, then crosses the SLA.",
         showarrow=False,
         font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
                   size=22, color=TEXT_MUTED, weight=300),

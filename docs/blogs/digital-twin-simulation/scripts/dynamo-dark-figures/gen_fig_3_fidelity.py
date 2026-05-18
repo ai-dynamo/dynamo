@@ -26,6 +26,7 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -150,7 +151,7 @@ def main() -> None:
     fig.update_layout(
         template=dynamo_template,
         title=dict(
-            text="DynoSim and AIC vs Hardware",
+            text="Concurrency Sweep: DynoSim, AIC, Hardware",
             x=0.02, xanchor="left",
             y=0.96, yanchor="top",
             font=dict(
@@ -180,7 +181,7 @@ def main() -> None:
         x=-0.049, y=1.155,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
-        text="Two paths to the frontier: DynoSim 5–9% MAPE, AIC 5–11%.",
+        text="B200 / MiniMax-M2.5 / TP=4 / ISL/OSL 1K/1K — DynoSim closes the AIC–hardware gap to ~50 ms on TTFT.",
         showarrow=False,
         font=dict(
             family="Helvetica Neue, HelveticaNeue, sans-serif",

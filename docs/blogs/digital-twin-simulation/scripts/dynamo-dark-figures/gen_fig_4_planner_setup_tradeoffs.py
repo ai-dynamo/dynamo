@@ -20,6 +20,7 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -239,7 +240,7 @@ def main() -> None:
     fig.update_layout(
         template=dynamo_template,
         title=dict(
-            text="Planner vs static: GPU-hours don't buy tail latency",
+            text="Planner vs Static: Cost-Latency Frontier",
             x=0.02, xanchor="left",
             y=0.96, yanchor="top",
             font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
@@ -270,7 +271,7 @@ def main() -> None:
         x=-0.049, y=1.458,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
-        text="Qwen3-32B / TP=2 / H200 — agg SLA Planner sits below the static Pareto on TTFT.",
+        text="Qwen3-32B / TP=2 / H200 — Planner holds p90 TTFT under SLA at ~30% of the static config's cumulative GPU-hours.",
         showarrow=False,
         font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
                   size=22, color=TEXT_MUTED, weight=300),

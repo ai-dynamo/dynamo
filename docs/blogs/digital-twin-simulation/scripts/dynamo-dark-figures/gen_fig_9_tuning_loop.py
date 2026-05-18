@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import plotly.graph_objects as go
+
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -179,7 +180,7 @@ def main() -> None:
     fig.update_layout(
         template=dynamo_template,
         title=dict(
-            text="Find the optimal config and stay there with DynoSim",
+            text="DynoSim in Prod",
             x=0.02, xanchor="left",
             y=0.95, yanchor="top",
             font=dict(

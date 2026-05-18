@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
+
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent

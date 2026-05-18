@@ -18,6 +18,7 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -136,7 +137,7 @@ def main() -> None:
     fig.update_layout(
         template=dynamo_template,
         title=dict(
-            text="KVBM's G2 host-memory tier dominates at every concurrency",
+            text="Baseline vs KVBM G2: Concurrency Sweep and Pareto Curve",
             x=0.02, xanchor="left",
             y=0.96, yanchor="top",
             font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
@@ -160,7 +161,7 @@ def main() -> None:
         x=-0.049, y=1.458,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
-        text="B200 MiniMax-M2.5 · TP=4 · 1 worker · Mooncake trace — G2 cuts mean TTFT 8.5-19.3% at c=8-c=64.",
+        text="B200 / MiniMax-M2.5 / TP=4 / 1 worker / Mooncake trace — KVBM G2 reduces TTFT across all concurrencies vs baseline.",
         showarrow=False,
         font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
                   size=22, color=TEXT_MUTED, weight=300),

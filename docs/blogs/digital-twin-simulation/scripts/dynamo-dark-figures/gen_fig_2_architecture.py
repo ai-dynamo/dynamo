@@ -180,14 +180,14 @@ def replay_loop(
 
 def build_svg() -> str:
     parts: list[str] = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<?xml version="1.0" encoding="UTF-8"?>',
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
         f'viewBox="0 0 {W} {H}" style="background:{BLACK};">',
         # Background
         f'<rect x="0" y="0" width="{W}" height="{H}" fill="{BLACK}"/>',
         # Title band
         text(
-            0.02 * W, 60, "The whole Dynamo stack on one simulated clock",
+            0.02 * W, 60, "Anatomy of a Digital Twin",
             family="Helvetica Neue, HelveticaNeue, sans-serif",
             size=42, weight="300", anchor="start",
         ),

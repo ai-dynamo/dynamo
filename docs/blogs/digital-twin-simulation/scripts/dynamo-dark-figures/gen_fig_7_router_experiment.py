@@ -18,6 +18,7 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
 from plotly_dynamo import dynamo_template, load_tokens
 
 HERE = Path(__file__).resolve().parent
@@ -166,7 +167,7 @@ def main() -> None:
     fig.update_layout(
         template=dynamo_template,
         title=dict(
-            text="KV-aware routing cuts TTFT and lifts the throughput frontier",
+            text="Round-Robin vs KV Router: Concurrency Sweep and Pareto Curve",
             x=0.02, xanchor="left",
             y=0.96, yanchor="top",
             font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
@@ -197,7 +198,7 @@ def main() -> None:
         x=-0.049, y=1.458,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
-        text="B200 MiniMax-M2.5 · TP=4 · 8 workers · Mooncake trace — KV Router cuts mean TTFT by 52-73%.",
+        text="B200 / MiniMax-M2.5 / TP=4 / 8 workers / Mooncake trace — KV Router reduces TTFT across all concurrencies and lifts throughput/GPU.",
         showarrow=False,
         font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
                   size=22, color=TEXT_MUTED, weight=300),
