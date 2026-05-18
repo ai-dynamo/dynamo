@@ -298,22 +298,23 @@ impl ConnectorLeader {
             )
             .await;
 
-            if let Err(e) = &transfer_result {
-                tracing::error!("Onboarding failed: {}", e);
-                // Notify workers that these block_ids did NOT get the
-                // expected values; the scheduler is responsible for handling
-                // these errors. Clone request_id so it stays live for the
-                // mark_onboarding_complete call below.
-                leader
-                    .workers
-                    .get()
-                    .unwrap()
-                    .mark_failed_onboarding(request_id.clone(), onboard_blocks_ids)
-                    .await
-                    .expect("Failed to mark failed onboarding");
+            if transfer_result.is_err() {
+                tracing::error!(
+                    "Onboarding failed: {}",
+                    transfer_result.as_ref().err().unwrap()
+                );
             } else {
                 tracing::debug!("Onboarding completed successfully");
             }
+
+            // -----------------------------------------------------------------
+            // PHASE 1: local cleanup. These ops cannot fail and MUST complete
+            // before any worker RPC that .expect()-panics on failure. If we
+            // ever reorder a worker RPC above this block, a panicking RPC
+            // would short-circuit the slot reset + session release and the
+            // request_id would wedge in Onboarding (same shape as the
+            // todo!() bug that preceded this fix). Keep RPCs in Phase 2.
+            // -----------------------------------------------------------------
 
             // Collect session IDs for release before any state transition —
             // onboarding_state() returns Some only while the slot is in
@@ -346,6 +347,29 @@ impl ConnectorLeader {
                 for session_id in session_ids {
                     instance_leader.release_session(session_id);
                 }
+            }
+
+            // -----------------------------------------------------------------
+            // PHASE 2: worker RPCs. Both calls .expect() on failure because
+            // a worker-side failure here is a CRITICAL signal we don't want
+            // to silently swallow into a log line. Local state is already
+            // consistent thanks to Phase 1, so a panic here unwinds the
+            // spawn task without leaving the slot in Onboarding or leaking
+            // shard sessions.
+            // -----------------------------------------------------------------
+
+            if transfer_result.is_err() {
+                // Notify workers that these block_ids did NOT get the
+                // expected values; the scheduler is responsible for handling
+                // these errors. Clone request_id so it stays live for the
+                // mark_onboarding_complete call below.
+                leader
+                    .workers
+                    .get()
+                    .unwrap()
+                    .mark_failed_onboarding(request_id.clone(), onboard_blocks_ids)
+                    .await
+                    .expect("Failed to mark failed onboarding");
             }
 
             // Regardless of error, mark the onboarding as complete.
