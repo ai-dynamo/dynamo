@@ -7,7 +7,10 @@ metadata:
 spec:
   backendFramework: vllm
   components:
-  - eppConfig:
+  - name: Epp
+    type: epp
+    replicas: 1
+    eppConfig:
       config:
         plugins:
         - type: disagg-profile-handler
@@ -31,11 +34,11 @@ spec:
             weight: 1
           - pluginRef: picker
             weight: 1
-    name: Epp
     podTemplate:
       spec:
         containers:
-        - env:
+        - name: main
+          env:
           - name: DYN_KV_CACHE_BLOCK_SIZE
             value: "128"
           - name: DYN_MODEL_NAME
@@ -46,15 +49,16 @@ spec:
           - secretRef:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
-          name: main
+  - name: VllmDecodeWorker
+    type: decode
     replicas: 1
-    type: epp
-  - frontendSidecar: sidecar-frontend
-    name: VllmDecodeWorker
+    sharedMemorySize: 2Gi
+    frontendSidecar: sidecar-frontend
     podTemplate:
       spec:
         containers:
-        - args:
+        - name: main
+          args:
           - python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME
             --tensor-parallel-size 1 --data-parallel-size 1 --gpu-memory-utilization
             0.90 --enable-prefix-caching --block-size 128 --kv-events-config '{"enable_kv_cache_events":true}'
@@ -72,14 +76,14 @@ spec:
           - secretRef:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          name: main
           resources:
             limits:
               nvidia.com/gpu: "1"
             requests:
               nvidia.com/gpu: "1"
           workingDir: /workspace/examples/backends/vllm
-        - args:
+        - name: sidecar-frontend
+          args:
           - -m
           - dynamo.frontend
           - --router-mode
@@ -88,7 +92,3 @@ spec:
           - secretRef:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          name: sidecar-frontend
-    replicas: 1
-    sharedMemorySize: 2Gi
-    type: decode
