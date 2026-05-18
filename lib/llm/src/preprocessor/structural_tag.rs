@@ -126,6 +126,8 @@ impl OpenAIPreprocessor {
                 .sampling_options
                 .guided_decoding
                 .get_or_insert_default();
+            // xgrammar accepts only one constraint at a time.
+            gd.json = None;
             gd.structural_tag = Some(ban_tag);
             Ok(true)
         } else {
@@ -164,7 +166,7 @@ impl OpenAIPreprocessor {
             .sampling_options
             .guided_decoding
             .get_or_insert_default();
-        // xgrammar accepts only one JSON-style constraint at a time.
+        // xgrammar accepts only one constraint at a time.
         gd.json = None;
         gd.structural_tag = Some(structural_tag);
         Ok(true)
