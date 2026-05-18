@@ -36,7 +36,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
     rm -rf /tmp/efa && \
-    rm -rf /opt/amazon/aws-ofi-nccl && \
+    # Disable the EFA installer's aws-ofi-nccl plugin: it crashes TRT-LLM at engine init.
+    # The plugin is installed at /opt/amazon/ofi-nccl (no `aws-` prefix), but ld.so picks
+    # it up via /etc/ld.so.conf.d/aws-ofi-nccl.conf (which DOES carry the `aws-` prefix).
+    # Remove both, and also the cuda-dl-base location /opt/amazon/aws-ofi-nccl if present,
+    # before re-running ldconfig.
+    rm -rf /opt/amazon/aws-ofi-nccl /opt/amazon/ofi-nccl \
+           /etc/ld.so.conf.d/aws-ofi-nccl.conf && \
     ldconfig
 
 ENV EFA_VERSION="${EFA_VERSION}"
