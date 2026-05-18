@@ -181,17 +181,10 @@ impl Client {
     pub fn instance_ids_routable(&self) -> Vec<u64> {
         let avail = self.instance_avail.load();
         let free = self.instance_free.load();
-
-        // Fast path: when nothing has been flagged busy, `free` covers the
-        // full discovered set and `avail` is the only filter that matters.
-        // Avoid the per-id contains() check in that common case.
-        if free.len() >= self.instance_ids().len() {
-            return avail.iter().copied().collect();
-        }
-
-        // Pre-build a small HashSet for the contains() check below — `free`
-        // is the busy-filtered subset; intersecting it with `avail` gives
-        // alive-AND-not-busy.
+        // Intersect alive ∩ not-busy. Always materialize the set — earlier
+        // versions had a fast-path keyed on `instance_ids().len()` which
+        // misfires when the discovery snapshot is transiently empty (the
+        // fast-path would skip the busy filter even though busy was set).
         let free_set: std::collections::HashSet<u64> = free.iter().copied().collect();
         avail
             .iter()
