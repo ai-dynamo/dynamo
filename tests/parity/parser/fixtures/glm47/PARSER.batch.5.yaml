@@ -33,6 +33,7 @@ cases:
     - *id002
     expected:
       dynamo: &id003
+        reason: "Dynamo's glm47 parser leaves closing </tool_call> tag, <arg_key>/<arg_value> tags in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
       vllm: *id003

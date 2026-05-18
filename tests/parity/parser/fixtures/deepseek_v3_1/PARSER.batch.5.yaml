@@ -18,6 +18,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜>
       vllm:
@@ -40,6 +41,7 @@ cases:
     - *id001
     expected:
       dynamo: &id002
+        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: <｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm: *id002
@@ -52,6 +54,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"loc
       vllm:

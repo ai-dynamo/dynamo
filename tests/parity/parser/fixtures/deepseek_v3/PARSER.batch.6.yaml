@@ -55,6 +55,7 @@ cases:
     - *id002
     expected:
       dynamo: &id004
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on minimal/no-body case"
         calls: []
         normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm:

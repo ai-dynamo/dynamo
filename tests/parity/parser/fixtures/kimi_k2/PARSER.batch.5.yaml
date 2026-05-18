@@ -33,6 +33,7 @@ cases:
     - *id002
     expected:
       dynamo: &id003
+        reason: "Dynamo's kimi_k2 parser leaves <|tool_call_begin|>, <|tool_call_argument_begin|>, <|tool_call_end|>, <|tool_calls_section_end|> tokens in normal_text when opening <|tool_calls_section_begin|> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
       vllm: *id003

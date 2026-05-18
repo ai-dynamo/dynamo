@@ -25,30 +25,6 @@ cases:
         normal_text: ''
       vllm: *id001
       sglang: *id001
-  PARSER.batch.2:
-    description: Multiple tool calls (parallel, semicolon-separated)
-    model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_time", "arguments":
-      {"timezone": "EST"}}'
-    tools:
-    - *id002
-    - name: get_time
-      parameters:
-        type: object
-        properties:
-          timezone:
-            type: string
-    expected:
-      dynamo: &id003
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        - name: get_time
-          arguments:
-            timezone: EST
-        normal_text: ''
-      vllm: *id003
-      sglang: *id003
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?

@@ -93,9 +93,19 @@ class FrontendMetricContainer(BaseModel):
 
 class PrometheusAPIClient:
     def __init__(
-        self, url: str, dynamo_namespace: str, metrics_source: str = "frontend"
+        self,
+        url: str,
+        dynamo_namespace: str,
+        metrics_source: str = "frontend",
+        bearer_token: Optional[str] = None,
+        ssl_verify: bool = False,
     ):
-        self.prom = PrometheusConnect(url=url, disable_ssl=True)
+        # disable_ssl=True (default) preserves prior behavior; flip via the
+        # ssl_verify config knob (env: PROMETHEUS_SSL_VERIFY) when the
+        # upstream cert can be validated.
+        self.prom = PrometheusConnect(url=url, disable_ssl=not ssl_verify)
+        if bearer_token:
+            self.prom._session.headers["Authorization"] = f"Bearer {bearer_token}"
         self.dynamo_namespace = dynamo_namespace
         self.metrics_source = metrics_source  # "frontend" | "router"
 

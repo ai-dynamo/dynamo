@@ -18,6 +18,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
       vllm:
@@ -38,6 +39,7 @@ cases:
     - *id001
     expected:
       dynamo: &id002
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
@@ -62,6 +64,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
@@ -100,3 +103,7 @@ cases:
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
           {"location": "NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+  PARSER.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in PARSER.batch.4.a through 4.d.

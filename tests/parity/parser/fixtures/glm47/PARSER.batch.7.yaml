@@ -50,3 +50,11 @@ cases:
         normal_text: ''
       vllm: *id002
       sglang: *id002
+  PARSER.batch.7.c:
+    description: Schema-type-mismatch test 7.c — not yet authored for this family
+    reason: |-
+      Schema-type-mismatch test 7.c not yet authored for glm47; argument-shape coverage is provided by 7.a / 7.b for this family.
+  PARSER.batch.7.d:
+    description: Nested-arguments test 7.d — not yet authored for this family
+    reason: |-
+      Nested-arguments test 7.d not yet authored for glm47; see 7.a / 7.b for simpler argument shapes.

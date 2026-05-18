@@ -36,6 +36,7 @@ cases:
     - *id001
     expected:
       dynamo: &id002
+        reason: "Dynamo's jamba parser leaves closing </tool_calls> envelope plus the JSON array in normal_text when opening <tool_calls> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
       vllm: *id002
@@ -49,6 +50,7 @@ cases:
     - *id001
     expected:
       dynamo: &id003
+        reason: "Dynamo's jamba parser leaves closing </tool_calls> envelope plus the JSON array in normal_text when opening <tool_calls> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
       vllm: *id003

@@ -36,6 +36,7 @@ cases:
     - *id001
     expected:
       dynamo: &id002
+        reason: "Dynamo's qwen25 (hermes alias) parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
       vllm:
@@ -49,6 +50,7 @@ cases:
     - *id001
     expected:
       dynamo: &id003
+        reason: "Dynamo's qwen25 (hermes alias) parser leaves closing </tool_call> tag plus the JSON body in normal_text when opening <tool_call> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
       vllm:

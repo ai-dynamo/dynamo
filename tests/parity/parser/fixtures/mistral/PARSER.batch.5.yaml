@@ -35,6 +35,7 @@ cases:
     - *id002
     expected:
       dynamo: &id003
+        reason: "Dynamo's mistral parser leaves [/TOOL_CALLS] in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
       vllm: *id003
@@ -47,6 +48,7 @@ cases:
     - *id002
     expected:
       dynamo:
+        reason: "Dynamo's mistral parser leaves [TOOL_CALLS] in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
       vllm:

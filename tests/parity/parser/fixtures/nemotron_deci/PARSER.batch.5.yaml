@@ -35,6 +35,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's nemotron_deci parser leaves closing </TOOLCALL> envelope plus the JSON array in normal_text when opening <TOOLCALL> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
       vllm:
@@ -49,6 +50,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's nemotron_deci parser leaves closing </TOOLCALL> envelope plus the JSON array in normal_text when opening <TOOLCALL> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
       vllm:

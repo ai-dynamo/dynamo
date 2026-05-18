@@ -64,3 +64,41 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. kimi_k2 uses section/call/argument sentinel tokens rather than delimiter-splitting call bodies, so separator-looking text inside JSON arguments is not a distinct parser state from generic string escaping.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. kimi_k2 uses section/call/argument sentinel tokens rather than delimiter-splitting call bodies, so separator-looking text inside JSON arguments is not a distinct parser state from generic string escaping. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.unknown_tool:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
