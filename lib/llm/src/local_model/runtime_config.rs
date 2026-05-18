@@ -67,14 +67,19 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub taints: HashSet<String>,
 
-    /// Stable routing identifier preserved across worker restarts.
+    /// Stable routing identity, set via the `DYN_STABLE_ROUTING_ID` env var. Used as
+    /// the rendezvous-hash key so cache assignments survive a new ephemeral
+    /// `worker_id`. `None` if unset.
     ///
-    /// Populated from the `HOSTNAME` environment variable when the worker is launched in a
-    /// Kubernetes StatefulSet (`worker-0`, `worker-1`, …). Distributed caching layers (KV
-    /// router, KVBM, multi-model dispatch) read this through the discovery watch and use it
-    /// as the keying input for rendezvous (HRW) hashing so cache assignments survive a pod
-    /// restart that gives the worker a new ephemeral `worker_id`. `None` means no stable id
-    /// was published; callers fall back to `worker_id`.
+    /// Recommended k8s wire-up (downward API on a StatefulSet pod):
+    ///
+    /// ```yaml
+    /// env:
+    ///   - name: DYN_STABLE_ROUTING_ID
+    ///     valueFrom:
+    ///       fieldRef:
+    ///         fieldPath: metadata.name
+    /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stable_routing_id: Option<String>,
 }
@@ -166,28 +171,24 @@ impl ModelRuntimeConfig {
         }
     }
 
-    /// Populate `stable_routing_id` from the `HOSTNAME` environment variable.
-    ///
-    /// On Kubernetes StatefulSets the pod hostname is stable across pod restarts
-    /// (`worker-0`, `worker-1`, …), which makes it a good rendezvous-hash key for caching
-    /// layers that want a worker's logical identity to outlive its process. The override
-    /// `DYN_STABLE_ROUTING_ID` is honoured first for operators who want to supply a value
-    /// explicitly (deployments where hostname is not a meaningful identity).
+    /// Populate `stable_routing_id` from the `DYN_STABLE_ROUTING_ID` environment variable.
     ///
     /// Sets the field only if it is currently unset; returns `&mut self` for chaining. If
-    /// neither `DYN_STABLE_ROUTING_ID` nor `HOSTNAME` is set (or both are empty) the field
-    /// is left as `None` and rendezvous-aware consumers should fall back to `worker_id`.
+    /// `DYN_STABLE_ROUTING_ID` is unset or empty/whitespace-only, the field is left
+    /// as `None`.
+    ///
+    /// See the doc on [`ModelRuntimeConfig::stable_routing_id`] for the recommended k8s
+    /// downward-API recipe.
     pub fn populate_stable_routing_id_from_env(&mut self) -> &mut Self {
         if self.stable_routing_id.is_some() {
             return self;
         }
         let candidate = std::env::var("DYN_STABLE_ROUTING_ID")
             .ok()
-            .or_else(|| std::env::var("HOSTNAME").ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         if let Some(value) = candidate {
-            tracing::info!(stable_routing_id = %value, "populated stable_routing_id from environment");
+            tracing::info!(stable_routing_id = %value, "populated stable_routing_id from DYN_STABLE_ROUTING_ID");
             self.stable_routing_id = Some(value);
         }
         self
@@ -205,29 +206,13 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn env_precedence() {
-        // HOSTNAME alone populates the field…
+    fn populates_from_dyn_env() {
         temp_env::with_vars(
-            [
-                ("DYN_STABLE_ROUTING_ID", None::<&str>),
-                ("HOSTNAME", Some("worker-3")),
-            ],
+            [("DYN_STABLE_ROUTING_ID", Some("worker-3"))],
             || {
                 let mut cfg = ModelRuntimeConfig::default();
                 cfg.populate_stable_routing_id_from_env();
                 assert_eq!(cfg.stable_routing_id.as_deref(), Some("worker-3"));
-            },
-        );
-        // …and the explicit DYN_ override wins when both are set.
-        temp_env::with_vars(
-            [
-                ("DYN_STABLE_ROUTING_ID", Some("router-shard-7")),
-                ("HOSTNAME", Some("worker-3")),
-            ],
-            || {
-                let mut cfg = ModelRuntimeConfig::default();
-                cfg.populate_stable_routing_id_from_env();
-                assert_eq!(cfg.stable_routing_id.as_deref(), Some("router-shard-7"));
             },
         );
     }
@@ -236,10 +221,7 @@ mod tests {
     #[serial_test::serial]
     fn preserves_caller_supplied_value() {
         temp_env::with_vars(
-            [
-                ("DYN_STABLE_ROUTING_ID", None::<&str>),
-                ("HOSTNAME", Some("worker-3")),
-            ],
+            [("DYN_STABLE_ROUTING_ID", Some("from-env"))],
             || {
                 let mut cfg = ModelRuntimeConfig {
                     stable_routing_id: Some("explicit".to_string()),
@@ -254,20 +236,17 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn no_meaningful_env_leaves_field_none() {
-        // Whitespace-only HOSTNAME is rejected…
+        // Whitespace-only is rejected…
         temp_env::with_vars(
-            [
-                ("DYN_STABLE_ROUTING_ID", None::<&str>),
-                ("HOSTNAME", Some("   ")),
-            ],
+            [("DYN_STABLE_ROUTING_ID", Some("   "))],
             || {
                 let mut cfg = ModelRuntimeConfig::default();
                 cfg.populate_stable_routing_id_from_env();
                 assert!(cfg.stable_routing_id.is_none());
             },
         );
-        // …as is having neither var set at all.
-        temp_env::with_vars_unset(["DYN_STABLE_ROUTING_ID", "HOSTNAME"], || {
+        // …as is having the var unset.
+        temp_env::with_vars_unset(["DYN_STABLE_ROUTING_ID"], || {
             let mut cfg = ModelRuntimeConfig::default();
             cfg.populate_stable_routing_id_from_env();
             assert!(cfg.stable_routing_id.is_none());
