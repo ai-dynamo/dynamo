@@ -528,12 +528,6 @@ class ModelRuntimeConfig:
     enable_eagle: bool
     taints: Set[str]
     stable_routing_id: str | None
-    """
-    Stable routing identifier preserved across worker restarts. Populated from
-    ``HOSTNAME`` (or ``DYN_STABLE_ROUTING_ID``) when the worker is launched in a
-    Kubernetes StatefulSet. Used by rendezvous-style routing so cache assignments
-    survive process restarts.
-    """
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
