@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Downloads Kimi-K2.5-NVFP4 and the Eagle3 speculative-decoding head into the
+# shared model-cache PVC. Both checkpoints are pulled from HuggingFace.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -17,6 +20,12 @@ spec:
       containers:
         - name: model-download
           image: python:3.10-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           command: ["sh", "-c"]
           envFrom:
             - secretRef:
@@ -24,8 +33,10 @@ spec:
           env:
             - name: MODEL_NAME
               value: nvidia/Kimi-K2.5-NVFP4
+            - name: EAGLE_MODEL_NAME
+              value: nvidia/Kimi-K2.5-Thinking-Eagle3
             - name: HF_HOME
-              value: /model-store
+              value: /model-cache
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
           args:
@@ -33,9 +44,10 @@ spec:
               set -eux
               pip install --no-cache-dir huggingface_hub==1.11.0
               hf download $MODEL_NAME
+              hf download $EAGLE_MODEL_NAME
           volumeMounts:
             - name: model-cache
-              mountPath: /model-store
+              mountPath: /model-cache
       volumes:
       - name: model-cache
         persistentVolumeClaim:

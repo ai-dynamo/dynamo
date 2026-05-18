@@ -12,7 +12,6 @@ import (
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 const (
@@ -27,9 +26,9 @@ const (
 	envCheckpointDir = "GMS_CHECKPOINT_DIR"
 )
 
-// EnsureGMSRestoreSidecars appends restartable init sidecars for GMS restore.
-// The server must be ready before CRIU resumes the target process, while the
-// loader continues running alongside regular containers.
+// EnsureGMSRestoreSidecars adds the GMS server init sidecar and loader.
+// The loader is a regular sidecar; the GMS RO lock — not init-phase ordering —
+// gates the restored engine on weight load. Idempotent.
 func EnsureGMSRestoreSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -39,31 +38,24 @@ func EnsureGMSRestoreSidecars(
 		return
 	}
 
-	// Re-append restore sidecars in a deterministic order.
-	initContainers := podSpec.InitContainers[:0]
-	for _, container := range podSpec.InitContainers {
-		if container.Name != gms.ServerContainerName && container.Name != GMSLoaderContainer {
-			initContainers = append(initContainers, container)
-		}
-	}
-	podSpec.InitContainers = initContainers
-	gms.EnsureSharedVolume(podSpec, mainContainer)
-
+	gms.EnsureServerSidecar(podSpec, mainContainer)
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
 
-	server := gms.Container(gms.ServerContainerName, gms.ServerModule, mainContainer.Image)
-	server.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
+	for _, c := range podSpec.Containers {
+		if c.Name == GMSLoaderContainer {
+			return
+		}
+	}
 
 	loader := gms.Container(GMSLoaderContainer, gmsCheckpointLoaderModule, mainContainer.Image)
 	loader.VolumeMounts = append(loader.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
 	loader.Env = append(loader.Env, corev1.EnvVar{Name: envCheckpointDir, Value: resolveGMSArtifactDir(storage)})
-	loader.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
-
-	podSpec.InitContainers = append(podSpec.InitContainers, server, loader)
+	podSpec.Containers = append(podSpec.Containers, loader)
 }
 
-// EnsureGMSCheckpointJobSidecars adds GMS server (init) + saver containers
-// to the pod spec for a checkpoint job.
+// EnsureGMSCheckpointJobSidecars adds the GMS server init sidecar and saver
+// as a regular Job container. Saver is a regular container (not init+sleep)
+// so Job completion gates on tensor write.
 func EnsureGMSCheckpointJobSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -87,11 +79,7 @@ func EnsureGMSCheckpointJobSidecars(
 	saver := gms.Container(GMSSaverContainer, gmsCheckpointSaverModule, mainContainer.Image)
 	saver.VolumeMounts = append(saver.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
 	saver.Env = append(saver.Env, corev1.EnvVar{Name: envCheckpointDir, Value: gmsArtifactDir})
-	// The saver is an init sidecar (restartPolicy=Always) so it doesn't
-	// affect pod Ready (only the worker's probe matters) and doesn't block
-	// Job completion. It saves, then sleeps until the pod terminates.
-	saver.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
-	podSpec.InitContainers = append(podSpec.InitContainers, saver)
+	podSpec.Containers = append(podSpec.Containers, saver)
 	return nil
 }
 

@@ -1,5 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# GAIE-managed disaggregated vLLM deployment, tuned for *stability* because used as a Post Merge test
+#
+# Why this configuration looks the way it does (intentional, not a default):
+#
+#   * Disagg requires a vLLM KV connector. The only one available without
+#     a separate KV cache service (KVBM, LMCache, FlexKV) is ``NixlConnector``
+#     -- see components/src/dynamo/vllm/args.py:_validate_disagg_args. We
+#     therefore use NIXL, but configure it for the most boring transport
+#     path possible.
+#
+#   * ``kv_buffer_device: "cpu"`` keeps the KV cache buffer in host RAM
+#     rather than GPU memory. This avoids the GPU-memory-registration code
+#     path in UCX entirely. A previous CI run segfaulted in
+#     ``uct_tcp_ep_am_bcopy`` while UCX tried to do a TCP active-message
+#     buffer copy of GPU memory with ``UCX_TLS=tcp,self`` (which does NOT
+#     include ``cuda_copy``/``cuda_ipc``). Moving the buffer to host RAM
+#     makes the transfer a plain CPU<->CPU memcpy over TCP.
+#
+#   * ``UCX_TLS=tcp,self`` is the lowest-common-denominator UCX transport
+#     set: TCP works everywhere, ``self`` covers intra-process. We deliberately
+#     do NOT include any ``rc_*``/``dc_*`` (RDMA) or ``cuda_*`` transports --
+#     they require hardware we cannot assume in CI.
+#
+#   * ``UCX_RNDV_THRESH=inf`` disables the UCX rendezvous protocol entirely,
+#     forcing every transfer through the eager active-message path. Slower,
+#     but fewer code paths and no zero-copy registration races.
+#
+#   * No ``podAffinity`` is set on the workers. Prefill and decode can land
+#     on the same pod-host or on different hosts -- whatever the scheduler
+#     decides given GPU availability. Stability over locality.
+#
+#   * ``gpu-memory-utilization: 0.50`` leaves enough headroom for prefill
+#     and decode to share a GPU if they happen to co-schedule.
+#
+#   * ``--max-model-len 16384`` caps the context window so vLLM's KV cache
+#     budget fits in the reduced GPU memory available to each worker.
+#     Qwen/Qwen3-0.6B's model default is 40960 tokens, which would require
+#     ~4.4 GiB of KV cache and refuses to start under
+#     ``gpu-memory-utilization=0.50`` (~2.6 GiB available). 16384 leaves
+#     comfortable headroom; raise this only if you also raise
+#     ``gpu-memory-utilization``.
+#
+#   * ``DYN_ENFORCE_DISAGG=true`` on the EPP prevents fallback to aggregated
+#     serving when one role is unavailable (the test asserts disagg).
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -82,26 +127,24 @@ spec:
           - key: "nvidia.com/gpu"
             operator: "Exists"
             effect: "NoSchedule"
-        affinity:
-          podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values:
-                  - worker
-              topologyKey: kubernetes.io/hostname
+        # No podAffinity: prefill and decode can land on the same host
+        # or different hosts. Stability over locality.
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
             - name: MODEL_PATH
               value: "Qwen/Qwen3-0.6B"
+            # Force UCX to use only TCP and self transports -- no RDMA, no
+            # CUDA-aware UCX paths. Combined with kv_buffer_device=cpu this
+            # is the most boring (and most reliable) transport configuration.
             - name: UCX_TLS
-              value: "tcp,cuda_copy,cuda_ipc,self"
+              value: "tcp,self"
+            # Disable rendezvous protocol; force eager active-message path.
+            - name: UCX_RNDV_THRESH
+              value: "inf"
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}' --gpu-memory-utilization 0.50 --max-model-len 16384 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
@@ -133,16 +176,8 @@ spec:
           - key: "nvidia.com/gpu"
             operator: "Exists"
             effect: "NoSchedule"
-        affinity:
-          podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values:
-                  - worker
-              topologyKey: kubernetes.io/hostname
+        # No podAffinity: prefill and decode can land on the same host
+        # or different hosts. Stability over locality.
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
@@ -150,9 +185,11 @@ spec:
             - name: MODEL_PATH
               value: "Qwen/Qwen3-0.6B"
             - name: UCX_TLS
-              value: "tcp,cuda_copy,cuda_ipc,self"
+              value: "tcp,self"
+            - name: UCX_RNDV_THRESH
+              value: "inf"
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode decode --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --block-size 16"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode decode --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}' --gpu-memory-utilization 0.50 --max-model-len 16384 --block-size 16"
           command:
           - /bin/sh
           - -c

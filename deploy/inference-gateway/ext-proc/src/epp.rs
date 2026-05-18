@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -49,6 +50,7 @@ pub struct Router {
     #[allow(dead_code)]
     drt: DistributedRuntime,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
+    pod_store_ready: Arc<AtomicBool>,
 }
 
 impl Router {
@@ -137,7 +139,7 @@ impl Router {
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
         // would silently match zero pods during/after a DGD rolling update.
-        let pod_store = spawn_pod_reflector(namespace).await?;
+        let (pod_store, pod_store_ready) = spawn_pod_reflector(namespace).await?;
 
         Ok(Self {
             prefill_router,
@@ -147,6 +149,7 @@ impl Router {
             runtime,
             drt,
             pod_store,
+            pod_store_ready,
         })
     }
 
@@ -527,7 +530,10 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
 /// of the current pod state — no K8s API calls on the hot path.
 async fn spawn_pod_reflector(
     dynamo_namespace: &str,
-) -> Result<kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>> {
+) -> Result<(
+    kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
+    Arc<AtomicBool>,
+)> {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::Pod;
     use kube::{Api, Client, runtime::reflector, runtime::watcher};
@@ -545,12 +551,13 @@ async fn spawn_pod_reflector(
     let pods: Api<Pod> = Api::namespaced(client, &k8s_namespace);
 
     let selector = format!(
-        "nvidia.com/dynamo-namespace={},nvidia.com/dynamo-component-type=worker",
+        "nvidia.com/dynamo-namespace={},nvidia.com/dynamo-component-class=worker",
         dynamo_namespace
     );
 
     let writer = reflector::store::Writer::default();
     let store = writer.as_reader();
+    let ready = Arc::new(AtomicBool::new(false));
     let watcher_config = watcher::Config::default().labels(&selector);
     let reflect = reflector::reflector(writer, watcher(pods, watcher_config));
 
@@ -570,9 +577,26 @@ async fn spawn_pod_reflector(
     // Wait for the initial LIST to populate the store so the first inference
     // request after startup doesn't race against an empty cache. Bounded so
     // we don't block startup forever if the API server is slow.
-    let _ = tokio::time::timeout(Duration::from_secs(30), store_for_wait.wait_until_ready()).await;
+    match tokio::time::timeout(Duration::from_secs(30), store_for_wait.wait_until_ready()).await {
+        Ok(()) => {
+            ready.store(true, Ordering::Release);
+            tracing::info!("Pod reflector initial LIST sync complete");
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Pod reflector initial LIST sync timed out after 30s; returning 503 until ready"
+            );
+            let store_for_background_wait = store.clone();
+            let ready_for_background_wait = ready.clone();
+            tokio::spawn(async move {
+                store_for_background_wait.wait_until_ready().await;
+                ready_for_background_wait.store(true, Ordering::Release);
+                tracing::info!("Pod reflector became ready after startup timeout");
+            });
+        }
+    }
 
-    Ok(store)
+    Ok((store, ready))
 }
 
 fn spawn_prefill_discovery_watcher(
@@ -720,6 +744,12 @@ impl EndpointPicker for Router {
         req: &RequestInfo,
         endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError> {
+        if !self.pod_store_ready.load(Ordering::Acquire) {
+            return Err(PickError::RoutingFailed(
+                "Pod reflector is not ready yet; endpoint cache is still syncing".to_string(),
+            ));
+        }
+
         // When the endpoint list is populated (e.g. from a K8s datastore),
         // use it to constrain which workers the router may select. When empty,
         // fall back to the router's own discovery-based worker set.
@@ -816,7 +846,13 @@ impl EndpointPicker for Router {
 
         let endpoint = if worker_map.is_empty() {
             self.resolve_worker_endpoint(decode_worker.worker_id)
-                .unwrap_or_else(|| format!("worker-{}", decode_worker.worker_id))
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        worker_id = decode_worker.worker_id,
+                        "Selected worker has no resolved endpoint"
+                    );
+                    PickError::NoEndpoints
+                })?
         } else {
             worker_map
                 .iter()

@@ -21,14 +21,17 @@ from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_b
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import IMAGE_COLOR_PROMPT
 from tests.utils.payload_builder import (
-    cached_tokens_chat_payload,
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
     completion_payload_default,
     completion_payload_with_logprobs,
+    kv_events_metrics_payload,
     metric_payload_default,
+    router_cached_tokens_chat_payload,
+    router_selection_chat_payload_default,
 )
 from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
@@ -58,6 +61,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -91,6 +95,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -122,6 +127,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_lmcache_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -144,6 +150,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_lmcache_multiproc_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -169,6 +176,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_request_planes_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -191,6 +199,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_request_planes_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -214,22 +223,16 @@ vllm_configs = {
         script_name="xpu/agg_router_xpu.sh",
         marks=[
             pytest.mark.xpu_2,
+            pytest.mark.router,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2263"),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            chat_payload_default(
-                expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(engine_seq=\d+(?:, [^)]*)?\)",
-                    r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                ]
-            )
+            router_selection_chat_payload_default(),
+            kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
-        env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
     ),
     "agg-router-approx": VLLMConfig(
         name="agg-router-approx-xpu",
@@ -237,34 +240,19 @@ vllm_configs = {
         script_name="xpu/agg_router_approx_xpu.sh",
         marks=[
             pytest.mark.xpu_2,
+            pytest.mark.router,
             pytest.mark.post_merge,
             pytest.mark.skip(reason="DYN-2264"),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
-            # Repeated requests should show cache-aware routing in logs
-            chat_payload_default(
-                repeat_count=3,
-                expected_log=[
-                    # Verify scheduler is selecting workers with cache awareness
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                    # After first request, should see cached blocks being tracked
-                    r"with \d+ cached blocks",
-                ],
-            ),
+            # Repeated requests should show cache-aware routing in nvext.
+            router_selection_chat_payload_default(repeat_count=3),
             # Also test with cached tokens payload to verify usage field
-            cached_tokens_chat_payload(
-                repeat_count=3,
-                expected_log=[
-                    # Verify routing decision shows cache hits
-                    r"with \d+ cached blocks",
-                ],
-            ),
+            router_cached_tokens_chat_payload(repeat_count=3),
         ],
-        env={
-            "DYN_LOG": "dynamo_kv_router::scheduling::selector=debug",
-        },
+        env={},
     ),
     "multimodal_agg_frontend_decoding": VLLMConfig(
         name="multimodal_agg_frontend_decoding_xpu",
@@ -272,6 +260,7 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.multimodal,
             pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_710_490_000
@@ -291,7 +280,7 @@ vllm_configs = {
                 [
                     {
                         "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
+                        "text": IMAGE_COLOR_PROMPT,
                     },
                     {
                         "type": "image_url",
@@ -301,7 +290,8 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["green"],
                 temperature=0.0,
-                max_tokens=100,
+                max_tokens=20,
+                timeout=180,
             )
         ],
     ),
@@ -311,6 +301,7 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.multimodal,
             pytest.mark.profiled_vram_gib(19.9),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 922_354_000
@@ -329,7 +320,7 @@ vllm_configs = {
                 [
                     {
                         "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
+                        "text": IMAGE_COLOR_PROMPT,
                     },
                     {
                         "type": "image_url",
@@ -337,8 +328,9 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["purple"],
-                max_tokens=100,
+                expected_response=["green"],
+                max_tokens=20,
+                timeout=180,
             ),
         ],
     ),
@@ -348,6 +340,7 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.multimodal,
             pytest.mark.profiled_vram_gib(14.9),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
                 922_354_000
@@ -471,7 +464,11 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.multimodal,
             pytest.mark.pre_merge,
+            pytest.mark.skip(
+                reason="Flaky: https://github.com/ai-dynamo/dynamo/issues/9601"
+            ),
             pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-VL-2B-Instruct",
@@ -499,6 +496,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -525,6 +523,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -581,17 +580,21 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_serve_deployment(
     vllm_config_test,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    num_system_ports,
     predownload_models,
-    image_server,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
@@ -599,9 +602,11 @@ def test_serve_deployment(
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 @pytest.mark.xpu_2
 @pytest.mark.nightly
+@pytest.mark.multimodal
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
     request,
@@ -623,7 +628,7 @@ def test_multimodal_b64(
         [
             {
                 "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
+                "text": IMAGE_COLOR_PROMPT,
             },
             {
                 "type": "image_url",
@@ -631,8 +636,9 @@ def test_multimodal_b64(
             },
         ],
         repeat_count=1,
-        expected_response=["purple"],
-        max_tokens=100,
+        expected_response=["green"],
+        max_tokens=20,
+        timeout=180,
     )
 
     # Create test config
@@ -655,9 +661,11 @@ def test_multimodal_b64(
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 @pytest.mark.xpu_1
 @pytest.mark.pre_merge
+@pytest.mark.multimodal
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,
@@ -678,7 +686,7 @@ def test_multimodal_b64_frontend_decoding(
         [
             {
                 "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
+                "text": IMAGE_COLOR_PROMPT,
             },
             {
                 "type": "image_url",
@@ -688,7 +696,8 @@ def test_multimodal_b64_frontend_decoding(
         repeat_count=1,
         expected_response=["green"],
         temperature=0.0,
-        max_tokens=100,
+        max_tokens=20,
+        timeout=180,
     )
 
     config = VLLMConfig(
@@ -752,9 +761,10 @@ def lora_chat_payload(
 
 
 @pytest.mark.vllm
+@pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.xpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model("Qwen/Qwen3-0.6B", "codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
 def test_lora_aggregated(
@@ -808,6 +818,7 @@ def test_lora_aggregated(
 
 
 @pytest.mark.vllm
+@pytest.mark.router
 @pytest.mark.e2e
 @pytest.mark.xpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
