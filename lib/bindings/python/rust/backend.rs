@@ -983,6 +983,7 @@ fn build_rust_source(item: &Bound<'_, PyAny>) -> PyResult<ComponentMetricsSource
     let snapshot_obj: PyObject = item.getattr("snapshot")?.into();
     let warned_call_failed = AtomicBool::new(false);
     let warned_missing_field = AtomicBool::new(false);
+    let warned_invalid_field = AtomicBool::new(false);
     let snapshot: ComponentSnapshotFn = Arc::new(move || -> Option<ComponentSnapshot> {
         Python::with_gil(|py| -> Option<ComponentSnapshot> {
             let result = match snapshot_obj.call0(py) {
@@ -999,9 +1000,21 @@ fn build_rust_source(item: &Bound<'_, PyAny>) -> PyResult<ComponentMetricsSource
             if bound.is_none() {
                 return None;
             }
+            // Surface extract failures (type mismatch, overflow) once per
+            // source — silently coercing to None would hide engine bugs
+            // (e.g. negative kv_used_blocks) as "no data."
             let extract_u64 = |name: &str| -> Option<u64> {
                 match bound.getattr(name) {
-                    Ok(v) => v.extract().ok(),
+                    Ok(v) => match v.extract() {
+                        Ok(n) => Some(n),
+                        Err(e) => {
+                            if !warned_invalid_field.swap(true, Ordering::Relaxed) {
+                                tracing::warn!(dp_rank, error = %e, field = name,
+                                    "snapshot field failed u64 extract; dropping tick");
+                            }
+                            None
+                        }
+                    },
                     Err(e) => {
                         if !warned_missing_field.swap(true, Ordering::Relaxed) {
                             tracing::warn!(dp_rank, error = %e, field = name,
@@ -1013,7 +1026,16 @@ fn build_rust_source(item: &Bound<'_, PyAny>) -> PyResult<ComponentMetricsSource
             };
             let extract_f32 = |name: &str| -> Option<f32> {
                 match bound.getattr(name) {
-                    Ok(v) => v.extract().ok(),
+                    Ok(v) => match v.extract() {
+                        Ok(n) => Some(n),
+                        Err(e) => {
+                            if !warned_invalid_field.swap(true, Ordering::Relaxed) {
+                                tracing::warn!(dp_rank, error = %e, field = name,
+                                    "snapshot field failed f32 extract; dropping tick");
+                            }
+                            None
+                        }
+                    },
                     Err(e) => {
                         if !warned_missing_field.swap(true, Ordering::Relaxed) {
                             tracing::warn!(dp_rank, error = %e, field = name,

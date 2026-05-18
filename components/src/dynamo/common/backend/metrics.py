@@ -117,20 +117,28 @@ def register_global_registry(
                 "using a separate multiproc registry",
                 e,
             )
+            # REGISTRY already has the existing MultiProcessCollector,
+            # so it covers engine_prefix metrics. The fresh mp_registry
+            # is only needed to pick up multiproc-only prefixes (e.g.
+            # `lmcache:`) that some forks scrape via a SECOND
+            # MultiProcessCollector. Filtering the second callback to
+            # `multiproc_only_prefixes` only avoids double-emitting
+            # engine_prefix in one /metrics scrape.
             register_engine_registry(
                 metrics,
                 REGISTRY,
                 prefix_filters=[engine_prefix],
                 exclude_prefixes=exclude_prefixes,
             )
-            mp_registry = CollectorRegistry()
-            multiprocess.MultiProcessCollector(mp_registry)
-            register_engine_registry(
-                metrics,
-                mp_registry,
-                prefix_filters=all_prefixes,
-                exclude_prefixes=exclude_prefixes,
-            )
+            if multiproc_only_prefixes:
+                mp_registry = CollectorRegistry()
+                multiprocess.MultiProcessCollector(mp_registry)
+                register_engine_registry(
+                    metrics,
+                    mp_registry,
+                    prefix_filters=list(multiproc_only_prefixes),
+                    exclude_prefixes=exclude_prefixes,
+                )
             return
 
     if multiproc_dir:

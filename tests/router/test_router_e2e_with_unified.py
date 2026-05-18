@@ -312,7 +312,11 @@ def test_unified_sglang_router_decisions_multiple_workers(
 @pytest.mark.model(SGLANG_MODEL_NAME)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.skip(reason="DYN-2265 (same as legacy SGLang DP test)")
+@pytest.mark.skip(
+    reason="SGLang multi-worker DP startup races on the same GPU "
+    "(same blocker as legacy test_router_decisions_sglang_dp; re-enable "
+    "when SGLang side stabilizes)"
+)
 def test_unified_sglang_router_decisions_dp(
     request,
     runtime_services_dynamic_ports,

@@ -85,9 +85,10 @@ _IDLE_SLEEP_S = 0.01
 # publish KV cache events. Without this, `get_kv_cache_events` returns empty.
 _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
-# Resolved once at import time: upstream TRT-LLM gained `metrics_dict` on
-# `GenerationResult` mid-cycle.
-_GENERATION_RESULT_HAS_METRICS_DICT = hasattr(GenerationResult, "metrics_dict")
+# Note: `metrics_dict` is set per-instance on `GenerationResult` (only
+# when TRT-LLM's perf-stats collection is enabled and the request
+# finished). Check `hasattr(res, "metrics_dict")` on each instance —
+# a class-level guard would skip finished results that DO carry it.
 
 
 # Bridges trtllm's local enum into the common one. ENCODE absent —
@@ -692,7 +693,7 @@ class TrtllmLLMEngine(LLMEngine):
                         if (
                             res.finished
                             and self._log_request_metrics is not None
-                            and _GENERATION_RESULT_HAS_METRICS_DICT
+                            and hasattr(res, "metrics_dict")
                         ):
                             try:
                                 self._log_request_metrics(res.metrics_dict)
