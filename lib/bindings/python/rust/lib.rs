@@ -848,7 +848,7 @@ impl DistributedRuntime {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None, defer_response_stream = false))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
@@ -856,12 +856,17 @@ impl Endpoint {
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
+        defer_response_stream: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
+        let ingress = JsonServerStreamingIngress::for_engine_with_deferred_response_stream(
+            engine.clone(),
+            defer_response_stream.unwrap_or(false),
+        )
+        .map_err(to_pyerr)?;
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -1233,6 +1238,45 @@ impl Client {
             tokio::spawn(process_stream(stream, tx));
 
             Ok(AsyncResponseStream::new(rx, annotated))
+        })
+    }
+
+    /// Forward a request while preserving the caller-provided response connection.
+    #[pyo3(signature = (request, connection_info, context=None))]
+    fn forward<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+        connection_info: PyObject,
+        context: Option<context::Context>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
+        let connection_info: rs::pipeline::network::ConnectionInfo =
+            pythonize::depythonize(&connection_info.into_bound(py))?;
+
+        let client = self.router.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            match context {
+                Some(context) => {
+                    let span = get_span_for_context(&context, "forward");
+                    client
+                        .forward(request_ctx, connection_info)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?;
+                    context.set_response_delegated();
+                }
+                _ => {
+                    client
+                        .forward(request_ctx, connection_info)
+                        .await
+                        .map_err(to_pyerr)?;
+                }
+            };
+
+            Ok(())
         })
     }
 }

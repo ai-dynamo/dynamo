@@ -148,6 +148,12 @@ impl<T> AddressedRequest<T> {
     }
 }
 
+fn tcp_response_subject(connection_info: &ConnectionInfo) -> Option<String> {
+    serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
+        .ok()
+        .map(|ci| ci.subject)
+}
+
 pub struct AddressedPushRouter {
     // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
@@ -198,6 +204,80 @@ impl AddressedPushRouter {
         self.resp_transport
             .clear_instance_tombstone(instance_id)
             .await
+    }
+}
+
+impl AddressedPushRouter {
+    pub async fn send_with_connection_info<T>(
+        &self,
+        request: SingleIn<AddressedRequest<T>>,
+        connection_info: ConnectionInfo,
+    ) -> Result<(), Error>
+    where
+        T: Data + Serialize,
+    {
+        let queue_start = Instant::now();
+        REQUEST_PLANE_INFLIGHT.inc();
+        let inflight_guard = InflightGuard::new();
+
+        let request_id = request.context().id().to_string();
+        let (addressed_request, context) = request.transfer(());
+        let (request, address, _instance_info) = addressed_request.into_parts();
+        let engine_ctx = context.context();
+        let response_transport = connection_info.transport.clone();
+        let response_subject = tcp_response_subject(&connection_info);
+
+        // TODO: once we add a tombstone-only API:
+        // if let Some(inst) = &instance_info {
+        //     self.ensure_instance_not_tombstoned(&inst.endpoint_instance_id()).await?;
+        // }
+
+        let control_message = RequestControlMessage {
+            id: engine_ctx.id().to_string(),
+            request_type: RequestType::SingleIn,
+            response_type: ResponseType::ManyOut,
+            connection_info,
+            frontend_send_ts_ns: None,
+        };
+
+        let ctrl = serde_json::to_vec(&control_message)?;
+        let data = serde_json::to_vec(&request)?;
+
+        let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());
+        let buffer = TwoPartCodec::default().encode_message(msg)?;
+
+        REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
+
+        let tx_start = Instant::now();
+
+        let mut headers = std::collections::HashMap::new();
+        inject_trace_headers_into_map(&mut headers);
+        headers.insert("request-id".to_string(), request_id.clone());
+
+        let send_ts_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
+
+        tracing::info!(
+            request_id = %request_id,
+            address = %address,
+            response_transport = %response_transport,
+            response_subject = response_subject.as_deref().unwrap_or("<unknown>"),
+            "forwarding request with delegated response stream"
+        );
+
+        self.req_client
+            .send_request(address, buffer, headers)
+            .await?;
+
+        REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+
+        // Do not disarm. No response stream takes over this gauge.
+        drop(inflight_guard);
+
+        Ok(())
     }
 }
 

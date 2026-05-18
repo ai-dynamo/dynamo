@@ -321,6 +321,14 @@ pub struct ConnectionInfo {
     pub info: String,
 }
 
+/// Runtime context key used to expose the original response stream connection
+/// to Python handlers that need to delegate response ownership downstream.
+pub const RESPONSE_CONNECTION_INFO_CONTEXT_KEY: &str = "dynamo.response_connection_info";
+
+/// Runtime context key for a shared flag set when a handler delegates response
+/// publishing to a downstream endpoint.
+pub const RESPONSE_DELEGATED_CONTEXT_KEY: &str = "dynamo.response_delegated";
+
 /// When registering a new TransportStream on the server, the caller specifies if the
 /// stream is a sender, receiver or both.
 ///
@@ -405,14 +413,20 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    defer_response_stream: bool,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     pub fn new() -> Arc<Self> {
+        Self::new_with_deferred_response_stream(false)
+    }
+
+    pub fn new_with_deferred_response_stream(defer_response_stream: bool) -> Arc<Self> {
         Arc::new(Self {
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            defer_response_stream,
         })
     }
 
@@ -460,13 +474,20 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     }
 
     pub fn for_engine(engine: ServiceEngine<Req, Resp>) -> Result<Arc<Self>> {
+        Self::for_engine_with_deferred_response_stream(engine, false)
+    }
+
+    pub fn for_engine_with_deferred_response_stream(
+        engine: ServiceEngine<Req, Resp>,
+        defer_response_stream: bool,
+    ) -> Result<Arc<Self>> {
         let frontend = SegmentSource::<Req, Resp>::new();
         let backend = ServiceBackend::from_engine(engine);
 
         // create the pipeline
         let pipeline = frontend.link(backend)?.link(frontend)?;
 
-        let ingress = Ingress::new();
+        let ingress = Ingress::new_with_deferred_response_stream(defer_response_stream);
         ingress.attach(pipeline)?;
 
         Ok(ingress)

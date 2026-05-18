@@ -10,7 +10,10 @@ use crate::metrics::work_handler_perf::{
 use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 use tracing::Instrument;
 use tracing::info_span;
@@ -138,6 +141,44 @@ impl Drop for RequestMetricsGuard {
     }
 }
 
+fn tcp_response_subject(connection_info: &ConnectionInfo) -> Option<String> {
+    serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
+        .ok()
+        .map(|ci| ci.subject)
+}
+
+async fn create_response_publisher(
+    context: Arc<dyn AsyncEngineContext>,
+    connection_info: ConnectionInfo,
+    metrics: Option<&Arc<WorkHandlerMetrics>>,
+) -> Result<StreamSender, PipelineError> {
+    let request_id = context.id().to_string();
+    let response_transport = connection_info.transport.clone();
+    let response_subject = tcp_response_subject(&connection_info);
+
+    tracing::info!(
+        request_id = %request_id,
+        response_transport = %response_transport,
+        response_subject = response_subject.as_deref().unwrap_or("<unknown>"),
+        "opening response stream to upstream caller"
+    );
+
+    tcp::client::TcpClient::create_response_stream(
+        context,
+        connection_info,
+        metrics.map(|m| m.cancellation_total.clone()),
+    )
+    .await
+    .map_err(|e| {
+        if let Some(m) = metrics {
+            m.error_counter
+                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                .inc();
+        }
+        PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
+    })
+}
+
 #[async_trait]
 impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
 where
@@ -241,25 +282,38 @@ where
         // extend request with context
         tracing::trace!("received control message: {:?}", control_msg);
         tracing::trace!("received request: {:?}", request);
-        let request: context::Context<T> = Context::with_id(request, control_msg.id);
+        let mut request: context::Context<T> = Context::with_id(request, control_msg.id);
+        let response_delegated = Arc::new(AtomicBool::new(false));
+        request.insert_unique(
+            RESPONSE_CONNECTION_INFO_CONTEXT_KEY,
+            control_msg.connection_info.clone(),
+        );
+        request.insert_unique(RESPONSE_DELEGATED_CONTEXT_KEY, response_delegated.clone());
 
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
-        tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_stream(
-            request.context(),
-            control_msg.connection_info,
-            self.metrics().map(|m| m.cancellation_total.clone()),
-        )
-        .await
-        .map_err(|e| {
-            if let Some(m) = self.metrics() {
-                m.error_counter
-                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
-                    .inc();
-            }
-            PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
-        })?;
+        let request_context = request.context();
+
+        let mut publisher = if self.defer_response_stream {
+            let response_subject = tcp_response_subject(&control_msg.connection_info);
+            tracing::info!(
+                request_id = %request_context.id(),
+                response_transport = %control_msg.connection_info.transport,
+                response_subject = response_subject.as_deref().unwrap_or("<unknown>"),
+                "deferring response stream creation; handler may delegate response"
+            );
+            None
+        } else {
+            // todo - eventually have a handler class which will returned an abstracted object, but for now,
+            // we only support tcp here, so we can just unwrap the connection info
+            tracing::trace!("creating tcp response stream");
+            Some(
+                create_response_publisher(
+                    request_context.clone(),
+                    control_msg.connection_info.clone(),
+                    self.metrics(),
+                )
+                .await?,
+            )
+        };
 
         tracing::trace!("calling generate");
         let stream = self
@@ -279,10 +333,45 @@ where
 
         // the prolouge is sent to the client to indicate that the stream is ready to receive data
         // or if the generate call failed, the error is sent to the client
+        let mut first_response = None;
         let mut stream = match stream {
             Ok(stream) => {
+                let mut stream = stream;
+                if self.defer_response_stream {
+                    first_response = stream.next().await;
+                    if response_delegated.load(Ordering::SeqCst) {
+                        if first_response.is_some() {
+                            tracing::warn!(
+                                "response stream was delegated after yielding a response; dropping local response"
+                            );
+                        }
+                        let response_subject = tcp_response_subject(&control_msg.connection_info);
+                        tracing::info!(
+                            request_id = %request_context.id(),
+                            response_transport = %control_msg.connection_info.transport,
+                            response_subject = response_subject.as_deref().unwrap_or("<unknown>"),
+                            "response stream delegated downstream; ingress will not publish response"
+                        );
+                        return Ok(());
+                    }
+
+                    tracing::trace!("creating deferred tcp response stream");
+                    publisher = Some(
+                        create_response_publisher(
+                            request_context.clone(),
+                            control_msg.connection_info.clone(),
+                            self.metrics(),
+                        )
+                        .await?,
+                    );
+                }
+
                 tracing::trace!("Successfully generated response stream; sending prologue");
-                let _result = publisher.send_prologue(None).await;
+                let _result = publisher
+                    .as_mut()
+                    .expect("response publisher initialized")
+                    .send_prologue(None)
+                    .await;
                 WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
                     .observe(start_time.elapsed().as_secs_f64());
                 stream
@@ -302,17 +391,39 @@ where
                     tracing::error!("Failed to generate response stream: {error_string}");
                 }
 
-                let _result = publisher.send_prologue(Some(error_string)).await;
+                if publisher.is_none() {
+                    publisher = Some(
+                        create_response_publisher(
+                            request_context.clone(),
+                            control_msg.connection_info.clone(),
+                            self.metrics(),
+                        )
+                        .await?,
+                    );
+                }
+                let _result = publisher
+                    .as_mut()
+                    .expect("response publisher initialized")
+                    .send_prologue(Some(error_string))
+                    .await;
                 Err(e)?
             }
         };
 
+        let publisher = publisher.expect("response publisher initialized");
         let context = stream.context();
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
-        while let Some(resp) = stream.next().await {
+        loop {
+            let resp = match first_response.take() {
+                Some(resp) => Some(resp),
+                None => stream.next().await,
+            };
+            let Some(resp) = resp else {
+                break;
+            };
             tracing::trace!("Sending response: {:?}", resp);
             let is_error = resp.err().is_some();
             if is_error {

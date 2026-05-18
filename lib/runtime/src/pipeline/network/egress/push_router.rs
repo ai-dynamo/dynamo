@@ -15,6 +15,7 @@ use crate::{
     pipeline::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
+        network::ConnectionInfo,
     },
     protocols::{EndpointId, maybe_error::MaybeError},
     traits::DistributedRuntimeProvider,
@@ -98,6 +99,38 @@ impl Drop for OccupancyPermit {
     fn drop(&mut self) {
         if self.armed {
             self.state.decrement(self.instance_id);
+        }
+    }
+}
+
+struct SelectedRoute {
+    instance_id: u64,
+    permit: Option<OccupancyPermit>,
+}
+
+impl SelectedRoute {
+    fn new(instance_id: u64) -> Self {
+        Self {
+            instance_id,
+            permit: None,
+        }
+    }
+
+    fn with_permit(permit: OccupancyPermit) -> Self {
+        Self {
+            instance_id: permit.instance_id(),
+            permit: Some(permit),
+        }
+    }
+
+    fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    fn into_tracked_stream<U: Data>(self, stream: ManyOut<U>) -> ManyOut<U> {
+        match self.permit {
+            Some(permit) => permit.into_tracked_stream(stream),
+            None => stream,
         }
     }
 }
@@ -485,6 +518,11 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let selected = self.select_round_robin()?;
+        self.generate_selected_route(selected, request).await
+    }
+
+    fn select_round_robin(&self) -> anyhow::Result<SelectedRoute> {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let instance_id = {
@@ -500,12 +538,16 @@ where
         };
         tracing::trace!("round robin router selected {instance_id}");
 
-        self.generate_with_fault_detection(instance_id, request)
-            .await
+        Ok(SelectedRoute::new(instance_id))
     }
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let selected = self.select_random()?;
+        self.generate_selected_route(selected, request).await
+    }
+
+    fn select_random(&self) -> anyhow::Result<SelectedRoute> {
         let instance_id = {
             let instance_ids = self.client.instance_ids_avail();
             let count = instance_ids.len();
@@ -520,13 +562,17 @@ where
         };
         tracing::trace!("random router selected {instance_id}");
 
-        self.generate_with_fault_detection(instance_id, request)
-            .await
+        Ok(SelectedRoute::new(instance_id))
     }
 
     /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
     /// route to the one with fewer in-flight requests.
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let selected = self.select_power_of_two_choices()?;
+        self.generate_selected_route(selected, request).await
+    }
+
+    fn select_power_of_two_choices(&self) -> anyhow::Result<SelectedRoute> {
         let state = self.occupancy_state()?;
         let instance_id = {
             let instance_ids = self
@@ -546,13 +592,7 @@ where
         state.increment(instance_id);
         let permit = OccupancyPermit::new(state, instance_id);
 
-        match self
-            .generate_with_fault_detection(instance_id, request)
-            .await
-        {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
-            Err(err) => Err(err),
-        }
+        Ok(SelectedRoute::with_permit(permit))
     }
 
     /// Issue a request to a specific endpoint
@@ -561,6 +601,11 @@ where
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
+        let selected = self.select_direct(instance_id)?;
+        self.generate_selected_route(selected, request).await
+    }
+
+    fn select_direct(&self, instance_id: u64) -> anyhow::Result<SelectedRoute> {
         // When fault detection is disabled, check the raw discovery list
         // (not filtered by report_instance_down) so transient failures
         // don't poison the instance for subsequent retries.
@@ -577,8 +622,7 @@ where
             ));
         }
 
-        self.generate_with_fault_detection(instance_id, request)
-            .await
+        Ok(SelectedRoute::new(instance_id))
     }
 
     /// Issue a request using device-aware weighted routing.
@@ -590,6 +634,11 @@ where
     /// If only one device class exists (all CPU or all non-CPU), this naturally
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let selected = self.select_device_aware_weighted().await?;
+        self.generate_selected_route(selected, request).await
+    }
+
+    async fn select_device_aware_weighted(&self) -> anyhow::Result<SelectedRoute> {
         let state = self.occupancy_state()?;
         let instance_ids = self
             .client
@@ -650,17 +699,16 @@ where
             "DeviceAwareWeighted selected instance"
         );
 
-        match self
-            .generate_with_fault_detection(instance_id, request)
-            .await
-        {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
-            Err(err) => Err(err),
-        }
+        Ok(SelectedRoute::with_permit(permit))
     }
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        let selected = self.select_least_loaded().await?;
+        self.generate_selected_route(selected, request).await
+    }
+
+    async fn select_least_loaded(&self) -> anyhow::Result<SelectedRoute> {
         let state = self.occupancy_state()?;
         let instance_ids = self
             .client
@@ -683,13 +731,7 @@ where
             state.load(instance_id)
         );
 
-        match self
-            .generate_with_fault_detection(instance_id, request)
-            .await
-        {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
-            Err(err) => Err(err),
-        }
+        Ok(SelectedRoute::with_permit(permit))
     }
 
     /// Select the next worker according to the routing mode.
@@ -778,24 +820,25 @@ where
     }
     */
 
-    async fn generate_with_fault_detection(
-        &self,
-        mut instance_id: u64,
-        request: SingleIn<T>,
-    ) -> anyhow::Result<ManyOut<U>> {
-        let route_start = Instant::now();
-        let request_id = request.id().to_string();
-        let route_span = if matches!(self.router_mode, RouterMode::KV) {
-            tracing::Span::none()
-        } else {
-            tracing::info_span!(
-                "router.route_request",
-                request_id = %request_id,
-                worker_id = instance_id,
-                router_mode = ?self.router_mode,
-            )
-        };
+    async fn select_route(&self) -> anyhow::Result<SelectedRoute> {
+        match self.router_mode {
+            RouterMode::Random => self.select_random(),
+            RouterMode::RoundRobin => self.select_round_robin(),
+            RouterMode::PowerOfTwoChoices => self.select_power_of_two_choices(),
+            RouterMode::KV => {
+                anyhow::bail!("KV routing should not use PushRouter route selection directly");
+            }
+            RouterMode::Direct => {
+                anyhow::bail!(
+                    "Direct routing should not use PushRouter route selection directly; use DirectRoutingRouter wrapper"
+                );
+            }
+            RouterMode::LeastLoaded => self.select_least_loaded().await,
+            RouterMode::DeviceAwareWeighted => self.select_device_aware_weighted().await,
+        }
+    }
 
+    fn check_worker_capacity(&self, request_id: &str, instance_id: u64) -> anyhow::Result<()> {
         // Check if all workers are busy (when fault detection is enabled).
         if self.fault_detection_enabled {
             let free_instances = self.client.instance_ids_free();
@@ -831,81 +874,116 @@ where
             }
         }
 
+        Ok(())
+    }
+
+    fn resolve_transport_address(
+        &self,
+        instance_id: &mut u64,
+    ) -> anyhow::Result<(String, &'static str, Instance)> {
         // Resolve transport address; if the selected instance disappeared
         // between selection and dispatch, fall back to another available one.
-        let (address, _transport_kind, instance) = {
-            use crate::component::TransportType;
+        use crate::component::TransportType;
 
-            let resolve_transport = |id: u64| {
-                let instances = self.client.instances();
-                instances
-                    .iter()
-                    .find(|i| i.instance_id == id)
-                    .map(|instance| {
-                        let (addr, kind) = match &instance.transport {
-                            TransportType::Http(http_endpoint) => {
-                                tracing::debug!(
-                                    instance_id = id,
-                                    http_endpoint = %http_endpoint,
-                                    "Using HTTP transport for instance"
-                                );
-                                (http_endpoint.clone(), "transport.http.request")
-                            }
-                            TransportType::Tcp(tcp_endpoint) => {
-                                tracing::debug!(
-                                    instance_id = id,
-                                    tcp_endpoint = %tcp_endpoint,
-                                    "Using TCP transport for instance"
-                                );
-                                (tcp_endpoint.clone(), "transport.tcp.request")
-                            }
-                            TransportType::Nats(subject) => {
-                                tracing::debug!(
-                                    instance_id = id,
-                                    subject = %subject,
-                                    "Using NATS transport for instance"
-                                );
-                                (subject.clone(), "transport.nats.request")
-                            }
-                        };
-                        (addr, kind, instance.clone())
-                    })
-            };
-
-            if let Some(result) = resolve_transport(instance_id) {
-                result
-            } else {
-                // Instance vanished — pick a different one from the current
-                // availability list and retry the lookup once.
-                let avail = self.client.instance_ids_avail();
-                let fallback_id = avail.iter().copied().find(|&id| id != instance_id);
-                match fallback_id {
-                    Some(id) => {
-                        tracing::warn!(
-                            original_instance = instance_id,
-                            fallback_instance = id,
-                            "Instance disappeared during routing, reselecting"
-                        );
-                        instance_id = id;
-                        resolve_transport(id).ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Fallback instance {} also not found for endpoint {}",
-                                id,
-                                self.client.endpoint.id()
-                            )
-                        })?
-                    }
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "Instance {} not found and no other instances available \
-                             for endpoint {}",
-                            instance_id,
-                            self.client.endpoint.id()
-                        ));
-                    }
-                }
-            }
+        let resolve_transport = |id: u64| {
+            let instances = self.client.instances();
+            instances
+                .iter()
+                .find(|i| i.instance_id == id)
+                .map(|instance| {
+                    let (addr, kind) = match &instance.transport {
+                        TransportType::Http(http_endpoint) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                http_endpoint = %http_endpoint,
+                                "Using HTTP transport for instance"
+                            );
+                            (http_endpoint.clone(), "transport.http.request")
+                        }
+                        TransportType::Tcp(tcp_endpoint) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                tcp_endpoint = %tcp_endpoint,
+                                "Using TCP transport for instance"
+                            );
+                            (tcp_endpoint.clone(), "transport.tcp.request")
+                        }
+                        TransportType::Nats(subject) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                subject = %subject,
+                                "Using NATS transport for instance"
+                            );
+                            (subject.clone(), "transport.nats.request")
+                        }
+                    };
+                    (addr, kind, instance.clone())
+                })
         };
+
+        if let Some(result) = resolve_transport(*instance_id) {
+            return Ok(result);
+        }
+
+        // Instance vanished — pick a different one from the current
+        // availability list and retry the lookup once.
+        let avail = self.client.instance_ids_avail();
+        let fallback_id = avail.iter().copied().find(|&id| id != *instance_id);
+        match fallback_id {
+            Some(id) => {
+                tracing::warn!(
+                    original_instance = *instance_id,
+                    fallback_instance = id,
+                    "Instance disappeared during routing, reselecting"
+                );
+                *instance_id = id;
+                resolve_transport(id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Fallback instance {} also not found for endpoint {}",
+                        id,
+                        self.client.endpoint.id()
+                    )
+                })
+            }
+            None => Err(anyhow::anyhow!(
+                "Instance {} not found and no other instances available for endpoint {}",
+                *instance_id,
+                self.client.endpoint.id()
+            )),
+        }
+    }
+
+    fn route_span(&self, request_id: &str, instance_id: u64) -> tracing::Span {
+        if matches!(self.router_mode, RouterMode::KV) {
+            tracing::Span::none()
+        } else {
+            tracing::info_span!(
+                "router.route_request",
+                request_id = %request_id,
+                worker_id = instance_id,
+                router_mode = ?self.router_mode,
+            )
+        }
+    }
+
+    fn prepare_addressed_request(
+        &self,
+        mut instance_id: u64,
+        request: SingleIn<T>,
+    ) -> anyhow::Result<(
+        u64,
+        &'static str,
+        SingleIn<AddressedRequest<T>>,
+        tracing::Span,
+    )> {
+        let route_start = Instant::now();
+        let request_id = request.id().to_string();
+        let route_span = self.route_span(&request_id, instance_id);
+
+        self.check_worker_capacity(&request_id, instance_id)?;
+
+        let (address, transport_kind, instance) =
+            self.resolve_transport_address(&mut instance_id)?;
 
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
@@ -913,7 +991,78 @@ where
             .with_label_values(&[STAGE_ROUTE])
             .observe(route_start.elapsed().as_secs_f64());
 
-        let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
+        Ok((instance_id, transport_kind, request, route_span))
+    }
+
+    async fn generate_selected_route(
+        &self,
+        selected: SelectedRoute,
+        request: SingleIn<T>,
+    ) -> anyhow::Result<ManyOut<U>> {
+        let instance_id = selected.instance_id();
+        match self
+            .generate_with_fault_detection(instance_id, request)
+            .await
+        {
+            Ok(stream) => Ok(selected.into_tracked_stream(stream)),
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn forward_selected_route(
+        &self,
+        selected: SelectedRoute,
+        request: SingleIn<T>,
+        response_connection_info: ConnectionInfo,
+    ) -> anyhow::Result<()> {
+        let instance_id = selected.instance_id();
+        let result = self
+            .forward_with_response(instance_id, request, response_connection_info)
+            .await;
+
+        // Forwarded responses bypass this router, so occupancy can only cover
+        // selection through request-plane send.
+        drop(selected);
+        result
+    }
+
+    async fn forward_with_response(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        response_connection_info: ConnectionInfo,
+    ) -> anyhow::Result<()> {
+        let (instance_id, transport_kind, request, route_span) =
+            self.prepare_addressed_request(instance_id, request)?;
+
+        let _nvtx_transport = dynamo_nvtx_range!(transport_kind);
+        let result = self
+            .addressed
+            .send_with_connection_info(request, response_connection_info)
+            .instrument(route_span)
+            .await;
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
+                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
+                    self.client.report_instance_down(instance_id);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    async fn generate_with_fault_detection(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+    ) -> anyhow::Result<ManyOut<U>> {
+        let (instance_id, transport_kind, request, route_span) =
+            self.prepare_addressed_request(instance_id, request)?;
+
+        let _nvtx_transport = dynamo_nvtx_range!(transport_kind);
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate(request)
@@ -999,21 +1148,24 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
-        match self.router_mode {
-            RouterMode::Random => self.random(request).await,
-            RouterMode::RoundRobin => self.round_robin(request).await,
-            RouterMode::PowerOfTwoChoices => self.power_of_two_choices(request).await,
-            RouterMode::KV => {
-                anyhow::bail!("KV routing should not call generate on PushRouter");
-            }
-            RouterMode::Direct => {
-                anyhow::bail!(
-                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
-                );
-            }
-            RouterMode::LeastLoaded => self.least_loaded(request).await,
-            RouterMode::DeviceAwareWeighted => self.device_aware_weighted(request).await,
-        }
+        let selected = self.select_route().await?;
+        self.generate_selected_route(selected, request).await
+    }
+}
+
+impl<T, U> PushRouter<T, U>
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    pub async fn forward(
+        &self,
+        request: SingleIn<T>,
+        response_connection_info: ConnectionInfo,
+    ) -> Result<(), Error> {
+        let selected = self.select_route().await?;
+        self.forward_selected_route(selected, request, response_connection_info)
+            .await
     }
 }
 
