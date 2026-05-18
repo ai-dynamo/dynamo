@@ -78,7 +78,6 @@ def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
     env["DYN_LOG"] = log_level
     env["DYN_NAMESPACE"] = NAMESPACE
     env["DYN_REQUEST_PLANE"] = "nats"
-    env["DYN_ROUTER_KV_OVERLAP_LOG_LEVEL"] = "info"
     env.update(extra)
     return env
 
