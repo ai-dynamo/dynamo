@@ -190,6 +190,14 @@ impl MockerBackend {
 
         let engine_args = build_engine_args(&args)?;
         let disaggregation_mode = args.common.disaggregation_mode;
+        let (tool_call_parser, reasoning_parser) = if disaggregation_mode.is_prefill() {
+            (None, None)
+        } else {
+            (
+                args.common.dyn_tool_call_parser.clone(),
+                args.common.dyn_reasoning_parser.clone(),
+            )
+        };
         let engine = Self::new(
             args.model_name.clone(),
             args.context_length,
@@ -205,6 +213,9 @@ impl MockerBackend {
             disaggregation_mode,
             model_name: args.model_path,
             served_model_name: Some(args.model_name),
+            tool_call_parser,
+            reasoning_parser,
+            exclude_tools_when_tool_choice_none: args.common.exclude_tools_when_tool_choice_none,
             ..Default::default()
         };
         Ok((engine, config))

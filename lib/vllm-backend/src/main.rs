@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
+mod backend;
 mod convert;
 mod error;
-mod vllm_engine;
 
 fn main() -> anyhow::Result<()> {
-    let (engine, config) = vllm_engine::VllmBackend::from_args(None)?;
+    let (engine, config) = backend::VllmBackend::from_args(None)?;
     dynamo_backend_common::run(Arc::new(engine), config)
 }

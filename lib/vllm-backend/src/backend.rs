@@ -132,16 +132,28 @@ impl VllmBackend {
             args.managed_engine,
             args.extra.clone(),
         );
+        let disaggregation_mode = args.common.disaggregation_mode;
+        let (tool_call_parser, reasoning_parser) = if disaggregation_mode.is_prefill() {
+            (None, None)
+        } else {
+            (
+                args.common.dyn_tool_call_parser,
+                args.common.dyn_reasoning_parser,
+            )
+        };
         let config = WorkerConfig {
             namespace: args.common.namespace,
             component: args.common.component,
             endpoint: args.common.endpoint,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
-            disaggregation_mode: args.common.disaggregation_mode,
+            disaggregation_mode,
             model_name: args.model,
             served_model_name: args.served_model_name,
             model_input: ModelInput::Tokens,
+            tool_call_parser,
+            reasoning_parser,
+            exclude_tools_when_tool_choice_none: args.common.exclude_tools_when_tool_choice_none,
             ..Default::default()
         };
         Ok((engine, config))
@@ -375,6 +387,11 @@ mod tests {
             "ns".to_string(),
             "--served-model-name".to_string(),
             "served-qwen".to_string(),
+            "--dyn-tool-call-parser".to_string(),
+            "hermes".to_string(),
+            "--dyn-reasoning-parser".to_string(),
+            "qwen3".to_string(),
+            "--exclude-tools-when-tool-choice-none=false".to_string(),
             "--dtype".to_string(),
             "float16".to_string(),
             "--data-parallel-size".to_string(),
@@ -392,6 +409,9 @@ mod tests {
         assert_eq!(config.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(config.served_model_name.as_deref(), Some("served-qwen"));
         assert_eq!(config.model_input, ModelInput::Tokens);
+        assert_eq!(config.tool_call_parser.as_deref(), Some("hermes"));
+        assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+        assert!(!config.exclude_tools_when_tool_choice_none);
         assert_eq!(engine.managed_engine.data_parallel_size, 2);
         assert_eq!(
             engine.managed_engine.python_args,
