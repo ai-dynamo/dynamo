@@ -17,6 +17,17 @@
 //! 5. Worker completes NIXL registration and creates DirectWorker
 //! 6. Worker creates G2/G3 layouts based on leader config
 //! 7. Worker returns updated metadata with all layouts
+//!
+//! # G1/G2/G3 layout selection (c3, mode-dominant)
+//!
+//! - G1 carries the vLLM-derived layout (`OperationalNHD`/`OperationalHND`).
+//! - G2 is picked by [`select_g2_block_layout`] from
+//!   `(g1_layout, runtime.config().block_layout)`:
+//!   * `BlockLayoutMode::Operational` → G2 inherits G1.
+//!   * `BlockLayoutMode::Universal` → G2 is `KvBlockLayout::Universal`
+//!     regardless of G1; G1↔G2 transfers dispatch the fused permute
+//!     kernel.
+//! - G3 inherits G2 (so G2↔G3 stays memcpy).
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -26,11 +37,25 @@ use dynamo_memory::TensorDescriptor;
 
 use kvbm_physical::transfer::context::TokioRuntime;
 
+/// Pick G2's `KvBlockLayout` from `(g1, mode)` per the c3 rule.
+///
+/// - `Operational` → G2 inherits G1's layout.
+/// - `Universal`   → G2 is `KvBlockLayout::Universal` regardless of G1.
+///
+/// Pure function so the rule is unit-testable without the full
+/// `complete_initialization` bring-up.
+pub(crate) fn select_g2_block_layout(g1: KvBlockLayout, mode: BlockLayoutMode) -> KvBlockLayout {
+    match mode {
+        BlockLayoutMode::Operational => g1,
+        BlockLayoutMode::Universal => KvBlockLayout::Universal,
+    }
+}
+
 use kvbm_engine::object::create_object_client;
 use kvbm_engine::worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse};
 
 use crate::KvbmRuntime;
-use kvbm_common::{KvBlockLayout, LogicalLayoutHandle};
+use kvbm_common::{BlockLayoutMode, KvBlockLayout, LogicalLayoutHandle};
 use kvbm_physical::TransferManager;
 use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
 use kvbm_physical::transfer::TransferCapabilities;
@@ -240,6 +265,22 @@ impl PendingWorkerState {
             config.parallelism == kvbm_config::ParallelismMode::ReplicatedData && config.rank > 0;
         let bypass_host = runtime.config().cache.bypass_host_cache();
 
+        // c3: G2 (and G3) layout selection. Operational mode keeps the
+        // legacy behaviour (G2 inherits G1); Universal mode pins G2 to
+        // KvBlockLayout::Universal so cross-leader transfers all see the
+        // same canonical layout, regardless of each leader's engine-side
+        // G1 layout. G1↔G2 transfers in Universal mode dispatch the
+        // fused permute kernel.
+        let g2_block_layout =
+            select_g2_block_layout(self.block_layout, runtime.config().block_layout);
+        let g3_block_layout = g2_block_layout;
+        tracing::info!(
+            g1 = %self.block_layout,
+            g2 = %g2_block_layout,
+            mode = %runtime.config().block_layout,
+            "Selected G1/G2 block layouts"
+        );
+
         let (g2_handle, g3_handle) = if skip_g2_g3 {
             tracing::info!(
                 rank = config.rank,
@@ -276,7 +317,7 @@ impl PendingWorkerState {
                 let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(host_layout)
                     .fully_contiguous()
-                    .with_block_layout(self.block_layout)
+                    .with_block_layout(g2_block_layout)
                     .allocate_pinned(Some(self.cuda_device_id as u32))
                     .build()
                     .map_err(|e| {
@@ -321,7 +362,7 @@ impl PendingWorkerState {
                 let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(disk_layout)
                     .fully_contiguous()
-                    .with_block_layout(self.block_layout)
+                    .with_block_layout(g3_block_layout)
                     .allocate_disk(Some(g3_path.clone()))
                     .build()
                     .map_err(|e| {
@@ -405,5 +446,37 @@ impl PendingWorkerState {
 
 #[cfg(test)]
 mod tests {
-    // Tests would require mock tensor setup - defer to integration tests
+    use super::*;
+    use kvbm_common::BlockLayoutMode;
+
+    /// c3 reproducer: Universal mode forces G2 to KvBlockLayout::Universal
+    /// regardless of G1's stamped layout. Operational mode keeps G2
+    /// inheriting G1 (no behavioural change for that path).
+    #[test]
+    fn select_g2_block_layout_chooses_universal_only_in_universal_mode() {
+        // Universal mode → G2 always Universal, regardless of G1's choice.
+        assert_eq!(
+            select_g2_block_layout(KvBlockLayout::OperationalNHD, BlockLayoutMode::Universal),
+            KvBlockLayout::Universal,
+        );
+        assert_eq!(
+            select_g2_block_layout(KvBlockLayout::OperationalHND, BlockLayoutMode::Universal),
+            KvBlockLayout::Universal,
+        );
+        assert_eq!(
+            select_g2_block_layout(KvBlockLayout::Universal, BlockLayoutMode::Universal),
+            KvBlockLayout::Universal,
+        );
+
+        // Operational mode → G2 inherits G1 (today's behaviour, forward
+        // regression guard).
+        assert_eq!(
+            select_g2_block_layout(KvBlockLayout::OperationalNHD, BlockLayoutMode::Operational),
+            KvBlockLayout::OperationalNHD,
+        );
+        assert_eq!(
+            select_g2_block_layout(KvBlockLayout::OperationalHND, BlockLayoutMode::Operational),
+            KvBlockLayout::OperationalHND,
+        );
+    }
 }

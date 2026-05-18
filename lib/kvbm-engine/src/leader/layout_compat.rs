@@ -27,7 +27,9 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use kvbm_common::{BlockLayoutMode, KvBlockLayout};
 use kvbm_physical::layout::LayoutTypeDetails;
-use kvbm_physical::manager::{SerializedLayout, canonical_shape_from_worker};
+use kvbm_physical::manager::{
+    SerializedLayout, canonical_shape_from_worker, select_transfer_canonical_layout,
+};
 use kvbm_protocols::control::layout_compat::{LayoutCompatPayload, check_layout_compat};
 
 use super::describe_map::to_layout_config_description;
@@ -76,14 +78,18 @@ pub fn build_layout_compat_payload_with_template(
     template: Option<&ParallelismTemplate>,
 ) -> Result<LayoutCompatPayload> {
     let unpacked = worker.unpack()?;
-    let first_layout = unpacked.layouts.first().ok_or_else(|| {
+    // c3: pick the transfer-canonical layout (G2 if present, else first).
+    // In Universal mode the connector pins G2 to KvBlockLayout::Universal,
+    // so peers must see G2's layout — not G1's operational layout — on the
+    // wire.
+    let canonical_layout = select_transfer_canonical_layout(&unpacked.layouts).ok_or_else(|| {
         anyhow!(
             "build_layout_compat_payload: worker {} exported no layouts",
             unpacked.worker_address.worker_id,
         )
     })?;
 
-    let kv_layout = kv_block_layout_of(&first_layout.layout.layout_type_details);
+    let kv_layout = kv_block_layout_of(&canonical_layout.layout.layout_type_details);
     if mode == BlockLayoutMode::Universal && matches!(kv_layout, KvBlockLayout::Unknown) {
         bail!(
             "build_layout_compat_payload: worker {} has KvBlockLayout::Unknown; \
@@ -123,7 +129,7 @@ pub fn build_layout_compat_payload_with_template(
         }
     };
 
-    let per_worker_config = to_layout_config_description(&first_layout.layout.layout_config);
+    let per_worker_config = to_layout_config_description(&canonical_layout.layout.layout_config);
 
     Ok(LayoutCompatPayload {
         mode,
@@ -225,16 +231,25 @@ fn kv_block_layout_of(details: &LayoutTypeDetails) -> KvBlockLayout {
 fn require_all_labeled(workers: &[SerializedLayout], side: &str) -> Result<()> {
     for (rank, w) in workers.iter().enumerate() {
         let unpacked = w.unpack()?;
-        let first = unpacked
-            .layouts
-            .first()
-            .ok_or_else(|| anyhow!("layout_compat: {side} rank {rank} exported no layouts"))?;
-        let kv = kv_block_layout_of(&first.layout.layout_type_details);
-        if matches!(kv, KvBlockLayout::Unknown) {
-            bail!(
-                "universal compat: {side} rank {rank} has KvBlockLayout::Unknown; \
-                 universal mode requires every axis to be labeled at registration"
-            );
+        if unpacked.layouts.is_empty() {
+            bail!("layout_compat: {side} rank {rank} exported no layouts");
+        }
+        // c3: walk **every** tier, not just the transfer-canonical one.
+        // The wire-reported layout (G2) is always `Universal` by
+        // construction in Universal mode (mode-dominant selection), so
+        // an Unknown G1 would slip through if we only checked G2 — and
+        // the fused permute kernel needs G1's labeled axis order
+        // (NHD vs HND) to permute correctly.
+        for layout in &unpacked.layouts {
+            let kv = kv_block_layout_of(&layout.layout.layout_type_details);
+            if matches!(kv, KvBlockLayout::Unknown) {
+                bail!(
+                    "universal compat: {side} rank {rank} tier {:?} has \
+                     KvBlockLayout::Unknown; universal mode requires every axis \
+                     of every tier to be labeled at registration",
+                    layout.logical_type
+                );
+            }
         }
     }
     Ok(())

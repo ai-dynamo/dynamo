@@ -262,6 +262,60 @@ impl SerializedLayout {
     }
 }
 
+/// Pick the layout that peers will transfer over (the "transfer-canonical"
+/// tier).
+///
+/// In `BlockLayoutMode::Universal` the connector emits G2 (and G3)
+/// with `KvBlockLayout::Universal` regardless of G1 (c3), so
+/// cross-leader compat checks must inspect G2's (or G3's) layout, not
+/// G1's. In `BlockLayoutMode::Operational` every tier inherits G1's
+/// layout, so picking G2 vs G3 vs first-layout is a no-op for the
+/// equality check.
+///
+/// Fallback chain (paired with [`select_transfer_canonical_tier`]):
+/// 1. G2 if present (normal mode).
+/// 2. G3 if present (bypass-host mode: `DYN_KVBM_DISK_CACHE_GB` set,
+///    `DYN_KVBM_CPU_CACHE_GB` unset — G2 is skipped and transfers go
+///    G1↔G3 directly via GDS).
+/// 3. First layout (degenerate: only G1 exists).
+///
+/// Returns `None` only when the layouts vec is empty.
+pub fn select_transfer_canonical_layout(
+    layouts: &[LogicalLayoutDescriptor],
+) -> Option<&LogicalLayoutDescriptor> {
+    use kvbm_common::LogicalLayoutHandle;
+    layouts
+        .iter()
+        .find(|l| l.logical_type == LogicalLayoutHandle::G2)
+        .or_else(|| {
+            layouts
+                .iter()
+                .find(|l| l.logical_type == LogicalLayoutHandle::G3)
+        })
+        .or_else(|| layouts.first())
+}
+
+/// Pick the tier that peers will transfer over (handle-level analogue of
+/// [`select_transfer_canonical_layout`]).
+///
+/// Same fallback chain — G2 → G3 → first — but operates on a slice of
+/// [`kvbm_common::LogicalLayoutHandle`] (just the tier list, no layout
+/// payload). Used by `validate_remote_metadata` to determine which
+/// tier must be present on every remote rank: hard-coding G2 there
+/// rejects legitimate bypass-host peers whose layout vec is
+/// `[G1, G3]`. Returns `None` only when the tier list is empty.
+pub fn select_transfer_canonical_tier(
+    tiers: &[kvbm_common::LogicalLayoutHandle],
+) -> Option<kvbm_common::LogicalLayoutHandle> {
+    use kvbm_common::LogicalLayoutHandle;
+    tiers
+        .iter()
+        .copied()
+        .find(|t| *t == LogicalLayoutHandle::G2)
+        .or_else(|| tiers.iter().copied().find(|t| *t == LogicalLayoutHandle::G3))
+        .or_else(|| tiers.first().copied())
+}
+
 impl std::fmt::Debug for SerializedLayout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SerializedLayout")
@@ -305,6 +359,134 @@ mod tests {
                 kv_block_layout: KvBlockLayout::OperationalNHD,
             }),
         }
+    }
+
+    /// Bypass-host mode (DYN_KVBM_DISK_CACHE_GB set, DYN_KVBM_CPU_CACHE_GB
+    /// unset) skips G2 allocation; the layouts vec is [G1, G3] only.
+    /// In Universal mode the connector pins G3 to KvBlockLayout::Universal
+    /// (mode-dominant selection, c3). The transfer-canonical helper must
+    /// pick G3 — picking G1 here would be the bug Codex caught at c3
+    /// stop-time review, where the wire payload would falsely report
+    /// G1's OperationalNHD layout instead of G3's Universal.
+    #[test]
+    fn select_transfer_canonical_prefers_g3_when_g2_absent() {
+        let make = |kv: KvBlockLayout| LayoutDescriptor {
+            version: 1,
+            layout_config: LayoutConfig::builder()
+                .num_blocks(2)
+                .num_layers(2)
+                .outer_dim(2)
+                .page_size(4)
+                .inner_dim(8)
+                .dtype_width_bytes(2)
+                .build()
+                .unwrap(),
+            location: StorageKind::System,
+            nixl_metadata: NixlMetadata::new("test".to_string(), nixl::MemType::Dram, 0),
+            memory_descriptors: vec![MemoryRegion {
+                addr: 0x1000,
+                size: 4096,
+            }],
+            layout_type_details: LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
+                block_format: BlockFormat::Operational,
+                kv_block_layout: kv,
+            }),
+        };
+        let layouts = vec![
+            LogicalLayoutDescriptor::new(
+                LayoutHandle::new(1, 0),
+                LogicalLayoutHandle::G1,
+                make(KvBlockLayout::OperationalNHD),
+            ),
+            LogicalLayoutDescriptor::new(
+                LayoutHandle::new(1, 1),
+                LogicalLayoutHandle::G3,
+                make(KvBlockLayout::Universal),
+            ),
+        ];
+
+        let picked = select_transfer_canonical_layout(&layouts)
+            .expect("non-empty layouts must yield a selection");
+        assert_eq!(
+            picked.logical_type,
+            LogicalLayoutHandle::G3,
+            "bypass-host: G2 absent so helper must fall back to G3, not G1",
+        );
+    }
+
+    /// Codex stop-time review (round 3): the validate_remote_metadata
+    /// site hard-coded `LogicalLayoutHandle::G2` as the required tier,
+    /// which rejects bypass-host peers whose tier list is [G1, G3].
+    /// The handle-level helper must mirror the layout-level fallback
+    /// (G2 → G3 → first) so the call site can pass the local leader's
+    /// actual transfer tier.
+    #[test]
+    fn select_transfer_canonical_tier_prefers_g3_when_g2_absent() {
+        use kvbm_common::LogicalLayoutHandle::{G1, G2, G3};
+        assert_eq!(
+            select_transfer_canonical_tier(&[G1, G2, G3]),
+            Some(G2),
+            "G2 wins when present",
+        );
+        assert_eq!(
+            select_transfer_canonical_tier(&[G1, G3]),
+            Some(G3),
+            "G3 is the bypass-host fallback when G2 is absent",
+        );
+        assert_eq!(
+            select_transfer_canonical_tier(&[G1]),
+            Some(G1),
+            "single-tier degenerate falls through to first",
+        );
+        assert_eq!(select_transfer_canonical_tier(&[]), None);
+    }
+
+    /// Normal mode: G1+G2+G3 all present, helper picks G2.
+    #[test]
+    fn select_transfer_canonical_prefers_g2_when_all_present() {
+        let make = |kv: KvBlockLayout| LayoutDescriptor {
+            version: 1,
+            layout_config: LayoutConfig::builder()
+                .num_blocks(2)
+                .num_layers(2)
+                .outer_dim(2)
+                .page_size(4)
+                .inner_dim(8)
+                .dtype_width_bytes(2)
+                .build()
+                .unwrap(),
+            location: StorageKind::System,
+            nixl_metadata: NixlMetadata::new("test".to_string(), nixl::MemType::Dram, 0),
+            memory_descriptors: vec![MemoryRegion {
+                addr: 0x1000,
+                size: 4096,
+            }],
+            layout_type_details: LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
+                block_format: BlockFormat::Operational,
+                kv_block_layout: kv,
+            }),
+        };
+        let layouts = vec![
+            LogicalLayoutDescriptor::new(
+                LayoutHandle::new(1, 0),
+                LogicalLayoutHandle::G1,
+                make(KvBlockLayout::OperationalNHD),
+            ),
+            LogicalLayoutDescriptor::new(
+                LayoutHandle::new(1, 1),
+                LogicalLayoutHandle::G2,
+                make(KvBlockLayout::Universal),
+            ),
+            LogicalLayoutDescriptor::new(
+                LayoutHandle::new(1, 2),
+                LogicalLayoutHandle::G3,
+                make(KvBlockLayout::Universal),
+            ),
+        ];
+
+        let picked = select_transfer_canonical_layout(&layouts)
+            .expect("non-empty layouts must yield a selection");
+        assert_eq!(picked.logical_type, LogicalLayoutHandle::G2);
     }
 
     #[test]

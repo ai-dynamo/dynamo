@@ -766,6 +766,50 @@ mod tests {
             .collect()
     }
 
+    /// Bypass-host tier layout: [G1, G3] (no G2 — G2 allocation is
+    /// skipped when DYN_KVBM_DISK_CACHE_GB is set and
+    /// DYN_KVBM_CPU_CACHE_GB is unset).
+    fn bypass_host_tiers_for(n_ranks: usize) -> Vec<Vec<LogicalLayoutHandle>> {
+        (0..n_ranks)
+            .map(|_| vec![LogicalLayoutHandle::G1, LogicalLayoutHandle::G3])
+            .collect()
+    }
+
+    /// Forward-looking semantic guard: `validate_remote_metadata`
+    /// itself is tier-agnostic — callers can pass `G3` and a
+    /// bypass-host remote with `[G1, G3]` will be accepted at this
+    /// layer. The connect_remote call site in `worker::group::spmd`
+    /// still hard-codes `required_tier = G2` because the downstream
+    /// RDMA pull also hard-requires G2; both must change together to
+    /// enable bypass-host Universal imports end-to-end (c3 follow-on).
+    /// This test pins the function's flexibility so the eventual
+    /// caller change doesn't fight an unexpected gate behaviour.
+    #[test]
+    fn compat_accepts_bypass_host_remote_with_g3_required_tier() {
+        let local = local_template_tp(2);
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        let tiers = bypass_host_tiers_for(2);
+        validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G3)
+            .expect("bypass-host remote (G1+G3) must be accepted when required_tier=G3");
+    }
+
+    /// Forward regression: with required_tier=G2, a bypass-host remote
+    /// still rejects (because no G2). This pins the existing semantic so
+    /// the fix at the call site is the only behavioural change.
+    #[test]
+    fn compat_rejects_bypass_host_remote_when_required_tier_is_g2() {
+        let local = local_template_tp(2);
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        let tiers = bypass_host_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(
+            matches!(err, CompatError::MissingLogicalTier { tier: LogicalLayoutHandle::G2, .. }),
+            "bypass-host remote must reject when required_tier=G2 (no G2 present); got: {err:?}",
+        );
+    }
+
     fn tier_refs<'a>(t: &'a [Vec<LogicalLayoutHandle>]) -> Vec<&'a [LogicalLayoutHandle]> {
         t.iter().map(|v| v.as_slice()).collect()
     }

@@ -367,6 +367,139 @@ fn build_unstamped_worker(
     .unwrap()
 }
 
+/// Build a stamped worker that exports both G1 (operational) and G2
+/// (universal) — the post-c3 connector layout. Used to assert the
+/// payload picks G2's KvBlockLayout (the transfer-canonical tier),
+/// not G1's.
+fn build_g1_g2_worker(
+    recipe: CanonicalRecipe,
+    g1_kv_layout: KvBlockLayout,
+    g2_kv_layout: KvBlockLayout,
+    worker_id: u64,
+) -> SerializedLayout {
+    let cfg = LayoutConfig::builder()
+        .num_blocks(4)
+        .num_layers(recipe.num_layers_total)
+        .outer_dim(recipe.outer_dim)
+        .page_size(recipe.page_size)
+        .inner_dim(recipe.num_heads_total * recipe.head_dim)
+        .dtype_width_bytes(recipe.dtype_width_bytes)
+        .num_heads(Some(recipe.num_heads_total))
+        .build()
+        .unwrap();
+
+    let make_descriptor = |kv: KvBlockLayout| LayoutDescriptor {
+        version: LayoutDescriptor::CURRENT_VERSION,
+        layout_config: cfg.clone(),
+        location: StorageKind::System,
+        nixl_metadata: NixlMetadata::new(format!("agent-{worker_id}"), MemType::Dram, 0),
+        memory_descriptors: vec![],
+        layout_type_details: LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
+            block_format: BlockFormat::Operational,
+            kv_block_layout: kv,
+        }),
+    };
+
+    let g1 = LogicalLayoutDescriptor::new(
+        LayoutHandle::new(worker_id, 0),
+        LogicalLayoutHandle::G1,
+        make_descriptor(g1_kv_layout),
+    );
+    let g2 = LogicalLayoutDescriptor::new(
+        LayoutHandle::new(worker_id, 1),
+        LogicalLayoutHandle::G2,
+        make_descriptor(g2_kv_layout),
+    );
+
+    SerializedLayout::pack(
+        WorkerAddress::new(worker_id, format!("agent-{worker_id}")),
+        Vec::new(),
+        vec![g1, g2],
+        Some(ParallelismDescriptor {
+            tp_size: 1,
+            pp_size: 1,
+            rank: 0,
+            shard_axis: KvDim::HeadCount,
+            global_extents: vec![
+                (KvDim::Layer, recipe.num_layers_total),
+                (KvDim::HeadCount, recipe.num_heads_total),
+            ],
+            layer_ownership: 0..recipe.num_layers_total,
+        }),
+    )
+    .unwrap()
+}
+
+/// c3 reproducer: when the connector emits both G1 (operational) and
+/// G2 (universal) layouts, the layout_compat payload must report G2's
+/// layout (the transfer-canonical tier), not G1's. Pre-c3 the builder
+/// picks `first_layout` which is G1 (registered first), so the
+/// per_worker_layout falsely shows OperationalNHD instead of Universal.
+#[test]
+fn layout_compat_payload_reports_g2_layout_in_universal_mode() {
+    let recipe = CanonicalRecipe::default();
+    let worker = build_g1_g2_worker(
+        recipe,
+        KvBlockLayout::OperationalNHD,
+        KvBlockLayout::Universal,
+        7,
+    );
+
+    let payload = kvbm_engine::leader::layout_compat::build_layout_compat_payload(
+        BlockLayoutMode::Universal,
+        &worker,
+    )
+    .expect("worker carries both G1 and G2; universal payload should succeed");
+
+    assert_eq!(
+        payload.per_worker_layout,
+        KvBlockLayout::Universal,
+        "Universal-mode payload must report G2's layout (transfer-canonical), \
+         not G1's; got {:?}",
+        payload.per_worker_layout
+    );
+}
+
+/// c3 stop-time review (Codex): the transfer-canonical helper picks G2
+/// for *wire reporting*, but the Universal-mode label gate must walk
+/// every tier — otherwise a vLLM probe failure that leaves G1 as
+/// `KvBlockLayout::Unknown` slips through because G2 is always
+/// `Universal` by construction in Universal mode. The fused permute
+/// kernel needs to know G1's actual axis order (NHD vs HND); an
+/// Unknown G1 would crash or produce garbage at transfer time.
+#[test]
+fn universal_check_rejects_unknown_g1_even_when_g2_universal() {
+    let recipe = CanonicalRecipe::default();
+    let local = build_g1_g2_worker(
+        recipe,
+        KvBlockLayout::OperationalNHD,
+        KvBlockLayout::Universal,
+        100,
+    );
+    let remote = build_g1_g2_worker(
+        recipe,
+        KvBlockLayout::Unknown, // ← the smuggled-through bug
+        KvBlockLayout::Universal,
+        200,
+    );
+
+    let err = check_import_compat(
+        BlockLayoutMode::Universal,
+        std::slice::from_ref(&local),
+        std::slice::from_ref(&remote),
+        None,
+    )
+    .expect_err(
+        "Universal mode must reject a peer whose G1 is Unknown even when \
+         G2 is Universal — the permute kernel needs G1's labeled axis order",
+    );
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("unknown") || msg.contains("labeled"),
+        "rejection should name the Unknown layout; got: {err}",
+    );
+}
+
 #[test]
 fn template_satisfies_universal_when_metadata_unstamped() {
     let recipe = CanonicalRecipe::default();

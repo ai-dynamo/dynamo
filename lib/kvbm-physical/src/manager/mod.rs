@@ -13,7 +13,7 @@ pub use canonical::canonical_shape_from_worker;
 pub use handle::LayoutHandle;
 pub use metadata::{
     LogicalLayoutDescriptor, ParallelismDescriptor, RdmaLayoutDescriptors, SerializedLayout,
-    WorkerAddress,
+    WorkerAddress, select_transfer_canonical_layout, select_transfer_canonical_tier,
 };
 
 pub(crate) use local::LocalLayout;

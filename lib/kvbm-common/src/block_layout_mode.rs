@@ -37,6 +37,14 @@
 //! would reconstruct by re-collecting every worker's slice along its
 //! sharded axis (heads for TP, layers for PP).
 //!
+//! **Mode-dominant G2 selection (c3).** Under Universal the connector
+//! pins G2 (and G3) to [`KvBlockLayout::Universal`] regardless of G1.
+//! G1 stays in the engine's operational layout (`OperationalNHD` /
+//! `OperationalHND`); G1↔G2 transfers dispatch the fused permute
+//! kernel from the kvbm-kernels catalog. Cross-leader transfers all
+//! see the canonical Universal layout on the wire — peers' G2's are
+//! agreed up front, even when their G1's diverge.
+//!
 //! ### Startup precondition (Universal only)
 //!
 //! Every local worker's [`KvBlockLayout`] must be *labeled* — i.e. not

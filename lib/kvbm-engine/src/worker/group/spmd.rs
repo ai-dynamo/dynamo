@@ -368,6 +368,15 @@ impl WorkerTransfers for SpmdParallelWorkers {
                     .collect();
                 let tier_refs: Vec<&[LogicalLayoutHandle]> =
                     tier_lists.iter().map(|v| v.as_slice()).collect();
+                // The required_tier stays hard-coded to G2: the downstream
+                // RDMA pull path also hard-requires G2 today, so accepting
+                // a non-G2 peer here would swap a loud gate rejection for
+                // a later runtime crash. The bypass-host Universal combo
+                // (local + remote both [G1, G3]) is documented as
+                // unsupported in the c3 plan and continues to fail at the
+                // gate. select_transfer_canonical_tier exists alongside
+                // for the future caller that drops the G2 dependency in
+                // both gate and pull paths together.
                 validate_remote_metadata(
                     template,
                     &descriptors,
@@ -736,23 +745,31 @@ fn require_universal_remote_labels(metadata: &[SerializedLayout]) -> Result<()> 
         let unpacked = w.unpack().with_context(|| {
             format!("universal compat: failed to unpack remote rank {rank} for label check")
         })?;
-        let Some(layout) = unpacked.layouts.first() else {
+        if unpacked.layouts.is_empty() {
             // A rank with no layouts is treated as Unknown — universal
             // mode cannot reason about an empty payload.
             anyhow::bail!(
                 "universal compat: remote rank {rank} exported no layouts; \
                  universal mode requires every rank to carry a labeled KvBlockLayout"
             );
-        };
-        let kv = match &layout.layout.layout_type_details {
-            LayoutTypeDetails::FullyContiguous(d) => d.kv_block_layout,
-            LayoutTypeDetails::LayerSeparate(d) => d.kv_block_layout,
-        };
-        if matches!(kv, KvBlockLayout::Unknown) {
-            anyhow::bail!(
-                "universal compat: remote rank {rank} has KvBlockLayout::Unknown; \
-                 universal mode requires every axis to be labeled"
-            );
+        }
+        // c3: walk **every** tier, not just the transfer-canonical one
+        // (which is always `Universal` by construction in Universal mode).
+        // The permute kernel needs G1's labeled axis order to convert
+        // between G1's operational layout and G2's Universal layout.
+        for layout in &unpacked.layouts {
+            let kv = match &layout.layout.layout_type_details {
+                LayoutTypeDetails::FullyContiguous(d) => d.kv_block_layout,
+                LayoutTypeDetails::LayerSeparate(d) => d.kv_block_layout,
+            };
+            if matches!(kv, KvBlockLayout::Unknown) {
+                anyhow::bail!(
+                    "universal compat: remote rank {rank} tier {:?} has \
+                     KvBlockLayout::Unknown; universal mode requires every \
+                     axis of every tier to be labeled",
+                    layout.logical_type
+                );
+            }
         }
     }
     Ok(())

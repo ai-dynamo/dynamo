@@ -14,16 +14,21 @@
 use anyhow::{Result, anyhow, bail};
 use kvbm_common::{CanonicalBlockShape, KvBlockLayout, KvDim};
 
-use super::metadata::SerializedLayout;
+use super::metadata::{SerializedLayout, select_transfer_canonical_layout};
 use crate::layout::LayoutTypeDetails;
 
 /// Build the canonical descriptor from one worker's [`SerializedLayout`].
 ///
 /// Any one worker is sufficient because `global_extents` is leader-wide
 /// (every worker in a leader carries the same pre-shard extents). The
-/// function picks the first layout in the worker's `layouts` vec — all
-/// of a worker's layouts share the same shape parameters; only the
-/// tier / location varies.
+/// function picks the transfer-canonical layout via
+/// [`select_transfer_canonical_layout`] (G2 → G3 → first) — all of a
+/// worker's layouts share the same shape parameters, but the
+/// `KvBlockLayout` guard is more accurate against the tier that peers
+/// will actually transfer over (G2 normally, G3 in bypass-host mode
+/// where G2 is skipped).
+///
+/// [`select_transfer_canonical_layout`]: super::metadata::select_transfer_canonical_layout
 ///
 /// # Errors
 ///
@@ -49,14 +54,19 @@ pub fn canonical_shape_from_worker(layout: &SerializedLayout) -> Result<Canonica
         )
     })?;
 
-    let first_layout = unpacked.layouts.first().ok_or_else(|| {
-        anyhow!(
-            "canonical_shape_from_worker: worker {} exported no layouts",
-            unpacked.worker_address.worker_id,
-        )
-    })?;
+    // c3: pick the transfer-canonical layout (G2 if present, else first).
+    // The shape parameters in `layout_config` (num_layers, num_heads, etc.)
+    // are identical across tiers, but the KvBlockLayout guard is more
+    // accurate against the transfer-canonical tier (G2 in Universal mode).
+    let canonical_layout =
+        select_transfer_canonical_layout(&unpacked.layouts).ok_or_else(|| {
+            anyhow!(
+                "canonical_shape_from_worker: worker {} exported no layouts",
+                unpacked.worker_address.worker_id,
+            )
+        })?;
 
-    let kv_block_layout = match &first_layout.layout.layout_type_details {
+    let kv_block_layout = match &canonical_layout.layout.layout_type_details {
         LayoutTypeDetails::FullyContiguous(d) => d.kv_block_layout,
         LayoutTypeDetails::LayerSeparate(d) => d.kv_block_layout,
     };
@@ -69,7 +79,7 @@ pub fn canonical_shape_from_worker(layout: &SerializedLayout) -> Result<Canonica
         );
     }
 
-    let cfg = &first_layout.layout.layout_config;
+    let cfg = &canonical_layout.layout.layout_config;
 
     let num_layers_total =
         extent_of(&parallelism.global_extents, KvDim::Layer).ok_or_else(|| {
