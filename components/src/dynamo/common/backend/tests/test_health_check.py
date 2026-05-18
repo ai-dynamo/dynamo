@@ -58,16 +58,17 @@ def test_env_override_empty_dict_wins_over_engine_default(monkeypatch):
     assert payload == {HEALTH_CHECK_KEY: True}
 
 
-def test_bos_token_id_or_walks_tokenizer_chain():
+def test_bos_token_id_or_accepts_direct_and_wrapped_tokenizers():
     class HFTok:
         bos_token_id = 7
 
     class Wrapper:
         tokenizer = HFTok()
 
+    assert bos_token_id_or(HFTok()) == 7
     assert bos_token_id_or(Wrapper()) == 7
     assert bos_token_id_or(None) == 1
-    assert bos_token_id_or(object(), default=5) == 5  # no inner tokenizer
+    assert bos_token_id_or(object(), default=5) == 5
 
 
 @pytest.mark.parametrize(

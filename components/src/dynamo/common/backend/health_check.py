@@ -63,10 +63,12 @@ def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def bos_token_id_or(tokenizer: Any, default: int = 1) -> int:
-    """Walk ``tokenizer.tokenizer.bos_token_id``; return ``default`` if missing.
-    Callers pass the backend-specific outer wrapper around the HF tokenizer."""
-    inner = getattr(tokenizer, "tokenizer", None)
-    bos = getattr(inner, "bos_token_id", None)
+    """Read ``bos_token_id`` from a direct HF tokenizer or a wrapper that
+    exposes it under ``.tokenizer``; return ``default`` if neither has it."""
+    bos = getattr(tokenizer, "bos_token_id", None)
+    if bos is None:
+        inner = getattr(tokenizer, "tokenizer", None)
+        bos = getattr(inner, "bos_token_id", None)
     return int(bos) if bos is not None else default
 
 

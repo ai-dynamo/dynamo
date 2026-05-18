@@ -22,6 +22,7 @@ import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
@@ -620,13 +621,6 @@ class SglangLLMEngine(LLMEngine):
         # FAKE_BOOTSTRAP_HOST tells SGLang to short-circuit real KV transfer;
         # room=0 always routes to DP rank 0.
         if self.serving_mode in (DisaggregationMode.PREFILL, DisaggregationMode.DECODE):
-            try:
-                from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
-            except ImportError:
-                logger.warning(
-                    "FAKE_BOOTSTRAP_HOST unavailable; disabling disagg canary"
-                )
-                return None
             bootstrap_port = (
                 getattr(self.server_args, "disaggregation_bootstrap_port", None) or 0
             )

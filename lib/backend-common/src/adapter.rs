@@ -84,6 +84,13 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         let mut inner_stream = typed_out;
         let mapped = async_stream::stream! {
             while let Some(ann) = inner_stream.next().await {
+                // HealthCheckManager only inspects `response.err()`; a chunk with
+                // `FinishReason::Error` would otherwise serialize as healthy data
+                // and mark the endpoint Ready on an engine failure.
+                if let Some(err) = ann.data.as_ref().and_then(|chunk| chunk.err()) {
+                    yield Annotated::<serde_json::Value>::from_err(err);
+                    continue;
+                }
                 yield ann.map_data(|chunk| serde_json::to_value(&chunk).map_err(|e| e.to_string()));
             }
         };
@@ -689,6 +696,34 @@ mod tests {
 
         release.notify_one();
         while stream.next().await.is_some() {}
+    }
+
+    /// Engine `FinishReason::Error` terminals must surface through the probe
+    /// adapter as `Annotated::error` so `HealthCheckManager::response.err()`
+    /// detects them; otherwise the canary marks the endpoint Ready on a
+    /// failed run.
+    #[tokio::test]
+    async fn probe_surfaces_engine_error_terminal_as_annotated_error() {
+        let (engine, _) = MockEngine::new(vec![LLMEngineOutput::error("boom".to_string())]);
+        let inner = Arc::new(EngineAdapter::new(engine, DisaggregationMode::Aggregated));
+        let probe = JsonProbeAdapter::new(inner);
+
+        let payload = serde_json::json!({"token_ids": [1], "_HEALTH_CHECK": true});
+        let stream = probe.generate(Context::new(payload)).await.unwrap();
+        let collected: Vec<_> = stream.collect().await;
+
+        assert_eq!(collected.len(), 1);
+        assert!(
+            collected[0].is_error(),
+            "error terminal must surface as Annotated::error"
+        );
+        assert!(
+            collected[0]
+                .err()
+                .expect("typed err")
+                .to_string()
+                .contains("boom")
+        );
     }
 
     /// Stream drop before first-token must NOT fire abort. The monitor's
