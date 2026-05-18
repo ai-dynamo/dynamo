@@ -326,9 +326,11 @@ def _patch_openresponses_suite(install_dir: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.sglang
+@pytest.mark.core
 @pytest.mark.gpu_0
 @pytest.mark.pre_merge
 def test_patch_openresponses_suite_adds_output_cap(tmp_path):
+    """Assert the OpenResponses harness patch injects a deterministic output cap."""
     source = tmp_path / "src" / "lib" / "compliance-tests.ts"
     source.parent.mkdir(parents=True)
     source.write_text(
