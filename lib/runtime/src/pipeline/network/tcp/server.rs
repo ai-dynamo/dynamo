@@ -547,7 +547,9 @@ async fn tcp_listener(
 
         // branch here to handle sender stream or receiver stream
         match handshake.stream_type {
-            StreamType::Request => process_request_stream().await,
+            StreamType::Request => {
+                process_request_stream(handshake.subject, state, framed_reader, framed_writer).await
+            }
             StreamType::Response => {
                 process_response_stream(handshake.subject, state, framed_reader, framed_writer)
                     .await
@@ -555,8 +557,178 @@ async fn tcp_listener(
         }
     }
 
-    async fn process_request_stream() -> Result<()> {
+    /// Symmetric to [`process_response_stream`] for the upstream→downstream
+    /// data direction: deliver the [`StreamSender`] half registered by the
+    /// upstream to whoever awaits it, then pump every frame the upstream pushes
+    /// into the now-connected TCP socket and pump any control message coming
+    /// back from the downstream side into the engine context.
+    async fn process_request_stream(
+        subject: String,
+        state: Arc<Mutex<State>>,
+        reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+    ) -> Result<()> {
+        let request_stream = {
+            let mut guard = state.lock().await;
+            guard.tx_subjects.remove(&subject).ok_or(error!(
+                "Subject not found: {}; downstream subscriber specified a subject unknown to the upstream publisher",
+                subject
+            ))?
+        };
+
+        let RequestedSendConnection {
+            context,
+            connection,
+        } = request_stream;
+
+        // Buffer size matches `process_response_stream`. See the corresponding
+        // TODO there — both should be driven by `StreamOptions::send_buffer_count`.
+        let (request_tx, request_rx) = mpsc::channel(64);
+
+        if connection
+            .send(Ok(crate::pipeline::network::StreamSender {
+                tx: request_tx,
+                // Request streams don't carry a downstream-prologue today; the
+                // upstream may begin sending immediately.
+                prologue: None,
+            }))
+            .is_err()
+        {
+            return Err(error!(
+                "The requester of the request stream has been dropped before the connection was established"
+            ));
+        }
+
+        let send_task = tokio::spawn(request_stream_send_handler(
+            writer,
+            request_rx,
+            context.clone(),
+        ));
+        let recv_task = tokio::spawn(request_stream_recv_handler(reader, context));
+
+        let (send_result, recv_result) = tokio::join!(send_task, recv_task);
+        send_result?;
+        recv_result?;
+
         Ok(())
+    }
+
+    /// Pump frames the upstream queued on its `StreamSender` into the TCP socket.
+    /// On clean closure (the upstream drops the sender → `request_rx` returns
+    /// `None`), write a `ControlMessage::Sentinel` so the downstream
+    /// `handle_request_reader` exits its loop cleanly.
+    async fn request_stream_send_handler(
+        mut framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        mut request_rx: mpsc::Receiver<TwoPartMessage>,
+        context: Arc<dyn AsyncEngineContext>,
+    ) {
+        let mut send_sentinel = true;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = context.killed() => {
+                    tracing::trace!("context kill received in request-stream send handler");
+                    send_sentinel = false;
+                    break;
+                }
+
+                msg = request_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            if let Err(e) = framed_writer.send(msg).await {
+                                tracing::trace!(
+                                    "failed to send request-stream frame to downstream: {:?}",
+                                    e
+                                );
+                                send_sentinel = false;
+                                break;
+                            }
+                        }
+                        None => {
+                            tracing::trace!("upstream request-stream sender closed; sending sentinel");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if send_sentinel && let Ok(bytes) = serde_json::to_vec(&ControlMessage::Sentinel) {
+            let _ = framed_writer
+                .send(TwoPartMessage::from_header(bytes.into()))
+                .await;
+        }
+
+        let mut inner = framed_writer.into_inner();
+        let _ = inner.flush().await;
+        let _ = inner.shutdown().await;
+    }
+
+    /// Read the downstream's control messages. Today the only expected message
+    /// is `ControlMessage::Sentinel` — the downstream acknowledging it has
+    /// finished consuming the request stream. Stop / Kill from the downstream
+    /// side aren't reachable in current flows (the downstream is the consumer,
+    /// not the cancel-initiator) but are handled defensively in case a future
+    /// caller wires that direction.
+    async fn request_stream_recv_handler(
+        mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        context: Arc<dyn AsyncEngineContext>,
+    ) {
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = context.killed() => {
+                    tracing::trace!("context kill received in request-stream recv handler");
+                    break;
+                }
+
+                msg = framed_reader.next() => {
+                    match msg {
+                        Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
+                            TwoPartMessageType::HeaderOnly(header) => {
+                                match serde_json::from_slice::<ControlMessage>(&header) {
+                                    Ok(ControlMessage::Sentinel) => {
+                                        tracing::trace!("downstream acknowledged request-stream close");
+                                        break;
+                                    }
+                                    Ok(ControlMessage::Stop) => context.stop(),
+                                    Ok(ControlMessage::Kill) => {
+                                        context.kill();
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "invalid control message on request-stream recv: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => {
+                                tracing::error!(
+                                    "unexpected non-control frame on request-stream recv direction"
+                                );
+                                break;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                "decode error on request-stream recv handler: {e:?}"
+                            );
+                            break;
+                        }
+                        None => {
+                            tracing::trace!("request-stream recv socket closed by downstream");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     async fn process_response_stream(

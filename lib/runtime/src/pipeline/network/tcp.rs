@@ -94,6 +94,66 @@ mod tests {
         foo: String,
     }
 
+    /// Round-trip a request-stream connection: register on the server with
+    /// `enable_request_stream(true)`, dial in via `TcpClient::create_request_stream`,
+    /// send a frame from the upstream `StreamSender`, and assert it arrives on the
+    /// downstream `StreamReceiver` returned by the client.
+    #[tokio::test]
+    async fn test_tcp_stream_request_stream_client_server() {
+        let options = server::ServerOptions::default();
+        let server = server::TcpStreamServer::new(options).await.unwrap();
+
+        let context_upstream = Context::new(());
+
+        let options = StreamOptions::builder()
+            .context(context_upstream.context())
+            .enable_request_stream(true)
+            .enable_response_stream(false)
+            .build()
+            .unwrap();
+
+        let pending_connection = server.register(options).await;
+
+        let connection_info = pending_connection
+            .send_stream
+            .as_ref()
+            .unwrap()
+            .connection_info
+            .clone();
+
+        // Set up the downstream side with the same context id so the handshake
+        // validation in `create_request_stream` accepts the connection info.
+        let context_downstream = Context::with_id((), context_upstream.id().to_string());
+
+        let mut recv_stream = client::TcpClient::create_request_stream(
+            context_downstream.context(),
+            connection_info,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Now the upstream side can pick up its `StreamSender` half.
+        let (_conn_info, stream_provider) = pending_connection.send_stream.unwrap().into_parts();
+        let send_stream = stream_provider.await.unwrap().unwrap();
+
+        let msg = TestMessage {
+            foo: "request-frame".to_string(),
+        };
+        let payload = serde_json::to_vec(&msg).unwrap();
+
+        send_stream.send(payload.into()).await.unwrap();
+
+        let data = recv_stream.rx.recv().await.unwrap();
+        let recv_msg = serde_json::from_slice::<TestMessage>(&data).unwrap();
+        assert_eq!(msg.foo, recv_msg.foo);
+
+        // Dropping the upstream `StreamSender` should cleanly close the request
+        // stream — the downstream receiver should observe `None`.
+        drop(send_stream);
+        assert!(recv_stream.rx.recv().await.is_none());
+    }
+
     #[tokio::test]
     async fn test_tcp_stream_client_server() {
         println!("Test Started");

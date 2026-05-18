@@ -17,8 +17,8 @@ use prometheus::IntCounter;
 use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::network::{
-    ConnectionInfo, ResponseStreamPrologue, StreamSender,
-    codec::{TwoPartCodec, TwoPartMessage},
+    ConnectionInfo, ResponseStreamPrologue, StreamReceiver, StreamSender,
+    codec::{TwoPartCodec, TwoPartMessage, TwoPartMessageType},
     tcp::StreamType,
 };
 use anyhow::{Context, Result, anyhow as error}; // Import SinkExt to use the `send` method
@@ -168,6 +168,162 @@ impl TcpClient {
 
         Ok(stream_sender)
     }
+
+    /// Symmetric to [`Self::create_response_stream`] for the request-stream half:
+    /// dial the upstream TCP server with `StreamType::Request`, then return a
+    /// [`StreamReceiver`] that yields the data frames the upstream pushes down.
+    /// The spawned reader task forwards `TwoPartMessage::DataOnly` payloads into
+    /// the channel and translates `ControlMessage::Stop` / `Kill` into context
+    /// cancellation. `ControlMessage::Sentinel` (or TCP close) terminates the
+    /// task cleanly. On exit the task sends `ControlMessage::Sentinel` back to
+    /// the upstream so the server-side `process_request_stream` can drain and
+    /// close its socket gracefully.
+    pub async fn create_request_stream(
+        context: Arc<dyn AsyncEngineContext>,
+        info: ConnectionInfo,
+        cancellation_counter: Option<IntCounter>,
+    ) -> Result<StreamReceiver> {
+        let info =
+            TcpStreamConnectionInfo::try_from(info).context("tcp-stream-connection-info-error")?;
+        tracing::trace!("Creating request stream for {:?}", info);
+
+        if info.stream_type != StreamType::Request {
+            return Err(error!(
+                "Invalid stream type; TcpClient::create_request_stream requires the stream type to be `request`; however {:?} was passed",
+                info.stream_type
+            ));
+        }
+
+        if info.context != context.id() {
+            return Err(error!(
+                "Invalid context; TcpClient::create_request_stream requires the context to be {:?}; however {:?} was passed",
+                context.id(),
+                info.context
+            ));
+        }
+
+        let stream = TcpClient::connect(&info.address).await?;
+        let (read_half, write_half) = tokio::io::split(stream);
+
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = CallHomeHandshake {
+            subject: info.subject.clone(),
+            stream_type: StreamType::Request,
+        };
+        let handshake_bytes = serde_json::to_vec(&handshake).map_err(|err| {
+            error!(
+                "create_request_stream: Error converting CallHomeHandshake to JSON array: {err:#}"
+            )
+        })?;
+        framed_writer
+            .send(TwoPartMessage::from_header(handshake_bytes.into()))
+            .await
+            .map_err(|e| error!("failed to send request-stream handshake: {:?}", e))?;
+
+        let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
+
+        tokio::spawn(handle_request_reader(
+            framed_reader,
+            framed_writer,
+            bytes_tx,
+            context,
+            cancellation_counter,
+        ));
+
+        Ok(StreamReceiver { rx: bytes_rx })
+    }
+}
+
+async fn handle_request_reader(
+    mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+    mut framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+    bytes_tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    context: Arc<dyn AsyncEngineContext>,
+    cancellation_counter: Option<IntCounter>,
+) {
+    let mut cancellation_counted = false;
+    let mut send_sentinel = true;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            _ = context.killed() => {
+                tracing::trace!("context kill signal received on request stream; shutting down");
+                send_sentinel = false;
+                break;
+            }
+
+            msg = framed_reader.next() => {
+                match msg {
+                    Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
+                        TwoPartMessageType::HeaderOnly(header) => {
+                            let ctrl = match serde_json::from_slice::<ControlMessage>(&header) {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    // TODO(#171) - address fatal errors
+                                    panic!("fatal error - invalid control message on request stream");
+                                }
+                            };
+                            match ctrl {
+                                ControlMessage::Stop => {
+                                    if let Some(counter) = &cancellation_counter && !cancellation_counted {
+                                        counter.inc();
+                                        cancellation_counted = true;
+                                    }
+                                    context.stop();
+                                }
+                                ControlMessage::Kill => {
+                                    if let Some(counter) = &cancellation_counter
+                                        && !cancellation_counted
+                                    {
+                                        counter.inc();
+                                    }
+                                    context.kill();
+                                    send_sentinel = false;
+                                    break;
+                                }
+                                ControlMessage::Sentinel => {
+                                    tracing::trace!("upstream signaled end of request stream");
+                                    break;
+                                }
+                            }
+                        }
+                        TwoPartMessageType::DataOnly(data) => {
+                            if bytes_tx.send(data).await.is_err() {
+                                tracing::debug!("downstream consumer dropped; exiting request-stream reader");
+                                break;
+                            }
+                        }
+                        _ => {
+                            // TODO(#171) - address fatal errors
+                            panic!("fatal error - unexpected message shape on request stream");
+                        }
+                    }
+                    Some(Err(e)) => {
+                        // TODO(#171) - address fatal errors
+                        panic!("fatal error - failed to decode message on request stream: {e:?}");
+                    }
+                    None => {
+                        tracing::debug!("request stream closed by upstream");
+                        send_sentinel = false;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if send_sentinel && let Ok(bytes) = serde_json::to_vec(&ControlMessage::Sentinel) {
+        let _ = framed_writer
+            .send(TwoPartMessage::from_header(bytes.into()))
+            .await;
+    }
+    // Dropping bytes_tx closes the receiver side, signaling end-of-stream to the
+    // engine consumer.
+    drop(bytes_tx);
 }
 
 async fn wait_for_connection_tasks(
