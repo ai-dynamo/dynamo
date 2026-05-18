@@ -390,6 +390,35 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
     transport_engine: Arc<dyn AsyncTransportEngine<Req, Resp>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{RequestControlMessage, RequestType, ResponseType};
+
+    #[test]
+    fn request_control_message_defaults_missing_metadata() {
+        let json = r#"{
+            "id": "request-123",
+            "request_type": "single_in",
+            "response_type": "many_out",
+            "connection_info": {
+                "transport": "tcp",
+                "info": "{}"
+            }
+        }"#;
+
+        let message: RequestControlMessage =
+            serde_json::from_str(json).expect("control message should deserialize");
+
+        assert_eq!(message.id, "request-123");
+        assert!(matches!(message.request_type, RequestType::SingleIn));
+        assert!(matches!(message.response_type, ResponseType::ManyOut));
+        assert_eq!(message.connection_info.transport, "tcp");
+        assert_eq!(message.connection_info.info, "{}");
+        assert!(message.metadata.is_empty());
+        assert!(message.frontend_send_ts_ns.is_none());
+    }
+}
+
 #[async_trait]
 impl<T: Data, U: Data> AsyncEngine<SingleIn<T>, ManyOut<U>, Error>
     for Egress<SingleIn<T>, ManyOut<U>>
