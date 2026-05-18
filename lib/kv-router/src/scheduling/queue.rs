@@ -50,11 +50,19 @@ fn read_overlap_refresh_after() -> Option<Duration> {
             return Some(default_overlap_refresh_after());
         }
     };
-    if parsed <= 0.0 {
+    if !parsed.is_finite() {
+        tracing::warn!(
+            value = %raw,
+            "non-finite DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS, disabling overlap refresh"
+        );
         return None;
     }
-    // try_from_secs_f64 rejects NaN, negatives, and values that don't fit in u64 seconds,
-    // so an env value like 1e100 disables the refresh instead of panicking in Duration::from_secs_f64.
+    if parsed <= 0.0 {
+        // Explicit disable (e.g. `0` or a negative value).
+        return None;
+    }
+    // try_from_secs_f64 also rejects values that don't fit in u64 seconds, so an env value
+    // like 1e100 disables the refresh instead of panicking in Duration::from_secs_f64.
     match Duration::try_from_secs_f64(parsed) {
         Ok(d) => Some(d),
         Err(err) => {
@@ -245,11 +253,15 @@ impl<
         let decay_now = Instant::now();
 
         let Some(threshold) = self.threshold_frac else {
+            // Queueing disabled — the request dispatches immediately and never sits in the
+            // pending heap, so `block_hashes` would never be consulted. Drop them on the floor.
             self.admit_one(request, decay_now).await;
             return;
         };
 
         if eligibility.bypasses_capacity_check() {
+            // Bypasses the capacity check (external routing) — admitted without ever queueing,
+            // so `block_hashes` are intentionally discarded.
             self.admit_one(request, decay_now).await;
             return;
         }
@@ -273,6 +285,8 @@ impl<
             self.pending_isl_tokens
                 .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
         } else {
+            // Workers have capacity — admit without queueing. `block_hashes` are intentionally
+            // discarded; refresh is only meaningful for requests that actually wait.
             self.admit_one(request, decay_now).await;
         }
     }
