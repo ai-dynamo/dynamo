@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# aiperf benchmark job for the EFA disagg recipe.
+# Workload shape (ISL=1k, OSL=8k, concurrency=512) is the same as the non-EFA
+# recipe's perf.yaml so EFA vs non-EFA numbers can be compared directly.
+# Pod shape follows the working pattern used by other benchmarked recipes
+# (deepseek-r1/gb200, llama-3-70b, deepseek-v32-fp4): python:3.12-slim image,
+# privileged container so apt-get and pip install work, model-cache PVC for
+# tokenizer + artifact output.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: glm5-disagg-efa-bench
+  namespace: <your-namespace>
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: glm5-disagg-efa-bench
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+      - name: nvcrimagepullsecret
+      containers:
+      - name: perf
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        env:
+        - name: TARGET_MODEL
+          value: nvidia/GLM-5-NVFP4
+        - name: ENDPOINT
+          value: glm5-sglang-efa-frontend:8000
+        - name: ISL
+          value: "1000"
+        - name: OSL
+          value: "8192"
+        # 32 req/GPU * 16 decode GPUs (4 nodes x 4 GPUs) = 512
+        - name: CONCURRENCY
+          value: "512"
+        - name: ARTIFACT_DIR
+          value: /model-store/perf/glm5-disagg-efa-isl1k-osl8k
+        - name: TOKENIZER
+          value: nvidia/GLM-5-NVFP4
+        - name: HF_HOME
+          value: /model-store
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: HF_TOKEN
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: COLUMNS
+          value: "200"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          apt-get update && apt-get install -y --no-install-recommends curl jq git && apt-get clean
+          # torch is needed for the GLM-5 tokenizer's auto_map; install CPU-only
+          # to save image size and download time (~200MB vs ~2.5GB for the GPU
+          # build). Install separately because pytorch's wheel index does not
+          # mirror aiperf / transformers.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # GLM-5 NVFP4 tokenizer uses the `TokenizersBackend` auto-tokenizer
+          # class introduced in transformers 5.x — pin to match the runtime
+          # image (see `pip show transformers` inside the sglang decode pod).
+          pip install aiperf==0.6.0 transformers==5.3.0 tokenizers==0.22.2
+
+          # Pre-save tokenizer to a flat directory once, then point aiperf at
+          # that path. Avoids each of aiperf's N record-processor subprocesses
+          # racing to resolve trust_remote_code from the HF cache concurrently
+          # (which is what fails with "Failed to load tokenizer" errors).
+          TOKENIZER_LOCAL_DIR="/tmp/glm5-tokenizer"
+          python -c "
+          from transformers import AutoTokenizer
+          tok = AutoTokenizer.from_pretrained('$TOKENIZER', trust_remote_code=True)
+          tok.save_pretrained('$TOKENIZER_LOCAL_DIR')
+          print('Saved tokenizer to $TOKENIZER_LOCAL_DIR, vocab=', len(tok))
+          "
+
+          echo "Waiting for model '$TARGET_MODEL' at http://$ENDPOINT/v1/models..."
+          while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] not ready, retrying in 10s..."
+            sleep 10
+          done
+          echo "Model ready."
+
+          mkdir -p "$ARTIFACT_DIR"
+          aiperf profile \
+            --artifact-dir "$ARTIFACT_DIR" \
+            --model "$TARGET_MODEL" \
+            --tokenizer "$TOKENIZER_LOCAL_DIR" \
+            --tokenizer-trust-remote-code \
+            --endpoint-type chat \
+            --endpoint /v1/chat/completions \
+            --streaming \
+            --url "http://$ENDPOINT" \
+            --synthetic-input-tokens-mean $ISL \
+            --synthetic-input-tokens-stddev 0 \
+            --output-tokens-mean $OSL \
+            --output-tokens-stddev 0 \
+            --extra-inputs "max_tokens:$OSL" \
+            --extra-inputs "min_tokens:$OSL" \
+            --extra-inputs "ignore_eos:true" \
+            --concurrency $CONCURRENCY \
+            --request-count $((CONCURRENCY * 3)) \
+            --warmup-request-count 16 \
+            --num-dataset-entries 12800 \
+            --random-seed 100 \
+            --ui simple
+          echo "Done. Results in $ARTIFACT_DIR"
+          ls -la "$ARTIFACT_DIR"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-store
+        workingDir: /workspace
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

@@ -1,0 +1,427 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GLM-5 (NVFP4) disaggregated prefill/decode on GB200 via SGLang + Dynamo + EFA.
+#
+# Differences vs ../deploy.yaml (the non-EFA variant):
+#   * Disagg KV transfer rides AWS EFA RDMA instead of UCX RoCE.
+#   * NIXL backend is forced to LIBFABRIC (SGLANG_DISAGGREGATION_NIXL_BACKEND).
+#     Without this, SGLang defaults to UCX, which silently falls back to TCP
+#     on kernel >= 6.8 (~10 Gbps, ~10x worse TTFT).
+#   * Containers run privileged so fi_mr_reg can pin GPU VRAM for RDMA.
+#     IPC_LOCK alone fails on every EFA NIC.
+#   * Each pod requests vpc.amazonaws.com/efa: <N> matching the GPU count.
+# Prerequisites:
+#   - dynamo-platform HelmRelease applied
+#   - Cluster nodes: p6e-gb200.36xlarge (arm64, 4 GB200 + 4 EFA NICs per node)
+#   - Model weights at /models/nvidia-GLM-5-NVFP4 on shared NFS PVC
+#   - Container built from recipes/glm-5-nvfp4/Dockerfile.efa
+#   - HF_TOKEN secret: kubectl create secret generic hf-token-secret \
+#       --from-literal=HF_TOKEN=<your-token> -n <namespace>
+#
+# Topology: 5 nodes total
+#   decode:  4 nodes x 4 GPUs = TP16 / DP16 / EP16 (EAGLE speculative decode)
+#   prefill: 1 node  x 4 GPUs = TP4 (matches non-EFA recipe)
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm5-sglang-efa
+  namespace: <your-namespace>
+spec:
+  backendFramework: sglang
+  envs:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: hf-token-secret
+          key: HF_TOKEN
+    - name: HF_HOME
+      value: /model-store
+
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --enforce-disagg
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          image: <your-registry>/sglang-dynamo-glm5-efa:latest
+          name: ""
+          resources: {}
+          volumeMounts:
+            - mountPath: /model-store
+              name: model-cache
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 4
+      resources:
+        limits:
+          gpu: "4"
+          custom:
+            # 1 EFA NIC per GPU on p6e-gb200.36xlarge.
+            vpc.amazonaws.com/efa: "4"
+        claims:
+          - name: compute-domain-channel
+      extraPodSpec:
+        hostIPC: true
+        mainContainer:
+          command:
+            - bash
+            - -c
+          args:
+            - >-
+              ulimit -l unlimited && ulimit -n 1048576 &&
+              exec python3 -m dynamo.sglang
+              --model-path nvidia/GLM-5-NVFP4
+              --served-model-name nvidia/GLM-5-NVFP4
+              --trust-remote-code
+              --quantization modelopt_fp4
+              --kv-cache-dtype fp8_e4m3
+              --tensor-parallel-size 16
+              --data-parallel-size 16
+              --expert-parallel-size 16
+              --enable-dp-attention
+              --enable-dp-lm-head
+              --max-running-requests 2048
+              --cuda-graph-max-bs 128
+              --mem-fraction-static 0.72
+              --chunked-prefill-size 32768
+              --max-prefill-tokens 32768
+              --enable-flashinfer-allreduce-fusion
+              --attention-backend nsa
+              --nsa-decode-backend trtllm
+              --nsa-prefill-backend trtllm
+              --moe-runner-backend flashinfer_trtllm
+              --speculative-algorithm EAGLE
+              --speculative-num-steps 2
+              --speculative-eagle-topk 1
+              --speculative-num-draft-tokens 3
+              --stream-interval 50
+              --incremental-streaming-output
+              --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}'
+              --host 0.0.0.0
+              --disaggregation-mode decode
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --prefill-round-robin-balance
+              --watchdog-timeout 3600
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            # === Force NIXL onto LIBFABRIC (otherwise UCX -> TCP fallback) ===
+            - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+              value: LIBFABRIC
+            # === EFA provider configuration ===
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            # MUST be 0. With shm transfer enabled, EFA's GPU buffers silently
+            # corrupt under load.
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: "0"
+            - name: FI_EFA_ENABLE_SHM
+              value: "0"
+            - name: FI_EFA_FORK_SAFE
+              value: "0"
+            # FI_EFA_USE_HUGE_PAGE=0: hugepages aren't allocated to this pod
+            # (would require additional cpu/memory limits per K8s admission).
+            # The performance delta on these workloads is <5%.
+            - name: FI_EFA_USE_HUGE_PAGE
+              value: "0"
+            - name: FI_EFA_MR_MAX_CACHED_COUNT
+              value: "524288"
+            - name: FI_EFA_MR_MAX_CACHED_SIZE
+              value: "0"
+            - name: FI_HMEM
+              value: cuda
+            - name: FI_HMEM_CUDA_ENABLE_XFER
+              value: "1"
+            - name: FI_LOG_LEVEL
+              value: warn
+            # === Path order: /opt/amazon/efa first so the patched libfabric
+            # is the one loaded at runtime. NIXL plugin path includes
+            # lib/aarch64-linux-gnu/ because debian multiarch puts arm64
+            # plugins there, not lib64/.
+            - name: PATH
+              value: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/bin:/usr/bin:/bin
+            - name: LD_LIBRARY_PATH
+              value: /opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib
+            # === NIXL telemetry (use =y, _ENABLED=1 is a no-op) ===
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            # === SGLang scheduler tuning for disagg ===
+            - name: SGLANG_DISAGGREGATION_NUM_PRE_ALLOCATE_REQS
+              value: "64"
+            # === SGLang feature flags (unchanged from non-EFA recipe) ===
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
+            - name: SGLANG_ENABLE_JIT_DEEPGEMM
+              value: "1"
+            - name: SGLANG_ENABLE_SPEC_V2
+              value: "1"
+            - name: SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE
+              value: "1"
+            - name: SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK
+              value: "1024"
+            # === NCCL — collectives can still ride NCCL/NVLS within the
+            # MNNVL clique; EFA is for inter-node KV transfer only.
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NCCL_GRAPH_MIXING_SUPPORT
+              value: "0"
+            # === Host the device plugin's GPU isolation (override any
+            # NVIDIA_VISIBLE_DEVICES=all baked into the base image).
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: NIXL_LOG_LEVEL
+              value: ERROR
+          image: <your-registry>/sglang-dynamo-glm5-efa:latest
+          name: ""
+          resources: {}
+          # REQUIRED. NIXL fi_mr_reg on VRAM needs broader caps than IPC_LOCK
+          # alone provides on EFA. IPC_LOCK is also added (belt-and-suspenders).
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          volumeMounts:
+            - mountPath: /model-store
+              name: model-cache
+            - mountPath: /dev/shm
+              name: shm
+          workingDir: /workspace/
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: glm5-efa-compute-domain-channel
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 80Gi
+
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+          custom:
+            vpc.amazonaws.com/efa: "4"
+      extraPodSpec:
+        hostIPC: true
+        mainContainer:
+          command:
+            - bash
+            - -c
+          args:
+            - >-
+              ulimit -l unlimited && ulimit -n 1048576 &&
+              exec python3 -m dynamo.sglang
+              --model-path nvidia/GLM-5-NVFP4
+              --served-model-name nvidia/GLM-5-NVFP4
+              --trust-remote-code
+              --quantization modelopt_fp4
+              --kv-cache-dtype fp8_e4m3
+              --tensor-parallel-size 4
+              --data-parallel-size 1
+              --expert-parallel-size 1
+              --enable-dp-lm-head
+              --max-running-requests 2048
+              --cuda-graph-max-bs 128
+              --mem-fraction-static 0.72
+              --chunked-prefill-size 32768
+              --max-prefill-tokens 32768
+              --enable-flashinfer-allreduce-fusion
+              --attention-backend nsa
+              --nsa-decode-backend trtllm
+              --nsa-prefill-backend trtllm
+              --moe-runner-backend flashinfer_trtllm
+              --stream-interval 50
+              --incremental-streaming-output
+              --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}'
+              --host 0.0.0.0
+              --disaggregation-mode prefill
+              --disaggregation-transfer-backend nixl
+              --disaggregation-bootstrap-port 30001
+              --load-balance-method round_robin
+              --watchdog-timeout 3600
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+              value: LIBFABRIC
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: "0"
+            - name: FI_EFA_ENABLE_SHM
+              value: "0"
+            - name: FI_EFA_FORK_SAFE
+              value: "0"
+            # FI_EFA_USE_HUGE_PAGE=0: hugepages aren't allocated to this pod
+            # (would require additional cpu/memory limits per K8s admission).
+            # The performance delta on these workloads is <5%.
+            - name: FI_EFA_USE_HUGE_PAGE
+              value: "0"
+            - name: FI_EFA_MR_MAX_CACHED_COUNT
+              value: "524288"
+            - name: FI_EFA_MR_MAX_CACHED_SIZE
+              value: "0"
+            - name: FI_HMEM
+              value: cuda
+            - name: FI_HMEM_CUDA_ENABLE_XFER
+              value: "1"
+            - name: FI_LOG_LEVEL
+              value: warn
+            - name: PATH
+              value: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/bin:/usr/bin:/bin
+            - name: LD_LIBRARY_PATH
+              value: /opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: SGLANG_DISAGGREGATION_NUM_PRE_ALLOCATE_REQS
+              value: "64"
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
+            - name: SGLANG_ENABLE_JIT_DEEPGEMM
+              value: "1"
+            - name: SGLANG_ENABLE_SPEC_V2
+              value: "1"
+            - name: SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE
+              value: "1"
+            - name: SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK
+              value: "1024"
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: "1"
+            - name: NCCL_STORE_TIMEOUT
+              value: "7200"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: NIXL_LOG_LEVEL
+              value: ERROR
+          image: <your-registry>/sglang-dynamo-glm5-efa:latest
+          name: ""
+          resources: {}
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 60
+            timeoutSeconds: 5
+          volumeMounts:
+            - mountPath: /model-store
+              name: model-cache
+            - mountPath: /dev/shm
+              name: shm
+          workingDir: /workspace/
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 80Gi
+---
+# ComputeDomain enables MNNVL scheduling for the 5-node decode+prefill group.
+# This is independent of EFA — collectives within an MNNVL clique still use
+# NVLink72, while EFA carries the disagg KV traffic between cliques.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: glm5-efa-compute-domain
+  namespace: <your-namespace>
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: glm5-efa-compute-domain-channel
+  numNodes: 5
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: glm5-efa-compute-domain-channel
+  namespace: <your-namespace>
+spec:
+  spec:
+    devices:
+      config:
+      - opaque:
+          driver: compute-domain.nvidia.com
+          parameters:
+            allocationMode: Single
+            apiVersion: resource.nvidia.com/v1beta1
+            kind: ComputeDomainChannelConfig
+        requests:
+        - channel
+      requests:
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: compute-domain-default-channel.nvidia.com
+        name: channel
