@@ -2,16 +2,20 @@
 # KVBM disagg bringup for Docker-based nodes (dlcluster b100_preprod, 4u4g, etc.)
 #
 # ⚠️  DOCKER vs PYXIS context — choose the right script:
-#   - This script (Docker): no NIXL plugin injection → must use cache.device + wheel NIXL path
-#   - launch-prefill.sh + launch-decode.sh (Pyxis/srun): NIXL plugins injected from host → use cache.host
+#   - launch-prefill.sh + launch-decode.sh (Pyxis/srun): RECOMMENDED for KVBM on dlcluster
+#     Pyxis injects host NIXL plugins → cache.host works, UCX available
+#   - This script (Docker): use only when Pyxis is not available; see Note 7 below
 #
-# Hard-won lessons from 2026-05-15 session:
+# Hard-won lessons from 2026-05-15 and 2026-05-18 sessions:
 #
-# 7. Use `cache: {device: {}}` NOT `cache: {host: {...}}` in Docker on dlcluster.
-#    - `host` cache auto-enables UCX for inter-worker KV transfer: if UCX is
-#      unavailable (Docker on b100_preprod, 4u4g) → `No UCX plugin found`
-#    - `device` cache uses GPU memory (CUDA IPC) for same-node P+D → no UCX needed
-#    Set this in BOTH leader (decode) and worker (prefill) configs.
+# 7. KVBM valid cache tiers: ONLY "host" (G2/CPU) and "disk" (G3) exist.
+#    - `cache: {device: {}}` is NOT a valid tier — causes "At least one cache tier must
+#      be configured" error. No such tier exists in KVBM's G1/G2/G3 hierarchy.
+#    - `cache: {host: ...}` auto-enables UCX for KV transfer. UCX IS available in Pyxis
+#      containers (host plugins injected) but NOT in plain Docker on dlcluster.
+#    - For Docker WITHOUT UCX: use `cache: {disk: {cache_size_gb: N}}` which writes KV
+#      directly from GPU (G1) to disk (G3), bypassing CPU. Requires fast local storage.
+#    - RECOMMENDED: use Pyxis (see launch-prefill.sh) instead of Docker on dlcluster.
 #
 # 8. Do NOT specify explicit nixl.backends in the worker config. Let NIXL
 #    auto-discover. Specifying {"POSIX": {}} causes "No POSIX plugin found"
@@ -27,6 +31,19 @@
 #      NIXL_WHEEL=$(ls -d $VENV/lib/python*/site-packages/.nixl_cu*.mesonpy.libs)
 #      export LD_LIBRARY_PATH="$NIXL_WHEEL:$NIXL_WHEEL/plugins:..."
 #    This is documented in env.sh. See also: NIXL_PLUGIN_DIR, NIXL_LIB_DIR.
+#
+# 9. NIXL_PLUGIN_DIR is baked into the container image as a Docker ENV pointing to
+#    /opt/nvidia/nvda_nixl/lib64/plugins (system NIXL — NO UCX plugin there).
+#    You MUST override it inside `bash -c "..."` with `export NIXL_PLUGIN_DIR=...`
+#    pointing to the wheel's plugins. Simply passing it via `srun -e KEY=VAL` does
+#    NOT work because `srun -e` means --error (stderr redirect), not env var.
+#    Use `srun --export=KEY=VAL` or (more reliably for Pyxis) `export` inside bash -c.
+#    The wheel path: /opt/dynamo/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/plugins
+#
+# 10. kvbm.v2 "built without Rust scheduler" warning: the Python import `kvbm.v2` succeeds
+#     even with a degraded _core.abi3.so (pure Python stub imports fine). To verify the Rust
+#     scheduler is actually compiled in, look for absence of this warning in worker logs.
+#     If present → rebuild with `cargo rustc --lib --crate-type cdylib --features v1,v2`.
 #
 # 1. RUSTUP_HOME and CARGO_HOME must be passed via `docker exec -e`, NOT via
 #    `export` inside bash -c. The Docker image sets RUSTUP_HOME=/home/dynamo/.rustup
