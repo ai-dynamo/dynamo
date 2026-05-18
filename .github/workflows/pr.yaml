@@ -311,6 +311,8 @@ jobs:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      # TEMP: validate coverage wiring end-to-end on this PR. Revert before merge.
+      enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
       gpu_test_markers: pre_merge and vllm and gpu_1
