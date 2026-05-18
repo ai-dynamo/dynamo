@@ -39,13 +39,19 @@ REPO = Path(__file__).resolve().parents[4]
 PY = REPO / ".venv/bin/python"
 TRACE = REPO / "traces/mooncake_fast25/toolagent_trace.jsonl"
 BLOG_DIR = REPO / "docs/blogs/digital-twin-simulation"
+SCRIPTS_DIR = BLOG_DIR / "scripts"
 IMAGES_DIR = BLOG_DIR / "images"
 REPORTS_ROOT = REPO / "planner_reports/blog_exp"
 
 
 def results_json_path(exp_name: str) -> Path:
-    """Aggregated per-run metrics JSON for a given experiment."""
-    return REPORTS_ROOT / exp_name / "results.json"
+    """Aggregated per-run metrics JSON for a given experiment.
+
+    Co-located with the script (e.g.
+    `docs/blogs/digital-twin-simulation/scripts/planner_exp_1/results.json`)
+    so the script + data form a self-contained reproduction bundle.
+    """
+    return SCRIPTS_DIR / exp_name / "results.json"
 
 
 def image_path(exp_name: str) -> Path:
