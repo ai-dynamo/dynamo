@@ -59,10 +59,10 @@ STAGES = [
     ("Deployed + Telemetry",  "1 config in production",     AMETHYST,    900, "Feedback Loop"),
 ]
 
-BOX_W = 144
-BOX_H = 92
+BOX_W = 160
+BOX_H = 100
 Y_C = 60
-ARROW_GAP = 14
+ARROW_GAP = 12
 
 
 def main() -> None:
@@ -76,14 +76,16 @@ def main() -> None:
         # three temporal phases (Before, Initial Verification, Feedback
         # Loop) read clearly without cluttering the intermediate steps.
         if phase:
+            # Kicker centered above the box with extra breathing room so the
+            # uppercase label reads as a header rather than crowding the box.
             fig.add_annotation(
-                x=xc, y=Y_C + BOX_H / 2 + 35,
+                x=xc, y=Y_C + BOX_H / 2 + 55,
                 xref="x", yref="y",
                 xanchor="center", yanchor="bottom",
                 text=f"<b>{phase.upper()}</b>",
                 showarrow=False,
                 font=dict(
-                    family=SANS, size=11, color=color,
+                    family=SANS, size=13, color=color,
                 ),
             )
         fig.add_shape(
@@ -100,7 +102,7 @@ def main() -> None:
             xanchor="center", yanchor="middle",
             text=f"<b>{label}</b>",
             showarrow=False,
-            font=dict(family=SANS, size=13, color=TEXT_PRIMARY),
+            font=dict(family=SANS, size=15, color=TEXT_PRIMARY),
         )
         fig.add_annotation(
             x=xc, y=Y_C - 14,
@@ -108,7 +110,7 @@ def main() -> None:
             xanchor="center", yanchor="middle",
             text=sub,
             showarrow=False,
-            font=dict(family=MONO, size=11, color=color),
+            font=dict(family=MONO, size=12, color=color),
         )
 
     # Forward arrows (4 total). Slightly thicker line + larger triangle so
@@ -165,16 +167,36 @@ def main() -> None:
                     color=AMETHYST, line=dict(width=0)),
         hoverinfo="skip", showlegend=False,
     ))
-    # Label hangs below the horizontal segment, centered on the FIGURE's
-    # horizontal axis (x=500, which is also the pipeline center) so it
-    # reads as the diagram's caption rather than as a loop-internal tag.
+    # "TELEMETRY" kicker above the dashed loop -- names what flows back from
+    # production and lists concrete signals so the loop reads as a data path
+    # rather than an abstract arrow.
+    loop_mid_x = (x_start + x_end) / 2          # midpoint of the dashed segment
     fig.add_annotation(
-        x=500, y=y_loop - 6,
+        x=loop_mid_x, y=y_loop + 6,
+        xref="x", yref="y",
+        xanchor="center", yanchor="bottom",
+        text="<b>TELEMETRY</b> · TTFT · TPOT · cache hit rate · queue depth",
+        showarrow=False,
+        font=dict(family=SANS, size=11, color=AMETHYST),
+    )
+
+    # Tufte editorial callout below the dashed feedback loop: semi-transparent
+    # dark background, thin white border, white text. Centered on the dashed
+    # loop midpoint (not the figure midpoint) so it visually anchors the loop.
+    fig.add_annotation(
+        x=loop_mid_x, y=y_loop - 20,
         xref="x", yref="y",
         xanchor="center", yanchor="top",
-        text="<b>Calibration</b> · Production Telemetry Refines DynoSim's Timing Model",
+        text="<b>Calibration</b> · production telemetry refines DynoSim's timing model",
         showarrow=False,
-        font=dict(family=SANS, size=12, color=AMETHYST),
+        bgcolor="rgba(20,20,20,0.65)",
+        bordercolor="rgba(255,255,255,0.18)",
+        borderwidth=1,
+        borderpad=10,
+        font=dict(
+            family="Helvetica Neue, HelveticaNeue, sans-serif",
+            size=14, color=TEXT_PRIMARY, weight=300,
+        ),
     )
 
     fig.update_layout(

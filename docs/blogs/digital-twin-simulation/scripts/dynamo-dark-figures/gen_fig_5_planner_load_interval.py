@@ -77,20 +77,20 @@ def main() -> None:
         fillcolor=rgba(NV_GREEN, 0.10),
         line_width=0, layer="below",
     )
-    # Label the band itself as a Tufte block, anchored just above the
-    # top of the band. x is the geometric midpoint of [5, 10] on the
-    # log axis; using x domain coords avoids the kaleido
-    # add_annotation-on-log-axis bug.
+    # Tufte band label sitting in the margin gap above the plot, horizontally
+    # centered on the band's log-axis midpoint. Pulling it out of the plot
+    # area keeps the data line and event-count labels clean while still
+    # tying the callout to the green band visually.
     SWEET_MID_X_DOMAIN = (
         (math.log10((SWEET_LO_S * SWEET_HI_S) ** 0.5) - math.log10(0.85))
         / (math.log10(360) - math.log10(0.85))
     )
     fig.add_annotation(
-        x=SWEET_MID_X_DOMAIN, y=0.45,
+        x=SWEET_MID_X_DOMAIN, y=1.04,
         xref="x domain", yref="y domain",
         xanchor="center", yanchor="bottom",
         align="center",
-        text=f"<b>Optimal Operating Band</b><br>({SWEET_LO_S}s – {SWEET_HI_S}s)",
+        text=f"<b>Optimal Operating Band</b> · {SWEET_LO_S}s – {SWEET_HI_S}s",
         showarrow=False,
         bgcolor="rgba(20,20,20,0.65)",
         bordercolor="rgba(255,255,255,0.18)",
@@ -142,7 +142,7 @@ def main() -> None:
     # differs from the in-band label so the figure carries three
     # distinct messages (title = what, band label = where, callout = why).
     fig.add_annotation(
-        x=0.98, y=0.04,
+        x=0.98, y=0.12,
         xref="x domain", yref="y domain",
         xanchor="right", yanchor="bottom",
         align="left",
