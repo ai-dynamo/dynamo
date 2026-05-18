@@ -73,6 +73,14 @@ const VALIDATION_PREFIX: &str = "Validation: ";
 const ADMISSION_CONTROL_REJECTION_HINT: &str =
     "If this rejection is not intended, consider passing --no-admission-control to the frontend.";
 
+pub(super) fn rl_router(
+    drt: Arc<dynamo_runtime::DistributedRuntime>,
+) -> anyhow::Result<axum::Router> {
+    let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
+    let state = dynamo_rl::RlDiscoveryState::new(config);
+    Ok(dynamo_rl::rl_router(state))
+}
+
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
 /// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.

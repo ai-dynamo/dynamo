@@ -63,6 +63,8 @@ pub async fn run(
     // with the instance_id as the router_id label.
     http_service_builder =
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
+    http_service_builder =
+        http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {

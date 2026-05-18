@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "lib/llm",
+    "lib/rl",
     "lib/runtime",
     "lib/config",
     "lib/tokenizers",
@@ -43,6 +44,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.2.0" }
 dynamo-llm = { path = "lib/llm", version = "1.2.0" }
+dynamo-rl = { path = "lib/rl", version = "1.2.0" }
 dynamo-config = { path = "lib/config", version = "1.2.0" }
 dynamo-tokenizers = { path = "lib/tokenizers", version = "1.2.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.2.0" }
