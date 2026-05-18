@@ -60,13 +60,12 @@ use crate::transfer::plan::{
 use crate::transfer::prepared::{PreparedPlanKey, PreparedTransferPlan};
 
 /// RAII guard that drains any work queued on a CUDA stream before
-/// `Drop` returns. Used by `dispatch_transform_kernel` and
-/// `dispatch_nhd_hnd_transpose_kernel` to guarantee that async H2D
-/// copies feeding the kernel from a prepared-plan scratch lease have
-/// fully drained before the lease is returned to its pool — closes
-/// the race where a concurrent transfer could re-acquire the leased
-/// `Vec` from the pool and overwrite bytes still being read by an
-/// in-flight `cudaMemcpyAsync`.
+/// `Drop` returns. Used by [`with_transform_scratch_upload`] to
+/// guarantee that async H2D copies feeding the kernel from a
+/// prepared-plan scratch lease have fully drained before the lease is
+/// returned to its pool — closes the race where a concurrent
+/// transfer could re-acquire the leased `Vec` from the pool and
+/// overwrite bytes still being read by an in-flight `cudaMemcpyAsync`.
 ///
 /// The guard records a stream event and host-synchronizes on it. If
 /// event recording fails (rare; e.g. driver OOM), we fall back to a
@@ -98,6 +97,48 @@ impl Drop for DrainOnDrop<'_> {
             }
         }
     }
+}
+
+/// Shared scratch fill + H2D upload for the permute-kernel dispatch
+/// path. The single owner of the prepared-plan lease lifetime
+/// contract:
+/// 1. Acquire a [`TransformScratchLease`] from the plan's pool.
+/// 2. Hand the two scratch `Vec<usize>` slots to the caller's `fill`
+///    closure — caller populates them via the appropriate emit method
+///    on the [`PreparedTransferPlan`].
+/// 3. `clone_htod` each slot to device memory.
+/// 4. Record + host-synchronize on a stream event (via `DrainOnDrop`)
+///    so the H2D copies drain before the lease returns to the pool.
+/// 5. Drop the lease; the kernel launch continues async on the stream.
+///
+/// The `DrainOnDrop` guard fires on every exit path — including `?`
+/// early-returns inside `fill` or between `clone_htod` calls — so a
+/// concurrent transfer can never re-acquire the leased `Vec` while
+/// an H2D against it is still in flight.
+fn with_transform_scratch_upload<F>(
+    stream: &Arc<CudaStream>,
+    prepared: &PreparedTransferPlan,
+    fill: F,
+) -> Result<(
+    cudarc::driver::CudaSlice<usize>,
+    cudarc::driver::CudaSlice<usize>,
+)>
+where
+    F: FnOnce(&mut Vec<usize>, &mut Vec<usize>) -> Result<()>,
+{
+    let mut lease = prepared.acquire_transform_scratch()?;
+    let (a_dev, b_dev) = {
+        let _drain = DrainOnDrop::new(stream);
+        {
+            let (a, b) = lease.both_mut();
+            fill(a, b)?;
+        }
+        let a_dev = stream.clone_htod(lease.op_ptrs())?;
+        let b_dev = stream.clone_htod(lease.univ_ptrs())?;
+        (a_dev, b_dev)
+    };
+    drop(lease);
+    Ok((a_dev, b_dev))
 }
 
 /// Dispatch a CudaAsync transfer through the stride-aware planner.
@@ -135,31 +176,20 @@ pub(crate) fn execute_planner_cuda_transfer(
         src.layout().block_layout(),
         dst.layout().block_layout(),
     )?;
-    // PR-7.7.1: reject heterogeneous layouts before any planning work.
-    // Heterogeneous-composition planning (disk↔device mixed axes) lands in PR-7.7.2+.
-    reject_heterogeneous_views_at_entry(src, dst, "execute_planner_cuda_transfer")?;
-
-    // PR-7.3: restore the 4 KiB min_inner_bytes default. Same-layout
-    // copies with a small contiguous tail now route to SmallStridedCopy
-    // (via vectorized_copy) rather than failing with a no-kernel error.
-    // Previously kept at 0 (§Lesson 5, now RESOLVED by PR-7.3).
-    //
-    // PR-7.5: look up the benchmark cache before calling plan_and_lower so
-    // the SelectionContext inside can consult the outcome.  Returns None when
-    // startup_benchmark is disabled (the default) — zero cost on the hot path.
-    let benchmark_outcome = lookup_benchmark_outcome(src, dst, strategy, ctx);
-    let prepared_plan = lookup_prepared_plan(src, dst, strategy, &axis_slices, plan_handles, ctx)?;
-    let outcome = plan_and_lower(
+    // PR-7.3: 4 KiB min_inner_bytes — same-layout copies with a small
+    // contiguous tail route to SmallStridedCopy (via vectorized_copy)
+    // rather than failing with a no-kernel error.
+    let outcome = planner_prelude(
         src,
         dst,
         src_block_ids,
         dst_block_ids,
         strategy,
-        ctx.capabilities(),
         CopyPolicy::default(),
-        benchmark_outcome,
-        prepared_plan,
         axis_slices,
+        plan_handles,
+        "execute_planner_cuda_transfer",
+        ctx,
     )?;
 
     // Acquire a stream (caller-provided or pool-acquired). Direction
@@ -204,14 +234,7 @@ pub(crate) fn execute_planner_cuda_transfer(
             block_pairs,
             prepared,
         } => {
-            dispatch_transform_kernel(
-                &invocation,
-                src,
-                dst,
-                &block_pairs,
-                &stream,
-                prepared.as_deref(),
-            )?;
+            dispatch_transform_kernel(&invocation, src, dst, &block_pairs, &stream, &prepared)?;
         }
         PlanOutcome::SmallStridedCopy(ops) => {
             dispatch_small_strided_copy(&ops, &stream)?;
@@ -304,9 +327,6 @@ pub(crate) fn execute_planner_nixl_transfer(
         src.layout().block_layout(),
         dst.layout().block_layout(),
     )?;
-    // PR-7.7.1: reject heterogeneous layouts before any planning work.
-    // Heterogeneous-composition planning (disk↔device mixed axes) lands in PR-7.7.2+.
-    reject_heterogeneous_views_at_entry(src, dst, "execute_planner_nixl_transfer")?;
     let xfer_op = match strategy {
         TransferStrategy::NixlRead | TransferStrategy::NixlReadFlipped => XferOp::Read,
         TransferStrategy::NixlWrite | TransferStrategy::NixlWriteFlipped => XferOp::Write,
@@ -315,29 +335,26 @@ pub(crate) fn execute_planner_nixl_transfer(
         other => bail!("execute_planner_nixl_transfer: strategy {other:?} not a NIXL strategy"),
     };
 
-    // NIXL path: keep min_inner_bytes = 0. NIXL descriptors are coalesced
+    // NIXL path: min_inner_bytes = 0. NIXL descriptors are coalesced
     // by plan_copy already, and the SmallStridedCopy (vectorized_copy)
-    // path is Cuda-only. Staged NIXL legs also call plan_and_lower with
-    // min_inner_bytes = 0 (same same-layout-always-Direct requirement).
-    //
-    // PR-7.5: benchmark lookup for NIXL; see Cuda entrypoint comment.
-    let nixl_benchmark_outcome = lookup_benchmark_outcome(src, dst, strategy, ctx);
+    // path is Cuda-only. Staged NIXL legs also call plan_and_lower
+    // with min_inner_bytes = 0 (same same-layout-always-Direct
+    // requirement).
     let nixl_policy = CopyPolicy {
         min_inner_bytes: 0,
         coalesce: true,
     };
-    let prepared_plan = lookup_prepared_plan(src, dst, strategy, &axis_slices, plan_handles, ctx)?;
-    let ops = match plan_and_lower(
+    let ops = match planner_prelude(
         src,
         dst,
         src_block_ids,
         dst_block_ids,
         strategy,
-        ctx.capabilities(),
         nixl_policy,
-        nixl_benchmark_outcome,
-        prepared_plan,
         axis_slices,
+        plan_handles,
+        "execute_planner_nixl_transfer",
+        ctx,
     )? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Direct(ops) => ops,
@@ -504,14 +521,15 @@ enum PlanOutcome {
     /// dispatch via the matching `kvbm-kernels` FFI entrypoint with
     /// pointer arrays built from the original `PhysicalLayout`s.
     ///
-    /// `prepared` carries the prepared-plan Arc when a cache entry was
-    /// available; the dispatch path uses it to reuse pooled scratch
-    /// arrays for `op_ptrs` / `univ_ptrs`. None routes through the
-    /// legacy per-call allocation path.
+    /// `prepared` is always present — see [`lookup_prepared_plan`].
+    /// The dispatch path uses it to reuse pooled scratch arrays for
+    /// `op_ptrs` / `univ_ptrs`; when the cache is disabled or the
+    /// pair has no handle key, the Arc points to a fresh per-call
+    /// plan with the same shape.
     Transform {
         invocation: crate::transfer::kernel_catalog::KernelInvocation,
         block_pairs: Vec<(BlockId, BlockId)>,
-        prepared: Option<std::sync::Arc<PreparedTransferPlan>>,
+        prepared: std::sync::Arc<PreparedTransferPlan>,
     },
     /// PR-7.3: threshold-fallback for same-layout copies whose inner
     /// contiguous tail is below `min_inner_bytes`. Each op has the same
@@ -577,20 +595,47 @@ impl PlanOutcome {
     }
 }
 
-/// Shared "validate → project → plan → lower" pipeline used by both
-/// the CUDA and NIXL planner-path entrypoints.
+/// Shared "reject-heterogeneous → benchmark-lookup → prepared-plan-lookup
+/// → plan_and_lower" pipeline used by both the CUDA and NIXL planner-path
+/// entrypoints.
 ///
 /// Strategy and layout-compatibility checks are NOT done here — each
 /// entrypoint enforces its own per-family contract via
 /// [`validate_cuda_planner_entry`] / [`validate_nixl_planner_entry`]
-/// before calling this. This stage handles only the structural
-/// invariants of the (src, dst, block_ids) triple.
-///
-/// `policy` lets callers control the threshold-fallback threshold:
-/// - Cuda entry: `CopyPolicy::default()` (`min_inner_bytes = 4096`) so
-///   small-tail same-layout copies route to `SmallStridedCopy`.
-/// - NIXL entry and staged NIXL legs: `CopyPolicy { min_inner_bytes: 0,
-///   coalesce: true }` so same-layout legs always go `Direct`.
+/// before calling this. The two entrypoints differ only by:
+/// - the `policy` they pass in (Cuda uses default with
+///   `min_inner_bytes = 4096`; NIXL uses `{ 0, coalesce: true }`);
+/// - the `entry_label` they pass for the heterogeneous-rejection error.
+#[allow(clippy::too_many_arguments)]
+fn planner_prelude(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    strategy: TransferStrategy,
+    policy: CopyPolicy,
+    axis_slices: Vec<kvbm_common::AxisIntersection>,
+    plan_handles: Option<(LayoutHandle, LayoutHandle)>,
+    entry_label: &'static str,
+    ctx: &TransferContext,
+) -> Result<PlanOutcome> {
+    reject_heterogeneous_views_at_entry(src, dst, entry_label)?;
+    let benchmark_outcome = lookup_benchmark_outcome(src, dst, strategy, ctx);
+    let prepared_plan = lookup_prepared_plan(src, dst, strategy, &axis_slices, plan_handles, ctx)?;
+    plan_and_lower(
+        src,
+        dst,
+        src_block_ids,
+        dst_block_ids,
+        strategy,
+        ctx.capabilities(),
+        policy,
+        benchmark_outcome,
+        prepared_plan,
+        axis_slices,
+    )
+}
+
 /// PR-7.5: Look up the benchmark cache and build a `BenchmarkKey` from
 /// two physical layouts.  Returns `None` if `startup_benchmark` is
 /// disabled or if the views can't be projected (safe fallback: scorer
@@ -616,6 +661,18 @@ fn lookup_benchmark_outcome(
     ctx.benchmark_cache().lookup(&key)
 }
 
+/// Resolve a prepared transfer plan for this pair.
+///
+/// Returns `Some(Arc<PreparedTransferPlan>)` for layout pairs that go
+/// through the kernel catalog (operational↔universal, NHD↔HND);
+/// returns `None` for same-layout direct copies, which the planner
+/// projects `AnnotatedLayout`s for inline without caching (the
+/// projection cost is microseconds against millisecond-scale
+/// DMA/RDMA — caching adds complexity without measurable gain).
+///
+/// When the cache is enabled and `plan_handles` is `Some`, transform
+/// plans are shared via the [`PreparedPlanCache`]; otherwise a fresh,
+/// uncached plan is built with a private scratch pool.
 fn lookup_prepared_plan(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -624,31 +681,35 @@ fn lookup_prepared_plan(
     plan_handles: Option<(LayoutHandle, LayoutHandle)>,
     ctx: &TransferContext,
 ) -> Result<Option<std::sync::Arc<PreparedTransferPlan>>> {
-    let Some((src_handle, dst_handle)) = plan_handles else {
+    let src_kv = src.layout().block_layout();
+    let dst_kv = dst.layout().block_layout();
+    if !src_kv.requires_transform(&dst_kv) {
         return Ok(None);
+    }
+    if !axis_slices.is_empty() {
+        bail!(
+            "lookup_prepared_plan: axis_slices not supported when the layout pair \
+             requires a permute-kernel transform (src={:?}, dst={:?})",
+            src_kv,
+            dst_kv,
+        );
+    }
+
+    let build = || -> Result<PreparedTransferPlan> {
+        let invocation = build_transform_invocation(src, dst)?;
+        PreparedTransferPlan::build_transform(invocation, src, dst)
     };
 
-    let key = PreparedPlanKey::new(src_handle, dst_handle, strategy, axis_slices);
-    ctx.prepared_plan_cache()
-        .get_or_insert_with(ctx.worker_id(), key, || {
-            let src_kv = src.layout().block_layout();
-            let dst_kv = dst.layout().block_layout();
-            if src_kv.requires_transform(&dst_kv) {
-                if !axis_slices.is_empty() {
-                    bail!(
-                        "lookup_prepared_plan: axis_slices not supported when the layout pair \
-                         requires a permute-kernel transform (src={:?}, dst={:?})",
-                        src_kv,
-                        dst_kv,
-                    );
-                }
-                let invocation = build_transform_invocation(src, dst)?;
-                return PreparedTransferPlan::build_transform(invocation, src, dst);
-            }
-
-            PreparedTransferPlan::build_direct(src, dst)
-        })
-        .map(Some)
+    let plan = if let Some((src_handle, dst_handle)) = plan_handles {
+        let key = PreparedPlanKey::new(src_handle, dst_handle, strategy, axis_slices);
+        ctx.prepared_plan_cache()
+            .get_or_insert_with(ctx.worker_id(), key, build)?
+    } else {
+        // No handles → no cache key. Build fresh; scratch pool is
+        // private to this transfer and drops with the Arc.
+        std::sync::Arc::new(build()?)
+    };
+    Ok(Some(plan))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -706,18 +767,15 @@ fn plan_and_lower(
                     dst_kv,
                 );
             }
-            let (invocation, prepared) = match prepared_plan.as_deref() {
-                Some(PreparedTransferPlan::Transform { invocation, .. }) => {
-                    (*invocation, prepared_plan)
-                }
-                Some(PreparedTransferPlan::Direct { .. }) => bail!(
-                    "plan_and_lower: cached direct plan used for transform pair \
-                     (src={:?}, dst={:?}); prepared-plan key is inconsistent",
+            let prepared = prepared_plan.ok_or_else(|| {
+                anyhow!(
+                    "plan_and_lower: layout pair requires a permute-kernel transform \
+                     (src={:?}, dst={:?}) but no prepared plan was supplied",
                     src_kv,
                     dst_kv,
-                ),
-                None => (build_transform_invocation(src, dst)?, None),
-            };
+                )
+            })?;
+            let invocation = prepared.invocation;
             return Ok(PlanOutcome::Transform {
                 invocation,
                 block_pairs,
@@ -726,21 +784,19 @@ fn plan_and_lower(
         }
     }
 
-    let (src_al, dst_al) = match prepared_plan.as_deref() {
-        Some(PreparedTransferPlan::Direct { src, dst }) => (src.clone(), dst.clone()),
-        Some(PreparedTransferPlan::Transform { .. }) => bail!(
-            "plan_and_lower: cached transform plan used for direct layout pair; \
-             prepared-plan key is inconsistent"
-        ),
-        None => {
-            let src_view = physical_to_layout_view(src)?;
-            let dst_view = physical_to_layout_view(dst)?;
-            (
-                AnnotatedLayout::from_view(&src_view)?,
-                AnnotatedLayout::from_view(&dst_view)?,
-            )
-        }
-    };
+    // Direct (same-layout / sliced) path: project AnnotatedLayouts
+    // inline. The projection is microseconds — too cheap to cache
+    // against the millisecond-scale DMA/RDMA the planner is feeding.
+    if prepared_plan.is_some() {
+        bail!(
+            "plan_and_lower: prepared plan supplied for a direct same-layout pair; \
+             callers must only pass a plan for permute-kernel transform pairs"
+        );
+    }
+    let src_view = physical_to_layout_view(src)?;
+    let dst_view = physical_to_layout_view(dst)?;
+    let src_al = AnnotatedLayout::from_view(&src_view)?;
+    let dst_al = AnnotatedLayout::from_view(&dst_view)?;
 
     // `block_pairs` was already built above; `plan_copy` consumes
     // a `usize`-typed pair list. AB-1d: thread caller-supplied
@@ -1129,26 +1185,31 @@ pub(crate) fn validate_nixl_planner_entry(
     Ok(())
 }
 
-/// Dispatch a `KernelInvocation` resolved by the catalog: build the
-/// per-side pointer arrays from `(src, dst, block_pairs)`, push them
-/// to device memory, and launch the matching `kvbm-kernels` FFI
-/// entrypoint.
+/// Dispatch a `KernelInvocation` resolved by the catalog: fill the
+/// per-side pointer arrays from `(src, dst, block_pairs)` through the
+/// prepared plan's scratch pool, push them to device memory, and
+/// launch the matching `kvbm-kernels` FFI entrypoint.
 ///
-/// Pointer-array shape per kernel:
-/// - **operational side**: one pointer per (block, layer, outer)
-///   chunk; total length `num_blocks_to_transfer * num_layers * outer_dim`.
-///   Walked via `Layout::memory_region(block, layer, outer)`.
-/// - **universal side**: one pointer per block; total length
-///   `num_blocks_to_transfer`. Computed as
-///   `single_buffer_base + block_id * bytes_per_block` (universal
-///   layouts are FC-only, so a single allocation backs all blocks).
+/// Three kernel kinds share this dispatch:
+/// - [`KernelKind::UniversalFromBlock`] / [`KernelKind::BlockFromUniversal`]
+///   move data between an operational layout (walked via
+///   `Layout::memory_region(block, layer, outer)` — one pointer per
+///   `(block, layer, outer)` chunk) and a universal layout (computed
+///   as `single_buffer_base + block_id * bytes_per_block` — one
+///   pointer per block, FC-only).
+/// - [`KernelKind::NhdHndTranspose`] transposes between two
+///   operational layouts; both sides are walked the same way.
+///
+/// The shared scratch + upload + drain path is owned by
+/// [`with_transform_scratch_upload`]; this function only picks the
+/// per-kind emit method and FFI entrypoint.
 pub(crate) fn dispatch_transform_kernel(
     invocation: &crate::transfer::kernel_catalog::KernelInvocation,
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     block_pairs: &[(BlockId, BlockId)],
     stream: &Arc<CudaStream>,
-    prepared: Option<&PreparedTransferPlan>,
+    prepared: &PreparedTransferPlan,
 ) -> Result<()> {
     use cudarc::driver::DevicePtr;
 
@@ -1161,119 +1222,49 @@ pub(crate) fn dispatch_transform_kernel(
     let nh = invocation.num_heads;
     let hd = invocation.head_dim;
 
-    // Operational↔operational transpose: both sides are operational
-    // block stacks, so the universal-side scaffolding below doesn't
-    // apply. Build per-side chunk pointer tables and launch directly.
-    if matches!(invocation.kind, KernelKind::NhdHndTranspose) {
-        return dispatch_nhd_hnd_transpose_kernel(
-            invocation,
-            src,
-            dst,
-            block_pairs,
-            stream,
-            prepared,
-        );
-    }
+    // Project per-side block-id slices once. The two fill the lease's
+    // `op_ptrs` and `univ_ptrs` slots respectively; for op↔op transpose
+    // we just reuse those slots as src/dst (the lease doesn't care
+    // about the semantic name, only the two capacity-pooled Vecs).
+    let a_block_ids: Vec<BlockId> = block_pairs
+        .iter()
+        .map(|p| match invocation.kind {
+            KernelKind::UniversalFromBlock | KernelKind::NhdHndTranspose => p.0,
+            KernelKind::BlockFromUniversal => p.1,
+        })
+        .collect();
+    let b_block_ids: Vec<BlockId> = block_pairs
+        .iter()
+        .map(|p| match invocation.kind {
+            KernelKind::UniversalFromBlock | KernelKind::NhdHndTranspose => p.1,
+            KernelKind::BlockFromUniversal => p.0,
+        })
+        .collect();
 
-    // Determine which side is operational vs universal, and project
-    // the block-id slice for each side.
-    let (op_layout, univ_layout, op_block_ids, univ_block_ids): (
-        &PhysicalLayout,
-        &PhysicalLayout,
-        Vec<BlockId>,
-        Vec<BlockId>,
-    ) = match invocation.kind {
-        KernelKind::UniversalFromBlock => (
-            src,
-            dst,
-            block_pairs.iter().map(|p| p.0).collect(),
-            block_pairs.iter().map(|p| p.1).collect(),
-        ),
-        KernelKind::BlockFromUniversal => (
-            dst,
-            src,
-            block_pairs.iter().map(|p| p.1).collect(),
-            block_pairs.iter().map(|p| p.0).collect(),
-        ),
-        KernelKind::NhdHndTranspose => unreachable!("handled above"),
-    };
-
-    // Fill pointer arrays through the prepared-plan scratch pool when
-    // a cached plan is available; otherwise fall back to per-call
-    // allocation. Both branches feed the same kernel launch below.
-    //
-    // Lease lifetime contract: cudarc's `clone_htod` calls
-    // `cudaMemcpyAsync` on `stream`, which captures the host pointer
-    // and queues an async H2D. The host source (the leased Vec) must
-    // not be modified until the H2D drains, otherwise a concurrent
-    // transfer that re-acquires this Vec from the pool could overwrite
-    // its bytes mid-flight. `DrainOnDrop` records an event on the
-    // stream and host-synchronizes on it in `Drop`, so the H2Ds drain
-    // *before* the leased Vec returns to the pool — and this happens
-    // on every exit path, including `?` early-returns between the two
-    // `clone_htod` calls. The kernel launch below continues async on
-    // the stream after the (small, KB-scale) sync.
-    let (op_dev, univ_dev) = if let Some(plan) = prepared {
-        let mut lease = plan.acquire_transform_scratch()?;
-        let (op_dev, univ_dev) = {
-            let _drain = DrainOnDrop::new(&stream);
-            let (op_dst, univ_dst) = lease.both_mut();
-            plan.emit_universal_kind_pointers(
-                op_layout,
-                &op_block_ids,
-                &univ_block_ids,
-                op_dst,
-                univ_dst,
-            )?;
-            let op_dev = stream.clone_htod(lease.op_ptrs())?;
-            let univ_dev = stream.clone_htod(lease.univ_ptrs())?;
-            (op_dev, univ_dev)
-            // `_drain` drops here, synchronizing the H2Ds. On any `?`
-            // above, the partial H2D state also drains before this
-            // scope exits — same guarantee.
-        };
-        drop(lease);
-        (op_dev, univ_dev)
-    } else {
-        // Legacy per-call alloc path — kept for callers that bypass the
-        // prepared-plan cache (e.g. when caching is disabled).
-        let mut op_ptrs: Vec<usize> = Vec::with_capacity(block_pairs.len() * nl * no);
-        let mut univ_ptrs: Vec<usize> = Vec::with_capacity(block_pairs.len());
-        let univ_buffers = univ_layout.layout().memory_regions();
-        if univ_buffers.len() != 1 {
-            bail!(
-                "dispatch_transform_kernel: universal side expects 1 Buffer, got {}",
-                univ_buffers.len()
-            );
-        }
-        let univ_base = univ_buffers[0].addr();
-        let bytes_per_block = univ_layout.layout().config().bytes_per_block();
-        for &block_id in &op_block_ids {
-            for layer in 0..nl {
-                for outer in 0..no {
-                    let region = op_layout
-                        .layout()
-                        .memory_region(block_id, layer, outer)
-                        .map_err(|e| {
-                            anyhow!(
-                                "dispatch_transform_kernel: failed to read operational chunk \
-                                 (block={block_id}, layer={layer}, outer={outer}): {e:?}"
-                            )
-                        })?;
-                    op_ptrs.push(region.addr());
-                }
+    let (a_dev, b_dev) = with_transform_scratch_upload(stream, prepared, |a, b| {
+        match invocation.kind {
+            KernelKind::UniversalFromBlock => prepared.emit_universal_kind_pointers(
+                src, // operational side
+                &a_block_ids,
+                &b_block_ids,
+                a,
+                b,
+            ),
+            KernelKind::BlockFromUniversal => prepared.emit_universal_kind_pointers(
+                dst, // operational side
+                &a_block_ids,
+                &b_block_ids,
+                a,
+                b,
+            ),
+            KernelKind::NhdHndTranspose => {
+                prepared.emit_oo_transpose_pointers(src, dst, &a_block_ids, &b_block_ids, a, b)
             }
         }
-        for &block_id in &univ_block_ids {
-            univ_ptrs.push(univ_base + block_id * bytes_per_block);
-        }
-        let op_dev = stream.clone_htod(&op_ptrs)?;
-        let univ_dev = stream.clone_htod(&univ_ptrs)?;
-        (op_dev, univ_dev)
-    };
+    })?;
 
-    let (op_ptr_dev_raw, _op_guard) = op_dev.device_ptr(stream.as_ref());
-    let (univ_ptr_dev_raw, _univ_guard) = univ_dev.device_ptr(stream.as_ref());
+    let (a_ptr_raw, _a_guard) = a_dev.device_ptr(stream.as_ref());
+    let (b_ptr_raw, _b_guard) = b_dev.device_ptr(stream.as_ref());
 
     tracing::debug!(
         target: "kvbm_physical::planner",
@@ -1291,8 +1282,9 @@ pub(crate) fn dispatch_transform_kernel(
 
     let status = match invocation.kind {
         KernelKind::UniversalFromBlock => {
-            let universal_ptrs = univ_ptr_dev_raw as usize as *const *mut c_void;
-            let block_ptrs = op_ptr_dev_raw as usize as *const *const c_void;
+            // a = operational (src, IN), b = universal (dst, OUT).
+            let universal_ptrs = b_ptr_raw as usize as *const *mut c_void;
+            let block_ptrs = a_ptr_raw as usize as *const *const c_void;
             unsafe {
                 kvbm_kernels::universal_from_block(
                     universal_ptrs,
@@ -1310,8 +1302,9 @@ pub(crate) fn dispatch_transform_kernel(
             }
         }
         KernelKind::BlockFromUniversal => {
-            let universal_ptrs = univ_ptr_dev_raw as usize as *const *const c_void;
-            let block_ptrs = op_ptr_dev_raw as usize as *const *mut c_void;
+            // a = operational (dst, OUT), b = universal (src, IN).
+            let universal_ptrs = b_ptr_raw as usize as *const *const c_void;
+            let block_ptrs = a_ptr_raw as usize as *const *mut c_void;
             unsafe {
                 kvbm_kernels::block_from_universal(
                     universal_ptrs,
@@ -1328,7 +1321,24 @@ pub(crate) fn dispatch_transform_kernel(
                 )
             }
         }
-        KernelKind::NhdHndTranspose => unreachable!("handled above"),
+        KernelKind::NhdHndTranspose => {
+            // a = src op, b = dst op.
+            unsafe {
+                kvbm_kernels::nhd_hnd_transpose(
+                    a_ptr_raw as usize as *const *const c_void,
+                    b_ptr_raw as usize as *const *mut c_void,
+                    block_pairs.len(),
+                    nl,
+                    no,
+                    nt,
+                    nh,
+                    hd,
+                    invocation.dtype,
+                    invocation.block_layout,
+                    stream_raw,
+                )
+            }
+        }
     };
     if status != cudarc::runtime::sys::cudaError::cudaSuccess {
         bail!(
@@ -1336,121 +1346,6 @@ pub(crate) fn dispatch_transform_kernel(
              for kind={:?}, num_blocks_to_transfer={}",
             invocation.kind,
             block_pairs.len(),
-        );
-    }
-    Ok(())
-}
-
-/// PR-6.3: dispatch the operational↔operational (NHD↔HND) transpose
-/// kernel.
-///
-/// Both sides are operational block stacks, so unlike
-/// [`dispatch_transform_kernel`]'s universal-side scaffolding, both
-/// pointer tables are built via `Layout::memory_region(b, l, o)` —
-/// shaped `[num_blocks_to_transfer × num_layers × outer_dim]` each.
-/// The direction is carried on `KernelInvocation::block_layout`
-/// (kernel's `src_layout` template parameter).
-fn dispatch_nhd_hnd_transpose_kernel(
-    invocation: &crate::transfer::kernel_catalog::KernelInvocation,
-    src: &PhysicalLayout,
-    dst: &PhysicalLayout,
-    block_pairs: &[(BlockId, BlockId)],
-    stream: &Arc<CudaStream>,
-    prepared: Option<&PreparedTransferPlan>,
-) -> Result<()> {
-    use cudarc::driver::DevicePtr;
-
-    let stream_raw = stream.cu_stream() as cudaStream_t;
-    let nl = invocation.num_layers;
-    let no = invocation.outer_dim;
-    let nt = invocation.page_size;
-    let nh = invocation.num_heads;
-    let hd = invocation.head_dim;
-
-    let src_block_ids: Vec<BlockId> = block_pairs.iter().map(|p| p.0).collect();
-    let dst_block_ids: Vec<BlockId> = block_pairs.iter().map(|p| p.1).collect();
-
-    // See `dispatch_transform_kernel` for the lease-lifetime rationale.
-    // Same `DrainOnDrop` pattern: any path that exits the inner scope
-    // (success or `?` partway through clone_htod) drains queued H2Ds
-    // before the leased Vec returns to the pool.
-    let (src_dev, dst_dev) = if let Some(plan) = prepared {
-        let mut lease = plan.acquire_transform_scratch()?;
-        let (src_dev, dst_dev) = {
-            let _drain = DrainOnDrop::new(&stream);
-            // For op↔op transpose, reuse the same lease: `op_ptrs` /
-            // `univ_ptrs` are just two reusable Vec slots — we use them
-            // as src/dst here.
-            let (src_dst, dst_dst) = lease.both_mut();
-            plan.emit_oo_transpose_pointers(
-                src,
-                dst,
-                &src_block_ids,
-                &dst_block_ids,
-                src_dst,
-                dst_dst,
-            )?;
-            let src_dev = stream.clone_htod(lease.op_ptrs())?;
-            let dst_dev = stream.clone_htod(lease.univ_ptrs())?;
-            (src_dev, dst_dev)
-        };
-        drop(lease);
-        (src_dev, dst_dev)
-    } else {
-        let build_table = |layout: &PhysicalLayout,
-                           block_id_of: fn(&(BlockId, BlockId)) -> BlockId|
-         -> Result<Vec<usize>> {
-            let mut table: Vec<usize> = Vec::with_capacity(block_pairs.len() * nl * no);
-            for pair in block_pairs {
-                let block_id = block_id_of(pair);
-                for layer in 0..nl {
-                    for outer in 0..no {
-                        let region = layout
-                            .layout()
-                            .memory_region(block_id, layer, outer)
-                            .map_err(|e| {
-                                anyhow!(
-                                    "dispatch_nhd_hnd_transpose_kernel: failed to read chunk \
-                                     (block={block_id}, layer={layer}, outer={outer}): {e:?}"
-                                )
-                            })?;
-                        table.push(region.addr());
-                    }
-                }
-            }
-            Ok(table)
-        };
-        let src_ptrs = build_table(src, |p| p.0)?;
-        let dst_ptrs = build_table(dst, |p| p.1)?;
-        let src_dev = stream.clone_htod(&src_ptrs)?;
-        let dst_dev = stream.clone_htod(&dst_ptrs)?;
-        (src_dev, dst_dev)
-    };
-
-    let (src_ptr_dev_raw, _src_guard) = src_dev.device_ptr(stream.as_ref());
-    let (dst_ptr_dev_raw, _dst_guard) = dst_dev.device_ptr(stream.as_ref());
-
-    let status = unsafe {
-        kvbm_kernels::nhd_hnd_transpose(
-            src_ptr_dev_raw as usize as *const *const c_void,
-            dst_ptr_dev_raw as usize as *const *mut c_void,
-            block_pairs.len(),
-            nl,
-            no,
-            nt,
-            nh,
-            hd,
-            invocation.dtype,
-            invocation.block_layout,
-            stream_raw,
-        )
-    };
-    if status != cudarc::runtime::sys::cudaError::cudaSuccess {
-        bail!(
-            "dispatch_nhd_hnd_transpose_kernel: kernel launch failed with status={status:?}, \
-             num_blocks_to_transfer={}, src_layout={:?}",
-            block_pairs.len(),
-            invocation.block_layout,
         );
     }
     Ok(())
@@ -1576,6 +1471,9 @@ impl OwnedStagedContext {
             min_inner_bytes: 0,
             coalesce: true,
         };
+        // Staged legs are same-KvBlockLayout (asserted by the Transform
+        // arm bailing below), so they always resolve to Direct. The
+        // Direct path does not consume a prepared plan — pass None.
         let outcome = plan_and_lower(
             src,
             dst,
@@ -1798,16 +1696,22 @@ fn dispatch_staged_nixl_transform(
             xfer_op,
         )?,
         XferOp::Write => {
-            // Staged transforms run on per-request bounce layouts that
-            // don't go through the prepared-plan cache. Pass `None` for
-            // `prepared` so the legacy per-call allocation path runs.
+            // Staged transforms run on per-request bounce layouts —
+            // no cache reuse possible — but the dispatcher requires a
+            // prepared plan. Build one fresh; the scratch pool is
+            // private to this one transfer.
+            let stage1_prepared = std::sync::Arc::new(PreparedTransferPlan::build_transform(
+                invocation,
+                src,
+                bounce_layout,
+            )?);
             dispatch_transform_kernel(
                 &invocation,
                 src,
                 bounce_layout,
                 &kernel_pairs,
                 &staged.stream,
-                None,
+                &stage1_prepared,
             )?;
             let cuda_event = staged.stream.record_event(None)?;
             staged.register_cuda_event(cuda_event)?
@@ -1833,18 +1737,23 @@ fn dispatch_staged_nixl_transform(
 
         let stage2_result: Result<()> = match xfer_op {
             XferOp::Read => {
-                // Stage 2 = local kernel bounce → dst.
+                // Stage 2 = local kernel bounce → dst. Build a fresh
+                // prepared plan for the bounce→dst pair; see sibling
+                // note in the Write branch.
                 let prep: Result<TransferCompleteNotification> = (|| {
-                    // Staged transforms bypass the prepared-plan cache
-                    // (per-request bounce layout). See sibling note in
-                    // the Write branch.
+                    let stage2_prepared =
+                        std::sync::Arc::new(PreparedTransferPlan::build_transform(
+                            invocation_owned,
+                            &bounce_owned,
+                            &dst_owned,
+                        )?);
                     dispatch_transform_kernel(
                         &invocation_owned,
                         &bounce_owned,
                         &dst_owned,
                         &kernel_pairs,
                         &staged.stream,
-                        None,
+                        &stage2_prepared,
                     )?;
                     let cuda_event = staged.stream.record_event(None)?;
                     staged.register_cuda_event(cuda_event)

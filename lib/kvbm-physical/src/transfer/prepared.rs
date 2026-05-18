@@ -4,27 +4,25 @@
 //! Prepared transfer-plan cache.
 //!
 //! Two-tier cache keyed by `(src_handle, dst_handle, strategy, axis_slices)`
-//! storing compact handle-keyed templates:
+//! storing transform templates (G1↔G2 + remote operational↔universal via
+//! the kernel catalog): the resolved [`KernelInvocation`], universal-side
+//! base address and `bytes_per_block`, and a per-plan scratch pool of
+//! pointer-array `Vec`s. Per-call work is reduced to filling the leased
+//! scratch via [`PointerSink`] — steady-state same-or-smaller block lists
+//! reuse capacity, so the hot path allocates only the device-side copy.
 //!
-//! * **Transform** plans (G1↔G2 + remote operational↔universal via the kernel
-//!   catalog) cache the resolved [`KernelInvocation`], universal-side base
-//!   address, `bytes_per_block`, and a per-plan scratch pool of
-//!   pointer-array `Vec`s. Per-call work is reduced to filling the leased
-//!   scratch via [`PointerSink`] — steady-state same-or-smaller block lists
-//!   reuse capacity, so the hot path allocates only the device-side copy.
-//!
-//! * **Direct** plans (same-layout / sliced copies) cache the projected
-//!   [`AnnotatedLayout`] pair so repeated calls skip layout-view projection.
-//!   Block-list-specific `CopyOp`s are still produced per call via
-//!   `plan_copy`; downstream NIXL/CUDA paths can consume them through a
-//!   [`DescSink`] (see [`NixlDescPairSink`], [`CopyOpVecSink`],
-//!   [`CountingDescSink`]).
+//! Same-layout / sliced direct copies are not cached: their projection
+//! cost is microseconds against millisecond-scale DMA/RDMA operations,
+//! and the plan_copy + coalesce step is unaffected by caching.
+//! Downstream NIXL/CUDA paths can still consume the resulting ops
+//! through a [`DescSink`] (see [`NixlDescPairSink`], [`CopyOpVecSink`],
+//! [`CountingDescSink`]).
 //!
 //! The cache values are wrapped in [`Arc`] so cache hits cost only a refcount
 //! bump — scratch pools are shared by definition across concurrent calls.
 
 use std::collections::{HashMap, VecDeque};
-use std::mem::{size_of, size_of_val};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -36,7 +34,7 @@ use crate::BlockId;
 use crate::manager::LayoutHandle;
 use crate::transfer::PhysicalLayout;
 use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
-use crate::transfer::plan::{AnnotatedLayout, CopyOp};
+use crate::transfer::plan::CopyOp;
 use crate::transfer::strategy::TransferStrategy;
 
 // ============================================================================
@@ -342,31 +340,33 @@ impl Drop for TransformScratchLease {
 // ============================================================================
 
 /// Cached transfer template — value type for the prepared-plan cache.
+///
+/// Carries the resolved [`KernelInvocation`], the universal-side base
+/// address and bytes-per-block (for `Universal*From*` kinds — `None`
+/// for the op↔op transpose where both sides are walked), and a
+/// per-plan scratch pool of host pointer-array `Vec`s.
+///
+/// Same-layout / sliced direct copies do not produce a prepared plan
+/// — `lookup_prepared_plan` returns `None` for those, and
+/// `plan_and_lower` projects `AnnotatedLayout`s inline. The cache
+/// therefore only stores transform templates.
 #[derive(Debug)]
-pub(crate) enum PreparedTransferPlan {
-    /// Semantic-layout transform through the kernel catalog.
-    Transform {
-        invocation: KernelInvocation,
-        /// Universal-side single-allocation base address. Always
-        /// `Some(_)` for `UniversalFromBlock`/`BlockFromUniversal`;
-        /// `None` for `NhdHndTranspose` (both sides operational).
-        univ_base: Option<usize>,
-        /// Universal-side bytes-per-block (constant; from `LayoutConfig`).
-        /// Paired with `univ_base`.
-        univ_bytes_per_block: Option<usize>,
-        /// Per-plan scratch pool of host pointer-array `Vec`s.
-        scratch_pool: Arc<TransformScratchPool>,
-    },
-    /// Same-layout / sliced direct copy.
-    Direct {
-        src: AnnotatedLayout,
-        dst: AnnotatedLayout,
-    },
+pub(crate) struct PreparedTransferPlan {
+    pub(crate) invocation: KernelInvocation,
+    /// Universal-side single-allocation base address. `Some(_)` for
+    /// `UniversalFromBlock`/`BlockFromUniversal`; `None` for
+    /// `NhdHndTranspose` (both sides operational).
+    univ_base: Option<usize>,
+    /// Universal-side bytes-per-block (constant; from `LayoutConfig`).
+    /// Paired with `univ_base`.
+    univ_bytes_per_block: Option<usize>,
+    /// Per-plan scratch pool of host pointer-array `Vec`s.
+    scratch_pool: Arc<TransformScratchPool>,
 }
 
 impl PreparedTransferPlan {
-    /// Build a `Transform` plan from the dispatched `KernelInvocation` and
-    /// the source/destination physical layouts.
+    /// Build a plan from the dispatched `KernelInvocation` and the
+    /// source/destination physical layouts.
     pub(crate) fn build_transform(
         invocation: KernelInvocation,
         src: &PhysicalLayout,
@@ -377,7 +377,7 @@ impl PreparedTransferPlan {
             KernelKind::UniversalFromBlock => extract_universal_base(dst)?,
             KernelKind::BlockFromUniversal => extract_universal_base(src)?,
         };
-        Ok(Self::Transform {
+        Ok(Self {
             invocation,
             univ_base,
             univ_bytes_per_block,
@@ -385,25 +385,9 @@ impl PreparedTransferPlan {
         })
     }
 
-    /// Build a `Direct` plan from the source/destination physical layouts.
-    pub(crate) fn build_direct(src: &PhysicalLayout, dst: &PhysicalLayout) -> Result<Self> {
-        let src_view = crate::transfer::lower::physical_to_layout_view(src)?;
-        let dst_view = crate::transfer::lower::physical_to_layout_view(dst)?;
-        Ok(Self::Direct {
-            src: AnnotatedLayout::from_view(&src_view)?,
-            dst: AnnotatedLayout::from_view(&dst_view)?,
-        })
-    }
-
-    /// Acquire a scratch lease from a `Transform` plan's pool. Errors on
-    /// the `Direct` variant.
+    /// Acquire a scratch lease from the plan's pool.
     pub(crate) fn acquire_transform_scratch(&self) -> Result<TransformScratchLease> {
-        match self {
-            PreparedTransferPlan::Transform { scratch_pool, .. } => Ok(scratch_pool.acquire()),
-            PreparedTransferPlan::Direct { .. } => {
-                bail!("acquire_transform_scratch: prepared plan is Direct, not Transform")
-            }
-        }
+        Ok(self.scratch_pool.acquire())
     }
 
     /// Fill the operational-side pointer array (`block × layer × outer`)
@@ -425,33 +409,25 @@ impl PreparedTransferPlan {
         O: PointerSink,
         U: PointerSink,
     {
-        let (invocation, univ_base, univ_bytes_per_block) = match self {
-            PreparedTransferPlan::Transform {
-                invocation,
-                univ_base: Some(b),
-                univ_bytes_per_block: Some(bpb),
-                ..
-            } => (invocation, *b, *bpb),
-            PreparedTransferPlan::Transform { .. } => bail!(
-                "emit_universal_kind_pointers: Transform plan has no universal base \
-                 (kind={:?}) — caller routed an op↔op transpose into the universal path",
-                self.kernel_kind().unwrap_or(KernelKind::NhdHndTranspose)
+        let (univ_base, univ_bytes_per_block) = match (self.univ_base, self.univ_bytes_per_block) {
+            (Some(b), Some(bpb)) => (b, bpb),
+            _ => bail!(
+                "emit_universal_kind_pointers: plan has no universal base (kind={:?}) — \
+                 caller routed an op↔op transpose into the universal path",
+                self.invocation.kind
             ),
-            PreparedTransferPlan::Direct { .. } => {
-                bail!("emit_universal_kind_pointers: prepared plan is Direct, not Transform")
-            }
         };
         if !matches!(
-            invocation.kind,
+            self.invocation.kind,
             KernelKind::UniversalFromBlock | KernelKind::BlockFromUniversal
         ) {
             bail!(
                 "emit_universal_kind_pointers: invocation kind {:?} is not a universal kind",
-                invocation.kind
+                self.invocation.kind
             );
         }
-        let nl = invocation.num_layers;
-        let no = invocation.outer_dim;
+        let nl = self.invocation.num_layers;
+        let no = self.invocation.outer_dim;
         op_sink.reserve(op_block_ids.len() * nl * no);
         univ_sink.reserve(univ_block_ids.len());
         for &block_id in op_block_ids {
@@ -492,16 +468,10 @@ impl PreparedTransferPlan {
         S: PointerSink,
         D: PointerSink,
     {
-        let invocation = match self {
-            PreparedTransferPlan::Transform { invocation, .. } => invocation,
-            PreparedTransferPlan::Direct { .. } => {
-                bail!("emit_oo_transpose_pointers: prepared plan is Direct, not Transform")
-            }
-        };
-        if !matches!(invocation.kind, KernelKind::NhdHndTranspose) {
+        if !matches!(self.invocation.kind, KernelKind::NhdHndTranspose) {
             bail!(
                 "emit_oo_transpose_pointers: invocation kind {:?} is not NhdHndTranspose",
-                invocation.kind
+                self.invocation.kind
             );
         }
         if src_block_ids.len() != dst_block_ids.len() {
@@ -511,8 +481,8 @@ impl PreparedTransferPlan {
                 dst_block_ids.len()
             );
         }
-        let nl = invocation.num_layers;
-        let no = invocation.outer_dim;
+        let nl = self.invocation.num_layers;
+        let no = self.invocation.outer_dim;
         let chunks_per_block = nl * no;
         src_sink.reserve(src_block_ids.len() * chunks_per_block);
         dst_sink.reserve(dst_block_ids.len() * chunks_per_block);
@@ -522,36 +492,31 @@ impl PreparedTransferPlan {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn kernel_invocation(&self) -> Option<&KernelInvocation> {
-        match self {
-            PreparedTransferPlan::Transform { invocation, .. } => Some(invocation),
-            PreparedTransferPlan::Direct { .. } => None,
-        }
-    }
-
-    pub(crate) fn kernel_kind(&self) -> Option<KernelKind> {
-        self.kernel_invocation().map(|i| i.kind)
-    }
-
-    /// Access the cached annotated layouts for a `Direct` plan. Returns
-    /// `None` for `Transform`. Used by observability and tests.
-    #[allow(dead_code)]
-    pub(crate) fn annotated_layouts(&self) -> Option<(&AnnotatedLayout, &AnnotatedLayout)> {
-        match self {
-            PreparedTransferPlan::Direct { src, dst } => Some((src, dst)),
-            PreparedTransferPlan::Transform { .. } => None,
-        }
+    pub(crate) fn kernel_kind(&self) -> KernelKind {
+        self.invocation.kind
     }
 
     fn approximate_heap_bytes(&self) -> usize {
-        match self {
-            PreparedTransferPlan::Transform { scratch_pool, .. } => {
-                size_of::<KernelInvocation>() + scratch_pool.approximate_bytes()
-            }
-            PreparedTransferPlan::Direct { src, dst } => {
-                approximate_annotated_layout_heap_bytes(src)
-                    + approximate_annotated_layout_heap_bytes(dst)
-            }
+        size_of::<KernelInvocation>() + self.scratch_pool.approximate_bytes()
+    }
+
+    /// Test-only constructor — assembles a plan from synthetic field
+    /// values without driving the kernel catalog or projecting a real
+    /// `PhysicalLayout`. Used by cache-only unit tests in
+    /// `tests/prepared_plan.rs` that exercise `PreparedPlanCache`
+    /// structural behaviour without emitting pointer arrays.
+    #[cfg(test)]
+    pub(crate) fn synthetic_for_tests(
+        invocation: KernelInvocation,
+        univ_base: Option<usize>,
+        univ_bytes_per_block: Option<usize>,
+        scratch_pool: Arc<TransformScratchPool>,
+    ) -> Self {
+        Self {
+            invocation,
+            univ_base,
+            univ_bytes_per_block,
+            scratch_pool,
         }
     }
 }
@@ -594,13 +559,6 @@ fn extract_universal_base(univ_layout: &PhysicalLayout) -> Result<(Option<usize>
     let base = buffers[0].addr();
     let bpb = univ_layout.layout().config().bytes_per_block();
     Ok((Some(base), Some(bpb)))
-}
-
-fn approximate_annotated_layout_heap_bytes(layout: &AnnotatedLayout) -> usize {
-    size_of_val(layout.regions())
-        + size_of_val(layout.dim_layout().dims())
-        + size_of_val(layout.dim_layout().sizes())
-        + size_of_val(layout.byte_strides().as_bytes())
 }
 
 // ============================================================================
@@ -778,7 +736,7 @@ mod tests {
     use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
 
     fn transform_plan() -> PreparedTransferPlan {
-        PreparedTransferPlan::Transform {
+        PreparedTransferPlan {
             invocation: KernelInvocation {
                 kind: KernelKind::UniversalFromBlock,
                 num_layers: 1,

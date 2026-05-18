@@ -478,8 +478,11 @@ impl TransferContext {
     /// of a `(src, dst)` handle pair using the strategy that
     /// [`crate::transfer::strategy::select_strategy`] would pick.
     ///
-    /// No-op when the cache is disabled. Sliced transfers (`axis_slices`)
-    /// still populate the cache lazily on first use.
+    /// No-op when the cache is disabled, when the layout pair is
+    /// same-shape direct (no plan needed — the planner projects
+    /// `AnnotatedLayout`s inline), or when the strategy is two-hop.
+    /// Sliced transfers (`axis_slices`) still populate the cache
+    /// lazily on first use.
     pub(crate) fn prewarm_prepared_plan(
         &self,
         src_handle: crate::manager::LayoutHandle,
@@ -492,6 +495,12 @@ impl TransferContext {
         if !self.prepared_plan_cache.is_enabled() {
             return Ok(());
         }
+        let src_kv = src_layout.layout().block_layout();
+        let dst_kv = dst_layout.layout().block_layout();
+        if !src_kv.requires_transform(&dst_kv) {
+            // Same-layout direct copies don't use a prepared plan.
+            return Ok(());
+        }
         let plan = select_strategy(src_layout, dst_layout, self)?;
         let strategy = match plan {
             TransferPlan::Direct(strategy) => strategy,
@@ -502,17 +511,10 @@ impl TransferContext {
         let key = PreparedPlanKey::new(src_handle, dst_handle, strategy, &[]);
         self.prepared_plan_cache
             .get_or_insert_with(self.worker_id(), key, || {
-                let src_kv = src_layout.layout().block_layout();
-                let dst_kv = dst_layout.layout().block_layout();
-                if src_kv.requires_transform(&dst_kv) {
-                    let invocation =
-                        crate::transfer::executor::planner::build_transform_invocation(
-                            src_layout, dst_layout,
-                        )?;
-                    PreparedTransferPlan::build_transform(invocation, src_layout, dst_layout)
-                } else {
-                    PreparedTransferPlan::build_direct(src_layout, dst_layout)
-                }
+                let invocation = crate::transfer::executor::planner::build_transform_invocation(
+                    src_layout, dst_layout,
+                )?;
+                PreparedTransferPlan::build_transform(invocation, src_layout, dst_layout)
             })?;
         Ok(())
     }

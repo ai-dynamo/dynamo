@@ -449,17 +449,27 @@ fn dispatch_benchmark_candidate(
             dst,
             block_pairs,
         } => {
+            // Build the prepared plan OUTSIDE the timing window — the
+            // bench measures raw kernel-dispatch + pointer-fill + device
+            // sync, not the one-time plan construction (extract_universal
+            // _base, scratch-pool allocator). This matches the pre-refactor
+            // baseline where `dispatch_transform_kernel` was passed `None`
+            // and built its arrays inline at dispatch time.
+            let prepared = std::sync::Arc::new(
+                crate::transfer::prepared::PreparedTransferPlan::build_transform(
+                    *invocation,
+                    src,
+                    dst,
+                )?,
+            );
             let t0 = std::time::Instant::now();
-            // Benchmark path bypasses the prepared-plan cache so timing
-            // reflects the raw kernel-dispatch + pointer-fill cost
-            // without conflating cache hit/miss state.
             crate::transfer::executor::dispatch_transform_kernel(
                 invocation,
                 src,
                 dst,
                 block_pairs,
                 stream,
-                None,
+                &prepared,
             )?;
             stream.synchronize()?;
             Ok(("TransformKernel", t0.elapsed().as_micros() as u64))

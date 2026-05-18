@@ -240,69 +240,8 @@ impl TransferManager {
         dst_blocks: &[BlockId],
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // Clone layouts inside the lock, then drop lock before transfer
-        let (src_layout, dst_layout) = {
-            let registry = self.registry.read().unwrap();
-            let src = registry
-                .get_layout(src_handle)
-                .ok_or_else(|| anyhow!("invalid source handle: {}", src_handle))?
-                .clone(); // Cheap: just Arc refcount bump
-            let dst = registry
-                .get_layout(dst_handle)
-                .ok_or_else(|| anyhow!("invalid destination handle: {}", dst_handle))?
-                .clone();
-            (src, dst)
-        }; // Lock released here
-
-        let (
-            layer_range,
-            nixl_write_notification,
-            bounce_buffer,
-            cuda_stream,
-            src_kv_layout,
-            dst_kv_layout,
-            metric_route,
-            use_planner,
-        ) = options.dissolve();
-
-        let mut internal_options = TransferOptionsInternal::builder()
-            .use_planner(use_planner)
-            .handles(src_handle, dst_handle);
-
-        if let Some(range) = layer_range {
-            internal_options = internal_options.layer_range(range);
-        }
-
-        if let Some(notification) = nixl_write_notification {
-            internal_options = internal_options.nixl_write_notification(notification);
-        }
-
-        if let Some(bounce) = bounce_buffer {
-            let (handle, block_ids) = bounce.into_parts();
-            let bounce_buffer = self.create_bounce_buffer(handle, block_ids)?;
-            internal_options = internal_options.bounce_buffer(bounce_buffer);
-        }
-
-        if let Some(stream) = cuda_stream {
-            internal_options = internal_options.cuda_stream(stream);
-        }
-
-        if let Some(layout) = src_kv_layout {
-            internal_options = internal_options.src_kv_layout(layout);
-        }
-
-        if let Some(layout) = dst_kv_layout {
-            internal_options = internal_options.dst_kv_layout(layout);
-        }
-
-        if let Some(route) = metric_route {
-            internal_options = internal_options.metric_route(route);
-        }
-
-        let options = internal_options.build()?;
-        let metric_route = options.metric_route;
-        let transfer_start = metric_route.map(|_| Instant::now());
-
+        let (src_layout, dst_layout, internal_options) =
+            self.resolve_and_dissolve(src_handle, dst_handle, options, None)?;
         tracing::debug!(
             src_handle = src_handle.to_string(),
             dst_handle = dst_handle.to_string(),
@@ -310,34 +249,13 @@ impl TransferManager {
             src_blocks,
             dst_blocks,
         );
-
-        // Execute transfer with no lock held
-        let notification = super::transfer::executor::execute_transfer(
+        self.dispatch_resolved(
             &src_layout,
             &dst_layout,
             src_blocks,
             dst_blocks,
-            options,
-            &self.context,
-        );
-
-        match notification {
-            Ok(notification) => match (metric_route, transfer_start) {
-                (Some(route), Some(started_at)) => self.wrap_notification_with_metrics(
-                    route,
-                    dst_blocks.len() as u64,
-                    started_at,
-                    notification,
-                ),
-                _ => Ok(notification),
-            },
-            Err(error) => {
-                if let Some(route) = metric_route {
-                    self.record_transfer_failure(route, "internal");
-                }
-                Err(error)
-            }
-        }
+            internal_options,
+        )
     }
 
     /// Sliced cross-leader transfer — AB-1d.
@@ -362,17 +280,47 @@ impl TransferManager {
         selection: crate::transfer::TransferSelection,
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // Split out block pairs into parallel vecs for the executor entry.
         let (src_blocks, dst_blocks): (Vec<BlockId>, Vec<BlockId>) =
             selection.block_pairs.iter().copied().unzip();
-        let axis_slices = selection.axis_slices;
+        let (src_layout, dst_layout, internal_options) = self.resolve_and_dissolve(
+            src_handle,
+            dst_handle,
+            options,
+            Some(selection.axis_slices),
+        )?;
+        self.dispatch_resolved(
+            &src_layout,
+            &dst_layout,
+            &src_blocks,
+            &dst_blocks,
+            internal_options,
+        )
+    }
 
+    /// Resolve `(src_handle, dst_handle)` to layouts and turn the
+    /// caller-supplied [`TransferOptions`] into the executor-internal
+    /// [`TransferOptionsInternal`].
+    ///
+    /// `selection_slices = Some(_)` means selection-flavored: forces
+    /// `use_planner = true` and attaches the axis slices (the caller's
+    /// `use_planner` choice is ignored — `axis_slices` is only
+    /// meaningful on the planner path). `None` means standard transfer:
+    /// the caller's `use_planner` choice is honored and no slices are
+    /// attached.
+    fn resolve_and_dissolve(
+        &self,
+        src_handle: LayoutHandle,
+        dst_handle: LayoutHandle,
+        options: TransferOptions,
+        selection_slices: Option<Vec<kvbm_common::AxisIntersection>>,
+    ) -> Result<(PhysicalLayout, PhysicalLayout, TransferOptionsInternal)> {
+        // Clone layouts inside the lock, then drop lock before transfer.
         let (src_layout, dst_layout) = {
             let registry = self.registry.read().unwrap();
             let src = registry
                 .get_layout(src_handle)
                 .ok_or_else(|| anyhow!("invalid source handle: {}", src_handle))?
-                .clone();
+                .clone(); // Cheap: just Arc refcount bump
             let dst = registry
                 .get_layout(dst_handle)
                 .ok_or_else(|| anyhow!("invalid destination handle: {}", dst_handle))?
@@ -388,48 +336,63 @@ impl TransferManager {
             src_kv_layout,
             dst_kv_layout,
             metric_route,
-            _use_planner_caller_choice,
+            use_planner,
         ) = options.dissolve();
 
-        let mut internal_options = TransferOptionsInternal::builder()
-            .use_planner(true)
-            .axis_slices(axis_slices)
+        let force_planner = selection_slices.is_some();
+        let mut builder = TransferOptionsInternal::builder()
+            .use_planner(force_planner || use_planner)
             .handles(src_handle, dst_handle);
-
+        if let Some(slices) = selection_slices {
+            builder = builder.axis_slices(slices);
+        }
         if let Some(range) = layer_range {
-            internal_options = internal_options.layer_range(range);
+            builder = builder.layer_range(range);
         }
         if let Some(notification) = nixl_write_notification {
-            internal_options = internal_options.nixl_write_notification(notification);
+            builder = builder.nixl_write_notification(notification);
         }
         if let Some(bounce) = bounce_buffer {
             let (handle, block_ids) = bounce.into_parts();
             let bounce_buffer = self.create_bounce_buffer(handle, block_ids)?;
-            internal_options = internal_options.bounce_buffer(bounce_buffer);
+            builder = builder.bounce_buffer(bounce_buffer);
         }
         if let Some(stream) = cuda_stream {
-            internal_options = internal_options.cuda_stream(stream);
+            builder = builder.cuda_stream(stream);
         }
         if let Some(layout) = src_kv_layout {
-            internal_options = internal_options.src_kv_layout(layout);
+            builder = builder.src_kv_layout(layout);
         }
         if let Some(layout) = dst_kv_layout {
-            internal_options = internal_options.dst_kv_layout(layout);
+            builder = builder.dst_kv_layout(layout);
         }
         if let Some(route) = metric_route {
-            internal_options = internal_options.metric_route(route);
+            builder = builder.metric_route(route);
         }
 
-        let options = internal_options.build()?;
-        let metric_route = options.metric_route;
+        Ok((src_layout, dst_layout, builder.build()?))
+    }
+
+    /// Drive the executor with already-resolved layouts + internal
+    /// options, then wrap the resulting notification with metrics when
+    /// a `metric_route` was attached.
+    fn dispatch_resolved(
+        &self,
+        src_layout: &PhysicalLayout,
+        dst_layout: &PhysicalLayout,
+        src_blocks: &[BlockId],
+        dst_blocks: &[BlockId],
+        internal_options: TransferOptionsInternal,
+    ) -> Result<TransferCompleteNotification> {
+        let metric_route = internal_options.metric_route;
         let transfer_start = metric_route.map(|_| Instant::now());
 
         let notification = super::transfer::executor::execute_transfer(
-            &src_layout,
-            &dst_layout,
-            &src_blocks,
-            &dst_blocks,
-            options,
+            src_layout,
+            dst_layout,
+            src_blocks,
+            dst_blocks,
+            internal_options,
             &self.context,
         );
 

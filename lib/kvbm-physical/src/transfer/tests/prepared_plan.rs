@@ -396,14 +396,16 @@ async fn prewarm_local_pair_populates_cache() -> Result<()> {
 
 // ────────────────── Cache-only unit tests (no CUDA) ──────────────────
 
-fn dummy_direct_plan() -> PreparedTransferPlan {
-    // Use a build-from-fake-layout path requires a PhysicalLayout we
-    // can't easily synthesise. Build the variant inline instead.
-    // SAFETY: the test only inspects `Arc::ptr_eq` and cache structural
-    // state; the AnnotatedLayouts are never deref'd as live layouts.
-    PreparedTransferPlan::Transform {
-        invocation: crate::transfer::kernel_catalog::KernelInvocation {
-            kind: crate::transfer::kernel_catalog::KernelKind::UniversalFromBlock,
+fn dummy_transform_plan() -> PreparedTransferPlan {
+    // Synthetic plan used by cache-only unit tests below. The tests
+    // only inspect Arc identity and cache structural state — they
+    // never invoke emit_*, so the inner univ_base/scratch pool fields
+    // are inert.
+    use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
+    use crate::transfer::prepared::TransformScratchPool;
+    PreparedTransferPlan::synthetic_for_tests(
+        KernelInvocation {
+            kind: KernelKind::UniversalFromBlock,
             num_layers: 1,
             outer_dim: 1,
             page_size: 1,
@@ -412,10 +414,10 @@ fn dummy_direct_plan() -> PreparedTransferPlan {
             dtype: kvbm_kernels::TensorDataType::F16,
             block_layout: kvbm_kernels::BlockLayout::NHD,
         },
-        univ_base: Some(0x1000),
-        univ_bytes_per_block: Some(64),
-        scratch_pool: Arc::new(crate::transfer::prepared::TransformScratchPool::default()),
-    }
+        Some(0x1000),
+        Some(64),
+        Arc::new(TransformScratchPool::default()),
+    )
 }
 
 /// (Plan test 4) Many remote `src_handles` sharing one `dst_handle`
@@ -434,7 +436,7 @@ fn remote_lru_bounds_distinct_src_handles_for_one_dst() {
         let src_handle = LayoutHandle::new(100 + i, 0);
         let key = PreparedPlanKey::new(src_handle, dst_handle, TransferStrategy::NixlRead, &[]);
         cache
-            .get_or_insert_with(local_worker, key, || Ok(dummy_direct_plan()))
+            .get_or_insert_with(local_worker, key, || Ok(dummy_transform_plan()))
             .expect("insert");
     }
     let stats = cache.stats();
@@ -478,7 +480,7 @@ fn remote_pair_second_lookup_hits_lru() {
     );
 
     let first = cache
-        .get_or_insert_with(local_worker, key1, || Ok(dummy_direct_plan()))
+        .get_or_insert_with(local_worker, key1, || Ok(dummy_transform_plan()))
         .unwrap();
     let second = cache
         .get_or_insert_with(local_worker, key2, || panic!("second lookup must hit"))
