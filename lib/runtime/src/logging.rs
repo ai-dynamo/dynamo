@@ -1052,6 +1052,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             (provider, None, None)
         };
 
+        // Register the provider globally so direct OTel API users
+        // (`opentelemetry::global::tracer(...)`) hit the same exporter as
+        // the tracing-opentelemetry bridge below. Without this, ad-hoc
+        // OTel spans created via `global::tracer()` go to the default
+        // no-op provider and are silently dropped.
+        // Cheap — `SdkTracerProvider` is Arc-shared internally.
+        opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+
         // Get a tracer from the provider
         let tracer = tracer_provider.tracer(service_name.clone());
 

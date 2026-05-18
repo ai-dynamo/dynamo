@@ -66,6 +66,15 @@ class InProcOtlpCollector(trace_service_pb2_grpc.TraceServiceServicer):
         with self._lock:
             return [s for s in self.spans if s.name == "engine.generate"]
 
+    def has_span(self, name):
+        with self._lock:
+            return any(s.name == name for s in self.spans)
+
+    def snapshot(self):
+        """Return a stable copy of `self.spans` for assertions."""
+        with self._lock:
+            return list(self.spans)
+
 
 def _get_attr(span, key):
     """Return the attribute value as a string, or None if absent.
@@ -244,14 +253,18 @@ def test_disagg_decode_span_links_to_prefill_span(
                     resp.status_code == 200
                 ), f"curl failed: {resp.status_code} {resp.text!r}"
 
-                # Wait for BOTH prefill and decode spans to arrive at the collector.
-                deadline = time.monotonic() + 20.0
+                # Wait for prefill/decode engine.generate AND at least one
+                # `sample.tokens` child span — the child is exported in a
+                # separate batch and can lag the parent.
+                deadline = time.monotonic() + 30.0
                 while time.monotonic() < deadline:
                     roles = {
                         _get_attr(s, "disagg_role")
                         for s in collector.engine_generate_spans()
                     }
-                    if {"prefill", "decode"}.issubset(roles):
+                    if {"prefill", "decode"}.issubset(roles) and collector.has_span(
+                        "sample.tokens"
+                    ):
                         break
                     time.sleep(0.5)
 
@@ -278,4 +291,24 @@ def test_disagg_decode_span_links_to_prefill_span(
     assert prefill_span.span_id in link_span_ids, (
         f"decode Link span_ids {[link.span_id.hex() for link in decode_span.links]} "
         f"don't include prefill span_id {prefill_span.span_id.hex()}"
+    )
+
+    # Engine-author child spans MUST nest under engine.generate, not be
+    # siblings. The sample engine opens `sample.tokens` via
+    # telemetry.start_span() — its parent_span_id must equal the decode
+    # engine.generate span_id.
+    sample_token_spans = [
+        s
+        for s in collector.snapshot()
+        if s.name == "sample.tokens"
+        and s.trace_id == decode_span.trace_id
+        and s.parent_span_id == decode_span.span_id
+    ]
+    assert sample_token_spans, (
+        "no `sample.tokens` child span nesting under decode engine.generate "
+        f"(decode trace_id={decode_span.trace_id.hex()} "
+        f"span_id={decode_span.span_id.hex()}). Likely causes: "
+        "OTel global TracerProvider not registered "
+        "(see lib/runtime/src/logging.rs), or Context.start_span hit the "
+        "NoOp path (bridge not installed)."
     )
