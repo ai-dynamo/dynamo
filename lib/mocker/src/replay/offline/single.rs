@@ -28,6 +28,10 @@ pub(super) struct SingleRuntime {
     collector: TraceCollector,
     mode: SingleReplayMode,
     progress: ReplayProgress,
+    /// Optional cap on simulated wall-clock time. When set, `run()` exits
+    /// gracefully once `current_time_ms` exceeds this cap, leaving any
+    /// in-flight requests as incomplete in the report.
+    max_sim_time_ms: Option<f64>,
 }
 
 impl SingleRuntime {
@@ -63,7 +67,17 @@ impl SingleRuntime {
             collector: TraceCollector::default(),
             mode,
             progress: ReplayProgress::new(total_requests, "offline replay"),
+            max_sim_time_ms: None,
         }
+    }
+
+    /// Cap the simulated wall-clock duration. After construction, call this to
+    /// have `run()` stop gracefully once the simulated clock would exceed
+    /// `ms`. Pass `None` to run to natural completion (the default).
+    #[allow(dead_code)] // exposed for parity with AggRuntime / DisaggRuntime
+    pub(super) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
+        self.max_sim_time_ms = ms;
+        self
     }
 
     fn enqueue_trace_arrivals(&mut self) {
@@ -190,6 +204,11 @@ impl SingleRuntime {
 
     pub(super) fn run(mut self) -> anyhow::Result<TraceCollector> {
         while !self.is_done() {
+            if let Some(cap_ms) = self.max_sim_time_ms
+                && self.current_time_ms > cap_ms
+            {
+                break;
+            }
             match self.mode {
                 SingleReplayMode::Trace => {
                     self.enqueue_trace_arrivals();
@@ -678,7 +697,7 @@ mod tests {
     ) {
         let args = replay_args(enable_prefix_caching, enable_chunked_prefill);
         let manual = run_trace_manually(&args, replay_fixture());
-        let replay_report = simulate_trace_single(args, replay_fixture(), 1.0).unwrap();
+        let replay_report = simulate_trace_single(args, replay_fixture(), 1.0, None).unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
@@ -734,7 +753,7 @@ mod tests {
             },
         ];
         let manual = run_concurrency_manually(&args, requests.clone(), 2);
-        let replay_report = simulate_concurrency_single(args, requests, 2).unwrap();
+        let replay_report = simulate_concurrency_single(args, requests, 2, None).unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
@@ -789,5 +808,88 @@ mod tests {
         assert!(arrival_times.contains(&0.0));
         assert!(arrival_times.iter().all(|arrival| *arrival >= 0.0));
         assert_eq!(report.request_counts.completed_requests, 3);
+    }
+
+    fn cap_request(uuid: u128, arrival_ms: f64) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(arrival_ms),
+        }
+    }
+
+    fn fast_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_num_batched_tokens(Some(8))
+            .max_num_seqs(Some(2))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap()
+    }
+
+    /// Verifies that the cap operates on **simulated** time: with arrivals
+    /// at 0/1/2/3/4 seconds of sim time and a 2.5s cap, the resulting
+    /// simulated duration stays at or below the cap. Real wall-clock
+    /// runtime is microseconds (speedup_ratio=1000).
+    #[test]
+    fn test_single_max_sim_time_truncates_run() {
+        let args = fast_args();
+        let submitted = 5;
+        let cap_ms = 2500.0;
+        let pending = VecDeque::from(vec![
+            cap_request(1, 0.0),
+            cap_request(2, 1000.0),
+            cap_request(3, 2000.0),
+            cap_request(4, 3000.0),
+            cap_request(5, 4000.0),
+        ]);
+        let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace)
+            .with_max_sim_time_ms(Some(cap_ms))
+            .run()
+            .unwrap();
+        let report = collector.finish();
+        assert!(
+            report.request_counts.num_requests < submitted,
+            "cap should admit fewer than {} requests; got num_requests={}",
+            submitted,
+            report.request_counts.num_requests
+        );
+        assert!(
+            report.throughput.duration_ms <= cap_ms,
+            "simulated duration must respect cap; got duration_ms={} cap_ms={}",
+            report.throughput.duration_ms,
+            cap_ms
+        );
+    }
+
+    /// Sanity: uncapped, the same setup admits all requests and the
+    /// simulated duration extends past the last arrival.
+    #[test]
+    fn test_single_no_cap_completes_everything() {
+        let args = fast_args();
+        let pending = VecDeque::from(vec![
+            cap_request(1, 0.0),
+            cap_request(2, 1000.0),
+            cap_request(3, 2000.0),
+            cap_request(4, 3000.0),
+            cap_request(5, 4000.0),
+        ]);
+        let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace)
+            .run()
+            .unwrap();
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 5);
+        assert_eq!(report.request_counts.num_requests, 5);
+        assert!(
+            report.throughput.duration_ms >= 4000.0,
+            "uncapped sim duration should extend past last arrival; got {}",
+            report.throughput.duration_ms
+        );
     }
 }

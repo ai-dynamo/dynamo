@@ -560,7 +560,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, max_sim_time_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -581,6 +581,7 @@ pub fn run_mocker_trace_replay(
     trace_format: &str,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    max_sim_time_ms: Option<f64>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -627,6 +628,7 @@ pub fn run_mocker_trace_replay(
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
+                            max_sim_time_ms,
                         )
                     }
                     ("offline", None) => {
@@ -642,6 +644,7 @@ pub fn run_mocker_trace_replay(
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
+                            max_sim_time_ms,
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -694,6 +697,7 @@ pub fn run_mocker_trace_replay(
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
+                        max_sim_time_ms,
                     )
                 }
                 ("offline", None) => {
@@ -708,6 +712,7 @@ pub fn run_mocker_trace_replay(
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
+                        max_sim_time_ms,
                     )
                 }
                 ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
