@@ -8,6 +8,7 @@
 //! avoid orphaning the prefill peer's NIXL KV transfer.
 
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -30,12 +31,12 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::disagg::DisaggregationMode;
 use crate::engine::{GenerateContext, LLMEngine};
 
-/// Test-only override count. Production reads check this first so tests can
-/// force-enable the recording fast-path without touching `OTEL_EXPORT_ENABLED`
-/// (which would require `unsafe { set_var }` and race with concurrent
-/// `getenv` callers). Tests acquire an `OtlpExportOverride` guard; multiple
-/// concurrent guards stack (counter-based), and the default is restored when
-/// the last guard drops.
+/// Test-only override count. Compiled out of release builds — tests acquire
+/// an `OtlpExportOverride` RAII guard to force-enable the recording
+/// fast-path without touching `OTEL_EXPORT_ENABLED` (which would require
+/// `unsafe { set_var }` and race with concurrent `getenv`). Multiple guards
+/// stack; the default is restored when the last drops.
+#[cfg(test)]
 static OTLP_EXPORT_OVERRIDES: AtomicUsize = AtomicUsize::new(0);
 
 /// OTLP-export gate. When the runtime isn't exporting traces (the operator
@@ -48,6 +49,7 @@ static OTLP_EXPORT_OVERRIDES: AtomicUsize = AtomicUsize::new(0);
 /// Read uncached (~tens of ns per request) — small cost, but it removes a
 /// class of test-ordering hazards that a cached version would introduce.
 fn is_otlp_export_enabled() -> bool {
+    #[cfg(test)]
     if OTLP_EXPORT_OVERRIDES.load(Ordering::Relaxed) > 0 {
         return true;
     }
