@@ -25,6 +25,9 @@ ENV PATH=/usr/local/bin/etcd:${PATH}
 RUN rm -f /usr/local/bin/etcd
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+# Copy uv from dynamo_base so the venv symlink below resolves even if a future
+# upstream tensorrt-llm/release tag drops /usr/local/bin/uv from its image.
+COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
@@ -44,7 +47,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # Install Dynamo wheels into a venv with --system-site-packages so upstream's
 # solve stays importable while our wheels live in their own namespace.
 RUN python3 -m venv --system-site-packages /opt/dynamo/venv \
-    && ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv
+    && ln -sf /usr/bin/uv /opt/dynamo/venv/bin/uv
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:${PATH}
 
