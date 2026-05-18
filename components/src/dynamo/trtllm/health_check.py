@@ -69,6 +69,7 @@ class TrtllmHealthCheckPayload(HealthCheckPayload):
 
         self.default_payload = {
             "token_ids": [bos_token_id],
+            "priority": 1.0,  # Highest TRT-LLM priority — health check must not be starved
             "stop_conditions": {
                 "max_tokens": 1,
                 "stop": None,

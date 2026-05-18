@@ -17,9 +17,11 @@ use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
+use crate::protocols::RoutingConstraints;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{
-    ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
+    ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
+    SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
 
@@ -177,7 +179,6 @@ where
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
         effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
-        tree_sizes: HashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&super::config::RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -185,6 +186,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<crate::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -198,10 +200,10 @@ where
             tier_overlap_blocks,
             effective_overlap_blocks,
             effective_cached_tokens,
-            tree_sizes,
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens,
+            routing_constraints,
             router_config_override: router_config_override.cloned(),
             update_states,
             lora_name,
@@ -274,15 +276,28 @@ where
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
         let decay_now = Instant::now();
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens_with_prefill_tracking(
-                token_seq.as_deref(),
-                isl_tokens,
-                effective_cached_tokens,
-                track_prefill_tokens,
-                decay_now,
-            );
+        let prefill_token_deltas = if track_prefill_tokens {
+            let by_worker = effective_cached_tokens
+                .iter()
+                .map(|(worker, cached_tokens)| {
+                    let delta = isl_tokens.checked_sub(*cached_tokens).unwrap_or_else(|| {
+                        tracing::error!(
+                            "prefill_tokens < 0 with ISL {isl_tokens} < cached_tokens {cached_tokens}, returning 0"
+                        );
+                        0
+                    });
+                    (*worker, delta)
+                })
+                .collect();
+            PrefillTokenDeltas::new(isl_tokens, by_worker)
+        } else {
+            PrefillTokenDeltas::none()
+        };
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
+            token_seq.as_deref(),
+            &prefill_token_deltas,
+            decay_now,
+        );
 
         let mut workers: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
         workers.extend(decode_blocks.keys().copied());
@@ -438,7 +453,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 Some("adapter-a".to_string()),
@@ -446,6 +460,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -480,7 +495,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 Some(&crate::config::RouterConfigOverride {
                     track_prefill_tokens: Some(false),
                     ..Default::default()
@@ -491,6 +505,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -528,7 +543,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::from([(worker, 0.75)]),
                 HashMap::from([(worker, 48)]),
-                HashMap::new(),
                 None,
                 true,
                 None,
@@ -536,6 +550,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -574,7 +589,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
@@ -582,6 +596,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -598,7 +613,6 @@ mod tests {
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
-                        HashMap::new(),
                         None,
                         true,
                         None,
@@ -606,6 +620,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -643,7 +658,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
@@ -651,6 +665,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -667,7 +682,6 @@ mod tests {
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
-                        HashMap::new(),
                         None,
                         true,
                         None,
@@ -675,6 +689,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -726,7 +741,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
@@ -734,6 +748,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -750,7 +765,6 @@ mod tests {
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
-                        HashMap::new(),
                         None,
                         true,
                         None,
@@ -758,6 +772,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -808,7 +823,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
@@ -816,6 +830,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -832,7 +847,6 @@ mod tests {
                         TierOverlapBlocks::default(),
                         HashMap::new(),
                         HashMap::new(),
-                        HashMap::new(),
                         None,
                         true,
                         None,
@@ -840,6 +854,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -888,7 +903,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 Some("adapter-a".to_string()),
@@ -896,6 +910,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -930,10 +945,10 @@ mod tests {
         );
         let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
         let token_seq = vec![11, 22, 33, 44];
-        let cached_tokens = HashMap::new();
 
+        let prefill_token_deltas = PrefillTokenDeltas::uniform(128);
         let (decode_blocks, prefill_tokens) =
-            slots.potential_blocks_and_tokens(Some(&token_seq), 128, cached_tokens.clone());
+            slots.potential_blocks_and_tokens(Some(&token_seq), &prefill_token_deltas);
         let mut expected: Vec<_> = decode_blocks
             .keys()
             .map(|worker| PotentialLoad {
@@ -945,7 +960,7 @@ mod tests {
             .collect();
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
-        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, cached_tokens, true);
+        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, HashMap::new(), true);
         actual.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
         assert_eq!(actual.len(), expected.len());
@@ -989,7 +1004,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
@@ -997,6 +1011,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -1088,7 +1103,6 @@ mod tests {
                 TierOverlapBlocks::default(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
                 None,
                 true,
                 None,
@@ -1096,6 +1110,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await

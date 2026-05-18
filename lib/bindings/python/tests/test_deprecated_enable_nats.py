@@ -157,7 +157,7 @@ def test_dynamo_worker_returns_working_decorator():
         async def _sample_worker(runtime, *args, **kwargs):
             pass
 
-    assert asyncio.iscoroutinefunction(_sample_worker)
+    assert inspect.iscoroutinefunction(_sample_worker)
 
 
 # ---------------------------------------------------------------------------

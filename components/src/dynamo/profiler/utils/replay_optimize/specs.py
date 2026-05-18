@@ -11,7 +11,7 @@ Method names follow Python / Pydantic convention (snake_case), matching how
 
 DGDR shapes we clone / extend:
 - `EngineSpec`    — local extension (DGDR has `model`/`backend` flat on the
-                    outer; we need engine-args carriers)
+                    outer; we need engine-arg input dictionaries)
 - `HardwareSpec`  — subset clone of DGDR.HardwareSpec (gpuSku + totalGpus only)
 - `WorkloadSpec`  — DGDR.WorkloadSpec + replay extensions, unified synthetic/
                     trace with a `traceFile` discriminator
@@ -35,13 +35,21 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
 from dynamo.profiler.utils.dgdr_v1beta1_types import BackendType, GPUSKUType
 
 from .constants import (
     AIC_BACKEND_VERSIONS,
     DEFAULT_MAX_PARALLEL_EVALS,
-    DEFAULT_OVERLAP_SCORE_WEIGHTS,
+    DEFAULT_OVERLAP_SCORE_CREDITS,
+    DEFAULT_PREFILL_LOAD_SCALES,
+)
+
+_OVERLAP_CREDITS_RANGE_ERROR = "overlapCredits must be between 0.0 and 1.0"
+_OVERLAP_CREDITS_MIGRATION_ERROR = (
+    "overlapCredits must be between 0.0 and 1.0; values above 1.0 are probably "
+    "not what you intended. If you want to weigh TTFT/prompt-side prefill load "
+    "more heavily, keep overlapCredits <= 1.0 and use that larger value for "
+    "prefillLoadScales instead; prefill_load_scale is applied after overlap credits."
 )
 
 
@@ -49,7 +57,8 @@ class RouterMode(str, Enum):
     """Router mode for the replay search.
 
     `BOTH` triggers a combined sweep across `KV_ROUTER` and `ROUND_ROBIN`;
-    `round_robin` collapses `overlapWeights` to `(0.0,)` (guardrail #5).
+    `round_robin` collapses `overlapCredits` to `(0.0,)` and
+    `prefillLoadScales` to `(1.0,)` (guardrail #5).
     Subclasses `str` for Pydantic coercion and wire-compatibility with the
     existing `router_mode` field on `DenseReplayState` / `DenseAggReplayState`.
     """
@@ -74,13 +83,17 @@ class ReplayObjective(str, Enum):
         return -float(report["mean_e2e_latency_ms"])
 
 
+EngineArgsInput = dict[str, Any]
+RouterConfigInput = dict[str, Any]
+
+
 class EngineSpec(BaseModel):
-    """Model + backend + engine-arg carriers.
+    """Model + backend + engine-arg input dictionaries.
 
     DGDR has `model: str` and `backend: BackendType` flat on the outer spec and
     no engine-args equivalent, so this spec is a replay-local extension.
 
-    Carries engine args for both agg and disagg paths; the relevant
+    Carries engine-arg inputs for both agg and disagg paths; the relevant
     `optimize_dense_*` entry asserts the right fields are populated
     (guardrail #8).
 
@@ -89,13 +102,13 @@ class EngineSpec(BaseModel):
     instead of silently falling through to a vLLM run.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     model: str
     backend: BackendType
-    baseEngineArgs: MockEngineArgs | None = None
-    basePrefillEngineArgs: MockEngineArgs | None = None
-    baseDecodeEngineArgs: MockEngineArgs | None = None
+    baseEngineArgs: EngineArgsInput | None = None
+    basePrefillEngineArgs: EngineArgsInput | None = None
+    baseDecodeEngineArgs: EngineArgsInput | None = None
 
     @field_validator("backend", mode="after")
     @classmethod
@@ -318,33 +331,64 @@ class RouterSpec(BaseModel):
 
     Analogous location to DGDR.KVRouterSpec but semantically different: DGDR
     has a single runtime on/off flag, we have a dev-time sweep over overlap
-    score weights plus a mode selector.
+    score credits plus a mode selector.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     mode: RouterMode = RouterMode.KV_ROUTER
-    # None → fallback to DEFAULT_OVERLAP_SCORE_WEIGHTS (guardrail #3). Empty
-    # list rejected (guardrail #4). Round-robin auto-collapse happens in
-    # `effectiveOverlapWeights` (guardrail #5).
-    overlapWeights: list[float] | None = None
-    baseRouterConfig: KvRouterConfig | None = None
+    # None → fallback to DEFAULT_* sweep values (guardrail #3). Empty
+    # lists and credits outside their valid ranges are rejected (guardrail #4).
+    # Round-robin auto-collapse happens in `effectiveOverlapCredits` (guardrail #5).
+    overlapCredits: list[float] | None = None
+    prefillLoadScales: list[float] | None = None
+    baseRouterConfig: RouterConfigInput | None = None
 
-    @field_validator("overlapWeights", mode="after")
+    @field_validator("overlapCredits", mode="after")
     @classmethod
-    def _reject_empty_weights(cls, weights: list[float] | None) -> list[float] | None:
-        if weights is not None and len(weights) == 0:
-            raise ValueError("overlapWeights must not be empty")
-        return weights
+    def _reject_empty_credits(cls, credits: list[float] | None) -> list[float] | None:
+        if credits is None:
+            return None
+        if len(credits) == 0:
+            raise ValueError("overlapCredits must not be empty")
+        parsed = [float(credit) for credit in credits]
+        if any(credit > 1.0 for credit in parsed):
+            raise ValueError(_OVERLAP_CREDITS_MIGRATION_ERROR)
+        if any(not 0.0 <= credit <= 1.0 for credit in parsed):
+            raise ValueError(_OVERLAP_CREDITS_RANGE_ERROR)
+        return credits
+
+    @field_validator("prefillLoadScales", mode="after")
+    @classmethod
+    def _reject_invalid_prefill_load_scales(
+        cls, scales: list[float] | None
+    ) -> list[float] | None:
+        if scales is None:
+            return None
+        if len(scales) == 0:
+            raise ValueError("prefillLoadScales must not be empty")
+        parsed = [float(scale) for scale in scales]
+        if any(not scale >= 0.0 for scale in parsed):
+            raise ValueError("prefillLoadScales must be non-negative")
+        return scales
 
     @property
-    def effectiveOverlapWeights(self) -> tuple[float, ...]:
-        """Resolve to the concrete weight sweep used by the search."""
+    def effectiveOverlapCredits(self) -> tuple[float, ...]:
+        """Resolve to the concrete credit sweep used by the search."""
         if self.mode is RouterMode.ROUND_ROBIN:
             return (0.0,)
-        if self.overlapWeights is None:
-            return DEFAULT_OVERLAP_SCORE_WEIGHTS
-        return tuple(float(w) for w in self.overlapWeights)
+        if self.overlapCredits is None:
+            return DEFAULT_OVERLAP_SCORE_CREDITS
+        return tuple(float(w) for w in self.overlapCredits)
+
+    @property
+    def effectivePrefillLoadScales(self) -> tuple[float, ...]:
+        """Resolve to the concrete prefill-load scale sweep used by the search."""
+        if self.mode is RouterMode.ROUND_ROBIN:
+            return (1.0,)
+        if self.prefillLoadScales is None:
+            return DEFAULT_PREFILL_LOAD_SCALES
+        return tuple(float(scale) for scale in self.prefillLoadScales)
 
 
 class ReplayOptimizeSpec(BaseModel):

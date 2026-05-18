@@ -10,7 +10,10 @@ import pytest
 
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
-except ImportError:
+except Exception:
+    # vllm_omni's import chain can raise NotImplementedError (and other
+    # non-ImportError types) on platforms it doesn't support — e.g. a
+    # CPU-only runner where vllm._C can't load libcuda.so.1.
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 from tests.serve.common import (
@@ -138,7 +141,7 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
         ],
         model="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
@@ -191,6 +194,10 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    # Known flake (post-merge): URL check fails after 600s with "StageDiffusionProc
+    # died during handshake (exit code 143)" — the diffusion child process is
+    # SIGTERM'd before the handshake completes. Bumping the timeout will not fix this;
+    # needs investigation of why StageDiffusionProc is dying.
     "omni_t2v": VLLMOmniConfig(
         name="omni_t2v",
         directory=vllm_dir,
@@ -202,8 +209,12 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.profiled_vram_gib(16.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                6_473_647_000
+            ),  # KV cache cap (2x safety over min=3_236_823_040)
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         request_payloads=[
@@ -221,6 +232,22 @@ vllm_omni_configs = {
                 expected_response=[],
                 expected_log=[],
             ),
+            # Streaming video generation
+            VideoGenerationPayload(
+                body={
+                    "prompt": "Dog running on a beach",
+                    "size": "480x272",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 10,
+                        "num_frames": 17,
+                    },
+                },
+                repeat_count=1,
+                http_stream=True,
+                expected_response=[],
+                expected_log=[],
+            ),
         ],
     ),
 }
@@ -233,6 +260,7 @@ def vllm_omni_config_test(request):
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 def test_omni_serve_deployment(
     vllm_omni_config_test,

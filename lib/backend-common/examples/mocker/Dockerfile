@@ -27,12 +27,12 @@ WORKDIR /build
 COPY . .
 
 # BuildKit cache mounts persist across builds:
-#   /usr/local/cargo/registry — downloaded crate sources (avoids redownloading)
-#   /build/target             — compiled artifacts (avoids full recompile)
+#   /usr/local/cargo/registry — downloaded crate sources, safe to share
+#   /build/target             — compiled artifacts, lock while writing
 # Cache mounts are NOT part of the resulting image, so copy the binary out
 # of the cache to /out/ within the same RUN so later stages can COPY it.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=shared \
+    --mount=type=cache,target=/build/target,sharing=locked \
     mkdir -p /out \
     && cargo build -p dynamo-mocker-backend --release \
     && cp /build/target/release/dynamo-mocker-backend /out/

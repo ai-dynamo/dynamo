@@ -31,6 +31,8 @@ reviews:
       instructions: "Review against .ai/python-guidelines.md"
     - path: "**/tests/**/*.py"
       instructions: "Review against .ai/pytest-guidelines.md"
+    - path: "**/tests/**/*.py"
+      instructions: "Review against .ai/test-model-size-guardrails.md"
     - path: "**/launch/**/*.sh"
       instructions: "Review against .ai/bash-launch-guidelines.md"
     - path: "**/*.{py,rs,go,ts,tsx,js,mjs,cjs,sh,yaml,yml,toml}"

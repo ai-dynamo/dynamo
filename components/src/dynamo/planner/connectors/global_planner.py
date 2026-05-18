@@ -117,7 +117,10 @@ class GlobalPlannerConnector(PlannerConnector):
 
         Raises:
             EmptyTargetReplicasError: If target_replicas is empty
-            RuntimeError: If remote_client is not initialized or response indicates error
+            RuntimeError: If remote_client is not initialized or the response
+                indicates a hard error (e.g., authorization denied, K8s
+                exception). A REJECTED response is NOT raised — it is logged
+                as a warning and treated as a no-op for this tick.
         """
         if not target_replicas:
             raise EmptyTargetReplicasError()
@@ -165,6 +168,9 @@ class GlobalPlannerConnector(PlannerConnector):
         # Check response status
         if response.status == ScaleStatus.SUCCESS:
             logger.info(f"GlobalPlanner scaling successful: {response.message}")
+        elif response.status == ScaleStatus.REJECTED:
+            # Over-budget rejection is a legitimate business outcome — keep running.
+            logger.warning(f"GlobalPlanner rejected scale request: {response.message}")
         elif response.status == ScaleStatus.ERROR:
             logger.error(f"GlobalPlanner scaling failed: {response.message}")
             raise RuntimeError(f"GlobalPlanner scaling failed: {response.message}")
@@ -271,6 +277,41 @@ class GlobalPlannerConnector(PlannerConnector):
                 "load scaling will be disabled."
             )
         return self._local_k8s_connector
+
+    def get_actual_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        """Read ready replica counts and rollout stability from the pool's own DGD.
+
+        GlobalPlanner orchestrates scaling, but the pool Planner pod has direct
+        access to its own DGD status. Mirror KubernetesConnector by delegating
+        to the pool-local connector so ``_scaling_in_progress`` observes real
+        rollouts instead of always seeing ``is_stable=True``.
+
+        Returns ``(0, 0, True)`` when no local KubernetesConnector is available
+        (e.g. running out-of-cluster), matching the existing capability-discovery
+        fallback path so out-of-cluster callers aren't blocked.
+        """
+        local = self._get_local_k8s_connector()
+        if local is None:
+            logger.debug(
+                "GlobalPlannerConnector: no local KubernetesConnector; "
+                "reporting (0, 0, stable=True) for out-of-cluster usage."
+            )
+            return 0, 0, True
+        return local.get_actual_worker_counts(
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+        )
+
+    def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
+        """Resolve the pool-local worker runtime namespace when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return base_dynamo_namespace
+        return local.get_worker_runtime_namespace(base_dynamo_namespace)
 
     def get_worker_info(
         self,

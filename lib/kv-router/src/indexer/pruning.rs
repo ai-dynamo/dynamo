@@ -3,17 +3,24 @@
 
 //! Pruning and TTL utilities for KV Indexers
 //!
-//! This module provides utilities for managing TTL-based expiration and size-based pruning
-//! of blocks in the radix tree. These utilities are used by the KvIndexer to manage
-//! memory usage and keep the cache fresh.
+//! This module provides utilities for managing TTL-based expiration of
+//! approximate-mode blocks in the radix tree.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, VecDeque};
 use std::hash::Hash;
-use tokio::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
 
-use super::KvRouterError;
-use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
+use dashmap::DashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use tokio::sync::watch;
+use tokio::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
+
+use crate::protocols::{ExternalSequenceBlockHash, WorkerId, WorkerWithDpRank};
+
+const HEAP_REBUILD_THRESHOLD: usize = 50;
+const WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD: usize = 10;
 
 /// Block entry to be inserted in the [`PruneManager::expirations`] heap.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -34,7 +41,7 @@ impl PartialOrd for BlockEntry {
 
 impl Ord for BlockEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Break ties by sequence position (important for pruning), then by key, then by worker.
+        // Break ties by sequence position, then by key, then by worker.
         self.seq_position
             .cmp(&other.seq_position)
             .then_with(|| self.key.cmp(&other.key))
@@ -46,20 +53,12 @@ impl Ord for BlockEntry {
 pub struct PruneConfig {
     /// Time-to-live duration for blocks before they expire.
     pub ttl: Duration,
-    /// The maximum tree size before pruning is considered.
-    pub max_tree_size: usize,
-    /// The target size ratio to prune down to when max_tree_size is exceeded.
-    /// For example, if max_tree_size is 100 and target_size_ratio is 0.5,
-    /// we will prune down to 50 nodes when max_tree_size is exceeded.
-    pub prune_target_ratio: f64,
 }
 
 impl Default for PruneConfig {
     fn default() -> Self {
         Self {
             ttl: Duration::from_secs(120), // 120 seconds
-            max_tree_size: 2usize.pow(20), // 2^20 = 1048576
-            prune_target_ratio: 0.8,       // Prune down to 80% of max
         }
     }
 }
@@ -72,34 +71,25 @@ impl Default for PruneConfig {
 #[derive(Debug)]
 pub struct PruneManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
-    timers: HashMap<K, Instant>,
+    timers: FxHashMap<K, Instant>,
 
     /// A max-heap of (Reverse<expiration_instant>, key) used to efficiently find the
     /// next expiring timer. Reverse<Instant> makes earlier times pop first.
     /// An entry in this heap is "stale" if the instant does not match the one in the `timers` map.
     expirations: BinaryHeap<(Reverse<Instant>, K)>,
 
-    /// Threshold for rebuilding the heap.
-    /// The heap will be rebuilt from scratch to remove stale entries.
-    threshold: usize,
-
     /// The expiration duration of the timers.
     ttl: Duration,
-
-    /// The configuration for tree-size pruning.
-    pub prune_config: Option<PruneConfig>,
 }
 
 impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     /// Creates a new, empty PruneManager.
-    pub fn new(threshold: usize, prune_config: PruneConfig) -> Self {
+    pub fn new(prune_config: PruneConfig) -> Self {
         let ttl = prune_config.ttl;
         PruneManager {
-            timers: HashMap::new(),
+            timers: FxHashMap::default(),
             expirations: BinaryHeap::new(),
             ttl,
-            threshold,
-            prune_config: Some(prune_config),
         }
     }
 
@@ -118,8 +108,15 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     /// * `key` - The unique key for the timer.
     /// * `duration` - The duration from now when the timer should expire.
     pub fn insert(&mut self, keys: Vec<K>) {
-        let expiry_time = Instant::now() + self.ttl;
+        self.insert_at(keys, Instant::now());
+    }
 
+    /// Inserts timers using a caller-provided timestamp.
+    pub fn insert_at(&mut self, keys: Vec<K>, now: Instant) {
+        let expiry_time = now + self.ttl;
+
+        self.timers.reserve(keys.len());
+        self.expirations.reserve(keys.len());
         for key in keys {
             // Insert or update the authoritative time in the map.
             self.timers.insert(key.clone(), expiry_time);
@@ -131,16 +128,22 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
         }
 
         // Check if we should rebuild the heap to remove stale entries
-        if self.expirations.len() > self.timers.len() * self.threshold {
+        if !self.timers.is_empty()
+            && self.expirations.len() > self.timers.len() * HEAP_REBUILD_THRESHOLD
+        {
             self.rebuild_heap();
         }
     }
 
+    /// Removes a timer for the given key.
+    pub fn remove(&mut self, key: &K) -> bool {
+        self.timers.remove(key).is_some()
+    }
+
     /// Polls for expired timers and returns a list of keys for all timers
-    /// that have expired up to the current moment.
-    pub fn pop_expired(&mut self) -> Vec<K> {
+    /// that have expired up to `now`.
+    pub fn pop_expired(&mut self, now: Instant) -> Vec<K> {
         let mut expired_keys = Vec::new();
-        let now = Instant::now();
 
         while let Some((Reverse(expiry_time), _)) = self.expirations.peek() {
             // If the next timer in the heap is not yet expired, we can stop.
@@ -161,74 +164,441 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
         expired_keys
     }
 
-    /// Returns the next expiry time, if it exists.
-    pub fn peek_next_expiry(&self) -> Option<Instant> {
-        self.expirations
-            .peek()
-            .map(|(Reverse(expiry_time), _)| *expiry_time)
+    /// Returns the next non-stale expiry time, if it exists.
+    pub fn peek_next_valid_expiry(&mut self) -> Option<Instant> {
+        while let Some((Reverse(expiry_time), key)) = self.expirations.peek() {
+            if self.timers.get(key) == Some(expiry_time) {
+                return Some(*expiry_time);
+            }
+            self.expirations.pop();
+        }
+        None
     }
 
-    /// Prunes the tree if the current size is greater than the max tree size.
-    pub fn prune(&mut self, current_size: usize) -> Result<Vec<K>, KvRouterError> {
-        let max_tree_size: usize;
-        let prune_target_ratio: f64;
+    pub fn len(&self) -> usize {
+        self.timers.len()
+    }
 
-        if let Some(prune_config) = &self.prune_config {
-            max_tree_size = prune_config.max_tree_size;
-            prune_target_ratio = prune_config.prune_target_ratio;
-        } else {
-            tracing::error!("Prune was called but prune config is None. This should never happen");
-            return Err(KvRouterError::PruneFailed(
-                "prune config is missing".to_string(),
-            ));
+    pub fn is_empty(&self) -> bool {
+        self.timers.is_empty()
+    }
+}
+
+#[derive(Debug)]
+struct WorkerPruneState {
+    timers: PruneManager<BlockEntry>,
+}
+
+impl WorkerPruneState {
+    fn new(config: PruneConfig) -> Self {
+        Self {
+            timers: PruneManager::new(config),
+        }
+    }
+
+    fn insert_block_entries(&mut self, entries: Vec<BlockEntry>, now: Instant) {
+        self.timers.insert_at(entries, now);
+    }
+
+    fn remove_block_entry(&mut self, entry: &BlockEntry) {
+        self.timers.remove(entry);
+    }
+
+    fn pop_expired(&mut self, now: Instant) -> Vec<BlockEntry> {
+        self.timers.pop_expired(now)
+    }
+
+    fn peek_next_valid_expiry(&mut self) -> Option<Instant> {
+        self.timers.peek_next_valid_expiry()
+    }
+}
+
+#[derive(Clone)]
+pub struct WorkerPruneManager {
+    inner: Arc<WorkerPruneManagerInner>,
+}
+
+struct WorkerPruneManagerInner {
+    config: PruneConfig,
+    workers: DashMap<WorkerWithDpRank, Mutex<WorkerPruneState>, FxBuildHasher>,
+    next_expiries: Mutex<BinaryHeap<(Reverse<Instant>, WorkerWithDpRank)>>,
+    pending_removes: Mutex<VecDeque<BlockEntry>>,
+    ready_tx: watch::Sender<u64>,
+    schedule_tx: watch::Sender<u64>,
+    cancel: CancellationToken,
+}
+
+impl Drop for WorkerPruneManagerInner {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+impl WorkerPruneManager {
+    pub fn new(config: PruneConfig) -> Self {
+        let (ready_tx, _) = watch::channel(0);
+        let (schedule_tx, schedule_rx) = watch::channel(0);
+        let inner = Arc::new(WorkerPruneManagerInner {
+            config,
+            workers: DashMap::with_hasher(FxBuildHasher),
+            next_expiries: Mutex::new(BinaryHeap::new()),
+            pending_removes: Mutex::new(VecDeque::new()),
+            ready_tx,
+            schedule_tx,
+            cancel: CancellationToken::new(),
+        });
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(Self::ttl_task(Arc::clone(&inner), schedule_rx));
         }
 
-        if current_size <= max_tree_size {
-            // Tree size within bounds, no pruning needed.
-            return Ok(Vec::new());
-        }
+        Self { inner }
+    }
 
-        tracing::info!(
-            "Pruning: tree size ({}) exceeded max tree size ({}), starting pruning",
-            current_size,
-            max_tree_size
-        );
-
-        // Number of blocks that will be kept after pruning.
-        let target_size = (max_tree_size as f64 * prune_target_ratio) as usize;
-
-        let mut pruned_keys = Vec::new();
-        let mut num_pruned = 0;
-
-        while num_pruned < current_size.saturating_sub(target_size) {
-            if let Some((Reverse(expiry_time), key)) = self.expirations.pop() {
-                if self.timers.get(&key) == Some(&expiry_time) {
-                    // This is a valid, non-stale timer.
-                    self.timers.remove(&key);
-                    pruned_keys.push(key);
-                    num_pruned += 1;
+    async fn ttl_task(inner: Arc<WorkerPruneManagerInner>, mut schedule_rx: watch::Receiver<u64>) {
+        loop {
+            let Some(next_expiry) = inner.next_global_expiry() else {
+                tokio::select! {
+                    _ = inner.cancel.cancelled() => break,
+                    changed = schedule_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
                 }
-            } else {
-                break;
+                continue;
+            };
+
+            tokio::select! {
+                _ = inner.cancel.cancelled() => break,
+                _ = tokio::time::sleep_until(next_expiry) => {
+                    inner.queue_due(Instant::now());
+                }
+                changed = schedule_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn insert_block_entries(&self, entries: Vec<BlockEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let mut by_worker: FxHashMap<WorkerWithDpRank, Vec<BlockEntry>> =
+            FxHashMap::with_capacity_and_hasher(entries.len(), FxBuildHasher);
+        for entry in entries {
+            by_worker.entry(entry.worker).or_default().push(entry);
+        }
+
+        let mut should_bump_schedule = false;
+        for (worker, worker_entries) in by_worker {
+            should_bump_schedule |=
+                self.insert_worker_block_entries_at(worker, worker_entries, now);
+        }
+
+        if should_bump_schedule {
+            self.inner.bump_schedule();
+        }
+    }
+
+    pub fn insert_worker_block_entries(&self, worker: WorkerWithDpRank, entries: Vec<BlockEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+
+        if self.insert_worker_block_entries_at(worker, entries, Instant::now()) {
+            self.inner.bump_schedule();
+        }
+    }
+
+    fn insert_worker_block_entries_at(
+        &self,
+        worker: WorkerWithDpRank,
+        entries: Vec<BlockEntry>,
+        now: Instant,
+    ) -> bool {
+        let (old_next, new_next) = {
+            let state =
+                self.inner.workers.entry(worker).or_insert_with(|| {
+                    Mutex::new(WorkerPruneState::new(self.inner.config.clone()))
+                });
+            let mut state = state.lock().expect("worker prune state mutex poisoned");
+            let old_next = state.peek_next_valid_expiry();
+            state.insert_block_entries(entries, now);
+            let new_next = state.peek_next_valid_expiry();
+            (old_next, new_next)
+        };
+
+        match (old_next, new_next) {
+            (None, Some(next_expiry)) => {
+                self.inner.push_worker_expiry(worker, next_expiry);
+                true
+            }
+            (Some(old_next), Some(new_next)) if new_next < old_next => {
+                tracing::warn!(
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    ?old_next,
+                    ?new_next,
+                    "Approximate prune expiry moved earlier during insert; rescheduling"
+                );
+                debug_assert!(
+                    new_next >= old_next,
+                    "approximate prune expiry moved earlier during insert"
+                );
+                self.inner.push_worker_expiry(worker, new_next);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn remove_block_entries(&self, entries: &[BlockEntry]) {
+        if entries.is_empty() {
+            return;
+        }
+
+        let removed_entries: FxHashSet<_> = entries.iter().copied().collect();
+        let mut by_worker: FxHashMap<WorkerWithDpRank, Vec<BlockEntry>> =
+            FxHashMap::with_capacity_and_hasher(entries.len(), FxBuildHasher);
+        for entry in entries {
+            by_worker.entry(entry.worker).or_default().push(*entry);
+        }
+
+        for (worker, worker_entries) in by_worker {
+            let next_expiry = {
+                let Some(state) = self.inner.workers.get(&worker) else {
+                    continue;
+                };
+                let mut state = state.lock().expect("worker prune state mutex poisoned");
+                for entry in &worker_entries {
+                    state.remove_block_entry(entry);
+                }
+                state.peek_next_valid_expiry()
+            };
+            if let Some(next_expiry) = next_expiry {
+                self.inner.push_worker_expiry(worker, next_expiry);
             }
         }
 
-        tracing::info!("Pruning: pruned ({}) blocks from tree", num_pruned);
+        self.inner
+            .pending_removes
+            .lock()
+            .expect("pending prune remove queue mutex poisoned")
+            .retain(|entry| !removed_entries.contains(entry));
+        self.inner.bump_schedule();
+    }
 
-        Ok(pruned_keys)
+    pub fn remove_worker(&self, worker_id: WorkerId) {
+        let workers: Vec<_> = self
+            .inner
+            .workers
+            .iter()
+            .filter_map(|entry| {
+                let worker = *entry.key();
+                (worker.worker_id == worker_id).then_some(worker)
+            })
+            .collect();
+        for worker in workers {
+            self.inner.workers.remove(&worker);
+        }
+        self.inner
+            .pending_removes
+            .lock()
+            .expect("pending prune remove queue mutex poisoned")
+            .retain(|entry| entry.worker.worker_id != worker_id);
+        self.inner.bump_schedule();
+    }
+
+    pub fn remove_worker_dp_rank(&self, worker: WorkerWithDpRank) {
+        self.inner.workers.remove(&worker);
+        self.inner
+            .pending_removes
+            .lock()
+            .expect("pending prune remove queue mutex poisoned")
+            .retain(|entry| entry.worker != worker);
+        self.inner.bump_schedule();
+    }
+
+    pub fn drain_due_and_pending(&self, now: Instant) -> Vec<BlockEntry> {
+        self.inner.queue_due(now);
+        self.drain_pending_removes()
+    }
+
+    pub fn drain_pending_removes(&self) -> Vec<BlockEntry> {
+        self.inner
+            .pending_removes
+            .lock()
+            .expect("pending prune remove queue mutex poisoned")
+            .drain(..)
+            .collect()
+    }
+
+    pub fn subscribe_ready(&self) -> watch::Receiver<u64> {
+        self.inner.ready_tx.subscribe()
+    }
+
+    pub fn shutdown(&self) {
+        self.inner.cancel.cancel();
+    }
+}
+
+impl WorkerPruneManagerInner {
+    fn bump_sender(sender: &watch::Sender<u64>) {
+        let next = sender.borrow().wrapping_add(1);
+        let _ = sender.send(next);
+    }
+
+    fn bump_schedule(&self) {
+        Self::bump_sender(&self.schedule_tx);
+    }
+
+    fn bump_ready(&self) {
+        Self::bump_sender(&self.ready_tx);
+    }
+
+    fn push_worker_expiry(&self, worker: WorkerWithDpRank, expiry: Instant) {
+        self.next_expiries
+            .lock()
+            .expect("worker expiry index mutex poisoned")
+            .push((Reverse(expiry), worker));
+        self.rebuild_worker_expiry_heap_if_needed();
+    }
+
+    fn rebuild_worker_expiry_heap_if_needed(&self) {
+        let workers_len = self.workers.len();
+        if workers_len == 0 {
+            return;
+        }
+
+        let should_rebuild = {
+            let expiries = self
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned");
+            expiries.len() > workers_len * WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD
+        };
+        if !should_rebuild {
+            return;
+        }
+
+        let mut rebuilt = BinaryHeap::new();
+        for entry in self.workers.iter() {
+            let worker = *entry.key();
+            let next_expiry = entry
+                .value()
+                .lock()
+                .expect("worker prune state mutex poisoned")
+                .peek_next_valid_expiry();
+            if let Some(next_expiry) = next_expiry {
+                rebuilt.push((Reverse(next_expiry), worker));
+            }
+        }
+
+        *self
+            .next_expiries
+            .lock()
+            .expect("worker expiry index mutex poisoned") = rebuilt;
+    }
+
+    fn next_global_expiry(&self) -> Option<Instant> {
+        loop {
+            let candidate = self
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned")
+                .peek()
+                .copied();
+            let (Reverse(expiry), worker) = candidate?;
+
+            let next_valid = self.workers.get(&worker).and_then(|state| {
+                state
+                    .lock()
+                    .expect("worker prune state mutex poisoned")
+                    .peek_next_valid_expiry()
+            });
+
+            if next_valid == Some(expiry) {
+                return Some(expiry);
+            }
+
+            let mut expiries = self
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned");
+            if expiries.peek().copied() != candidate {
+                continue;
+            }
+            expiries.pop();
+            if let Some(next_valid) = next_valid {
+                expiries.push((Reverse(next_valid), worker));
+            }
+        }
+    }
+
+    fn queue_due(&self, now: Instant) {
+        let mut expired = Vec::new();
+
+        loop {
+            let Some((Reverse(expiry), worker)) = ({
+                let mut expiries = self
+                    .next_expiries
+                    .lock()
+                    .expect("worker expiry index mutex poisoned");
+                let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
+                    break;
+                };
+                if expiry > now {
+                    break;
+                }
+                expiries.pop()
+            }) else {
+                break;
+            };
+
+            let (mut worker_expired, next_expiry) = {
+                let Some(state) = self.workers.get(&worker) else {
+                    continue;
+                };
+                let mut state = state.lock().expect("worker prune state mutex poisoned");
+                let next_valid = state.peek_next_valid_expiry();
+                if next_valid != Some(expiry) {
+                    (Vec::new(), next_valid)
+                } else {
+                    let expired = state.pop_expired(now);
+                    let next_expiry = state.peek_next_valid_expiry();
+                    (expired, next_expiry)
+                }
+            };
+
+            if let Some(next_expiry) = next_expiry {
+                self.push_worker_expiry(worker, next_expiry);
+            }
+            expired.append(&mut worker_expired);
+        }
+
+        if expired.is_empty() {
+            return;
+        }
+
+        self.pending_removes
+            .lock()
+            .expect("pending prune remove queue mutex poisoned")
+            .extend(expired);
+        self.bump_ready();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use crate::protocols::{TokensWithHashes, WorkerId, WorkerWithDpRank};
-    use std::sync::Arc;
+    use crate::protocols::WorkerWithDpRank;
     use tokio::time::{self, Duration, Instant};
-    use tokio_util::sync::CancellationToken;
-
-    const KV_BLOCK_SIZE: u32 = 4;
 
     impl<T: Clone + Hash + Eq + Ord> PruneManager<T> {
         pub fn get_expiry(&self, key: &T) -> Option<&Instant> {
@@ -236,22 +606,21 @@ mod tests {
         }
     }
 
-    /// Helper to spin until a future evaluates to `true`, or a timeout is reached.
-    async fn spin_until<F, Fut>(timeout: Duration, mut predicate: F)
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = bool>,
-    {
-        let start = Instant::now();
-        const POLL: Duration = Duration::from_millis(1);
-        loop {
-            if predicate().await {
-                return;
-            }
-            if Instant::now().duration_since(start) >= timeout {
-                panic!("timeout waiting for condition");
-            }
-            time::sleep(POLL).await;
+    impl WorkerPruneManager {
+        fn worker_expiry_heap_len(&self) -> usize {
+            self.inner
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned")
+                .len()
+        }
+    }
+
+    fn test_block(worker: WorkerWithDpRank, key: u64, seq_position: usize) -> BlockEntry {
+        BlockEntry {
+            key: ExternalSequenceBlockHash(key),
+            worker,
+            seq_position,
         }
     }
 
@@ -259,12 +628,8 @@ mod tests {
     #[tokio::test]
     async fn test_prune_manager_expiry() {
         const TTL: Duration = Duration::from_millis(50);
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: usize::MAX, // Effectively disable size-based pruning
-            prune_target_ratio: 0.5,
-        };
-        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+        let prune_config = PruneConfig { ttl: TTL };
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
 
         pm.insert(vec![1, 2, 3]);
         assert!(pm.get_expiry(&1).is_some());
@@ -273,7 +638,7 @@ mod tests {
 
         // Wait until after the TTL
         time::sleep(TTL + Duration::from_millis(20)).await;
-        let expired = pm.pop_expired();
+        let expired = pm.pop_expired(Instant::now());
         assert_eq!(expired.len(), 3);
         assert!(pm.get_expiry(&1).is_none());
         assert!(pm.get_expiry(&2).is_none());
@@ -285,12 +650,8 @@ mod tests {
     async fn test_prune_manager_update_resets_ttl() {
         // Validate that reinserting an existing key extends its TTL and prevents premature expiry.
         const TTL: Duration = Duration::from_millis(50);
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: usize::MAX,
-            prune_target_ratio: 0.5,
-        };
-        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+        let prune_config = PruneConfig { ttl: TTL };
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
 
         // Initial insert and capture the original expiry.
         pm.insert(vec![42]);
@@ -310,7 +671,7 @@ mod tests {
 
         // Wait until *after* the first expiry would have fired, but *before* the new expiry.
         time::sleep(Duration::from_millis(30)).await; // 25ms already elapsed, +30ms = 55ms > first TTL
-        let expired = pm.pop_expired();
+        let expired = pm.pop_expired(Instant::now());
         assert!(
             expired.is_empty(),
             "key expired prematurely despite TTL refresh"
@@ -318,431 +679,8 @@ mod tests {
 
         // Now wait until after the second expiry should have occurred.
         time::sleep(Duration::from_millis(30)).await; // Ensure we pass the refreshed TTL
-        let expired_after = pm.pop_expired();
+        let expired_after = pm.pop_expired(Instant::now());
         assert_eq!(expired_after, vec![42]);
-    }
-
-    /// End-to-end test for [`KvIndexer`] with TTL:
-    ///   1. No matches before routing decision
-    ///   2. Matches appear after `process_routing_decision`
-    ///   3. Matches disappear after TTL expiry
-    #[tokio::test]
-    async fn test_approx_kv_indexer_basic_flow() {
-        const TTL: Duration = Duration::from_millis(200);
-        let cancel = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: usize::MAX,
-            prune_target_ratio: 0.5,
-        };
-        let indexer = KvIndexer::new_with_frequency(
-            cancel.clone(),
-            None,
-            KV_BLOCK_SIZE,
-            metrics,
-            Some(prune_config),
-        );
-
-        let tokens: Vec<u32> = vec![1, 2, 3, 4]; // Exactly one KV block
-        let worker_id: WorkerId = 0;
-
-        // 1. Before routing decision there should be no matches
-        let pre_scores = indexer
-            .find_matches_for_request(&tokens, None, None)
-            .await
-            .expect("indexer offline");
-        assert!(pre_scores.scores.is_empty());
-
-        // 2. Inform indexer about routing decision
-        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
-        indexer
-            .process_routing_decision_for_request(
-                &mut tokens_with_hashes,
-                WorkerWithDpRank::from_worker_id(worker_id),
-            )
-            .await
-            .unwrap();
-
-        // Poll until we observe the match being registered
-        spin_until(Duration::from_millis(100), async || {
-            let s = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            s.scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_id))
-                .copied()
-                == Some(1)
-        })
-        .await;
-
-        // 3. After the TTL has passed the entry should expire automatically
-        time::sleep(TTL + Duration::from_millis(50)).await;
-        let post_scores = indexer
-            .find_matches_for_request(&tokens, None, None)
-            .await
-            .unwrap();
-        assert!(post_scores.scores.is_empty());
-    }
-
-    /// Verify that `remove_worker` clears all entries for the specified worker.
-    #[tokio::test]
-    async fn test_remove_worker() {
-        const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
-        let cancel = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: usize::MAX,
-            prune_target_ratio: 0.5,
-        };
-        let indexer = KvIndexer::new_with_frequency(
-            cancel.clone(),
-            None,
-            KV_BLOCK_SIZE,
-            metrics,
-            Some(prune_config),
-        );
-
-        let tokens: Vec<u32> = vec![10, 11, 12, 13];
-        let worker_id: WorkerId = 7;
-
-        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
-        indexer
-            .process_routing_decision_for_request(
-                &mut tokens_with_hashes,
-                WorkerWithDpRank::from_worker_id(worker_id),
-            )
-            .await
-            .unwrap();
-
-        // Wait until the worker is registered
-        spin_until(Duration::from_millis(100), async || {
-            let s = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            s.scores
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_id))
-        })
-        .await;
-
-        // Remove the worker
-        indexer.remove_worker(worker_id).await;
-
-        // Ensure the worker's entries are gone
-        spin_until(Duration::from_millis(100), async || {
-            let s = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            !s.scores
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_id))
-        })
-        .await;
-    }
-
-    /// After removing one of multiple workers that share the same block, the remaining worker's entries should persist.
-    #[tokio::test]
-    async fn test_remove_worker_preserves_other_workers() {
-        const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
-
-        let cancel = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: usize::MAX,
-            prune_target_ratio: 0.5,
-        };
-        let indexer = KvIndexer::new_with_frequency(
-            cancel.clone(),
-            None,
-            KV_BLOCK_SIZE,
-            metrics,
-            Some(prune_config),
-        );
-
-        let tokens: Vec<u32> = vec![100, 101, 102, 103];
-        let worker_0: WorkerId = 30;
-        let worker_1: WorkerId = 31;
-
-        // Register on both workers
-        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
-        indexer
-            .process_routing_decision_for_request(
-                &mut tokens_with_hashes,
-                WorkerWithDpRank::from_worker_id(worker_0),
-            )
-            .await
-            .unwrap();
-        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
-        indexer
-            .process_routing_decision_for_request(
-                &mut tokens_with_hashes,
-                WorkerWithDpRank::from_worker_id(worker_1),
-            )
-            .await
-            .unwrap();
-
-        // Ensure both workers are registered
-        spin_until(Duration::from_millis(100), async || {
-            let s = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            s.scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_0))
-                .copied()
-                == Some(1)
-                && s.scores
-                    .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                    .copied()
-                    == Some(1)
-        })
-        .await;
-
-        // Remove one worker
-        indexer.remove_worker(worker_0).await;
-
-        // Confirm the removed worker is gone, and the other remains.
-        spin_until(Duration::from_millis(100), async || {
-            let s = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            !s.scores
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-                && s.scores
-                    .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                    .copied()
-                    == Some(1)
-        })
-        .await;
-    }
-
-    /// Two sequences with a shared prefix should yield overlap scores reflecting the common blocks.
-    #[tokio::test]
-    async fn test_common_prefix_overlap() {
-        const TTL: Duration = Duration::from_secs(5);
-
-        let cancel = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: usize::MAX,
-            prune_target_ratio: 0.5,
-        };
-        let indexer = KvIndexer::new_with_frequency(
-            cancel.clone(),
-            None,
-            KV_BLOCK_SIZE,
-            metrics,
-            Some(prune_config),
-        );
-
-        // Sequence A : single block
-        let seq_a: Vec<u32> = vec![1, 2, 3, 4];
-        let worker_a: WorkerId = 11;
-
-        // Register Sequence A on worker A
-        let mut tokens_with_hashes = TokensWithHashes::new(seq_a.clone(), KV_BLOCK_SIZE);
-        indexer
-            .process_routing_decision_for_request(
-                &mut tokens_with_hashes,
-                WorkerWithDpRank::from_worker_id(worker_a),
-            )
-            .await
-            .unwrap();
-
-        // Ensure the indexer has registered the block
-        spin_until(Duration::from_millis(100), async || {
-            let s = indexer
-                .find_matches_for_request(&seq_a, None, None)
-                .await
-                .unwrap();
-            s.scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_a))
-                .copied()
-                == Some(1)
-        })
-        .await;
-
-        // Sequence B : shares the first block with Sequence A, plus an extra block
-        let seq_b: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8];
-
-        // Query the indexer for overlaps of Sequence B (before it has been routed anywhere)
-        let overlap = indexer
-            .find_matches_for_request(&seq_b, None, None)
-            .await
-            .unwrap();
-
-        // Expect worker A to have an overlap score of 1 (shared first block)
-        assert_eq!(
-            overlap
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_a)),
-            Some(&1)
-        );
-    }
-
-    /// When the same block resides on multiple workers, all should appear in the overlap scores.
-    #[tokio::test]
-    async fn test_multiple_workers_same_block() {
-        const TTL: Duration = Duration::from_secs(5);
-
-        let cancel = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: usize::MAX,
-            prune_target_ratio: 0.5,
-        };
-        let indexer = KvIndexer::new_with_frequency(
-            cancel.clone(),
-            None,
-            KV_BLOCK_SIZE,
-            metrics,
-            Some(prune_config),
-        );
-
-        let tokens: Vec<u32> = vec![9, 8, 7, 6];
-        let worker_0: WorkerId = 21;
-        let worker_1: WorkerId = 22;
-
-        // Register the same sequence on two different workers
-        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
-        indexer
-            .process_routing_decision_for_request(
-                &mut tokens_with_hashes,
-                WorkerWithDpRank::from_worker_id(worker_0),
-            )
-            .await
-            .unwrap();
-        let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), KV_BLOCK_SIZE);
-        indexer
-            .process_routing_decision_for_request(
-                &mut tokens_with_hashes,
-                WorkerWithDpRank::from_worker_id(worker_1),
-            )
-            .await
-            .unwrap();
-
-        // Wait until both workers are reflected in overlap scores
-        spin_until(Duration::from_millis(100), async || {
-            let s = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            s.scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_0))
-                .copied()
-                == Some(1)
-                && s.scores
-                    .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                    .copied()
-                    == Some(1)
-        })
-        .await;
-
-        let scores = indexer
-            .find_matches_for_request(&tokens, None, None)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_0)),
-            Some(&1)
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_1)),
-            Some(&1)
-        );
-    }
-
-    /// Test that pruning returns empty when tree size is within the max tree size.
-    #[tokio::test]
-    async fn test_prune_manager_no_prune_when_within_bounds() {
-        const TTL: Duration = Duration::from_secs(10);
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: 100,
-            prune_target_ratio: 0.5,
-        };
-
-        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
-
-        // Insert 50 keys (well below max_tree_size of 100)
-        pm.insert((0..50).collect());
-
-        // Pruning should return empty vec when size is within bounds
-        let pruned = pm.prune(50).unwrap();
-        assert!(pruned.is_empty());
-
-        // All keys should still be present
-        for i in 0..50 {
-            assert!(pm.get_expiry(&i).is_some());
-        }
-    }
-
-    /// Test that pruning removes the oldest entries first.
-    #[tokio::test]
-    async fn test_prune_manager_prune_removes_oldest_first() {
-        const TTL: Duration = Duration::from_secs(10);
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: 10,
-            prune_target_ratio: 0.5,
-        };
-
-        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
-
-        // Insert keys one at a time with delays to ensure different timestamps
-        for i in 1..=15 {
-            pm.insert(vec![i]);
-            time::sleep(Duration::from_millis(1)).await;
-        }
-
-        // Total: 15 keys. Trigger pruning with current_size = 15
-        let pruned = pm.prune(15).unwrap();
-
-        // Should prune down to 5 (10 * 0.5), so 10 keys should be pruned (15 - 5)
-        assert_eq!(pruned.len(), 10);
-
-        // The oldest keys should be pruned first
-        for i in 1..=10 {
-            assert!(pruned.contains(&i));
-        }
-
-        // The newer keys should still be present
-        for i in 11..=15 {
-            assert!(pm.get_expiry(&i).is_some());
-        }
-    }
-
-    /// Test that pruning fails gracefully when config is None.
-    #[tokio::test]
-    async fn test_prune_manager_prune_fails_without_config() {
-        const TTL: Duration = Duration::from_secs(10);
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: usize::MAX,
-            prune_target_ratio: 0.5,
-        };
-        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
-        // Temporarily set prune_config to None to test the error case
-        pm.prune_config = None;
-
-        pm.insert(vec![1, 2, 3]);
-
-        // Pruning should fail when prune_config is None
-        let result = pm.prune(150);
-        assert!(result.is_err());
-        assert!(matches!(result, Err(KvRouterError::PruneFailed(_))));
     }
 
     /// Test that BlockEntry ordering prioritizes sequence position.
@@ -765,141 +703,59 @@ mod tests {
         assert!(entry1 < entry2);
     }
 
-    /// End-to-end test for [`KvIndexer`] with TTL and pruning
-    ///   0. Max tree size is 5, target size is 2 (prune_target_ratio = 0.4)
-    ///   1. Insert 5 blocks (at max_tree_size but not exceeding)
-    ///   2. Verify all 5 blocks are present
-    ///   3. Insert 6th block (exceeds threshold, triggers reactive pruning)
-    ///   4. Verify pruning occurred: 4 oldest blocks removed
-    ///   5. Verify 2 newest blocks remain
-    #[tokio::test]
-    async fn test_approx_indexer_e2e_pruning() {
-        const TTL: Duration = Duration::from_secs(60); // Long TTL to avoid expiry
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: 5,        // Very small to trigger pruning quickly
-            prune_target_ratio: 0.4, // target size is 5 * 0.4 = 2
-        };
+    #[test]
+    fn test_worker_expiry_heap_rebuilds_under_churn() {
+        let manager = WorkerPruneManager::new(PruneConfig {
+            ttl: Duration::from_secs(60),
+        });
+        let worker = WorkerWithDpRank::from_worker_id(7);
 
-        let cancel = CancellationToken::new();
-        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let indexer = KvIndexer::new_with_frequency(
-            cancel.clone(),
-            None,
-            KV_BLOCK_SIZE,
-            metrics,
-            Some(prune_config),
-        );
-
-        let worker = WorkerWithDpRank::from_worker_id(42);
-
-        // Insert 5 sequences (5 blocks total, at max_tree_size but not exceeding)
-        for i in 0..5 {
-            let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
-            let mut tokens_with_hashes = TokensWithHashes::new(tokens, KV_BLOCK_SIZE);
-            indexer
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
-                .await
-                .unwrap();
-            time::sleep(Duration::from_millis(1)).await; // Ensure different timestamps
+        for idx in 0..=WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD {
+            manager.insert_block_entries(vec![test_block(worker, 100 + idx as u64, idx)]);
         }
 
-        // Verify all 5 blocks are present (no pruning yet)
-        for i in 0..5 {
-            let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
-            let scores = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            assert_eq!(
-                scores.scores.get(&worker).copied(),
-                Some(1),
-                "Block {} should be present before threshold is exceeded",
-                i
-            );
-        }
-
-        // Insert 6th block - this exceeds max_tree_size and should trigger reactive pruning
-        let tokens: Vec<u32> = vec![50, 51, 52, 53];
-        let mut tokens_with_hashes = TokensWithHashes::new(tokens, KV_BLOCK_SIZE);
-        indexer
-            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
-            .await
-            .unwrap();
-
-        // Wait for pruning to complete
-        time::sleep(Duration::from_millis(100)).await;
-
-        // After pruning, we will have exactly 2 blocks (5 * 0.4 = 2)
-        // The 2 newest blocks (i=4, i=5) will remain, oldest 4 blocks (i=0,1,2,3) will be pruned
-
-        // Verify that the 4 oldest blocks are pruned
-        for i in 0..4 {
-            let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
-            let scores = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            assert!(
-                scores.scores.get(&worker).copied().unwrap_or(0) == 0,
-                "Block {} should have been pruned but is still present",
-                i
-            );
-        }
-
-        // Verify the 2 newest blocks are present
-        for i in 4..6 {
-            let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
-            let scores = indexer
-                .find_matches_for_request(&tokens, None, None)
-                .await
-                .unwrap();
-            assert_eq!(
-                scores.scores.get(&worker).copied(),
-                Some(1),
-                "Block {} should have been present but was pruned",
-                i
-            );
-        }
+        assert_eq!(manager.worker_expiry_heap_len(), 1);
+        manager.shutdown();
     }
 
-    /// Test that re-inserting a key updates its position in the pruning queue.
-    #[tokio::test]
-    async fn test_prune_manager_prune_reinsertion_updates_position() {
+    #[tokio::test(start_paused = true)]
+    async fn test_worker_expiry_queue_drains_staggered_workers() {
         const TTL: Duration = Duration::from_secs(10);
-        let prune_config = PruneConfig {
-            ttl: TTL,
-            max_tree_size: 5,
-            prune_target_ratio: 0.8,
-        };
+        let manager = WorkerPruneManager::new(PruneConfig { ttl: TTL });
+        let first_worker = WorkerWithDpRank::from_worker_id(1);
+        let second_worker = WorkerWithDpRank::from_worker_id(2);
 
-        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+        let first = test_block(first_worker, 101, 0);
+        let second = test_block(second_worker, 202, 0);
 
-        // Insert keys
-        for i in 1..=10 {
-            pm.insert(vec![i]);
-            time::sleep(Duration::from_millis(1)).await;
-        }
+        manager.insert_block_entries(vec![first]);
+        time::advance(Duration::from_secs(5)).await;
+        manager.insert_block_entries(vec![second]);
 
-        // Re-insert key 1 (should move it to the back of the queue)
-        pm.insert(vec![1]);
+        time::advance(Duration::from_secs(5)).await;
+        assert_eq!(manager.drain_due_and_pending(Instant::now()), vec![first]);
 
-        // Total: 10 unique keys. Trigger pruning: current_size = 10, target = 4, so prune 6 keys
-        // Order by expiry (oldest first): 2, 3, 4, 5, 6, 7, 8, 9, 10, 1 (re-inserted)
-        let pruned = pm.prune(10).unwrap();
-        assert_eq!(pruned.len(), 6);
+        time::advance(Duration::from_secs(5)).await;
+        assert_eq!(manager.drain_due_and_pending(Instant::now()), vec![second]);
+        manager.shutdown();
+    }
 
-        // The oldest keys (2-7) should be pruned
-        for i in 2..=7 {
-            assert!(pruned.contains(&i));
-        }
+    #[tokio::test(start_paused = true)]
+    async fn test_worker_expiry_queue_ignores_stale_global_entries() {
+        const TTL: Duration = Duration::from_secs(10);
+        let manager = WorkerPruneManager::new(PruneConfig { ttl: TTL });
+        let worker = WorkerWithDpRank::from_worker_id(7);
+        let block = test_block(worker, 707, 0);
 
-        // The newest keys (8-10) should still be present
-        for i in 8..=10 {
-            assert!(pm.get_expiry(&i).is_some());
-        }
+        manager.insert_block_entries(vec![block]);
+        time::advance(Duration::from_secs(5)).await;
+        manager.insert_block_entries(vec![block]);
 
-        // Key 1 should still be present (it was refreshed and is now near the end)
-        assert!(pm.get_expiry(&1).is_some());
+        time::advance(Duration::from_secs(5)).await;
+        assert!(manager.drain_due_and_pending(Instant::now()).is_empty());
+
+        time::advance(Duration::from_secs(5)).await;
+        assert_eq!(manager.drain_due_and_pending(Instant::now()), vec![block]);
+        manager.shutdown();
     }
 }

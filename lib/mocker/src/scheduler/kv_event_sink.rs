@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, WorkerId};
+use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, StorageTier, WorkerId};
 
 use crate::common::protocols::{
     ForwardPassSnapshot, FpmPublisher, KvCacheEventSink, KvEventPublishers, RawKvEvent,
@@ -44,6 +44,19 @@ impl KvCacheEventSink for RouterEventCaptureSink {
         self.buffer.push(RouterEvent::new(self.worker_id, event));
         Ok(())
     }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Result<()> {
+        self.buffer.push(RouterEvent::with_storage_tier(
+            self.worker_id,
+            event,
+            storage_tier,
+        ));
+        Ok(())
+    }
 }
 
 /// Returns the capture buffer plus a sink handle that can be passed into a
@@ -65,6 +78,7 @@ pub(crate) fn capture_router_event_sink(
 pub(crate) struct DeferredKvPublish {
     pub(crate) event: KvCacheEvent,
     pub(crate) block_token_ids: Option<Vec<Vec<u32>>>,
+    pub(crate) storage_tier: StorageTier,
 }
 
 /// Captures raw KV publishes for the live `python -m dynamo.mocker` and online
@@ -79,10 +93,16 @@ pub(crate) struct DeferredKvPublishBuffer {
 }
 
 impl DeferredKvPublishBuffer {
-    pub(crate) fn push(&self, event: KvCacheEvent, block_token_ids: Option<Vec<Vec<u32>>>) {
+    pub(crate) fn push(
+        &self,
+        event: KvCacheEvent,
+        block_token_ids: Option<Vec<Vec<u32>>>,
+        storage_tier: StorageTier,
+    ) {
         self.events.lock().unwrap().push(DeferredKvPublish {
             event,
             block_token_ids,
+            storage_tier,
         });
     }
 
@@ -100,7 +120,16 @@ struct DeferredKvEventSink {
 
 impl KvCacheEventSink for DeferredKvEventSink {
     fn publish(&self, event: KvCacheEvent) -> Result<()> {
-        self.buffer.push(event, None);
+        self.buffer.push(event, None, StorageTier::Device);
+        Ok(())
+    }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Result<()> {
+        self.buffer.push(event, None, storage_tier);
         Ok(())
     }
 }
@@ -116,6 +145,7 @@ impl RawKvEventSink for DeferredRawKvEventSink {
         if let Some(last) = events.last_mut()
             && last.event.event_id == event.event.event_id
             && last.event.dp_rank == event.event.dp_rank
+            && last.storage_tier == event.storage_tier
         {
             last.block_token_ids = event.block_token_ids;
             return Ok(());
@@ -124,6 +154,7 @@ impl RawKvEventSink for DeferredRawKvEventSink {
         events.push(DeferredKvPublish {
             event: event.event,
             block_token_ids: event.block_token_ids,
+            storage_tier: event.storage_tier,
         });
         Ok(())
     }
@@ -154,7 +185,11 @@ pub(crate) fn publish_deferred_kv_events(
     events: Vec<DeferredKvPublish>,
 ) {
     for event in events {
-        if let Err(error) = sinks.publish(event.event, event.block_token_ids.as_deref()) {
+        if let Err(error) = sinks.publish_with_storage_tier(
+            event.event,
+            event.block_token_ids.as_deref(),
+            event.storage_tier,
+        ) {
             tracing::warn!("Failed to forward buffered KV event: {error}");
         }
     }

@@ -285,6 +285,44 @@ async def test_connector_set_replicas_success(connector):
 
 
 @pytest.mark.asyncio
+async def test_connector_set_replicas_rejected(connector):
+    """REJECTED is a budget-gate outcome — must not raise, must log a warning."""
+    target_replicas = [
+        TargetReplica(
+            sub_component_type=SubComponentType.PREFILL,
+            component_name="prefill-svc",
+            desired_replicas=2,
+        )
+    ]
+
+    with patch.dict(
+        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "dgd", "POD_NAMESPACE": "ns"}
+    ):
+        mock_response = ScaleResponse(
+            status=ScaleStatus.REJECTED,
+            message="budget exceeded",
+            current_replicas={},
+        )
+        mock_client = AsyncMock()
+        mock_client.send_scale_request = AsyncMock(return_value=mock_response)
+        connector.remote_client = mock_client
+
+        with patch("dynamo.planner.connectors.global_planner.logger") as mock_logger:
+            # Must not raise — REJECTED is a legitimate business outcome.
+            await connector.set_component_replicas(target_replicas, blocking=False)
+
+            # Warning logged, not error.
+            mock_logger.warning.assert_called_once()
+            warning_msg = mock_logger.warning.call_args[0][0]
+            assert "rejected" in warning_msg.lower()
+            assert "budget exceeded" in warning_msg
+            mock_logger.error.assert_not_called()
+
+        # Client was still called — execution continued normally.
+        mock_client.send_scale_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_connector_error_handling(connector):
     """Test GlobalPlannerConnector error handling"""
     # Empty list
@@ -461,3 +499,79 @@ def test_connector_get_worker_info_falls_back_on_local_init_failure(connector_ru
     assert info.context_length is None
     assert info.max_kv_tokens is None
     assert info.component_name is not None
+
+
+def test_connector_get_actual_worker_counts_delegates_to_local_k8s(connector_runtime):
+    """get_actual_worker_counts should report real pool DGD status by
+    delegating to the pool-local KubernetesConnector. Without this, the
+    base planner falls through to a runtime path that always reports
+    is_stable=True, so _scaling_in_progress can't detect in-flight
+    rollouts under environment=global-planner.
+    """
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    fake_local = MagicMock()
+    fake_local.get_actual_worker_counts = MagicMock(return_value=(2, 3, False))
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    counts = c.get_actual_worker_counts(
+        prefill_component_name="VllmPrefillWorker",
+        decode_component_name="VllmDecodeWorker",
+    )
+    assert counts == (2, 3, False)
+    fake_local.get_actual_worker_counts.assert_called_once_with(
+        prefill_component_name="VllmPrefillWorker",
+        decode_component_name="VllmDecodeWorker",
+    )
+
+
+def test_connector_get_actual_worker_counts_out_of_cluster_fallback(connector_runtime):
+    """When no local KubernetesConnector is available (e.g. running outside
+    a cluster), get_actual_worker_counts must return (0, 0, True) rather
+    than raising — mirroring the capability-discovery fallback path so
+    out-of-cluster callers aren't blocked.
+    """
+    with patch(
+        "dynamo.planner.connectors.global_planner.KubernetesConnector",
+        side_effect=DeploymentValidationError(["forced test failure"]),
+    ):
+        c = GlobalPlannerConnector(
+            connector_runtime, "ns", "gns", "GP", model_name="test"
+        )
+        counts = c.get_actual_worker_counts(
+            prefill_component_name="p", decode_component_name="d"
+        )
+
+    assert counts == (0, 0, True)
+
+
+def test_connector_get_worker_runtime_namespace_delegates_to_local_k8s(
+    connector_runtime,
+):
+    """GlobalPlannerConnector should resolve the pool-local worker namespace."""
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    fake_local = MagicMock()
+    fake_local.get_worker_runtime_namespace = MagicMock(return_value="ns-hash")
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    namespace = c.get_worker_runtime_namespace("ns")
+
+    assert namespace == "ns-hash"
+    fake_local.get_worker_runtime_namespace.assert_called_once_with("ns")
+
+
+def test_connector_get_worker_runtime_namespace_out_of_cluster_fallback(
+    connector_runtime,
+):
+    """Fallback to base namespace when no pool-local KubernetesConnector exists."""
+    with patch(
+        "dynamo.planner.connectors.global_planner.KubernetesConnector",
+        side_effect=DeploymentValidationError(["forced test failure"]),
+    ):
+        c = GlobalPlannerConnector(
+            connector_runtime, "ns", "gns", "GP", model_name="test"
+        )
+        namespace = c.get_worker_runtime_namespace("ns")
+
+    assert namespace == "ns"

@@ -6,11 +6,19 @@ import json
 import os
 import socket
 
+from dynamo._internal.aic import (
+    DEFAULT_GPU_MEMORY_UTILIZATION,
+    DEFAULT_MEM_FRACTION_STATIC,
+    estimate_num_gpu_blocks,
+)
 from dynamo.llm import MockEngineArgs, ModelRuntimeConfig, ReasoningConfig, SglangArgs
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+_DEFAULT_AIC_SYSTEM = "h200_sxm"
+_DEFAULT_VLLM_BLOCK_SIZE = 64
+_DEFAULT_SGLANG_BLOCK_SIZE = 1
 
 
 def _parse_reasoning_config(reasoning_json: str | None) -> ReasoningConfig | None:
@@ -39,6 +47,147 @@ def _build_sglang_args(args: argparse.Namespace) -> SglangArgs | None:
     if not any(value is not None for value in sglang_args.values()):
         return None
     return SglangArgs(**sglang_args)
+
+
+def _resolve_block_size_for_capacity(
+    engine_type: str,
+    block_size: int | None,
+    sglang_page_size: int | None,
+) -> int:
+    if block_size is not None:
+        return block_size
+    if engine_type == "sglang":
+        if sglang_page_size is not None:
+            return sglang_page_size
+        return _DEFAULT_SGLANG_BLOCK_SIZE
+    return _DEFAULT_VLLM_BLOCK_SIZE
+
+
+def _estimate_aic_num_gpu_blocks(
+    *,
+    engine_type: str,
+    block_size: int | None,
+    max_num_batched_tokens: int | None,
+    aic_backend: str,
+    aic_system: str | None,
+    aic_backend_version: str | None,
+    aic_tp_size: int | None,
+    aic_model_path: str | None,
+    aic_moe_tp_size: int | None,
+    aic_moe_ep_size: int | None,
+    aic_attention_dp_size: int | None,
+    gpu_memory_utilization: float | None,
+    mem_fraction_static: float | None,
+    sglang_page_size: int | None,
+) -> int:
+    if not aic_model_path:
+        raise ValueError(
+            "AIC KV cache capacity estimation requires a model path; "
+            "set --model-path or aic_model_path"
+        )
+    resolved_block_size = _resolve_block_size_for_capacity(
+        engine_type, block_size, sglang_page_size
+    )
+    return estimate_num_gpu_blocks(
+        backend_name=aic_backend,
+        system=aic_system or _DEFAULT_AIC_SYSTEM,
+        model_path=aic_model_path,
+        tp_size=aic_tp_size if aic_tp_size is not None else 1,
+        block_size=resolved_block_size,
+        max_num_batched_tokens=(
+            max_num_batched_tokens
+            if max_num_batched_tokens is not None
+            else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+        ),
+        gpu_memory_utilization=(
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else DEFAULT_GPU_MEMORY_UTILIZATION
+        ),
+        mem_fraction_static=(
+            mem_fraction_static
+            if mem_fraction_static is not None
+            else DEFAULT_MEM_FRACTION_STATIC
+        ),
+        backend_version=aic_backend_version,
+        moe_tp_size=aic_moe_tp_size,
+        moe_ep_size=aic_moe_ep_size,
+        attention_dp_size=aic_attention_dp_size,
+    )
+
+
+def _resolve_num_gpu_blocks(
+    *,
+    explicit_num_gpu_blocks: int | None,
+    engine_type: str,
+    block_size: int | None,
+    max_num_batched_tokens: int | None,
+    aic_backend: str | None,
+    aic_system: str | None,
+    aic_backend_version: str | None,
+    aic_tp_size: int | None,
+    aic_model_path: str | None,
+    aic_moe_tp_size: int | None,
+    aic_moe_ep_size: int | None,
+    aic_attention_dp_size: int | None,
+    gpu_memory_utilization: float | None,
+    mem_fraction_static: float | None,
+    sglang_page_size: int | None,
+) -> int:
+    if explicit_num_gpu_blocks is not None:
+        return explicit_num_gpu_blocks
+    if aic_backend is None:
+        return _DEFAULT_NUM_GPU_BLOCKS
+    return _estimate_aic_num_gpu_blocks(
+        engine_type=engine_type,
+        block_size=block_size,
+        max_num_batched_tokens=max_num_batched_tokens,
+        aic_backend=aic_backend,
+        aic_system=aic_system,
+        aic_backend_version=aic_backend_version,
+        aic_tp_size=aic_tp_size,
+        aic_model_path=aic_model_path,
+        aic_moe_tp_size=aic_moe_tp_size,
+        aic_moe_ep_size=aic_moe_ep_size,
+        aic_attention_dp_size=aic_attention_dp_size,
+        gpu_memory_utilization=gpu_memory_utilization,
+        mem_fraction_static=mem_fraction_static,
+        sglang_page_size=sglang_page_size,
+    )
+
+
+def _resolve_raw_engine_args(
+    raw: dict,
+    *,
+    fallback_model_path: str | None = None,
+) -> dict:
+    if raw.get("num_gpu_blocks") is not None:
+        return raw
+
+    aic_backend = raw.get("aic_backend")
+    if aic_backend is None:
+        return raw
+
+    engine_type = raw.get("engine_type") or "vllm"
+    sglang = raw.get("sglang")
+    sglang_page_size = sglang.get("page_size") if isinstance(sglang, dict) else None
+    raw["num_gpu_blocks"] = _estimate_aic_num_gpu_blocks(
+        engine_type=engine_type,
+        block_size=raw.get("block_size"),
+        max_num_batched_tokens=raw.get("max_num_batched_tokens"),
+        aic_backend=aic_backend,
+        aic_system=raw.get("aic_system"),
+        aic_backend_version=raw.get("aic_backend_version"),
+        aic_tp_size=raw.get("aic_tp_size"),
+        aic_model_path=raw.get("aic_model_path") or fallback_model_path,
+        aic_moe_tp_size=raw.get("aic_moe_tp_size"),
+        aic_moe_ep_size=raw.get("aic_moe_ep_size"),
+        aic_attention_dp_size=raw.get("aic_attention_dp_size"),
+        gpu_memory_utilization=raw.get("gpu_memory_utilization"),
+        mem_fraction_static=raw.get("mem_fraction_static"),
+        sglang_page_size=sglang_page_size,
+    )
+    return raw
 
 
 def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
@@ -70,9 +219,29 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_moe_tp_size = getattr(args, "aic_moe_tp_size", None)
         aic_moe_ep_size = getattr(args, "aic_moe_ep_size", None)
         aic_attention_dp_size = getattr(args, "aic_attention_dp_size", None)
+    engine_type = getattr(args, "engine_type", None) or "vllm"
+    num_gpu_blocks = _resolve_num_gpu_blocks(
+        explicit_num_gpu_blocks=getattr(args, "num_gpu_blocks", None),
+        engine_type=engine_type,
+        block_size=getattr(args, "block_size", None),
+        max_num_batched_tokens=getattr(
+            args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
+        ),
+        aic_backend=aic_backend,
+        aic_system=aic_system,
+        aic_backend_version=aic_backend_version,
+        aic_tp_size=aic_tp_size,
+        aic_model_path=aic_model_path,
+        aic_moe_tp_size=aic_moe_tp_size,
+        aic_moe_ep_size=aic_moe_ep_size,
+        aic_attention_dp_size=aic_attention_dp_size,
+        gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
+        mem_fraction_static=getattr(args, "mem_fraction_static", None),
+        sglang_page_size=getattr(args, "sglang_page_size", None),
+    )
     return MockEngineArgs(
-        engine_type=getattr(args, "engine_type", None) or "vllm",
-        num_gpu_blocks=getattr(args, "num_gpu_blocks", _DEFAULT_NUM_GPU_BLOCKS),
+        engine_type=engine_type,
+        num_gpu_blocks=num_gpu_blocks,
         block_size=getattr(args, "block_size", 0) or 0,
         max_num_seqs=getattr(args, "max_num_seqs", _DEFAULT_MAX_NUM_SEQS),
         max_num_batched_tokens=getattr(
@@ -94,6 +263,8 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_moe_tp_size=aic_moe_tp_size,
         aic_moe_ep_size=aic_moe_ep_size,
         aic_attention_dp_size=aic_attention_dp_size,
+        gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
+        mem_fraction_static=getattr(args, "mem_fraction_static", None),
         enable_local_indexer=not getattr(args, "durable_kv_events", False),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
@@ -104,7 +275,13 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
 
 def load_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
     if args.extra_engine_args:
-        return MockEngineArgs.from_json(args.extra_engine_args.read_text())
+        raw = json.loads(args.extra_engine_args.read_text())
+        if not isinstance(raw, dict):
+            raise ValueError("extra engine args must be a JSON object")
+        raw = _resolve_raw_engine_args(
+            raw, fallback_model_path=getattr(args, "model_path", None)
+        )
+        return MockEngineArgs.from_json(json.dumps(raw))
     return build_mocker_engine_args(args)
 
 

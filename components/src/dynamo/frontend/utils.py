@@ -20,17 +20,30 @@ def random_call_id() -> str:
     return f"call_{uuid.uuid4().int & _MASK_64_BITS:016x}"
 
 
+def nvext_extra_field_requested(request: dict[str, Any], field: str) -> bool:
+    """Return whether a request opted into a response nvext field."""
+    nvext = request.get("nvext")
+    if not isinstance(nvext, dict):
+        return False
+    extra_fields = nvext.get("extra_fields")
+    return isinstance(extra_fields, list) and field in extra_fields
+
+
 def worker_warmup() -> bool:
     """Dummy task to ensure a ProcessPoolExecutor worker is fully initialized."""
     return True
 
 
 class PreprocessError(Exception):
-    """Raised by preprocess workers for user-facing errors (e.g., n!=1)."""
+    """Raised by preprocess workers for user-facing errors (e.g., n!=1).
 
-    def __init__(self, error_dict: dict[str, Any]):
-        self.error_dict = error_dict
-        super().__init__(str(error_dict))
+    Carries a plain message because the worker→main-process boundary
+    pickles the exception; the main process re-raises a Dynamo-typed
+    exception so PyO3 can route it through the proper backend-error path.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)
 
 
 # Content part types that carry media URLs, mapped to the key used in the

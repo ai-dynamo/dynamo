@@ -34,6 +34,7 @@ else:
 
 pytestmark = [
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,  # "Hardware"
     pytest.mark.pre_merge,  # "Lifecyle"
     pytest.mark.unit,  # "Test Type"

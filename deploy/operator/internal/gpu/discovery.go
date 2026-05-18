@@ -31,6 +31,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -85,6 +86,7 @@ const (
 	tokenH200   = "H200"
 	tokenH100   = "H100"
 	tokenA100   = "A100"
+	tokenA30    = "A30"
 	tokenL40S   = "L40S"
 	tokenL40    = "L40"
 	tokenL4     = "L4"
@@ -129,6 +131,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
+	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -171,7 +174,7 @@ type gpuCacheEntry struct {
 }
 
 // GPUDiscoveryCache caches discovery results keyed by SKU filter.
-// Bounded by the GPUSKUType enum (≤7 values incl. empty for unfiltered).
+// Bounded by the GPUSKUType enum plus empty for unfiltered discovery.
 type GPUDiscoveryCache struct {
 	mu      sync.RWMutex
 	entries map[nvidiacomv1beta1.GPUSKUType]gpuCacheEntry
@@ -179,6 +182,7 @@ type GPUDiscoveryCache struct {
 
 type GPUDiscovery struct {
 	Scraper ScrapeMetricsFunc
+	group   singleflight.Group
 }
 
 func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
@@ -266,12 +270,52 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //   - *GPUInfo for the selected node
 //   - error if no GPU data can be retrieved
 func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
+	logger := log.FromContext(ctx)
 	if cache != nil {
 		if cached, ok := cache.Get(filterSKU); ok {
+			logger.V(1).Info("GPU discovery cache hit", "gpuSku", filterSKU)
 			return cached, nil
 		}
 	}
 
+	resultCh := g.group.DoChan(string(filterSKU), func() (any, error) {
+		if cache != nil {
+			if cached, ok := cache.Get(filterSKU); ok {
+				logger.V(1).Info("GPU discovery cache hit after waiting for in-flight request", "gpuSku", filterSKU)
+				return cached, nil
+			}
+		}
+
+		logger.V(1).Info("GPU discovery cache miss; scraping DCGM exporter pods", "gpuSku", filterSKU)
+		info, err := g.discoverGPUsFromDCGMFilteredUncached(ctx, k8sClient, filterSKU)
+		if err != nil {
+			return nil, err
+		}
+		if cache != nil {
+			cache.Set(filterSKU, info, 60*time.Second)
+		}
+		return info, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		if result.Shared {
+			logger.V(1).Info("GPU discovery shared in-flight result", "gpuSku", filterSKU)
+		}
+		info, ok := result.Val.(*GPUInfo)
+		if !ok || info == nil {
+			return nil, fmt.Errorf("unexpected GPU discovery result type %T", result.Val)
+		}
+		return info, nil
+	}
+}
+
+func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
 	if err != nil && !strings.Contains(err.Error(), "no DCGM exporter pods found") {
@@ -375,9 +419,6 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 
-	if cache != nil {
-		cache.Set(filterSKU, bestNode, 60*time.Second)
-	}
 	return bestNode, nil
 }
 func buildDCGMEndpoint(podIP string) string {
@@ -878,6 +919,9 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
+		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+			continue
+		}
 		if strings.Contains(normalized, rule.token) {
 			if rule.singleSKU != "" {
 				return rule.singleSKU
@@ -909,6 +953,28 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 func normalize(input string) string {
 	s := strings.ToUpper(strings.ReplaceAll(input, strDash, strSpace))
 	return strings.ReplaceAll(s, " ", "")
+}
+
+func containsModelToken(input, token string) bool {
+	upper := strings.ToUpper(input)
+	for start := 0; start < len(upper); {
+		idx := strings.Index(upper[start:], token)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		end := idx + len(token)
+		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
+			(end == len(upper) || !isASCIIAlphaNum(upper[end])) {
+			return true
+		}
+		start = idx + 1
+	}
+	return false
+}
+
+func isASCIIAlphaNum(ch byte) bool {
+	return (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
 }
 
 // detectFormFactor determines the GPU form factor (e.g. SXM or PCIe)

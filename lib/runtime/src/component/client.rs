@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -12,19 +12,11 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures::StreamExt;
-use tokio::net::unix::pipe::Receiver;
+use rand::Rng;
 
+use crate::component::{Endpoint, Instance};
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
-use crate::{
-    component::{Endpoint, Instance},
-    pipeline::async_trait,
-    pipeline::{
-        AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
-        SingleIn,
-    },
-    traits::DistributedRuntimeProvider,
-    transports::etcd::Client as EtcdClient,
-};
+use crate::traits::DistributedRuntimeProvider;
 
 /// Shared occupancy state for routing modes that track per-worker in-flight requests.
 #[derive(Debug, Default)]
@@ -51,7 +43,30 @@ impl RoutingOccupancyState {
 
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
-        let id = *instance_ids.iter().min_by_key(|&&id| self.load(id))?;
+
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform without allocating in this locked hot path.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        let id = selected?;
         self.increment(id);
         Some(id)
     }
@@ -101,16 +116,55 @@ pub(crate) async fn get_or_create_routing_occupancy_state(
 /// Default interval for periodic reconciliation of instance_avail with instance_source
 const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Shared endpoint discovery state for a single endpoint query.
+///
+/// This wraps both the coalesced instance snapshot used for routing decisions
+/// and a raw, lossless per-subscriber event feed used by the response-stream
+/// cancellation watcher. Both outputs are driven by a single underlying
+/// discovery `list_and_watch` task so clients do not multiply control-plane
+/// watches.
+#[derive(Debug)]
+pub(crate) struct EndpointDiscoverySource {
+    instance_source: tokio::sync::watch::Receiver<Vec<Instance>>,
+    event_subscribers: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>>>,
+}
+
+impl EndpointDiscoverySource {
+    fn new(instance_source: tokio::sync::watch::Receiver<Vec<Instance>>) -> Self {
+        Self {
+            instance_source,
+            event_subscribers: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn instance_receiver(&self) -> tokio::sync::watch::Receiver<Vec<Instance>> {
+        self.instance_source.clone()
+    }
+
+    fn subscribe_events(&self) -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.event_subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    fn broadcast_event(&self, event: &DiscoveryEvent) {
+        let subscribers = &mut *self.event_subscribers.lock().unwrap();
+        subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
     pub endpoint: Endpoint,
+    // Shared endpoint discovery source backing both snapshots and raw events.
+    endpoint_discovery_source: Arc<EndpointDiscoverySource>,
     // These are the remotes I know about from watching key-value store
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // These are the instance source ids less those reported as down from sending rpc
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
-    // These are the instance source ids less those reported as busy (above threshold)
-    instance_free: Arc<ArcSwap<Vec<u64>>>,
+    // These are the instance ids reported as busy (above threshold)
+    instance_busy: Arc<ArcSwap<HashSet<u64>>>,
     // Watch sender for available instance IDs (for sending updates)
     instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
     // Watch receiver for available instance IDs (for cloning to external subscribers)
@@ -137,7 +191,9 @@ impl Client {
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
             endpoint.id()
         );
-        let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
+        let endpoint_discovery_source =
+            Self::get_or_create_dynamic_discovery_source(&endpoint).await?;
+        let instance_source = Arc::new(endpoint_discovery_source.instance_receiver());
 
         // Seed instance_avail from the current instance_source snapshot so that
         // callers who proceed immediately after wait_for_instances (which reads
@@ -151,9 +207,10 @@ impl Client {
         let (avail_tx, avail_rx) = tokio::sync::watch::channel(initial_ids.clone());
         let client = Client {
             endpoint: endpoint.clone(),
+            endpoint_discovery_source,
             instance_source: instance_source.clone(),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
+            instance_avail: Arc::new(ArcSwap::from_pointee(initial_ids.clone())),
+            instance_busy: Arc::new(ArcSwap::from_pointee(HashSet::new())),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,
@@ -175,13 +232,29 @@ impl Client {
         self.instance_avail.load()
     }
 
-    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
-        self.instance_free.load()
+    pub fn instance_ids_free(&self) -> Vec<u64> {
+        let instance_ids = self.instance_ids();
+        let busy_ids = self.instance_busy.load();
+
+        instance_ids
+            .into_iter()
+            .filter(|id| !busy_ids.contains(id))
+            .collect()
     }
 
     /// Get a watcher for available instance IDs
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
         self.instance_avail_rx.clone()
+    }
+
+    /// Subscribe to raw discovery events for this endpoint.
+    ///
+    /// Unlike `instance_source`, this feed does not coalesce remove→add pairs,
+    /// so consumers can react to every removal event exactly once.
+    pub(crate) fn subscribe_discovery_events(
+        &self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent> {
+        self.endpoint_discovery_source.subscribe_events()
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
@@ -224,14 +297,11 @@ impl Client {
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
-    /// Update the set of free instances based on busy instance IDs
-    pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
-        let all_instance_ids = self.instance_ids();
-        let free_ids: Vec<u64> = all_instance_ids
-            .into_iter()
-            .filter(|id| !busy_instance_ids.contains(id))
-            .collect();
-        self.instance_free.store(Arc::new(free_ids));
+    /// Replace the set of busy instances reported by the worker monitor.
+    pub fn set_busy_instances(&self, busy_instance_ids: &[u64]) {
+        self.instance_busy.store(Arc::new(
+            busy_instance_ids.iter().copied().collect::<HashSet<_>>(),
+        ));
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -254,9 +324,7 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
-                // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
-                client.instance_free.store(Arc::new(instance_ids.clone()));
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 let registry = client.endpoint.drt().routing_occupancy_states();
@@ -296,18 +364,18 @@ impl Client {
         self.instance_avail.store(Arc::new(ids));
     }
 
-    async fn get_or_create_dynamic_instance_source(
+    async fn get_or_create_dynamic_discovery_source(
         endpoint: &Endpoint,
-    ) -> Result<Arc<tokio::sync::watch::Receiver<Vec<Instance>>>> {
+    ) -> Result<Arc<EndpointDiscoverySource>> {
         let drt = endpoint.drt();
-        let instance_sources = drt.instance_sources();
-        let mut instance_sources = instance_sources.lock().await;
+        let sources = drt.endpoint_discovery_sources();
+        let mut sources = sources.lock().await;
 
-        if let Some(instance_source) = instance_sources.get(endpoint) {
-            if let Some(instance_source) = instance_source.upgrade() {
-                return Ok(instance_source);
+        if let Some(source) = sources.get(endpoint) {
+            if let Some(source) = source.upgrade() {
+                return Ok(source);
             } else {
-                instance_sources.remove(endpoint);
+                sources.remove(endpoint);
             }
         }
 
@@ -322,8 +390,10 @@ impl Client {
             .list_and_watch(discovery_query.clone(), None)
             .await?;
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
+        let discovery_source = Arc::new(EndpointDiscoverySource::new(watch_rx));
 
         let secondary = endpoint.component.drt.runtime().secondary().clone();
+        let discovery_source_task = discovery_source.clone();
 
         secondary.spawn(async move {
             tracing::trace!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
@@ -350,15 +420,17 @@ impl Client {
                     }
                 };
 
-                match discovery_event {
-                    DiscoveryEvent::Added(discovery_instance) => {
-                        if let DiscoveryInstance::Endpoint(instance) = discovery_instance {
+                discovery_source_task.broadcast_event(&discovery_event);
 
-                                map.insert(instance.instance_id, instance);
-                        }
+                match discovery_event {
+                    DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
+                        map.insert(instance.instance_id, instance);
                     }
+                    DiscoveryEvent::Added(_) => {}
                     DiscoveryEvent::Removed(id) => {
-                        map.remove(&id.instance_id());
+                        if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
+                            map.remove(&endpoint_id.instance_id);
+                        }
                     }
                 }
 
@@ -370,9 +442,8 @@ impl Client {
             let _ = watch_tx.send(vec![]);
         });
 
-        let instance_source = Arc::new(watch_rx);
-        instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
-        Ok(instance_source)
+        sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
+        Ok(discovery_source)
     }
 }
 
@@ -461,6 +532,92 @@ mod tests {
         rt.shutdown();
     }
 
+    #[tokio::test]
+    async fn test_instance_reconciliation_preserves_busy_existing_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_busy_reconciliation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_free().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+        assert!(
+            client.instance_ids_free().contains(&worker_id),
+            "worker should be free after initial discovery reconciliation"
+        );
+
+        client.set_busy_instances(&[worker_id]);
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "worker should be busy before periodic reconciliation"
+        );
+
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "periodic reconciliation should not mark an existing busy worker free"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_instance_ids_free_excludes_busy_new_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let worker_id = drt.connection_id();
+        let ns = drt
+            .namespace("test_new_busy_reconciliation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        client.set_busy_instances(&[worker_id]);
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        assert_eq!(instances[0].id(), worker_id);
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "newly discovered busy worker should not be free"
+        );
+
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "discovery reconciliation should not affect recomputed free workers"
+        );
+
+        rt.shutdown();
+    }
+
     /// Test that instance_avail_watcher receives updates when instances change.
     #[tokio::test]
     async fn test_instance_avail_watcher() {
@@ -513,6 +670,31 @@ mod tests {
         assert_eq!(state.load(100), 30);
         assert_eq!(state.load(200), 30);
         assert_eq!(state.load(300), 30);
+    }
+
+    #[tokio::test]
+    async fn test_select_exact_min_and_increment_randomizes_ties() {
+        let mut selected = [false; 3];
+
+        for _ in 0..120 {
+            let state = RoutingOccupancyState::default();
+            let picked = state
+                .select_exact_min_and_increment(&[10, 20, 30])
+                .await
+                .unwrap();
+            match picked {
+                10 => selected[0] = true,
+                20 => selected[1] = true,
+                30 => selected[2] = true,
+                _ => panic!("unexpected worker id: {picked}"),
+            }
+        }
+
+        let selected_count = selected.into_iter().filter(|seen| *seen).count();
+        assert!(
+            selected_count > 1,
+            "tie-breaking should not always select the first minimum-load worker"
+        );
     }
 
     #[tokio::test]
