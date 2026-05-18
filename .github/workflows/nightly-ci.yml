@@ -182,6 +182,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-build:
@@ -196,6 +197,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-build:
@@ -210,6 +212,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   # ============================================================================
@@ -238,6 +241,7 @@ jobs:
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -257,6 +261,7 @@ jobs:
       gpu_test_markers: vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-test:
@@ -282,6 +287,7 @@ jobs:
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -301,6 +307,7 @@ jobs:
       gpu_test_markers: sglang and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-test:
@@ -326,6 +333,7 @@ jobs:
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -345,6 +353,7 @@ jobs:
       gpu_test_markers: trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   # ============================================================================
@@ -368,6 +377,7 @@ jobs:
       gpu_test_markers: 'pre_merge and none and gpu_1'
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   # ============================================================================
