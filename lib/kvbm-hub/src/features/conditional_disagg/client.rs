@@ -17,7 +17,7 @@ use velo_ext::{InstanceId, PeerInfo};
 use crate::client::HubClient;
 use crate::protocol::{
     self, ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole,
-    Feature, LayoutCompatPayload, PrefillRequest,
+    Feature, LayoutCompatPayload, P2pConfig, PrefillRequest,
 };
 
 /// Thin wrapper that registers an instance under the ConditionalDisagg
@@ -91,30 +91,27 @@ impl ConditionalDisaggClient {
         &self.hub
     }
 
-    /// Register the participant with the hub, declaring the CD feature.
+    /// Register the participant with the hub, declaring the CD feature
+    /// alongside the mandatory P2P feature carrying `layout_compat`.
     ///
     /// On success, caches the hub's velo `InstanceId` internally so
     /// subsequent prefill-queue calls can target it without re-reading the
     /// response.
     ///
-    /// `layout_compat` carries this leader's
-    /// [`LayoutCompatPayload`](crate::protocol::LayoutCompatPayload) so the
-    /// hub can gate this registration against the baseline established by
-    /// the first CD instance. Pass `None` for the legacy / backward-
-    /// compatible path that bypasses the gate.
+    /// `layout_compat` is mandatory — c2 removed the opt-in bypass path.
     pub async fn register(
         &self,
         peer_info: PeerInfo,
-        layout_compat: Option<LayoutCompatPayload>,
+        layout_compat: LayoutCompatPayload,
     ) -> Result<Option<InstanceId>> {
         let hub_id = self
             .hub
             .register_instance_with_features(
                 peer_info,
-                vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
-                    role: self.role,
-                    layout_compat,
-                }))],
+                vec![
+                    Feature::P2P(P2pConfig { layout_compat }),
+                    Feature::ConditionalDisagg(ConditionalDisaggConfig { role: self.role }),
+                ],
             )
             .await?;
         if let Some(id) = hub_id {

@@ -21,9 +21,10 @@ use serde::{Deserialize, Serialize};
 use super::LayoutConfigDescription;
 
 /// Compatibility payload one leader sends to declare its block layout to
-/// peers. Carried inside the hub's `Feature::ConditionalDisagg` config at
-/// register time, and built by the engine from each `SerializedLayout`
-/// during per-import compatibility checks.
+/// peers. Carried inside the hub's `Feature::P2P` config at register
+/// time (c2 — was previously inside `Feature::ConditionalDisagg`), and
+/// built by the engine from each `SerializedLayout` during per-import
+/// compatibility checks.
 ///
 /// The hub stores the first-seen payload as the baseline and rejects
 /// subsequent registrations whose payload is not compatible. The engine

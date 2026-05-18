@@ -796,19 +796,31 @@ impl ConnectorLeader {
             } else {
                 None
             };
-            let layout_compat_payload = {
+            // c2: layout_compat is mandatory for the P2P feature, which is
+            // emitted alongside CD on every connector register. Empty
+            // `worker_metadata` here would mean the SPMD bring-up
+            // didn't populate it at the expected call site — bail loudly
+            // rather than silently sending no payload (the pre-c2
+            // `.transpose()?` short-circuit).
+            let worker_metadata_for_payload = {
                 let state = self.init.lock();
                 state.worker_metadata.first().cloned()
             }
-            .map(|w| {
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot build layout_compat payload for hub registration: \
+                     worker_metadata is empty. The connector's SPMD bring-up \
+                     must populate state.worker_metadata before \
+                     register_with_hub fires (call-ordering bug)."
+                )
+            })?;
+            let layout_compat_payload =
                 kvbm_engine::leader::layout_compat::build_layout_compat_payload_with_template(
                     block_layout_mode,
-                    &w,
+                    &worker_metadata_for_payload,
                     template_for_payload.as_ref(),
                 )
-                .context("building layout_compat payload for hub registration")
-            })
-            .transpose()?;
+                .context("building layout_compat payload for hub registration")?;
 
             let (hub, client, hub_velo_id) = super::disagg::register_with_hub(
                 &disagg_cfg,

@@ -20,6 +20,7 @@ use crate::registry::PeerRegistry;
 
 pub mod conditional_disagg;
 pub mod control_plane;
+pub mod p2p;
 
 /// Context handed to a [`FeatureManager`] at hub startup so it can stash any
 /// references it needs (e.g. the hub's Velo handle for active messaging).

@@ -712,6 +712,27 @@ async fn register_instance(
     let peer = req.peer_info;
     let instance_id = peer.instance_id();
 
+    // Cross-feature dependency (c2): CD is a specialisation of P2P. Reject
+    // pre-dispatch — cheaper than rolling back base registration. This is
+    // the ONLY site where this rule is enforced; individual managers do
+    // not duplicate it.
+    let has_p2p = req
+        .features
+        .iter()
+        .any(|f| matches!(f.key(), crate::protocol::FeatureKey::P2P));
+    let has_cd = req
+        .features
+        .iter()
+        .any(|f| matches!(f.key(), crate::protocol::FeatureKey::ConditionalDisagg));
+    if has_cd && !has_p2p {
+        return Err(HubError::bad_request(
+            "Feature::ConditionalDisagg requires Feature::P2P to also be \
+             present in the same register request (CD is a specialisation \
+             of P2P; layout_compat lives in the P2P payload)"
+                .to_string(),
+        ));
+    }
+
     state
         .registry
         .register(peer.clone())

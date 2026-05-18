@@ -20,10 +20,10 @@ use std::sync::Arc;
 use kvbm_common::shape::CanonicalBlockShape;
 use kvbm_common::{BlockLayoutMode, KvBlockLayout};
 use kvbm_hub::protocol::{
-    ConditionalDisaggConfig, ConditionalDisaggRole, ErrorBody, Feature, RegisterRequest, paths,
-    peers_by_instance,
+    ConditionalDisaggConfig, ConditionalDisaggRole, ErrorBody, Feature, P2pConfig, RegisterRequest,
+    paths, peers_by_instance,
 };
-use kvbm_hub::{ConditionalDisaggManager, FeatureManager, HubServer};
+use kvbm_hub::{ConditionalDisaggManager, FeatureManager, HubServer, P2pManager};
 use kvbm_protocols::control::LayoutConfigDescription;
 use kvbm_protocols::control::layout_compat::LayoutCompatPayload;
 use velo_ext::{InstanceId, PeerInfo, WorkerAddress};
@@ -32,10 +32,12 @@ use velo_ext::{InstanceId, PeerInfo, WorkerAddress};
 
 async fn start_server_with_cd() -> (HubServer, Arc<ConditionalDisaggManager>) {
     let cd: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let p2p: Arc<P2pManager> = Arc::new(P2pManager::new());
     let server = kvbm_hub::create_server_builder()
         .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
         .discovery_port(0)
         .control_port(0)
+        .add_feature_manager(p2p as Arc<dyn FeatureManager>)
         .add_feature_manager(Arc::clone(&cd) as Arc<dyn FeatureManager>)
         .serve()
         .await
@@ -106,11 +108,15 @@ fn payload(mode: BlockLayoutMode) -> LayoutCompatPayload {
     }
 }
 
-fn cd_feature(role: ConditionalDisaggRole, layout: Option<LayoutCompatPayload>) -> Feature {
-    Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
-        role,
-        layout_compat: layout,
-    }))
+/// Construct a CD+P2P bundle for the common "leader with a role and a
+/// layout_compat payload" case. Pass `None` for `layout` to test the
+/// CD-without-P2P rejection path (legacy).
+fn cd_features(role: ConditionalDisaggRole, layout: Option<LayoutCompatPayload>) -> Vec<Feature> {
+    let cd = Feature::ConditionalDisagg(ConditionalDisaggConfig { role });
+    match layout {
+        Some(payload) => vec![Feature::P2P(P2pConfig { layout_compat: payload }), cd],
+        None => vec![cd],
+    }
 }
 
 async fn post_register(
@@ -121,7 +127,7 @@ async fn post_register(
 ) -> reqwest::Response {
     let req = RegisterRequest {
         peer_info: peer.clone(),
-        features: vec![cd_feature(role, layout)],
+        features: cd_features(role, layout),
     };
     http()
         .post(control_url(server, paths::INSTANCES))
@@ -262,16 +268,93 @@ async fn universal_mismatch_rejected_at_register() {
 }
 
 #[tokio::test]
-async fn legacy_payload_without_layout_compat_accepted() {
+async fn legacy_payload_without_layout_compat_rejected() {
+    // c2: the hub gate is mandatory — CD registers without the
+    // accompanying Feature::P2P (which carries layout_compat) must
+    // be rejected at the server before any FeatureManager runs.
     let (server, _cd) = start_server_with_cd().await;
     let peer = make_peer();
 
-    // No layout_compat populated → backward-compat path; the gate is opt-in.
     let resp = post_register(&server, &peer, ConditionalDisaggRole::Prefill, None).await;
     assert_eq!(
         resp.status(),
-        200,
-        "legacy payload (no layout_compat) should still register"
+        400,
+        "CD register without Feature::P2P (no layout_compat) must reject"
+    );
+    let body: ErrorBody = resp.json().await.unwrap();
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("p2p"),
+        "rejection reason should name the missing P2P feature, got: {}",
+        body.message
+    );
+}
+
+/// Reproducer for c2: CD without P2P in the same register request must
+/// be rejected at the server pre-dispatch layer. Distinct from the
+/// "no layout_compat" case above — this asserts the cross-feature
+/// dependency check fires even when CD's own config is well-formed.
+#[tokio::test]
+async fn cd_register_without_p2p_feature_is_rejected() {
+    let (server, cd) = start_server_with_cd().await;
+    let peer = make_peer();
+
+    // Build a request with ONLY Feature::ConditionalDisagg, no P2P.
+    let req = RegisterRequest {
+        peer_info: peer.clone(),
+        features: vec![Feature::ConditionalDisagg(ConditionalDisaggConfig {
+            role: ConditionalDisaggRole::Prefill,
+        })],
+    };
+    let resp = http()
+        .post(control_url(&server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .expect("POST /v1/instances");
+
+    assert_eq!(resp.status(), 400, "CD without P2P must reject");
+    let body: ErrorBody = resp.json().await.unwrap();
+    assert!(
+        body.message.to_lowercase().contains("p2p"),
+        "rejection reason should name the missing P2P feature, got: {}",
+        body.message
+    );
+
+    // No registration state should have leaked through.
+    assert!(cd.snapshot().prefill.is_empty());
+    assert!(cd.snapshot().decode.is_empty());
+}
+
+/// Reproducer for c2: P2P-only register with a self-inconsistent
+/// layout_compat payload must reject (validate_self path, now owned
+/// by P2pManager).
+#[tokio::test]
+async fn p2p_register_with_self_inconsistent_payload_is_rejected() {
+    let (server, _cd) = start_server_with_cd().await;
+    let peer = make_peer();
+
+    let mut bad = payload(BlockLayoutMode::Universal);
+    bad.canonical = None; // Universal mode requires a canonical aggregate.
+
+    let req = RegisterRequest {
+        peer_info: peer.clone(),
+        features: vec![Feature::P2P(P2pConfig { layout_compat: bad })],
+    };
+    let resp = http()
+        .post(control_url(&server, paths::INSTANCES))
+        .json(&req)
+        .send()
+        .await
+        .expect("POST /v1/instances");
+
+    assert_eq!(resp.status(), 400, "self-inconsistent P2P payload must reject");
+    let body: ErrorBody = resp.json().await.unwrap();
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("internally inconsistent") || msg.contains("canonical"),
+        "rejection reason should name validate_self failure, got: {}",
+        body.message
     );
 }
 
@@ -305,64 +388,52 @@ async fn matching_shapes_accepted_across_roles() {
 }
 
 // ---- Unit-level manager state machine tests --------------------------------
+//
+// The layout-compat baseline lives in P2pManager after c2, so the
+// state-machine tests below talk to P2pManager directly (not
+// ConditionalDisaggManager).
+
+fn p2p_feature(layout: LayoutCompatPayload) -> Feature {
+    Feature::P2P(P2pConfig {
+        layout_compat: layout,
+    })
+}
 
 #[tokio::test]
 async fn same_shape_idempotent_on_manager() {
-    let mgr = ConditionalDisaggManager::new();
+    let mgr = P2pManager::new();
     let p_id = InstanceId::new_v4();
     let d_id = InstanceId::new_v4();
 
-    mgr.on_register(
-        p_id,
-        &cd_feature(
-            ConditionalDisaggRole::Prefill,
-            Some(payload(BlockLayoutMode::Operational)),
-        ),
-    )
-    .await
-    .expect("baseline accepted");
+    mgr.on_register(p_id, &p2p_feature(payload(BlockLayoutMode::Operational)))
+        .await
+        .expect("baseline accepted");
 
-    mgr.on_register(
-        d_id,
-        &cd_feature(
-            ConditionalDisaggRole::Decode,
-            Some(payload(BlockLayoutMode::Operational)),
-        ),
-    )
-    .await
-    .expect("matching shape on decode side accepted");
+    mgr.on_register(d_id, &p2p_feature(payload(BlockLayoutMode::Operational)))
+        .await
+        .expect("matching shape on second registration accepted");
 }
 
 #[tokio::test]
 async fn baseline_cleared_when_population_zero() {
-    let mgr = ConditionalDisaggManager::new();
+    let mgr = P2pManager::new();
     let p_id = InstanceId::new_v4();
 
     // First instance under Operational defines the baseline.
-    mgr.on_register(
-        p_id,
-        &cd_feature(
-            ConditionalDisaggRole::Prefill,
-            Some(payload(BlockLayoutMode::Operational)),
-        ),
-    )
-    .await
-    .expect("first register accepted");
+    mgr.on_register(p_id, &p2p_feature(payload(BlockLayoutMode::Operational)))
+        .await
+        .expect("first register accepted");
+    assert!(mgr.has_baseline());
 
-    // Last CD instance leaves → baseline must clear so a fresh universal
+    // Last P2P instance leaves → baseline must clear so a fresh universal
     // group can take over without bouncing the hub.
     mgr.on_unregister(p_id);
+    assert!(!mgr.has_baseline(), "baseline must clear when empty");
 
     let p2 = InstanceId::new_v4();
-    mgr.on_register(
-        p2,
-        &cd_feature(
-            ConditionalDisaggRole::Prefill,
-            Some(payload(BlockLayoutMode::Universal)),
-        ),
-    )
-    .await
-    .expect("re-register with different mode after empty should accept");
+    mgr.on_register(p2, &p2p_feature(payload(BlockLayoutMode::Universal)))
+        .await
+        .expect("re-register with different mode after empty should accept");
 }
 
 #[tokio::test]

@@ -63,12 +63,13 @@ pub use features::conditional_disagg::{
     PrefillRequestDispatcher, RecordingDispatcher,
 };
 pub use features::control_plane::ControlPlaneManager;
+pub use features::p2p::{P2pClient, P2pManager};
 pub use features::{FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 pub use protocol::{
     CD_PREFILL_QUEUE, ConditionalDisaggConfig, ConditionalDisaggInstancesResponse,
     ConditionalDisaggRole, DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, Feature, FeatureKey,
-    PrefillRequest, ProbeResponse,
+    P2pConfig, PrefillRequest, ProbeResponse,
 };
 pub use registry::{EvictionCallback, InMemoryRegistry, PeerRegistry, RegistryError};
 pub use server::{HubServer, HubServerBuilder, HubServerState};

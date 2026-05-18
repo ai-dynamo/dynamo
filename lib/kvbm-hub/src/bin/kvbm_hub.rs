@@ -147,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         .prune_interval(Duration::from_secs(config.prune_interval_secs))
         .heartbeat_interval(Duration::from_secs(config.heartbeat_interval_secs))
         .heartbeat_max_failures(config.heartbeat_max_failures)
+        .add_feature_manager(Arc::new(kvbm_hub::P2pManager::new()))
         .add_feature_manager(Arc::new(cd_manager))
         .add_feature_manager(Arc::new(kvbm_hub::ControlPlaneManager::new()));
 

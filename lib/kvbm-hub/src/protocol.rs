@@ -190,13 +190,26 @@ pub struct RegisterRequest {
 ///
 /// Non-exhaustive so new variants can be added without breaking downstream
 /// clients that only serialize variants they know about.
+///
+/// **Feature dependencies (c2):** `ConditionalDisagg` is a specialisation
+/// of `P2P` — any register containing `Feature::ConditionalDisagg` MUST
+/// also contain `Feature::P2P` in the same request. The server enforces
+/// this pre-dispatch in [`crate::server`]. Do not duplicate the check
+/// inside individual managers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "config", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Feature {
-    /// The client participates in the ConditionalDisagg feature. Config is
-    /// required — the manager rejects registrations where this is `None`.
-    ConditionalDisagg(Option<ConditionalDisaggConfig>),
+    /// Peer-to-peer block transfers between leaders. Carries the
+    /// `layout_compat` payload that the hub gates against the baseline
+    /// established by the first P2P registration. This is the *only*
+    /// place `LayoutCompatPayload` lives on the wire.
+    #[serde(rename = "p2p")]
+    P2P(P2pConfig),
+    /// The client participates in the ConditionalDisagg feature.
+    /// Requires `Feature::P2P` to also be present in the same register
+    /// request (CD is a specialisation of P2P).
+    ConditionalDisagg(ConditionalDisaggConfig),
 }
 
 /// Stable discriminant for [`Feature`] — lets managers match by kind
@@ -204,6 +217,8 @@ pub enum Feature {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum FeatureKey {
+    /// Matches [`Feature::P2P`].
+    P2P,
     /// Matches [`Feature::ConditionalDisagg`].
     ConditionalDisagg,
     /// Connector-control HTTP→velo proxy. No client-side `Feature`
@@ -216,24 +231,33 @@ impl Feature {
     /// Return the stable discriminant for this feature.
     pub fn key(&self) -> FeatureKey {
         match self {
+            Feature::P2P(_) => FeatureKey::P2P,
             Feature::ConditionalDisagg(_) => FeatureKey::ConditionalDisagg,
         }
     }
 }
 
+/// Configuration payload for the P2P feature. Carries the
+/// `layout_compat` payload that the hub validates against the baseline
+/// established by the first P2P registration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct P2pConfig {
+    /// Block-layout compatibility payload — mandatory for every P2P
+    /// registration. The hub runs `validate_self` on the first payload
+    /// and `check_layout_compat` against the baseline on subsequent
+    /// payloads.
+    pub layout_compat: LayoutCompatPayload,
+}
+
 /// Configuration payload for the ConditionalDisagg feature.
+///
+/// `layout_compat` no longer lives here — c2 moved it to
+/// [`P2pConfig`]. CD register requests must include `Feature::P2P`
+/// in the same payload; the server rejects otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConditionalDisaggConfig {
     /// The role this instance is taking inside the ConditionalDisagg split.
     pub role: ConditionalDisaggRole,
-    /// Block-layout compatibility payload. When `Some`, the hub gates this
-    /// registration against the baseline from the first CD instance with a
-    /// non-`None` payload and rejects mismatches at register time. `None` is
-    /// the backward-compatible path used by older clients that predate the
-    /// gate; those registrations always accept but also never set or modify
-    /// the baseline.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layout_compat: Option<LayoutCompatPayload>,
 }
 
 /// Role a ConditionalDisagg participant takes on.
@@ -413,10 +437,9 @@ mod tests {
         let peer_info = make_peer_info();
         let orig = RegisterRequest {
             peer_info: peer_info.clone(),
-            features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+            features: vec![Feature::ConditionalDisagg(ConditionalDisaggConfig {
                 role: ConditionalDisaggRole::Prefill,
-                layout_compat: None,
-            }))],
+            })],
         };
         let json = serde_json::to_string(&orig).unwrap();
         let back: RegisterRequest = serde_json::from_str(&json).unwrap();
@@ -437,11 +460,10 @@ mod tests {
     }
 
     #[test]
-    fn feature_cd_with_config_serde_round_trip() {
-        let f = Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
+    fn feature_cd_serde_round_trip() {
+        let f = Feature::ConditionalDisagg(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Decode,
-            layout_compat: None,
-        }));
+        });
         let json = serde_json::to_string(&f).unwrap();
         // Adjacently-tagged: {"kind":"conditional_disagg","config":{"role":"decode"}}
         assert!(json.contains("\"kind\":\"conditional_disagg\""));
@@ -452,11 +474,48 @@ mod tests {
     }
 
     #[test]
-    fn feature_cd_with_no_config_serde_round_trip() {
-        let f = Feature::ConditionalDisagg(None);
+    fn feature_p2p_serde_round_trip() {
+        use crate::protocol::LayoutCompatPayload;
+        use kvbm_common::shape::CanonicalBlockShape;
+        use kvbm_common::{BlockLayoutMode, KvBlockLayout};
+        use kvbm_protocols::control::LayoutConfigDescription;
+
+        let payload = LayoutCompatPayload {
+            mode: BlockLayoutMode::Operational,
+            canonical: Some(CanonicalBlockShape {
+                num_layers_total: 4,
+                outer_dim: 2,
+                page_size: 16,
+                num_heads_total: 8,
+                head_dim: 64,
+                dtype_width_bytes: 2,
+            }),
+            per_worker_layout: KvBlockLayout::OperationalNHD,
+            per_worker_config: LayoutConfigDescription {
+                num_blocks: 16,
+                num_layers: 4,
+                outer_dim: 2,
+                page_size: 16,
+                inner_dim: 8 * 64,
+                alignment: 256,
+                dtype_width_bytes: 2,
+                num_heads: Some(8),
+            },
+            tp_size: 1,
+            pp_size: 1,
+        };
+        let f = Feature::P2P(P2pConfig {
+            layout_compat: payload,
+        });
         let json = serde_json::to_string(&f).unwrap();
+        // Renamed variant (default snake_case would mangle the acronym).
+        assert!(
+            json.contains("\"kind\":\"p2p\""),
+            "expected kind=p2p, got: {json}"
+        );
         let back: Feature = serde_json::from_str(&json).unwrap();
         assert_eq!(back, f);
+        assert_eq!(back.key(), FeatureKey::P2P);
     }
 
     #[test]

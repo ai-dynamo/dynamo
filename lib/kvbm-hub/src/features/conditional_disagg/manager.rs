@@ -19,9 +19,8 @@ use super::dispatcher::{DispatchOutcome, PrefillRequestDispatcher};
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::protocol::{
     self, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, Feature, FeatureKey,
-    LayoutCompatPayload, PrefillRequest,
+    PrefillRequest,
 };
-use kvbm_protocols::control::layout_compat::check_layout_compat;
 
 /// Tracks which instances participate in ConditionalDisagg and under what role.
 ///
@@ -48,12 +47,6 @@ struct CdInner {
     prefill: HashSet<InstanceId>,
     decode: HashSet<InstanceId>,
     by_instance: HashMap<InstanceId, ConditionalDisaggRole>,
-    /// Block-layout baseline established by the first CD instance whose
-    /// registration carried a [`LayoutCompatPayload`]. Subsequent
-    /// registrations whose payloads are not compatible with this baseline
-    /// are rejected. Cleared when the prefill + decode sets are both empty
-    /// (see [`FeatureManager::on_unregister`]).
-    layout_baseline: Option<LayoutCompatPayload>,
 }
 
 impl std::fmt::Debug for ConditionalDisaggManager {
@@ -87,7 +80,6 @@ impl ConditionalDisaggManager {
                 prefill: HashSet::new(),
                 decode: HashSet::new(),
                 by_instance: HashMap::new(),
-                layout_baseline: None,
             }),
             velo: OnceLock::new(),
             queue_backend: OnceLock::new(),
@@ -201,13 +193,17 @@ impl FeatureManager for ConditionalDisaggManager {
         feature: &'a Feature,
     ) -> BoxFuture<'a, Result<(), FeatureError>> {
         Box::pin(async move {
-            let Feature::ConditionalDisagg(cfg) = feature;
-            let cfg = cfg.as_ref().ok_or_else(|| {
-                FeatureError::InvalidConfig(
-                    "ConditionalDisagg requires a config with a role".to_string(),
-                )
-            })?;
+            let Feature::ConditionalDisagg(cfg) = feature else {
+                return Err(FeatureError::KeyMismatch {
+                    manager: FeatureKey::ConditionalDisagg,
+                    payload: feature.key(),
+                });
+            };
             let role = cfg.role;
+
+            // Layout-compat enforcement lives in `P2pManager`. The server
+            // requires `Feature::P2P` alongside any CD register, so by the
+            // time we get here the gate has already accepted the leader.
 
             let mut inner = self.inner.write();
             if let Some(prior) = inner.by_instance.get(&instance_id).copied() {
@@ -217,42 +213,8 @@ impl FeatureManager for ConditionalDisaggManager {
                         prior, role
                     )));
                 }
-                // Same role re-registration is idempotent — including the
-                // layout compat gate: a re-register cannot redefine an
-                // already-established baseline, and the existing baseline
-                // already accepted this instance once.
+                // Same-role re-registration is idempotent.
                 return Ok(());
-            }
-
-            // Block-layout compatibility gate. Only registrations that opt
-            // in by sending a `layout_compat` payload are inspected;
-            // legacy clients without a payload bypass the gate (the
-            // baseline is also not modified by them). The first opt-in
-            // payload sets the baseline; every subsequent opt-in payload
-            // must pass [`check_layout_compat`] against it.
-            //
-            // The first payload also has to pass `validate_self` —
-            // without that guard a malformed first registration (e.g.
-            // `Universal` mode with `canonical = None`) could become an
-            // unverifiable baseline that silently accepts every
-            // subsequent peer in the same mode.
-            if let Some(candidate) = cfg.layout_compat.as_ref() {
-                match inner.layout_baseline.as_ref() {
-                    None => {
-                        candidate.validate_self().map_err(|e| {
-                            FeatureError::InvalidConfig(format!(
-                                "block_layout payload from instance {instance_id} is \
-                                 internally inconsistent: {e}"
-                            ))
-                        })?;
-                        inner.layout_baseline = Some(candidate.clone());
-                    }
-                    Some(baseline) => check_layout_compat(baseline, candidate).map_err(|e| {
-                        FeatureError::InvalidConfig(format!(
-                            "block_layout incompatibility for instance {instance_id}: {e}"
-                        ))
-                    })?,
-                }
             }
 
             inner.by_instance.insert(instance_id, role);
@@ -265,13 +227,6 @@ impl FeatureManager for ConditionalDisaggManager {
         let mut inner = self.inner.write();
         if let Some(role) = inner.by_instance.remove(&instance_id) {
             remove_role(&mut inner, instance_id, role);
-        }
-        // Clear the layout baseline once both populations are empty, so a
-        // new CD group can adopt a different mode/shape without bouncing
-        // the hub. This matches the "first instance defines" semantics
-        // contextually rather than persistently.
-        if inner.prefill.is_empty() && inner.decode.is_empty() {
-            inner.layout_baseline = None;
         }
     }
 
@@ -392,10 +347,7 @@ mod tests {
     use crate::protocol::ConditionalDisaggConfig;
 
     fn cd(role: ConditionalDisaggRole) -> Feature {
-        Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
-            role,
-            layout_compat: None,
-        }))
+        Feature::ConditionalDisagg(ConditionalDisaggConfig { role })
     }
 
     #[tokio::test]
@@ -422,15 +374,11 @@ mod tests {
         assert!(snap.prefill.is_empty());
     }
 
-    #[tokio::test]
-    async fn register_without_config_is_invalid() {
-        let mgr = ConditionalDisaggManager::new();
-        let err = mgr
-            .on_register(InstanceId::new_v4(), &Feature::ConditionalDisagg(None))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, FeatureError::InvalidConfig(_)));
-    }
+    // c2: the "register without config" path no longer exists — the type
+    // system makes `Feature::ConditionalDisagg(...)` require a config.
+    // The cross-feature "CD without P2P is rejected" invariant is
+    // exercised at the integration layer by
+    // `cd_layout_compat::cd_register_without_p2p_feature_is_rejected`.
 
     #[tokio::test]
     async fn reregister_same_role_is_idempotent() {

@@ -454,7 +454,7 @@ impl ConnectorLeaderApi for ConditionalDisaggLeader {
 pub async fn register_with_hub(
     config: &DisaggConfig,
     velo: Arc<Velo>,
-    layout_compat: Option<kvbm_hub::protocol::LayoutCompatPayload>,
+    layout_compat: kvbm_hub::protocol::LayoutCompatPayload,
 ) -> Result<(
     Arc<HubClient>,
     Arc<ConditionalDisaggClient>,

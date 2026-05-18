@@ -93,10 +93,13 @@
 //!   own inside the payload; the wire `SerializedLayout` does not
 //!   carry mode).
 //!
-//!   Coverage: CD instances that opted in by populating
-//!   `layout_compat`. Standalone (non-CD) leaders, CD leaders that
-//!   omit the payload (legacy / backward-compat clients), and any
-//!   non-hub leader-to-leader exchange bypass this gate entirely.
+//!   Coverage (c2): every `Feature::P2P` registration is gated.
+//!   `Feature::ConditionalDisagg` requires `Feature::P2P` to also be
+//!   present in the same register request (CD is a specialisation of
+//!   P2P), so all CD instances pass through the gate. Standalone
+//!   leaders that don't register `Feature::P2P` (observer-only,
+//!   future use cases) don't get the hub-level gate; session-layer
+//!   re-validation for those paths is tracked separately.
 //!
 //! - **Engine gate (same-mode shape check, every connect path).** At
 //!   `connect_remote` the local leader runs

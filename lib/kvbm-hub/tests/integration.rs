@@ -9,10 +9,10 @@ use std::sync::Arc;
 use kvbm_hub::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 use kvbm_hub::protocol::{
     ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole,
-    DISAGG_PROTOCOL_VERSION, ErrorBody, ErrorCode, Feature, HeartbeatResponse,
-    ListInstancesResponse, PeerLookupResponse, PrefillRequest, ProbeResponse, RegisterRequest,
-    RegisterResponse, instance_by_id, instance_heartbeat, instance_probe, paths, peers_by_instance,
-    peers_by_worker,
+    DISAGG_PROTOCOL_VERSION, ErrorBody, ErrorCode, Feature, HeartbeatResponse, LayoutCompatPayload,
+    ListInstancesResponse, P2pConfig, PeerLookupResponse, PrefillRequest, ProbeResponse,
+    RegisterRequest, RegisterResponse, instance_by_id, instance_heartbeat, instance_probe, paths,
+    peers_by_instance, peers_by_worker,
 };
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer};
 use velo::Transport;
@@ -52,6 +52,49 @@ fn discovery_url(server: &HubServer, path: &str) -> String {
 
 fn control_url(server: &HubServer, path: &str) -> String {
     format!("http://{}{}", server.control_addr(), path)
+}
+
+/// Build a minimal valid `LayoutCompatPayload` for tests that need to
+/// pass the P2P gate without caring about specific shape values.
+fn test_layout_compat_payload() -> LayoutCompatPayload {
+    use kvbm_common::shape::CanonicalBlockShape;
+    use kvbm_common::{BlockLayoutMode, KvBlockLayout};
+    use kvbm_protocols::control::LayoutConfigDescription;
+    LayoutCompatPayload {
+        mode: BlockLayoutMode::Operational,
+        canonical: Some(CanonicalBlockShape {
+            num_layers_total: 4,
+            outer_dim: 2,
+            page_size: 16,
+            num_heads_total: 8,
+            head_dim: 64,
+            dtype_width_bytes: 2,
+        }),
+        per_worker_layout: KvBlockLayout::OperationalNHD,
+        per_worker_config: LayoutConfigDescription {
+            num_blocks: 16,
+            num_layers: 4,
+            outer_dim: 2,
+            page_size: 16,
+            inner_dim: 8 * 64,
+            alignment: 256,
+            dtype_width_bytes: 2,
+            num_heads: Some(8),
+        },
+        tp_size: 1,
+        pp_size: 1,
+    }
+}
+
+/// Build the standard P2P + CD feature bundle for tests that exercise
+/// the post-c2 mandatory-gate path.
+fn p2p_cd_features(role: ConditionalDisaggRole) -> Vec<Feature> {
+    vec![
+        Feature::P2P(P2pConfig {
+            layout_compat: test_layout_compat_payload(),
+        }),
+        Feature::ConditionalDisagg(ConditionalDisaggConfig { role }),
+    ]
 }
 
 fn http() -> reqwest::Client {
@@ -751,11 +794,13 @@ async fn start_server_with_cd() -> (
 ) {
     let transport = new_velo_transport();
     let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let p2p: Arc<kvbm_hub::P2pManager> = Arc::new(kvbm_hub::P2pManager::new());
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .discovery_port(0)
         .control_port(0)
         .add_transport(Arc::clone(&transport) as Arc<dyn Transport>)
+        .add_feature_manager(p2p as Arc<dyn kvbm_hub::FeatureManager>)
         .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
         .serve()
         .await
@@ -769,10 +814,12 @@ async fn start_server_with_cd() -> (
 /// would otherwise reject the opaque addresses produced by `make_peer()`.
 async fn start_server_with_cd_no_velo() -> (HubServer, Arc<ConditionalDisaggManager>) {
     let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let p2p: Arc<kvbm_hub::P2pManager> = Arc::new(kvbm_hub::P2pManager::new());
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .discovery_port(0)
         .control_port(0)
+        .add_feature_manager(p2p as Arc<dyn kvbm_hub::FeatureManager>)
         .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
         .serve()
         .await
@@ -782,14 +829,14 @@ async fn start_server_with_cd_no_velo() -> (HubServer, Arc<ConditionalDisaggMana
 
 #[tokio::test]
 async fn feature_register_without_manager_rejects() {
+    // Bare server with no managers + P2P+CD features → pre-dispatch
+    // accepts (both features present), per-feature dispatch then rejects
+    // with "no manager registered for P2P".
     let server = start_server().await;
     let peer = make_peer();
     let req = RegisterRequest {
         peer_info: peer.clone(),
-        features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
-            role: ConditionalDisaggRole::Prefill,
-            layout_compat: None,
-        }))],
+        features: p2p_cd_features(ConditionalDisaggRole::Prefill),
     };
     let resp = http()
         .post(control_url(&server, paths::INSTANCES))
@@ -813,33 +860,11 @@ async fn feature_register_without_manager_rejects() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
-async fn feature_cd_register_missing_config_rejects() {
-    let (server, _cd) = start_server_with_cd_no_velo().await;
-    let peer = make_peer();
-    let req = RegisterRequest {
-        peer_info: peer.clone(),
-        features: vec![Feature::ConditionalDisagg(None)],
-    };
-    let resp = http()
-        .post(control_url(&server, paths::INSTANCES))
-        .json(&req)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400);
-
-    // Base entry rolled back.
-    let resp = http()
-        .get(discovery_url(
-            &server,
-            &peers_by_instance(peer.instance_id()),
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
-}
+// c2: `feature_cd_register_missing_config_rejects` removed — the type
+// system now makes `Feature::ConditionalDisagg(...)` require a config,
+// so the missing-config path is unreachable. The cross-feature
+// "CD without P2P is rejected" invariant is exercised by
+// `cd_layout_compat::cd_register_without_p2p_feature_is_rejected`.
 
 #[tokio::test]
 async fn feature_cd_list_empty_on_both_ports() {
@@ -883,10 +908,7 @@ async fn feature_cd_role_conflict_on_reregister() {
     let post = |role: ConditionalDisaggRole| {
         let req = RegisterRequest {
             peer_info: peer.clone(),
-            features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
-                role,
-                layout_compat: None,
-            }))],
+            features: p2p_cd_features(role),
         };
         http()
             .post(control_url(&server, paths::INSTANCES))
@@ -908,10 +930,7 @@ async fn feature_cd_unregister_removes_from_lists() {
     let peer = make_peer();
     let req = RegisterRequest {
         peer_info: peer.clone(),
-        features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
-            role: ConditionalDisaggRole::Prefill,
-            layout_compat: None,
-        }))],
+        features: p2p_cd_features(ConditionalDisaggRole::Prefill),
     };
     http()
         .post(control_url(&server, paths::INSTANCES))
@@ -935,12 +954,14 @@ async fn feature_cd_reaper_evicts_from_lists() {
     // No transport — the reaper runs off the in-memory registry ticker and
     // the eviction callback fires into the CD manager regardless of velo.
     let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(ConditionalDisaggManager::new());
+    let p2p: Arc<kvbm_hub::P2pManager> = Arc::new(kvbm_hub::P2pManager::new());
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .discovery_port(0)
         .control_port(0)
         .registration_ttl(Duration::from_millis(60))
         .prune_interval(Duration::from_millis(20))
+        .add_feature_manager(p2p as Arc<dyn kvbm_hub::FeatureManager>)
         .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
         .serve()
         .await
@@ -949,10 +970,7 @@ async fn feature_cd_reaper_evicts_from_lists() {
     let peer = make_peer();
     let req = RegisterRequest {
         peer_info: peer.clone(),
-        features: vec![Feature::ConditionalDisagg(Some(ConditionalDisaggConfig {
-            role: ConditionalDisaggRole::Prefill,
-            layout_compat: None,
-        }))],
+        features: p2p_cd_features(ConditionalDisaggRole::Prefill),
     };
     http()
         .post(control_url(&server, paths::INSTANCES))
@@ -997,12 +1015,12 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
     );
 
     let p_hub_id = p_cd
-        .register(p_velo.peer_info(), None)
+        .register(p_velo.peer_info(), test_layout_compat_payload())
         .await
         .unwrap()
         .expect("hub velo id");
     let d_hub_id = d_cd
-        .register(d_velo.peer_info(), None)
+        .register(d_velo.peer_info(), test_layout_compat_payload())
         .await
         .unwrap()
         .expect("hub velo id");
@@ -1157,11 +1175,13 @@ async fn start_server_with_cd_dispatcher() -> (
         Arc::new(ConditionalDisaggManager::new().with_dispatcher(
             Arc::clone(&dispatcher) as Arc<dyn kvbm_hub::PrefillRequestDispatcher>
         ));
+    let p2p: Arc<kvbm_hub::P2pManager> = Arc::new(kvbm_hub::P2pManager::new());
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .discovery_port(0)
         .control_port(0)
         .add_transport(Arc::clone(&transport) as Arc<dyn Transport>)
+        .add_feature_manager(p2p as Arc<dyn kvbm_hub::FeatureManager>)
         .add_feature_manager(Arc::clone(&cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
         .serve()
         .await
@@ -1187,7 +1207,7 @@ async fn dispatcher_worker_drains_queue_and_invokes_dispatcher() {
         ConditionalDisaggRole::Decode,
     );
     let d_hub_id = d_cd
-        .register(d_velo.peer_info(), None)
+        .register(d_velo.peer_info(), test_layout_compat_payload())
         .await
         .unwrap()
         .expect("hub velo id");
@@ -1248,7 +1268,7 @@ async fn no_dispatcher_does_not_spawn_worker() {
         ConditionalDisaggRole::Decode,
     );
     let d_hub_id = d_cd
-        .register(d_velo.peer_info(), None)
+        .register(d_velo.peer_info(), test_layout_compat_payload())
         .await
         .unwrap()
         .expect("hub velo id");
@@ -1280,7 +1300,7 @@ async fn no_dispatcher_does_not_spawn_worker() {
         ConditionalDisaggRole::Prefill,
     );
     let p_hub_id = p_cd
-        .register(p_velo.peer_info(), None)
+        .register(p_velo.peer_info(), test_layout_compat_payload())
         .await
         .unwrap()
         .expect("hub velo id");
