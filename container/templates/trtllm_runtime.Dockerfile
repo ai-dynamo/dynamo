@@ -29,12 +29,15 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 # upstream tensorrt-llm/release tag drops /usr/local/bin/uv from its image.
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
-# Create dynamo user with group 0 for OpenShift compatibility
+# Create dynamo user with group 0 for OpenShift compatibility.
+# Also clear upstream's /workspace baggage (README.md, tutorials/, docker-examples/,
+# license.txt) — pytest collection picks up broken tutorial test files otherwise.
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
     && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && rm -rf /workspace && mkdir /workspace \
     && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
     && mkdir -p /etc/profile.d \
     && echo 'umask 002' > /etc/profile.d/00-umask.sh
