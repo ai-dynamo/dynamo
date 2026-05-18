@@ -78,33 +78,57 @@ fn default_canonical() -> CanonicalBlockShape {
     }
 }
 
-/// Default per-worker layout config consistent with [`default_canonical`].
-/// `num_heads` is per-worker (TP=2 → 32 per rank). `inner_dim = num_heads *
-/// head_dim` so the operational equality predicate has the full picture.
-fn default_layout_config() -> LayoutConfigDescription {
-    LayoutConfigDescription {
-        num_blocks: 1024,
-        num_layers: 32,
-        outer_dim: 2,
-        page_size: 16,
-        inner_dim: 32 * 128,
-        alignment: 256,
-        dtype_width_bytes: 2,
-        num_heads: Some(32),
-    }
+fn payload(mode: BlockLayoutMode) -> LayoutCompatPayload {
+    payload_with_topology(mode, 2, 1)
 }
 
-fn payload(mode: BlockLayoutMode) -> LayoutCompatPayload {
+/// Build a payload with an explicit `(tp_size, pp_size)` decomposition.
+///
+/// The canonical aggregate stays fixed (matches [`default_canonical`])
+/// while `per_worker_config` is rebuilt from
+/// `(num_heads_total / tp_size, num_layers_total / pp_size, …)` so the
+/// per-worker shapes are consistent with the requested decomposition.
+///
+/// Used by the c4 cross-topology tests to exercise the operative
+/// Universal-mode invariant: same canonical, different `(TP, PP)`
+/// decomposition → hub accepts.
+fn payload_with_topology(
+    mode: BlockLayoutMode,
+    tp_size: usize,
+    pp_size: usize,
+) -> LayoutCompatPayload {
+    let canonical = default_canonical();
+    assert!(
+        canonical.num_heads_total.is_multiple_of(tp_size),
+        "payload_with_topology: tp_size={tp_size} must divide num_heads_total={}",
+        canonical.num_heads_total
+    );
+    assert!(
+        canonical.num_layers_total.is_multiple_of(pp_size),
+        "payload_with_topology: pp_size={pp_size} must divide num_layers_total={}",
+        canonical.num_layers_total
+    );
+    let num_heads = canonical.num_heads_total / tp_size;
+    let num_layers = canonical.num_layers_total / pp_size;
     LayoutCompatPayload {
         mode,
-        canonical: Some(default_canonical()),
+        canonical: Some(canonical),
         per_worker_layout: match mode {
             BlockLayoutMode::Operational => KvBlockLayout::OperationalNHD,
             BlockLayoutMode::Universal => KvBlockLayout::Universal,
         },
-        per_worker_config: default_layout_config(),
-        tp_size: 2,
-        pp_size: 1,
+        per_worker_config: LayoutConfigDescription {
+            num_blocks: 1024,
+            num_layers,
+            outer_dim: canonical.outer_dim,
+            page_size: canonical.page_size,
+            inner_dim: num_heads * canonical.head_dim,
+            alignment: 256,
+            dtype_width_bytes: canonical.dtype_width_bytes,
+            num_heads: Some(num_heads),
+        },
+        tp_size,
+        pp_size,
     }
 }
 
@@ -574,4 +598,199 @@ async fn first_universal_baseline_rejects_unknown_kv_block_layout() {
         400,
         "first universal payload with Unknown KvBlockLayout must reject"
     );
+}
+
+// ---- c4: cross-topology Universal-mode aggregate equality ------------------
+//
+// Universal mode's operative invariant: two leaders with the same
+// un-sharded canonical aggregate are compatible at the hub gate
+// regardless of how they slice the model across TP × PP worker grids.
+// Same model, different decomposition. The three accept cases below
+// form a triangle (TP=2,PP=2) ↔ (TP=4,PP=1) ↔ (TP=1,PP=4) over
+// `default_canonical()` (num_heads_total=64, num_layers_total=32).
+//
+// Dependencies (any regression of these surfaces here):
+//   - c1: single `KvBlockLayout::Universal` variant.
+//   - c2: mandatory P2P gate (Feature::P2P carrying layout_compat).
+//   - c3: connector pins G2/G3 to Universal in Universal mode, so the
+//     wire payload's per_worker_layout is Universal on both sides.
+//   - layout_compat predicate: Universal mode compares ONLY canonical,
+//     ignoring tp_size/pp_size/per_worker_layout/per_worker_config.
+//     If that ever changes, c4-1/2/3 fail loudly.
+
+#[tokio::test]
+async fn universal_accepts_cross_topology_tp2_pp2_vs_tp4_pp1() {
+    let (server, _cd) = start_server_with_cd().await;
+    let p_peer = make_peer();
+    let d_peer = make_peer();
+
+    let p_resp = post_register(
+        &server,
+        &p_peer,
+        ConditionalDisaggRole::Prefill,
+        Some(payload_with_topology(BlockLayoutMode::Universal, 2, 2)),
+    )
+    .await;
+    assert_eq!(p_resp.status(), 200, "prefill (TP=2, PP=2) must register");
+
+    let d_resp = post_register(
+        &server,
+        &d_peer,
+        ConditionalDisaggRole::Decode,
+        Some(payload_with_topology(BlockLayoutMode::Universal, 4, 1)),
+    )
+    .await;
+    assert_eq!(
+        d_resp.status(),
+        200,
+        "decode (TP=4, PP=1) with same canonical aggregate must register",
+    );
+}
+
+#[tokio::test]
+async fn universal_accepts_cross_topology_tp2_pp2_vs_tp1_pp4() {
+    let (server, _cd) = start_server_with_cd().await;
+    let p_peer = make_peer();
+    let d_peer = make_peer();
+
+    let p_resp = post_register(
+        &server,
+        &p_peer,
+        ConditionalDisaggRole::Prefill,
+        Some(payload_with_topology(BlockLayoutMode::Universal, 2, 2)),
+    )
+    .await;
+    assert_eq!(p_resp.status(), 200);
+
+    let d_resp = post_register(
+        &server,
+        &d_peer,
+        ConditionalDisaggRole::Decode,
+        Some(payload_with_topology(BlockLayoutMode::Universal, 1, 4)),
+    )
+    .await;
+    assert_eq!(
+        d_resp.status(),
+        200,
+        "decode (TP=1, PP=4) with same canonical aggregate must register",
+    );
+}
+
+#[tokio::test]
+async fn universal_accepts_cross_topology_tp4_pp1_vs_tp1_pp4() {
+    let (server, _cd) = start_server_with_cd().await;
+    let p_peer = make_peer();
+    let d_peer = make_peer();
+
+    let p_resp = post_register(
+        &server,
+        &p_peer,
+        ConditionalDisaggRole::Prefill,
+        Some(payload_with_topology(BlockLayoutMode::Universal, 4, 1)),
+    )
+    .await;
+    assert_eq!(p_resp.status(), 200);
+
+    let d_resp = post_register(
+        &server,
+        &d_peer,
+        ConditionalDisaggRole::Decode,
+        Some(payload_with_topology(BlockLayoutMode::Universal, 1, 4)),
+    )
+    .await;
+    assert_eq!(
+        d_resp.status(),
+        200,
+        "(TP=4, PP=1) ↔ (TP=1, PP=4) with same canonical must register",
+    );
+}
+
+/// Negative case: same (TP, PP) topology but different canonical
+/// aggregate → universal mode still rejects. Pins the canonical-
+/// equality requirement as the only thing universal mode checks.
+#[tokio::test]
+async fn universal_rejects_cross_topology_with_different_aggregate() {
+    let (server, _cd) = start_server_with_cd().await;
+    let p_peer = make_peer();
+    let d_peer = make_peer();
+
+    let p_resp = post_register(
+        &server,
+        &p_peer,
+        ConditionalDisaggRole::Prefill,
+        Some(payload_with_topology(BlockLayoutMode::Universal, 2, 2)),
+    )
+    .await;
+    assert_eq!(p_resp.status(), 200);
+
+    let mut mismatched = payload_with_topology(BlockLayoutMode::Universal, 2, 2);
+    mismatched.canonical.as_mut().unwrap().num_heads_total = 48;
+    // Keep per_worker_config consistent with the mutated canonical so
+    // we're testing canonical mismatch, not internal payload incoherence.
+    mismatched.per_worker_config.num_heads = Some(24);
+    mismatched.per_worker_config.inner_dim = 24 * 128;
+
+    let d_resp = post_register(
+        &server,
+        &d_peer,
+        ConditionalDisaggRole::Decode,
+        Some(mismatched),
+    )
+    .await;
+    assert_eq!(
+        d_resp.status(),
+        400,
+        "different canonical num_heads_total must reject under universal",
+    );
+    let body: ErrorBody = resp_to_body(d_resp).await;
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("num_heads") || msg.contains("canonical"),
+        "rejection should name the diverging field; got: {}",
+        body.message
+    );
+}
+
+/// Operational mode is strict: even when canonical aggregates match,
+/// different `(TP, PP)` decompositions reject because Operational
+/// compares per-worker fields (including tp_size). Counter-test to
+/// the universal_accepts_cross_topology_* cases — proves mode is the
+/// dominant axis for "is cross-topology allowed?".
+#[tokio::test]
+async fn operational_rejects_cross_topology_even_when_canonical_matches() {
+    let (server, _cd) = start_server_with_cd().await;
+    let p_peer = make_peer();
+    let d_peer = make_peer();
+
+    let p_resp = post_register(
+        &server,
+        &p_peer,
+        ConditionalDisaggRole::Prefill,
+        Some(payload_with_topology(BlockLayoutMode::Operational, 2, 2)),
+    )
+    .await;
+    assert_eq!(p_resp.status(), 200);
+
+    let d_resp = post_register(
+        &server,
+        &d_peer,
+        ConditionalDisaggRole::Decode,
+        Some(payload_with_topology(BlockLayoutMode::Operational, 4, 1)),
+    )
+    .await;
+    assert_eq!(
+        d_resp.status(),
+        400,
+        "Operational mode rejects different (TP, PP) decomposition even \
+         when canonical matches — tp_size is compared in Operational",
+    );
+}
+
+/// Small inline helper for tests that destructure the response after
+/// status assertion. Pulls the body out as ErrorBody so the test can
+/// assert on the error message contents.
+async fn resp_to_body(resp: reqwest::Response) -> ErrorBody {
+    resp.json::<ErrorBody>()
+        .await
+        .expect("error response must deserialize as ErrorBody")
 }
