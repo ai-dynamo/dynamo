@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Planner dev image — extends the lightweight frontend image with git/git-lfs
+# and the planner Python deps so a CI / dev pod can iterate without a fresh
+# pip install on every cold start.
+#
+# Build (from repo root):
+#     docker build -f deploy/planner/dev/Dockerfile.planner-dev -t <registry>/planner-dev:<tag> .
+#
+FROM dynamoci.azurecr.io/ai-dynamo/dynamo:e637f35dc03b916d95cabfac7ebdc6fab56d078a-dynamo-frontend
+
+USER root
+
+RUN apt-get update -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git git-lfs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY container/deps/requirements.planner.txt /tmp/requirements.planner.txt
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /opt/dynamo/venv/bin/python3 \
+        -r /tmp/requirements.planner.txt
+
+COPY pyproject.toml /workspace/pyproject.toml
+COPY components/src/dynamo/planner /workspace/components/src/dynamo/planner
+COPY components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
+COPY components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
+
+ENV PYTHONPATH="/workspace/components/src:/workspace"
+WORKDIR /workspace
+USER dynamo
+
+CMD ["python3", "-m", "dynamo.planner"]

@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Planner dev pod — long-lived (sleep infinity) container with the lightweight
+# frontend image so you can iterate on planner code against a live cluster
+# without rebuilding/redeploying. Companion to `qwen3-quickstart-dgd.yaml`.
+#
+# Usage (PowerShell example, see docs/components/planner/dpp-dev-env.md §5):
+#
+#     $env:NS         = "<your-namespace>"          # e.g. "alice-dynamo-system"
+#     $env:DGD        = "qwen3-quickstart"          # DGD name from quickstart yaml
+#     $env:DYN_NS     = "${env:NS}-${env:DGD}"      # dynamo-namespace = "<ns>-<dgd>"
+#
+#     # Apply to your namespace (substitute the placeholders below first):
+#     #   - replace ${NS}     with $env:NS
+#     #   - replace ${DGD}    with $env:DGD
+#     #   - replace ${DYN_NS} with $env:DYN_NS
+#     # Either edit the file in-place, or pipe through envsubst on Linux/WSL:
+#     #     envsubst < deploy/planner/dev/planner-dev-pod.yaml | kubectl apply -n $env:NS -f -
+#
+apiVersion: v1
+kind: Pod
+metadata:
+  name: planner-dev
+  labels:
+    app: planner-dev
+spec:
+  serviceAccountName: planner-dev-sa
+  restartPolicy: Never
+  containers:
+    - name: dev
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:e637f35dc03b916d95cabfac7ebdc6fab56d078a-dynamo-frontend
+      command: ["sleep", "infinity"]
+      env:
+        - name: NATS_SERVER
+          value: "nats://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"
+        - name: DYN_DISCOVERY_BACKEND
+          value: "kubernetes"
+        # Dynamo-namespace = "<your-k8s-namespace>-<dgd-name>"
+        - name: DYN_NAMESPACE
+          value: "${DYN_NS}"
+        - name: DYN_NAMESPACE_PREFIX
+          value: "${DYN_NS}"
+        - name: DYN_PARENT_DGD_K8S_NAME
+          value: "${DGD}"
+        - name: DYN_PARENT_DGD_K8S_NAMESPACE
+          value: "${NS}"
+        - name: DYN_COMPONENT
+          value: "planner"
+        - name: PROMETHEUS_ENDPOINT
+          value: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+        - name: PYTHONPATH
+          value: "/workspace/repo/components/src:/workspace/repo"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+      resources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+          ephemeral-storage: "10Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      workingDir: /workspace
