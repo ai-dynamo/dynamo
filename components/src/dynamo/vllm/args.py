@@ -237,7 +237,7 @@ def update_engine_config_with_dynamo(
     if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
 
-    defaults = {
+    defaults: Dict[str, Any] = {
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
