@@ -498,6 +498,24 @@ def setup_vllm_engine(
                 "Install with: pip install modelexpress"
             ) from e
 
+    # ModelExpress v2 mid-training weight refit. Opted into via env var
+    # DYN_MX_REFIT_ENABLED=1 (set by nrl-k8s when the trainer uses
+    # cluster.weight_sync.method=mx). Injects MxRefitWorkerExtension into
+    # vLLM's Worker base classes so its methods become callable via
+    # AsyncLLM.collective_rpc — see components/src/dynamo/vllm/mx_refit/.
+    if os.environ.get("DYN_MX_REFIT_ENABLED") == "1":
+        existing_ext = getattr(engine_args, "worker_extension_cls", None)
+        mx_ext = "dynamo.vllm.mx_refit.extension.MxRefitWorkerExtension"
+        if existing_ext and existing_ext != mx_ext:
+            logger.warning(
+                "[mx-refit] worker_extension_cls already set to %r; "
+                "overriding to %r. Stacking extensions is not supported.",
+                existing_ext,
+                mx_ext,
+            )
+        engine_args.worker_extension_cls = mx_ext
+        logger.info("[mx-refit] enabled; worker_extension_cls=%s", mx_ext)
+
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()

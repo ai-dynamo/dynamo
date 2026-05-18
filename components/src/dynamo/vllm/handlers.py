@@ -1033,6 +1033,82 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         else:
             yield result
 
+    async def update_weights_via_mx(self, request=None):
+        """Trigger a ModelExpress v2 mid-training weight refit on every worker.
+
+        Fans into the vLLM workers via ``AsyncLLM.collective_rpc`` so the
+        ``MxRefitWorkerExtension.update_weights_via_mx`` method runs inside
+        each worker process (where the model parameters live). Requires
+        ``parallel_config.worker_extension_cls`` to point at
+        ``dynamo.vllm.mx_refit.extension.MxRefitWorkerExtension`` — set by
+        the launcher when the MX refit feature is enabled.
+
+        Request format::
+
+            {
+              "version": int,                    # required, training-step id
+              "mx_config": {...MxConfig fields...}  # optional, see MxConfig
+            }
+        """
+        if request is None:
+            yield {
+                "status": "error",
+                "message": "request body required: {'version': int, 'mx_config': {...}}",
+            }
+            return
+
+        version = request.get("version")
+        if version is None:
+            yield {"status": "error", "message": "'version' (int) is required"}
+            return
+
+        mx_config = request.get("mx_config") or {}
+
+        try:
+            results = await self.engine_client.collective_rpc(
+                "update_weights_via_mx",
+                kwargs={"version": int(version), "mx_config": mx_config},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[mx] collective_rpc failed: %s", exc)
+            yield {
+                "status": "error",
+                "message": f"collective_rpc failed: {exc}",
+            }
+            return
+
+        # collective_rpc returns one entry per worker — True/False from the
+        # MxRefitWorkerExtension.update_weights_via_mx return.
+        all_ok = bool(results) and all(bool(r) for r in results)
+        yield {
+            "status": "ok" if all_ok else "error",
+            "version": int(version),
+            "workers_ok": sum(1 for r in (results or []) if r),
+            "workers_total": len(results or []),
+        }
+
+    async def prepare_refit_info(self, request=None):
+        """Forward per-tensor (shape, dtype) info to every worker.
+
+        Called once by the trainer driver before the first refit cycle. The
+        trainer sends ``{tensor_name: [shape_list, dtype_string]}``; we hand
+        it to ``MxRefitWorkerExtension.prepare_refit_info`` on each worker.
+        """
+        if request is None:
+            yield {"status": "error", "message": "state_dict_info dict required"}
+            return
+        state_dict_info = request.get("state_dict_info") or request
+        try:
+            await self.engine_client.collective_rpc(
+                "prepare_refit_info",
+                kwargs={"state_dict_info": state_dict_info},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[mx] prepare_refit_info collective_rpc failed: %s", exc)
+            yield {"status": "error", "message": str(exc)}
+            return
+        yield {"status": "ok"}
+
     def add_temp_dir(self, temp_dir: tempfile.TemporaryDirectory) -> None:
         """Add a temporary directory to be cleaned up later."""
         if temp_dir is not None:
