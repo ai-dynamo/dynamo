@@ -25,6 +25,19 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "enforce_disagg",
 )
 
+# Valid values for --admission-control.
+#
+# - "token-capacity": apply the configured per-worker busy thresholds
+#   (--active-decode-blocks-threshold, --active-prefill-tokens-threshold,
+#   --active-prefill-tokens-threshold-frac).
+# - "none": disable busy-worker admission checks entirely; router queueing
+#   remains controlled by --router-queue-threshold.
+#
+# The name is intentionally broader than "kv-capacity" / "blocks" so that
+# future admission schemes (encoder-cache, TPS budget, billing-based, ...)
+# can be added as additional enum values without renaming the flag.
+ADMISSION_CONTROL_CHOICES: tuple[str, ...] = ("token-capacity", "none")
+
 
 def _nullable_float(value: str) -> Optional[float]:
     """Parse a float, or return None for the literal 'None'."""
@@ -49,16 +62,28 @@ class RouterConfigBase(ConfigBase):
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
-    no_admission_control: bool = False
+    admission_control: str = "none"
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
-        self.apply_no_admission_control()
+        self.apply_admission_control()
         return {f: getattr(self, f) for f in _ROUTER_FIELDS}
 
-    def apply_no_admission_control(self) -> None:
-        if not self.no_admission_control:
+    def apply_admission_control(self) -> None:
+        """Apply the --admission-control mode to the busy thresholds.
+
+        - "token-capacity": keep the configured busy thresholds as-is.
+        - "none": clear all busy thresholds; router queueing remains controlled
+          by --router-queue-threshold.
+        """
+        if self.admission_control not in ADMISSION_CONTROL_CHOICES:
+            raise ValueError(
+                f"--admission-control must be one of "
+                f"{ADMISSION_CONTROL_CHOICES}, got {self.admission_control!r}"
+            )
+        if self.admission_control == "token-capacity":
             return
+        # "none" — disable admission checks.
         self.active_decode_blocks_threshold = None
         self.active_prefill_tokens_threshold = None
         self.active_prefill_tokens_threshold_frac = None
@@ -158,15 +183,16 @@ class RouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--no-admission-control",
-            env_var="DYN_NO_ADMISSION_CONTROL",
-            default=False,
+            flag_name="--admission-control",
+            env_var="DYN_ADMISSION_CONTROL",
+            default="none",
             help=(
-                "Disable busy-worker admission checks by clearing "
-                "--active-decode-blocks-threshold, --active-prefill-tokens-threshold, "
-                "and --active-prefill-tokens-threshold-frac. Router queueing remains "
-                "controlled by --router-queue-threshold."
+                "Admission control mode. 'token-capacity' enables per-worker busy "
+                "checks using --active-decode-blocks-threshold, "
+                "--active-prefill-tokens-threshold, and "
+                "--active-prefill-tokens-threshold-frac. 'none' disables those "
+                "busy checks; router queueing remains controlled by "
+                "--router-queue-threshold."
             ),
-            arg_type=None,
-            action="store_true",
+            choices=list(ADMISSION_CONTROL_CHOICES),
         )

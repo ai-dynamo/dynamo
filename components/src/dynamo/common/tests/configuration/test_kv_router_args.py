@@ -19,7 +19,7 @@ def _clear_admission_control_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-        "DYN_NO_ADMISSION_CONTROL",
+        "DYN_ADMISSION_CONTROL",
         "DYN_ROUTER_QUEUE_THRESHOLD",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -330,7 +330,9 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     assert config.router_assume_kv_reuse is False
 
 
-def test_frontend_uses_admission_control_defaults(monkeypatch) -> None:
+def test_frontend_admission_control_defaults_to_none(monkeypatch) -> None:
+    """Default --admission-control is 'none': busy thresholds are cleared
+    even though the underlying threshold flags have non-None defaults."""
     _clear_admission_control_env(monkeypatch)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
@@ -340,13 +342,41 @@ def test_frontend_uses_admission_control_defaults(monkeypatch) -> None:
     config = FrontendConfig.from_cli_args(args)
     config.validate()
 
+    assert config.admission_control == "none"
+    assert config.active_decode_blocks_threshold is None
+    assert config.active_prefill_tokens_threshold is None
+    assert config.active_prefill_tokens_threshold_frac is None
+    assert config.router_queue_threshold == 16.0
+
+
+def test_admission_control_token_capacity_preserves_busy_thresholds(
+    monkeypatch,
+) -> None:
+    """With --admission-control token-capacity, the configured busy thresholds
+    flow through to router_kwargs unchanged."""
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--admission-control", "token-capacity"])
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.admission_control == "token-capacity"
     assert config.active_decode_blocks_threshold == 1.0
     assert config.active_prefill_tokens_threshold == 10_000_000
     assert config.active_prefill_tokens_threshold_frac == 64.0
     assert config.router_queue_threshold == 16.0
+    assert config.router_kwargs() == {
+        "active_decode_blocks_threshold": 1.0,
+        "active_prefill_tokens_threshold": 10_000_000,
+        "active_prefill_tokens_threshold_frac": 64.0,
+        "enforce_disagg": False,
+    }
 
 
-def test_no_admission_control_clears_busy_thresholds_but_keeps_queue(
+def test_admission_control_token_capacity_with_custom_thresholds(
     monkeypatch,
 ) -> None:
     _clear_admission_control_env(monkeypatch)
@@ -355,7 +385,8 @@ def test_no_admission_control_clears_busy_thresholds_but_keeps_queue(
 
     args = parser.parse_args(
         [
-            "--no-admission-control",
+            "--admission-control",
+            "token-capacity",
             "--active-decode-blocks-threshold",
             "0.5",
             "--active-prefill-tokens-threshold",
@@ -370,7 +401,46 @@ def test_no_admission_control_clears_busy_thresholds_but_keeps_queue(
     config = FrontendConfig.from_cli_args(args)
     config.validate()
 
-    assert config.no_admission_control is True
+    assert config.admission_control == "token-capacity"
+    assert config.active_decode_blocks_threshold == 0.5
+    assert config.active_prefill_tokens_threshold == 1000
+    assert config.active_prefill_tokens_threshold_frac == 2.0
+    assert config.router_queue_threshold == 32.0
+    assert config.router_kwargs() == {
+        "active_decode_blocks_threshold": 0.5,
+        "active_prefill_tokens_threshold": 1000,
+        "active_prefill_tokens_threshold_frac": 2.0,
+        "enforce_disagg": False,
+    }
+    assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
+
+
+def test_admission_control_none_clears_busy_thresholds_but_keeps_queue(
+    monkeypatch,
+) -> None:
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--admission-control",
+            "none",
+            "--active-decode-blocks-threshold",
+            "0.5",
+            "--active-prefill-tokens-threshold",
+            "1000",
+            "--active-prefill-tokens-threshold-frac",
+            "2.0",
+            "--router-queue-threshold",
+            "32.0",
+        ]
+    )
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.admission_control == "none"
     assert config.active_decode_blocks_threshold is None
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
@@ -382,3 +452,18 @@ def test_no_admission_control_clears_busy_thresholds_but_keeps_queue(
         "enforce_disagg": False,
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
+
+
+def test_admission_control_env_var(monkeypatch) -> None:
+    _clear_admission_control_env(monkeypatch)
+    monkeypatch.setenv("DYN_ADMISSION_CONTROL", "token-capacity")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.admission_control == "token-capacity"
+    assert config.active_decode_blocks_threshold == 1.0
