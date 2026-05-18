@@ -134,6 +134,7 @@ async def _serve_disagg(
                     ("service", "global_router"),
                     ("type", "prefill"),
                 ],
+                defer_response_stream=True,
             ),
             decode_endpoint.serve_endpoint(
                 handler.handle_decode,
@@ -142,6 +143,7 @@ async def _serve_disagg(
                     ("service", "global_router"),
                     ("type", "decode"),
                 ],
+                defer_response_stream=True,
             ),
         )
     except Exception as e:
@@ -184,6 +186,7 @@ async def _serve_agg(
                 ("service", "global_router"),
                 ("type", "agg"),
             ],
+            defer_response_stream=True,
         )
     except Exception as e:
         logger.error(f"Failed to serve agg endpoint: {e}")
