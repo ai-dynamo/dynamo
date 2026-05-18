@@ -21,6 +21,9 @@ use crate::metrics::request_plane::{
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
+use crate::pipeline::network::RequestControlMessage;
+use crate::pipeline::network::RequestType;
+use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
@@ -31,8 +34,6 @@ use crate::traits::DistributedRuntimeProvider;
 
 use anyhow::{Error, Result};
 use futures::stream::Stream;
-use serde::Deserialize;
-use serde::Serialize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
@@ -267,6 +268,7 @@ where
             connection_info,
             metadata: context.metadata().clone(),
             frontend_send_ts_ns: None,
+            request_stream_connection_info: None,
         };
 
         // next build the two part message where we package the connection info and the request into
