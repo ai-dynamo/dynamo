@@ -846,6 +846,22 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(gen_config.checksum().as_bytes());
                 }
 
+                // extra_files: hash each file's checksum in sorted order
+                // so two workers harvesting the same siblings produce
+                // identical mdcsums regardless of filesystem read_dir
+                // order. Without this, different siblings would collide
+                // under the same mdcsum and the frontend cache would
+                // serve stale metadata.
+                let mut extra_hashes: Vec<&str> = self
+                    .extra_files
+                    .iter()
+                    .map(|cf| cf.checksum().hash())
+                    .collect();
+                extra_hashes.sort_unstable();
+                for h in &extra_hashes {
+                    bytes_to_hash.extend(h.as_bytes());
+                }
+
                 if let Some(prompt_context_vec) = self.prompt_context.as_ref() {
                     // Paste it as the bytes of the debug format. It's a Vec of enum, so this should be
                     // fine. If the debug representation changes that only happens in a new release.

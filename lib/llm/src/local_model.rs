@@ -719,20 +719,27 @@ pub(crate) fn self_host_base_url(
 /// filenames, and anything that isn't a regular file. Non-recursive.
 /// Results are sorted by filename so the resulting `mdcsum` is stable
 /// across filesystems that return `read_dir` entries in different
-/// orders.
+/// orders. Returns an empty vec when `model_dir` doesn't exist (e.g.
+/// name-only `LocalModel` placeholders).
 fn harvest_extra_files(
     model_dir: &Path,
     typed_filenames: &HashSet<String>,
 ) -> anyhow::Result<Vec<CheckedFile>> {
+    if !model_dir.is_dir() {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     for entry in
         fs::read_dir(model_dir).with_context(|| format!("read_dir {}", model_dir.display()))?
     {
         let entry = entry?;
-        if !entry.file_type()?.is_file() {
+        let path = entry.path();
+        // `Path::is_file` uses `fs::metadata` which follows symlinks.
+        // `entry.file_type()` / `entry.metadata()` use lstat on Unix —
+        // they would skip the HF blob symlinks we need to harvest.
+        if !path.is_file() {
             continue;
         }
-        let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -797,6 +804,11 @@ mod harvest_extra_files_tests {
         touch("special_tokens_map.json");
         // subdir (skipped — not a file)
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        // symlink to a real file (must be followed — HF snapshot dirs
+        // are full of these pointing into blobs/)
+        let target = dir.path().join("target_for_symlink");
+        std::fs::write(&target, b"x").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("added_tokens.json")).unwrap();
 
         let typed: HashSet<String> = ["config.json".to_string()].into_iter().collect();
         let mut names: Vec<String> = harvest_extra_files(dir.path(), &typed)
@@ -815,7 +827,20 @@ mod harvest_extra_files_tests {
         names.sort();
         assert_eq!(
             names,
-            vec!["preprocessor_config.json", "special_tokens_map.json"]
+            vec![
+                "added_tokens.json",
+                "preprocessor_config.json",
+                "special_tokens_map.json",
+                "target_for_symlink",
+            ]
         );
+    }
+
+    #[test]
+    fn returns_empty_for_missing_dir() {
+        let typed: HashSet<String> = HashSet::new();
+        // bogus path: doesn't exist on disk; must not error
+        let result = harvest_extra_files(Path::new("/nonexistent/dynamo/test/path"), &typed);
+        assert!(result.unwrap().is_empty());
     }
 }
