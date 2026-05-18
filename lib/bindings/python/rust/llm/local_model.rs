@@ -10,8 +10,8 @@ use dynamo_kv_router::protocols::{
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
-use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
 use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
+use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
 use pyo3::exceptions::PyValueError;
 
 fn validate_model_runtime_config(config: &RsModelRuntimeConfig) -> PyResult<()> {
@@ -235,7 +235,7 @@ impl ModelRuntimeConfig {
             _ => {
                 return Err(PyErr::new::<PyException, _>(format!(
                     "Invalid structural_tag_mode: {mode}. Expected 'off' or 'on'."
-                )))
+                )));
             }
         };
         Ok(())
@@ -249,7 +249,7 @@ impl ModelRuntimeConfig {
             _ => {
                 return Err(PyErr::new::<PyException, _>(format!(
                     "Invalid structural_tag_scope: {scope}. Expected 'auto' or 'always'."
-                )))
+                )));
             }
         };
         Ok(())
@@ -263,7 +263,7 @@ impl ModelRuntimeConfig {
             _ => {
                 return Err(PyErr::new::<PyException, _>(format!(
                     "Invalid structural_tag_schema: {schema}. Expected 'auto' or 'strict'."
-                )))
+                )));
             }
         };
         Ok(())
