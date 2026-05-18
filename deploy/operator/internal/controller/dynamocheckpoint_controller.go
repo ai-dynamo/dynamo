@@ -265,11 +265,10 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	ckpt.Status.CreatedAt = nil
 	ckpt.Status.Message = ""
 	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-		Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-		Status:             metav1.ConditionTrue,
-		Reason:             "JobCreated",
-		Message:            fmt.Sprintf("Checkpoint job %s created", jobName),
-
+		Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+		Status:  metav1.ConditionTrue,
+		Reason:  "JobCreated",
+		Message: fmt.Sprintf("Checkpoint job %s created", jobName),
 	})
 
 	if err := r.Status().Update(ctx, ckpt); err != nil {
@@ -340,10 +339,10 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 			ckpt.Status.Message = "checkpoint job was deleted"
 			meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-				Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-				Status:             metav1.ConditionFalse,
-				Reason:             "JobDeleted",
-				Message:            "Checkpoint job was deleted",
+				Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+				Status:  metav1.ConditionFalse,
+				Reason:  "JobDeleted",
+				Message: "Checkpoint job was deleted",
 			})
 			if err := r.Status().Update(ctx, ckpt); err != nil {
 				return ctrl.Result{}, err
@@ -392,10 +391,10 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		ckpt.Status.CreatedAt = &now
 		ckpt.Status.Message = ""
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
-			Status:             metav1.ConditionTrue,
-			Reason:             observation.Reason,
-			Message:            observation.Message,
+			Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+			Status:  metav1.ConditionTrue,
+			Reason:  observation.Reason,
+			Message: observation.Message,
 		})
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
@@ -408,10 +407,10 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 		ckpt.Status.Message = observation.Message
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
-			Status:             metav1.ConditionFalse,
-			Reason:             observation.Reason,
-			Message:            observation.Message,
+			Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+			Status:  metav1.ConditionFalse,
+			Reason:  observation.Reason,
+			Message: observation.Message,
 		})
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err

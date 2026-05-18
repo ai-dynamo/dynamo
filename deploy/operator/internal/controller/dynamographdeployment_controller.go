@@ -149,11 +149,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 		// Update Ready condition
 		dynamoDeployment.AddStatusCondition(metav1.Condition{
-			Type:               "Ready",
-			Status:             readyStatus,
-			Reason:             string(reason),
-			Message:            string(message),
-
+			Type:    "Ready",
+			Status:  readyStatus,
+			Reason:  string(reason),
+			Message: string(message),
 		})
 
 		// Only set ObservedGeneration when reconciliation succeeded (no error),
@@ -544,11 +543,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	if groveTopoCond == nil {
 		// No topology condition from Grove yet — don't assume healthy.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionUnknown,
-			Reason:             nvidiacomv1beta1.ConditionReasonTopologyConditionPending,
-			Message:            "Waiting for topology condition from the scheduling framework",
-
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionUnknown,
+			Reason:  nvidiacomv1beta1.ConditionReasonTopologyConditionPending,
+			Message: "Waiting for topology condition from the scheduling framework",
 		}
 	} else if groveTopoCond.Status == metav1.ConditionTrue {
 		// Grove reports topology levels are unavailable.
@@ -557,11 +555,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 			reason = nvidiacomv1beta1.ConditionReasonTopologyDefinitionNotFound
 		}
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            groveTopoCond.Message,
-
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionFalse,
+			Reason:  reason,
+			Message: groveTopoCond.Message,
 		}
 		prev := meta.FindStatusCondition(dgd.Status.Conditions, nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable)
 		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != groveTopoCond.Message {
@@ -571,11 +568,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	} else {
 		// Grove's TopologyLevelsUnavailable is False → all levels available.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionTrue,
-			Reason:             nvidiacomv1beta1.ConditionReasonAllTopologyLevelsAvailable,
-			Message:            "All required topology levels are available in the cluster topology",
-
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionTrue,
+			Reason:  nvidiacomv1beta1.ConditionReasonAllTopologyLevelsAvailable,
+			Message: "All required topology levels are available in the cluster topology",
 		}
 	}
 

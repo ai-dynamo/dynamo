@@ -230,8 +230,8 @@ func (r *DynamoModelReconciler) updateCondition(model *v1alpha1.DynamoModel, con
 		Status:             status,
 		ObservedGeneration: model.Generation,
 
-		Reason:             reason,
-		Message:            message,
+		Reason:  reason,
+		Message: message,
 	}
 	meta.SetStatusCondition(&model.Status.Conditions, condition)
 }
