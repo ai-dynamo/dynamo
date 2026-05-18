@@ -10246,9 +10246,10 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 [[package]]
 name = "vllm-engine-core-client"
 version = "0.1.0"
-source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e6f9e3877cf86b8698aee76cd2e866c029f1efe6#e6f9e3877cf86b8698aee76cd2e866c029f1efe6"
+source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e70039679264223b931016e6604cbe10af39bd54#e70039679264223b931016e6604cbe10af39bd54"
 dependencies = [
  "arc-swap",
+ "bytemuck",
  "byteorder",
  "bytes",
  "enum-as-inner",
@@ -10277,7 +10278,7 @@ dependencies = [
 [[package]]
 name = "vllm-llm"
 version = "0.1.0"
-source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e6f9e3877cf86b8698aee76cd2e866c029f1efe6#e6f9e3877cf86b8698aee76cd2e866c029f1efe6"
+source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e70039679264223b931016e6604cbe10af39bd54#e70039679264223b931016e6604cbe10af39bd54"
 dependencies = [
  "easy-ext",
  "enum-as-inner",
@@ -10296,7 +10297,7 @@ dependencies = [
 [[package]]
 name = "vllm-managed-engine"
 version = "0.1.0"
-source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e6f9e3877cf86b8698aee76cd2e866c029f1efe6#e6f9e3877cf86b8698aee76cd2e866c029f1efe6"
+source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e70039679264223b931016e6604cbe10af39bd54#e70039679264223b931016e6604cbe10af39bd54"
 dependencies = [
  "anyhow",
  "clap 4.6.1",
@@ -10308,7 +10309,7 @@ dependencies = [
 [[package]]
 name = "vllm-metrics"
 version = "0.1.0"
-source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e6f9e3877cf86b8698aee76cd2e866c029f1efe6#e6f9e3877cf86b8698aee76cd2e866c029f1efe6"
+source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e70039679264223b931016e6604cbe10af39bd54#e70039679264223b931016e6604cbe10af39bd54"
 dependencies = [
  "prometheus-client",
 ]

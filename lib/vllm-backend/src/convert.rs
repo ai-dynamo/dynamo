@@ -10,8 +10,8 @@ use dynamo_backend_common::{
     StopReason as DynamoStopReason, TopLogprob, usage,
 };
 use vllm_engine_core_client::protocol::{
-    EngineCoreSamplingParams, Logprobs as VllmLogprobs, StopReason as VllmStopReason,
-    StructuredOutputsParams,
+    EngineCoreSamplingParams, StopReason as VllmStopReason, StructuredOutputsParams,
+    logprobs::Logprobs as VllmLogprobs,
 };
 use vllm_llm::{FinishReason as VllmFinishReason, GenerateOutput, GenerateRequest};
 

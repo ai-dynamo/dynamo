@@ -26,9 +26,9 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-vllm-engine-core-client = { git = "https://github.com/Inferact/vllm-frontend-rs.git", rev = "e6f9e3877cf86b8698aee76cd2e866c029f1efe6" }
-vllm-llm = { git = "https://github.com/Inferact/vllm-frontend-rs.git", rev = "e6f9e3877cf86b8698aee76cd2e866c029f1efe6" }
-vllm-managed-engine = { git = "https://github.com/Inferact/vllm-frontend-rs.git", rev = "e6f9e3877cf86b8698aee76cd2e866c029f1efe6" }
+vllm-engine-core-client = { git = "https://github.com/Inferact/vllm-frontend-rs.git", rev = "e70039679264223b931016e6604cbe10af39bd54" }
+vllm-llm = { git = "https://github.com/Inferact/vllm-frontend-rs.git", rev = "e70039679264223b931016e6604cbe10af39bd54" }
+vllm-managed-engine = { git = "https://github.com/Inferact/vllm-frontend-rs.git", rev = "e70039679264223b931016e6604cbe10af39bd54" }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
