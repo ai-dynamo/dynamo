@@ -164,18 +164,26 @@ Standardize on:
 
 Engines must forward W3C trace headers to their underlying inference engine so
 that vLLM / TRT-LLM / SGLang's internal OTel spans (scheduler, forward pass,
-KV transfer) join the Dynamo trace tree. Call `context.trace_headers()` (a
-method on the Rust-bound `Context`) once at the top of `generate()` and pass
-the result to every inference-engine call site:
+KV transfer) join the Dynamo trace tree. Call `telemetry.trace_headers(context)`
+once at the top of `generate()` and pass the result to every inference-engine
+call site:
 
 ```python
-trace_headers = context.trace_headers()
+from dynamo.common.backend import telemetry
+
+headers = telemetry.trace_headers(context)
 gen = self.engine_client.generate(prompt, sampling_params, request_id,
-                                  trace_headers=trace_headers)
+                                  trace_headers=headers)
 ```
 
-`context.trace_headers()` returns `None` when the request arrived without a
-`traceparent` — pass it through unchanged; inference engines treat `None` as
+The facade prefers the `engine.generate` auto-span's OTel context (so
+downstream engine spans nest *under* `engine.generate`) and falls back to
+the inbound trace context otherwise. It's a thin wrapper around
+`context.trace_headers()` — the underlying method is still callable
+directly for legacy paths that don't depend on the facade module.
+
+`telemetry.trace_headers(context)` returns `None` when no trace context is
+available — pass it through unchanged; inference engines treat `None` as
 "no upstream trace." The kwarg name varies per backend:
 
 | Backend | Method | Kwarg |

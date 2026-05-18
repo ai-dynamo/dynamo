@@ -53,3 +53,17 @@ def start_span(context: Context, name: str, **attrs: Any) -> "SpanProxy":
             s.add_event("encoder_warmup_complete")
     """
     return context.start_span(name, dict(attrs) if attrs else None)
+
+
+def trace_headers(context: Context) -> dict[str, str] | None:
+    """W3C trace headers to forward to the underlying inference engine.
+
+    Thin wrapper over ``Context.trace_headers()``; see that method's
+    docstring for return semantics. Example::
+
+        headers = telemetry.trace_headers(context)
+        gen = self.engine_client.generate(
+            prompt, params, request_id, trace_headers=headers,
+        )
+    """
+    return context.trace_headers()

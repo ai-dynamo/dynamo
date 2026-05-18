@@ -62,6 +62,9 @@ class _ContextProtocol(Protocol):
     def start_span(self, name: str, attrs: Optional[dict] = None) -> _SpanProxyProtocol:
         ...
 
+    def trace_headers(self) -> Optional[dict]:
+        ...
+
 
 class _FakeSpan:
     def __init__(self):
@@ -91,9 +94,10 @@ class _FakeSpan:
 
 
 class _FakeContext:
-    def __init__(self):
+    def __init__(self, trace_headers_value: Optional[dict] = None):
         self._auto_span = _FakeSpan()
         self._child_spans: list[tuple[str, Optional[dict], _FakeSpan]] = []
+        self._trace_headers_value = trace_headers_value
 
     def current_span(self):
         return self._auto_span
@@ -102,6 +106,9 @@ class _FakeContext:
         child = _FakeSpan()
         self._child_spans.append((name, attrs, child))
         return child
+
+    def trace_headers(self):
+        return self._trace_headers_value
 
 
 def test_fakes_match_pyo3_protocols():
@@ -158,3 +165,10 @@ def test_set_status_accepts_error_with_description():
     span = telemetry.current_span(ctx)
     span.set_status("error", "kv_transfer_timeout")
     assert ctx._auto_span.statuses == [("error", "kv_transfer_timeout")]
+
+
+def test_trace_headers_delegates_to_context():
+    headers = {"traceparent": "00-1234-5678-01"}
+    ctx = _FakeContext(trace_headers_value=headers)
+    assert telemetry.trace_headers(ctx) is headers
+    assert telemetry.trace_headers(_FakeContext()) is None
