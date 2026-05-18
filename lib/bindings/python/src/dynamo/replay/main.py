@@ -525,6 +525,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="path to save the full replay report JSON; defaults to a timestamped file in the current directory",
     )
     parser.add_argument(
+        "--report-jsonl",
+        default=None,
+        help="optional path to emit one JSON object per request (offline disagg replay only). "
+        "Useful for per-request analysis (TTFT vs ISL scatter, ITL trace per request, "
+        "worker-residency analysis). Each line carries arrival/admit/token timestamps, "
+        "input/output lengths, full ITL series, and prefill/decode worker indices "
+        "(prefill_worker_idx=None indicates a conditional-prefill bypass).",
+    )
+    parser.add_argument(
         "--planner-config",
         help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg only)",
     )
@@ -638,6 +647,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace_format=args.trace_format,
             trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
             trace_num_prefix_groups=args.trace_num_prefix_groups,
+            report_jsonl_path=args.report_jsonl,
         )
     else:
         report = run_synthetic_trace_replay(

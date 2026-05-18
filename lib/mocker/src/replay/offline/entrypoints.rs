@@ -303,6 +303,7 @@ pub(crate) fn simulate_trace_disagg(
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
@@ -314,6 +315,7 @@ pub(crate) fn simulate_trace_disagg(
         DisaggReplayMode::Trace,
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
@@ -325,6 +327,7 @@ pub(crate) fn simulate_concurrency_disagg(
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let pending = VecDeque::from(requests);
@@ -336,6 +339,7 @@ pub(crate) fn simulate_concurrency_disagg(
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
@@ -346,6 +350,7 @@ pub(crate) fn simulate_trace_workload_disagg(
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
@@ -357,6 +362,7 @@ pub(crate) fn simulate_trace_workload_disagg(
         DisaggReplayMode::Trace,
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
@@ -368,6 +374,7 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     trace: Trace,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let driver = WorkloadDriver::new_concurrency(trace, config.prefill_args.block_size)?;
@@ -379,6 +386,7 @@ pub(crate) fn simulate_concurrency_workload_disagg(
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
