@@ -341,6 +341,11 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn kv_bytes_per_token(&self) -> Option<usize> {
+        self.inner.kv_bytes_per_token
+    }
+
+    #[getter]
     fn num_g2_blocks(&self) -> Option<usize> {
         self.inner.num_g2_blocks
     }
