@@ -43,6 +43,7 @@ from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, Zm
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import (
@@ -717,9 +718,7 @@ class SglangLLMEngine(LLMEngine):
                 return {"json_schema": json.dumps(json_schema)}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
-                if hasattr(structural_tag, "model_dump"):
-                    structural_tag = structural_tag.model_dump()
-                return {"structural_tag": json.dumps(structural_tag)}
+                return {"structural_tag": serialize_structural_tag(structural_tag)}
         return {}
 
     def _get_input_param(self, request: GenerateRequest) -> dict:

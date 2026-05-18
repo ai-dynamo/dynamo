@@ -160,6 +160,7 @@ pub async fn detect_and_parse_tool_call_with_recovery(
     };
     let cfg = ToolCallConfig {
         parser_config: recovery_config,
+        structural_tag_builder: None,
     };
     try_tool_call_parse(message, &cfg, tools).await
 }
@@ -412,6 +413,7 @@ mod tests {
                     tool_call_end_tokens: vec!["".to_string()],
                     ..Default::default()
                 }),
+                structural_tag_builder: None,
             },
             None,
         )
@@ -760,6 +762,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));
@@ -1208,6 +1211,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
                 arguments_keys: vec!["arguments".to_string()],
                 ..Default::default()
             }),
+            structural_tag_builder: None,
         };
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
         assert_eq!(content, Some("".to_string()));

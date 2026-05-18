@@ -656,6 +656,11 @@ async def register_vllm_model(
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )
+    runtime_config.set_structural_tag_mode(
+        "on" if config.dyn_enable_structural_tag else "off"
+    )
+    runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
+    runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
 
     # Propagate stream_interval so the frontend can respect --stream-interval.
     # set_engine_specific requires a JSON-encoded string (the Rust binding

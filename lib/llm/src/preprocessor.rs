@@ -16,6 +16,7 @@ pub mod lightseek_mm;
 pub mod media;
 pub mod prompt;
 pub mod speculative_prefill;
+mod structural_tag;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
@@ -73,6 +74,7 @@ use crate::protocols::{
 use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
+use crate::preprocessor::structural_tag::StructuralTagApplyResult;
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
@@ -1664,6 +1666,7 @@ impl OpenAIPreprocessor {
         stream: S,
         request: &NvCreateChatCompletionRequest,
         prompt_injected_reasoning: bool,
+        uses_tool_call_structural_tag: bool,
     ) -> anyhow::Result<
         impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     >
@@ -1769,6 +1772,7 @@ impl OpenAIPreprocessor {
                 self.tool_call_parser.clone(),
                 request.inner.tool_choice.clone(),
                 tool_definitions,
+                uses_tool_call_structural_tag,
                 stream,
             ))
         } else {
@@ -2121,6 +2125,7 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
         tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
+        uses_tool_call_structural_tag: bool,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
@@ -2137,37 +2142,46 @@ impl OpenAIPreprocessor {
             builder = builder.tool_definitions(tool_definitions);
         }
 
-        // Configure jail based on tool_choice
-        //
-        // For tool_choice=required or named we mirror SGLang / vLLM: assume the
-        // backend applied guided decoding and emit a bare JSON shape, so parse
-        // via the JSON array parser (base_json_parser) rather than the model's
-        // native-format parser.  If a parser is also configured we still carry
-        // it so the Immediate branch can fall back to marker-based parsing for
-        // backends that do not honor guided decoding (e.g. XML-native models
-        // like qwen3_coder — see regression test_tool_choice_required_with_
-        // qwen3_coder_parser).
-        match tool_choice {
-            Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                builder = builder
-                    .tool_choice_named(named.function.name.clone())
-                    .named_tool_filter(named.function.name.clone());
-                if let Some(parser) = tool_call_parser {
-                    builder = builder.tool_call_parser(parser);
-                }
+        // When structural_tag is active, the model output is already constrained by
+        // guided decoding into a model-specific format. Always use the marker-based
+        // parser to extract tool calls from that format.
+        if uses_tool_call_structural_tag {
+            if let Some(parser) = tool_call_parser {
+                builder = builder.tool_call_parser(parser);
             }
-            Some(ChatCompletionToolChoiceOption::Required) => {
-                builder = builder.tool_choice_required();
-                if let Some(parser) = tool_call_parser {
-                    builder = builder.tool_call_parser(parser);
+        } else {
+            // Configure jail based on tool_choice
+            //
+            // For tool_choice=required or named we mirror SGLang / vLLM: assume the
+            // backend applied guided decoding and emit a bare JSON shape, so parse
+            // via the JSON array parser (base_json_parser) rather than the model's
+            // native-format parser.  If a parser is also configured we still carry
+            // it so the Immediate branch can fall back to marker-based parsing for
+            // backends that do not honor guided decoding (e.g. XML-native models
+            // like qwen3_coder — see regression test_tool_choice_required_with_
+            // qwen3_coder_parser).
+            match tool_choice {
+                Some(ChatCompletionToolChoiceOption::Named(named)) => {
+                    builder = builder
+                        .tool_choice_named(named.function.name.clone())
+                        .named_tool_filter(named.function.name.clone());
+                    if let Some(parser) = tool_call_parser {
+                        builder = builder.tool_call_parser(parser);
+                    }
                 }
-            }
-            Some(ChatCompletionToolChoiceOption::Auto)
-            | Some(ChatCompletionToolChoiceOption::None)
-            | None => {
-                // Traditional marker-based jail for auto/none/unspecified
-                if let Some(parser) = tool_call_parser {
-                    builder = builder.tool_call_parser(parser);
+                Some(ChatCompletionToolChoiceOption::Required) => {
+                    builder = builder.tool_choice_required();
+                    if let Some(parser) = tool_call_parser {
+                        builder = builder.tool_call_parser(parser);
+                    }
+                }
+                Some(ChatCompletionToolChoiceOption::Auto)
+                | Some(ChatCompletionToolChoiceOption::None)
+                | None => {
+                    // Traditional marker-based jail for auto/none/unspecified
+                    if let Some(parser) = tool_call_parser {
+                        builder = builder.tool_call_parser(parser);
+                    }
                 }
             }
         }
@@ -2569,6 +2583,12 @@ impl
         let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
+
+        let uses_tool_call_structural_tag = matches!(
+            self.try_apply_structural_tag(&request, &mut common_request)?,
+            StructuralTagApplyResult::ToolCallFormat
+        );
+
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
             &common_request,
@@ -2612,8 +2632,12 @@ impl
             trace_tokens_enabled,
         );
 
-        let transformed_stream =
-            self.postprocessor_parsing_stream(stream, &request, prompt_injected_reasoning)?;
+        let transformed_stream = self.postprocessor_parsing_stream(
+            stream,
+            &request,
+            prompt_injected_reasoning,
+            uses_tool_call_structural_tag,
+        )?;
 
         // Apply audit aggregation strategy.
         // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
