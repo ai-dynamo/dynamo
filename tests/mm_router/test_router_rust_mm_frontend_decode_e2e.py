@@ -84,6 +84,7 @@ def _make_process_env(**extra: str) -> dict[str, str]:
     env["DYN_NAMESPACE"] = NAMESPACE
     env["DYN_REQUEST_PLANE"] = "tcp"
     env["DYN_MM_ALLOW_INTERNAL"] = "1"
+    env["DYN_ROUTER_KV_OVERLAP_LOG_LEVEL"] = "info"
     env.update(extra)
     return env
 

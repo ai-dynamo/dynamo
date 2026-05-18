@@ -54,6 +54,14 @@ struct WorkerSelection {
     scheduler_tracked: bool,
 }
 
+const ROUTER_KV_OVERLAP_LOG_LEVEL_ENV: &str = "DYN_ROUTER_KV_OVERLAP_LOG_LEVEL";
+
+fn router_kv_overlap_log_at_info() -> bool {
+    std::env::var(ROUTER_KV_OVERLAP_LOG_LEVEL_ENV)
+        .map(|level| level.eq_ignore_ascii_case("info"))
+        .unwrap_or(false)
+}
+
 /// Drop guard that manages the full lifecycle of a routed request:
 /// per-item tracking (prefill, first token, output blocks) and final cleanup (free + metrics).
 ///
@@ -334,18 +342,33 @@ impl KvPushRouter {
                     .len()
                     .div_ceil(self.chooser.block_size() as usize);
                 // tests/utils/router_logs.py parses the structured fields on this event.
-                tracing::debug!(
-                    request_id = %context_id,
-                    worker_id = best_worker.worker_id,
-                    dp_rank = best_worker.dp_rank,
-                    overlap_blocks = overlap_amount,
-                    total_blocks = total_blocks,
-                    "[ROUTING] Best: worker_{} dp_rank={} with {}/{} blocks overlap",
-                    best_worker.worker_id,
-                    best_worker.dp_rank,
-                    overlap_amount,
-                    total_blocks,
-                );
+                if router_kv_overlap_log_at_info() {
+                    tracing::info!(
+                        request_id = %context_id,
+                        worker_id = best_worker.worker_id,
+                        dp_rank = best_worker.dp_rank,
+                        overlap_blocks = overlap_amount,
+                        total_blocks = total_blocks,
+                        "[ROUTING] Best: worker_{} dp_rank={} with {}/{} blocks overlap",
+                        best_worker.worker_id,
+                        best_worker.dp_rank,
+                        overlap_amount,
+                        total_blocks,
+                    );
+                } else {
+                    tracing::debug!(
+                        request_id = %context_id,
+                        worker_id = best_worker.worker_id,
+                        dp_rank = best_worker.dp_rank,
+                        overlap_blocks = overlap_amount,
+                        total_blocks = total_blocks,
+                        "[ROUTING] Best: worker_{} dp_rank={} with {}/{} blocks overlap",
+                        best_worker.worker_id,
+                        best_worker.dp_rank,
+                        overlap_amount,
+                        total_blocks,
+                    );
+                }
             }
 
             return Ok(WorkerSelection {
