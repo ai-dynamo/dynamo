@@ -78,10 +78,15 @@ impl P2pManager {
     /// - The baseline matches the candidate under `check_layout_compat`.
     ///
     /// Returns `Err(FeatureError::InvalidConfig)` when:
-    /// - No baseline is present (instance registered without `Feature::P2P`
-    ///   or the hub restarted since last register) — this is a protocol
-    ///   violation (describe-before-register or missing re-register after
-    ///   hub restart).
+    /// - `instance_id` is not a P2P-registered member of this hub — a leader
+    ///   that registered without `Feature::P2P` has no group baseline to be
+    ///   validated against, so any `layout_compat` it pushes is unverifiable.
+    ///   Without this check, a non-member's payload would either get silently
+    ///   accepted (matches the unrelated baseline of some other P2P group) or
+    ///   rejected with a misleading "diverges from baseline" message.
+    /// - No baseline is present (defensive — should be unreachable when the
+    ///   membership check above passes, since baseline and `instances` are
+    ///   populated together under the same lock).
     /// - The candidate diverges from the baseline (mode, canonical, or
     ///   per-worker fields differ under the operative mode's predicate).
     pub fn check_describe_layout(
@@ -90,11 +95,18 @@ impl P2pManager {
         candidate: &LayoutCompatPayload,
     ) -> Result<(), FeatureError> {
         let inner = self.inner.read();
+        if !inner.instances.contains(&instance_id) {
+            return Err(FeatureError::InvalidConfig(format!(
+                "describe for instance {instance_id} carries layout_compat but \
+                 this instance is not registered with Feature::P2P; only P2P \
+                 members are checked against the group's layout baseline"
+            )));
+        }
         let baseline = inner.layout_baseline.as_ref().ok_or_else(|| {
             FeatureError::InvalidConfig(format!(
                 "describe for instance {instance_id} carries layout_compat but \
-                 this instance has no P2P baseline (describe before register, \
-                 or hub restarted without re-register?)"
+                 the P2P baseline is unset (hub restart between register and \
+                 describe?)"
             ))
         })?;
         check_layout_compat(baseline, candidate).map_err(|e| {

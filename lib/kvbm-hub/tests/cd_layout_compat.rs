@@ -977,10 +977,12 @@ async fn describe_push_with_mode_divergence_rejects() {
 }
 
 #[tokio::test]
-async fn describe_push_without_baseline_rejects() {
-    // Decision 1: describe carrying Some(layout_compat) but the
-    // instance has no P2P baseline (= no prior register with
-    // Feature::P2P) is a protocol violation. HTTP 400.
+async fn describe_push_without_p2p_membership_rejects() {
+    // Decision 1: describe carrying Some(layout_compat) from a leader
+    // that did not register Feature::P2P is a protocol violation, HTTP
+    // 400. The membership check fires before any baseline lookup —
+    // here `inner.instances` is empty, so the rejection cites the
+    // missing P2P registration rather than an absent baseline.
     let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
     let peer = make_peer();
 
@@ -995,13 +997,13 @@ async fn describe_push_without_baseline_rejects() {
     assert_eq!(
         resp.status(),
         400,
-        "describe with layout_compat but no P2P baseline must reject"
+        "describe with layout_compat from non-P2P-member must reject"
     );
     let body = resp_to_body(resp).await;
     let msg = body.message.to_lowercase();
     assert!(
-        msg.contains("baseline") || msg.contains("p2p") || msg.contains("before register"),
-        "rejection should reference the missing baseline; got: {}",
+        msg.contains("not registered") && msg.contains("p2p"),
+        "rejection should reference the non-membership; got: {}",
         body.message
     );
 }
@@ -1254,6 +1256,84 @@ async fn core_describe_instance_with_baseline_divergence_rejects() {
     assert!(
         msg.contains("mode") || msg.contains("universal") || msg.contains("operational"),
         "rejection should reference the mode mismatch; got: {}",
+        body.message
+    );
+}
+
+// ---- c5 follow-on: per-instance P2P membership check ---------------------
+//
+// Codex stop-time finding: `check_describe_layout` runs the candidate
+// against the baseline without verifying that the pushing leader is
+// itself a P2P-registered member. With two leaders in play (one P2P
+// registers and sets the baseline, the other bare-registers), the
+// non-P2P leader can push a describe with `Some(layout_compat)` and
+// either get silently accepted (matching layout) or rejected with a
+// misleading "diverges from baseline" message (divergent layout).
+//
+// Fix: `check_describe_layout` rejects with a "not registered with
+// Feature::P2P" error before running the layout check when the pushing
+// instance is absent from `inner.instances`.
+
+#[tokio::test]
+async fn describe_push_from_non_p2p_member_with_matching_baseline_rejects() {
+    // Two leaders: A registers with P2P (sets baseline), B bare-registers.
+    // B pushes a describe whose `layout_compat` matches the baseline. The
+    // payload is "valid" against the baseline, but B is not a P2P member
+    // and has no business stamping `layout_compat` in the first place.
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer_a = make_peer();
+    let peer_b = make_peer();
+    let baseline = payload(BlockLayoutMode::Operational);
+
+    let resp = post_p2p_register(&server, &peer_a, baseline.clone()).await;
+    assert_eq!(resp.status(), 200, "P2P register sets baseline");
+
+    let resp = post_bare_register(&server, &peer_b).await;
+    assert_eq!(resp.status(), 200, "bare register (no P2P) for B");
+
+    let descr = describe_payload(peer_b.instance_id(), Some(baseline));
+    let resp = post_describe(&server, peer_b.instance_id(), &descr).await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "describe-push from a non-P2P-member must reject even if layout matches baseline"
+    );
+    let body = resp_to_body(resp).await;
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("not registered") && msg.contains("p2p"),
+        "rejection should reference the non-membership; got: {}",
+        body.message
+    );
+}
+
+#[tokio::test]
+async fn describe_push_from_non_p2p_member_with_divergent_baseline_rejects_with_membership_reason()
+{
+    // Same two-leader setup, but B pushes a divergent layout. Current
+    // code rejects with "diverges from baseline" — semantically wrong:
+    // B was never a member, so divergence against the baseline isn't
+    // the failure mode. Fix flips the message to the membership reason.
+    let (server, _cpm, _p2p) = start_server_with_cpm_and_p2p().await;
+    let peer_a = make_peer();
+    let peer_b = make_peer();
+    let baseline = payload_with_topology(BlockLayoutMode::Operational, 2, 1);
+
+    let resp = post_p2p_register(&server, &peer_a, baseline).await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = post_bare_register(&server, &peer_b).await;
+    assert_eq!(resp.status(), 200);
+
+    let divergent = payload_with_topology(BlockLayoutMode::Operational, 4, 1);
+    let descr = describe_payload(peer_b.instance_id(), Some(divergent));
+    let resp = post_describe(&server, peer_b.instance_id(), &descr).await;
+    assert_eq!(resp.status(), 400);
+    let body = resp_to_body(resp).await;
+    let msg = body.message.to_lowercase();
+    assert!(
+        msg.contains("not registered") && msg.contains("p2p"),
+        "rejection should reference non-membership (not 'diverges from baseline'); got: {}",
         body.message
     );
 }
