@@ -571,6 +571,40 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
+    if engine_args.load_format in ("mx-source", "mx-target"):
+        try:
+            from modelexpress import register_modelexpress_loaders
+
+            # Ensure the ModelExpress server URL env var is set for the model loader
+            if config.model_express_url:
+                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
+            register_modelexpress_loaders()
+            # Use wrapper worker to ensure loaders are registered in spawned worker processes
+            engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
+        except ImportError as e:
+            raise ImportError(
+                f"ModelExpress package required for --load-format={engine_args.load_format}. "
+                "Install with: pip install modelexpress"
+            ) from e
+
+    # ModelExpress v2 mid-training weight refit. Opted into via env var
+    # DYN_MX_REFIT_ENABLED=1 (set by nrl-k8s when the trainer uses
+    # cluster.weight_sync.method=mx). Injects MxRefitWorkerExtension into
+    # vLLM's Worker base classes so its methods become callable via
+    # AsyncLLM.collective_rpc; see components/src/dynamo/vllm/mx_refit/.
+    if os.environ.get("DYN_MX_REFIT_ENABLED") == "1":
+        existing_ext = getattr(engine_args, "worker_extension_cls", None)
+        mx_ext = "dynamo.vllm.mx_refit.extension.MxRefitWorkerExtension"
+        if existing_ext and existing_ext != mx_ext:
+            logger.warning(
+                "[mx-refit] worker_extension_cls already set to %r; "
+                "overriding to %r. Stacking extensions is not supported.",
+                existing_ext,
+                mx_ext,
+            )
+        engine_args.worker_extension_cls = mx_ext
+        logger.info("[mx-refit] enabled; worker_extension_cls=%s", mx_ext)
+
     # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
     # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
     if (
