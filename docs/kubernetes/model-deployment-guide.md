@@ -101,30 +101,37 @@ benchmarks with AIPerf. Takes 2–4 hours.
 
 ## AIC Support Matrix
 
-The rapid strategy relies on AIC performance models. AIC currently supports:
+The rapid strategy relies on AIC performance models. AIC rapid support by GPU
+SKU:
 
 ### GPU SKUs
 
-| Supported (rapid) | Not Yet Supported (use thorough) |
-|---|---|
-| H100 SXM | V100 (SXM/PCIe) |
-| H100 PCIe | T4 |
-| H200 SXM | MI200, MI300 |
-| A100 SXM |  |
-| A100 PCIe |  |
-| A30 |  |
-| B200 SXM |  |
-| GB200 SXM |  |
-| L40S |  |
-| L4 |  |
+| Hardware | Value | Rapid support |
+|---|---|---|
+| H100 SXM | `h100_sxm` | Supported |
+| H100 PCIe | `h100_pcie` | Supported |
+| H200 SXM | `h200_sxm` | Supported |
+| A100 SXM | `a100_sxm` | Supported |
+| A100 PCIe | `a100_pcie` | Supported |
+| A30 | `a30` | Supported |
+| B200 SXM | `b200_sxm` | Supported |
+| GB200 SXM | `gb200_sxm` | Supported |
+| L40S | `l40s` | Supported |
+| L40 | `l40` | Not yet supported; use `thorough` |
+| L4 | `l4` | Supported |
+| V100 SXM | `v100_sxm` | Not yet supported; use `thorough` |
+| V100 PCIe | `v100_pcie` | Not yet supported; use `thorough` |
+| T4 | `t4` | Not yet supported; use `thorough` |
+| MI200 | `mi200` | Not yet supported; use `thorough` |
+| MI300 | `mi300` | Not yet supported; use `thorough` |
 
 > [!NOTE]
 > Some rapid-mode SKUs use AIC estimate-only data until measured profiles are
 > available. Use `searchStrategy: thorough` when you need hardware-measured
 > profiling for an estimate-only or unsupported SKU.
 
-When specifying GPU SKUs manually, use lowercase underscore format (e.g.,
-`h100_sxm`, not `H100-SXM5-80GB`). See the
+When specifying GPU SKUs manually, set `spec.hardware.gpuSku` to one of the
+canonical lowercase underscore values above. See the
 [DGDR Reference — SKU Format](dgdr.md#sku-format) for the full list.
 
 ### Backends
