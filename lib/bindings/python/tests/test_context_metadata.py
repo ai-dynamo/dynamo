@@ -7,6 +7,7 @@ from dynamo._core import Context
 
 pytestmark = [
     pytest.mark.parallel,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
