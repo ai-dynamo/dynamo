@@ -177,12 +177,8 @@ async fn wait_for_connection_tasks(
     peer_port: Option<u16>,
     subject: String,
 ) -> Result<()> {
-    // Await the reader first. If it panics or returns Err, we abort the
-    // writer rather than waiting on `tokio::join!` to surface the failure
-    // — the writer parks in `bytes_rx.recv()` waiting for app data, and
-    // dropping the reader-side `alive_tx` does not unblock that recv.
-    // Without abort, a failed reader can leave the monitor stuck on the
-    // join indefinitely with no error logged and no cleanup.
+    // Await the reader first and abort the writer on reader Err — the
+    // writer parks on `bytes_rx.recv()` and won't wake on its own.
     let reader = match reader_task.await {
         Ok(reader) => reader,
         Err(reader_err) => {
