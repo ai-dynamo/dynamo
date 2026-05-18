@@ -1002,16 +1002,196 @@ where
     }
 }
 
+impl<T, U> PushRouter<T, U>
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    /// Bidirectional sibling of [`Self::generate_with_fault_detection`].
+    /// Resolves `(address, instance)` for `instance_id`, calls
+    /// [`AddressedPushRouter::generate_bidirectional`] with the first frame
+    /// plus the remainder of the input stream, then applies the same
+    /// fault-detection / inactivity-timeout wrap on the response stream as
+    /// the unary path.
+    async fn bidirectional_dispatch(
+        &self,
+        mut instance_id: u64,
+        first_frame: T,
+        rest: ManyIn<T>,
+    ) -> anyhow::Result<ManyOut<U>> {
+        let route_start = Instant::now();
+        let request_id = rest.context().id().to_string();
+        let route_span = tracing::info_span!(
+            "router.route_request_bidirectional",
+            request_id = %request_id,
+            worker_id = instance_id,
+            router_mode = ?self.router_mode,
+        );
+
+        if self.fault_detection_enabled {
+            let free_instances = self.client.instance_ids_free();
+            if free_instances.is_empty() {
+                let all_instances = self.client.instance_ids();
+                if !all_instances.is_empty() {
+                    tracing::warn!(
+                        instance_id,
+                        total_workers = all_instances.len(),
+                        "Rejecting bidirectional request: all workers are busy"
+                    );
+                    let cause = PipelineError::ServiceOverloaded(
+                        "All workers are busy, please retry later".to_string(),
+                    );
+                    return Err(DynamoError::builder()
+                        .error_type(ErrorType::ResourceExhausted)
+                        .message("All workers are busy, please retry later")
+                        .cause(cause)
+                        .build()
+                        .into());
+                }
+            }
+        }
+
+        let (address, _transport_kind, instance) = {
+            use crate::component::TransportType;
+
+            let resolve_transport = |id: u64| {
+                let instances = self.client.instances();
+                instances
+                    .iter()
+                    .find(|i| i.instance_id == id)
+                    .map(|instance| {
+                        let (addr, kind) = match &instance.transport {
+                            TransportType::Http(http_endpoint) => {
+                                (http_endpoint.clone(), "transport.http.request")
+                            }
+                            TransportType::Tcp(tcp_endpoint) => {
+                                (tcp_endpoint.clone(), "transport.tcp.request")
+                            }
+                            TransportType::Nats(subject) => {
+                                (subject.clone(), "transport.nats.request")
+                            }
+                        };
+                        (addr, kind, instance.clone())
+                    })
+            };
+
+            if let Some(result) = resolve_transport(instance_id) {
+                result
+            } else {
+                let avail = self.client.instance_ids_avail();
+                let fallback_id = avail.iter().copied().find(|&id| id != instance_id);
+                match fallback_id {
+                    Some(id) => {
+                        tracing::warn!(
+                            original_instance = instance_id,
+                            fallback_instance = id,
+                            "Instance disappeared during bidirectional routing, reselecting"
+                        );
+                        instance_id = id;
+                        resolve_transport(id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Fallback instance {} also not found for endpoint {}",
+                                id,
+                                self.client.endpoint.id()
+                            )
+                        })?
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "Instance {} not found and no other instances available \
+                             for endpoint {}",
+                            instance_id,
+                            self.client.endpoint.id()
+                        ));
+                    }
+                }
+            }
+        };
+
+        STAGE_DURATION_SECONDS
+            .with_label_values(&[STAGE_ROUTE])
+            .observe(route_start.elapsed().as_secs_f64());
+
+        let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
+        let stream: anyhow::Result<ManyOut<U>> = self
+            .addressed
+            .generate_bidirectional(instance, address, first_frame, rest)
+            .instrument(route_span)
+            .await;
+
+        match stream {
+            Ok(stream) => {
+                if !self.fault_detection_enabled {
+                    return Ok(stream);
+                }
+                let engine_ctx = stream.context();
+                let client = self.client.clone();
+                let client_for_timeout = self.client.clone();
+                let stream = stream.map(move |res| {
+                    if let Some(err) = res.err()
+                        && is_inhibited(&err)
+                    {
+                        tracing::debug!(
+                            "Reporting instance {instance_id} down due to migratable error: {err}"
+                        );
+                        client.report_instance_down(instance_id);
+                    }
+                    res
+                });
+
+                let stream: Pin<Box<dyn Stream<Item = U> + Send>> = if let Some(timeout) =
+                    self.response_timeout
+                {
+                    Box::pin(async_stream::stream! {
+                        let mut inner = Box::pin(stream);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                item = inner.next() => {
+                                    match item {
+                                        Some(item) => yield item,
+                                        None => break,
+                                    }
+                                }
+                                _ = tokio::time::sleep(timeout) => {
+                                    tracing::warn!(
+                                        instance_id,
+                                        timeout_secs = timeout.as_secs(),
+                                        "backend bidirectional response inactivity timeout — quarantining worker"
+                                    );
+                                    client_for_timeout.report_instance_down(instance_id);
+                                    yield U::from_err(
+                                        crate::error::DynamoError::builder()
+                                            .error_type(crate::error::ErrorType::ResponseTimeout)
+                                            .message("backend response inactivity timeout")
+                                            .build()
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    })
+                } else {
+                    Box::pin(stream)
+                };
+
+                Ok(ResponseStream::new(stream, engine_ctx))
+            }
+            Err(err) => {
+                if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
+                    tracing::debug!("Reporting instance {instance_id} down due to error: {err}");
+                    self.client.report_instance_down(instance_id);
+                }
+                Err(err)
+            }
+        }
+    }
+}
+
 /// Bidirectional `AsyncEngine` impl for streaming-input workloads (e.g. the
 /// OpenAI Realtime API). Selects a sticky instance on the first inbound frame
-/// and binds the whole input stream to that worker. Required so engines of
-/// shape `BidirectionalStreamingEngine<T, U>` can be stored as a `PushRouter`
-/// in `WorkerSet`.
-///
-/// Remote per-frame dispatch over `AddressedPushRouter` / `PushWorkHandler`
-/// is not yet implemented; this impl currently bails after selecting the
-/// worker. KV and Direct modes inherit the same `bail!` invariants as the
-/// unary impl.
+/// and binds the whole input stream to that worker. KV and Direct modes
+/// inherit the same `bail!` invariants as the unary impl.
 #[async_trait]
 impl<T, U> AsyncEngine<ManyIn<T>, ManyOut<U>, Error> for PushRouter<T, U>
 where
@@ -1032,20 +1212,17 @@ where
         }
 
         // Wait for the first frame so the sticky-instance pick reflects the
-        // session's actual start, not router construction time.
-        if input.next().await.is_none() {
-            anyhow::bail!("bidirectional input stream closed before first frame");
-        }
+        // session's actual start, not router construction time. Keep the
+        // first frame so the dispatch can include it in the initial envelope.
+        let first_frame = input.next().await.ok_or_else(|| {
+            anyhow::anyhow!("bidirectional input stream closed before first frame")
+        })?;
         let instance_id = self
             .select_next_worker()
             .ok_or_else(|| anyhow::anyhow!("no instances available for bidirectional routing"))?;
 
-        // Per-frame remote dispatch over AddressedPushRouter / PushWorkHandler
-        // is tracked in #9361. Until that lands, callers must register engines
-        // in-process via ModelManager rather than rely on discovered workers.
-        anyhow::bail!(
-            "bidirectional remote dispatch is not yet implemented (selected instance {instance_id})"
-        )
+        self.bidirectional_dispatch(instance_id, first_frame, input)
+            .await
     }
 }
 
