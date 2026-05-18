@@ -16,7 +16,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::model_card::ModelDeploymentCard;
+use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
@@ -737,7 +737,7 @@ fn harvest_extra_files(
             continue;
         };
         if typed_filenames.contains(name)
-            || HuggingFaceProvider::is_weight_file(name)
+            || is_weight_file(&path)
             || HuggingFaceProvider::is_ignored(name)
         {
             continue;
@@ -785,8 +785,10 @@ mod harvest_extra_files_tests {
         };
         // typed slot (excluded by name)
         touch("config.json");
-        // weight (excluded by extension)
+        // weights — covers the mx-narrow case (safetensors) and the
+        // ecosystem-wide case (.pt) which mx alone wouldn't catch.
         touch("model.safetensors");
+        touch("pytorch_lora_weights.pt");
         // dotfile / README (excluded by is_ignored)
         touch(".gitattributes");
         touch("README.md");

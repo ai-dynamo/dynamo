@@ -317,13 +317,14 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
 /// the fallback when `size` is absent on a `CheckedFile`.
 const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// File extensions that identify model weights. Used by the hf:// sibling
-/// harvest to skip weight blobs (which `hub::from_hf(_, ignore_weights=true)`
-/// also already filters at download, but the snapshot dir may contain
-/// pre-existing weights from a prior unrestricted pull).
+/// File extensions that identify model weights. Used by both gh-8749
+/// harvest paths — the frontend hf:// sibling harvest below and the
+/// worker self-host harvest in `local_model::move_to_self_host`. Wider
+/// than mx's `HuggingFaceProvider::is_weight_file` so a stray `.pt` /
+/// `.gguf` / `.onnx` weight doesn't ride the metadata HTTP path.
 ///
 /// `.safetensors.index.json` is correctly kept: extension is `.json`.
-fn is_weight_file(path: &Path) -> bool {
+pub(crate) fn is_weight_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
         Some("safetensors" | "bin" | "gguf" | "onnx" | "tflite" | "h5" | "pt" | "pth" | "msgpack")
