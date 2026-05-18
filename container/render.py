@@ -84,6 +84,19 @@ def parse_args():
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
+        "--has-trtllm-context",
+        action="store_true",
+        help=(
+            "Render the `COPY --from=trtllm_wheel / /trtllm_wheel/` line in the trtllm "
+            "framework stage. Use this when you plan to invoke `docker build` with "
+            "`--build-context trtllm_wheel=<dir>` AND `--build-arg HAS_TRTLLM_CONTEXT=1`. "
+            "Without this flag, the COPY line is omitted at render time (per "
+            'context.yaml `trtllm.has_trtllm_context` default "0"), and a build that '
+            "passes `--build-arg HAS_TRTLLM_CONTEXT=1` will fail because /trtllm_wheel "
+            "doesn't exist inside the container."
+        ),
+    )
+    parser.add_argument(
         "--output-short-filename",
         action="store_true",
         help="Output filename is rendered.Dockerfile instead of <framework>-<target>-cuda<cuda_version>-<arch>-rendered.Dockerfile",
@@ -225,6 +238,13 @@ def main():
     script_dir = Path(__file__).parent
     with open(f"{script_dir}/context.yaml", "r") as f:
         context = yaml.safe_load(f)
+
+    # --has-trtllm-context overrides the context.yaml default so users can opt
+    # into the local-wheel-build-context path at render time without editing
+    # context.yaml. The build-time ARG HAS_TRTLLM_CONTEXT must agree with this
+    # at `docker build` time — see trtllm_framework.Dockerfile for the gate.
+    if getattr(args, "has_trtllm_context", False):
+        context.setdefault("trtllm", {})["has_trtllm_context"] = "1"
 
     render(args, context, script_dir)
 
