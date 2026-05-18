@@ -167,10 +167,10 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "source URI must start with 's3://' or 'hf://', got: http://example.com/model",
+			errMsg:  "source URI must start with 's3://', 'hf://', or 'file://', got: http://example.com/model",
 		},
 		{
-			name: "lora with file:// URI scheme",
+			name: "valid lora model with file:// source",
 			model: &nvidiacomv1alpha1.DynamoModel{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-lora",
@@ -181,12 +181,11 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 					BaseModelName: "llama-3-8b",
 					ModelType:     "lora",
 					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "file:///local/path",
+						URI: "file:///local/path/to/adapter",
 					},
 				},
 			},
-			wantErr: true,
-			errMsg:  "source URI must start with 's3://' or 'hf://', got: file:///local/path",
+			wantErr: false,
 		},
 	}
 
