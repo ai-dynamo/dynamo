@@ -150,6 +150,24 @@ navigation:
         path: ../pages-v1.1.1/components/router/router-guide.md
       - page: KV Cache Offloading
         path: ../pages-v1.1.1/components/kvbm/kvbm-guide.md
+      - section: Tool Calling
+        slug: tool-calling
+        path: ../pages-v1.1.1/tool-calling/README.md
+        contents:
+          - page: Tool Call Parsing (Dynamo)
+            path: ../pages-v1.1.1/tool-calling/dynamo.md
+          - page: Tool Call Parsing (Engine Fallback)
+            path: ../pages-v1.1.1/tool-calling/engine-fallback.md
+          - page: Troubleshooting Tool Calls
+            path: ../pages-v1.1.1/tool-calling/troubleshooting.md
+      - section: Reasoning
+        slug: reasoning
+        path: ../pages-v1.1.1/reasoning/README.md
+        contents:
+          - page: Reasoning Parsing (Dynamo)
+            path: ../pages-v1.1.1/reasoning/dynamo.md
+          - page: Reasoning Parsing (Engine Fallback)
+            path: ../pages-v1.1.1/reasoning/engine-fallback.md
       - section: Multimodal
         path: ../pages-v1.1.1/features/multimodal/README.md
         contents:
@@ -182,12 +200,6 @@ navigation:
             path: ../pages-v1.1.1/agents/agent-tracing.md
           - page: Agent Hints
             path: ../pages-v1.1.1/agents/agent-hints.md
-          - page: Chat Processors
-            path: ../pages-v1.1.1/agents/chat-processor-options.md
-          - page: Tool Calling
-            path: ../pages-v1.1.1/agents/tool-calling.md
-          - page: Reasoning
-            path: ../pages-v1.1.1/agents/reasoning.md
           - page: SGLang for Agentic Workloads
             path: ../pages-v1.1.1/backends/sglang/agents.md
       - section: Observability (Local)
@@ -266,6 +278,8 @@ navigation:
         contents:
           - page: Reference Guide
             path: ../pages-v1.1.1/backends/vllm/vllm-reference-guide.md
+          - page: Frontend Processor Fallback
+            path: ../pages-v1.1.1/backends/vllm/vllm-chat-processor.md
           - page: Examples
             path: ../pages-v1.1.1/backends/vllm/vllm-examples.md
           - page: KV Cache Offloading
