@@ -1284,9 +1284,14 @@ mod tests {
                 .unwrap();
 
         // Override avail to contain only a stale ID with no real backing
-        // instance AND no other available fallback.
+        // instance AND no other available fallback. Also seed instance_free
+        // with the stale_id so it survives the routable intersection
+        // (avail ∩ free); without that, routable returns empty and the
+        // router short-circuits with ResourceExhausted before reaching
+        // the vanished-instance fallback path this test exercises.
         let stale_id = 99999;
         client.override_instance_avail(vec![stale_id]);
+        client.instance_free.store(std::sync::Arc::new(vec![stale_id]));
 
         let request = SingleIn::new(42u64);
         let result = router.generate(request).await;
