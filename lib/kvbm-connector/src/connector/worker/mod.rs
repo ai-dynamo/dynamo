@@ -89,6 +89,7 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// All dims are passed explicitly because they cannot be unambiguously
     /// inferred from the raw tensor shape (the last dim is the product of
     /// num_kv_heads and head_size, which we don't need to split).
+    #[allow(clippy::too_many_arguments)]
     fn register_cross_layers_kv_cache(
         &self,
         tensor: Arc<dyn TensorDescriptor>,
