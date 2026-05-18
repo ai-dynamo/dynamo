@@ -10,6 +10,11 @@ source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 
 export VLLM_TARGET_DEVICE=xpu
 
+# Device affinity: Use auto-selected device via ZE_AFFINITY_MASK if set by test framework,
+# otherwise default to device 0
+ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0}
+export ZE_AFFINITY_MASK
+
 # Parse command-line arguments for request plane mode
 REQUEST_PLANE="tcp"  # Default to TCP
 

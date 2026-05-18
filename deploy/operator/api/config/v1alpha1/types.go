@@ -201,10 +201,10 @@ type KaiSchedulerConfiguration struct {
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
-// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io/v1) settings.
 //
-// NOTE: auto-detection here only verifies that the resource.k8s.io API group is
-// registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+// NOTE: auto-detection here only verifies that the resource.k8s.io/v1 API is
+// registered on the apiserver (Kubernetes 1.34+). It does NOT verify that a
 // GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
 // installed, that its DeviceClass exists, or that node-level GPU drivers are
 // compatible. An admin can use `enabled: false` to force-off DRA integration
@@ -213,7 +213,7 @@ type KaiSchedulerConfiguration struct {
 // with a clear error instead of letting pods Pend with a confusing
 // "resourceclaim not found" at schedule time.
 type DRAConfiguration struct {
-	// Enabled overrides auto-detection of the resource.k8s.io API group.
+	// Enabled overrides auto-detection of the resource.k8s.io/v1 API.
 	// nil = auto-detect. Setting true requires detection to also succeed (the
 	// operator will exit at startup otherwise).
 	Enabled *bool `json:"enabled,omitempty"`

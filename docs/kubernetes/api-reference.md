@@ -2707,10 +2707,10 @@ _Appears in:_
 
 
 
-DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io/v1) settings.
 
-NOTE: auto-detection here only verifies that the resource.k8s.io API group is
-registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+NOTE: auto-detection here only verifies that the resource.k8s.io/v1 API is
+registered on the apiserver (Kubernetes 1.34+). It does NOT verify that a
 GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
 installed, that its DeviceClass exists, or that node-level GPU drivers are
 compatible. An admin can use `enabled: false` to force-off DRA integration
@@ -2726,7 +2726,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled overrides auto-detection of the resource.k8s.io API group.<br />nil = auto-detect. Setting true requires detection to also succeed (the<br />operator will exit at startup otherwise). |  |  |
+| `enabled` _boolean_ | Enabled overrides auto-detection of the resource.k8s.io/v1 API.<br />nil = auto-detect. Setting true requires detection to also succeed (the<br />operator will exit at startup otherwise). |  |  |
 
 
 #### DiscoveryBackend

@@ -14,6 +14,7 @@ description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 [features]
 default = []
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
+profile = ["dynamo-mocker/profile"]
 
 [[bench]]
 name = "multiturn_bench"

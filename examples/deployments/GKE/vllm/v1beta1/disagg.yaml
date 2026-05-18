@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: my-registry/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - |
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
+          command:
+          - /bin/sh
+          - -c
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          startupProbe:
+            initialDelaySeconds: 180
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: decode
+  - name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - |
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill
+          command:
+          - /bin/sh
+          - -c
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: prefill

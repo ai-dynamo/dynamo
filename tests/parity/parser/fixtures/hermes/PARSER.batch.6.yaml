@@ -9,33 +9,47 @@ cases:
     ref: dynamo
     model_text: '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>'
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
     model_text: '<tool_call>{"name": "get_time", "arguments": { }}</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
     model_text: '<tool_call>{"name": "get_time"}</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
+      dynamo: &id004
+        reason: "Dynamo's hermes parser leaves <tool_call> tag in normal_text on minimal/no-body case"
+        calls: []
+        normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
+      vllm: *id004
+      sglang:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''

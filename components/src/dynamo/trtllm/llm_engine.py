@@ -15,9 +15,11 @@ import json
 import logging
 import re
 import sys
-from collections.abc import AsyncGenerator
+import threading
+import time
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Optional
 
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
@@ -26,19 +28,27 @@ from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.sampling_params import GuidedDecodingParams
+from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
 from dynamo.common.backend.disagg import require_prefill_result
+from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.publisher import (
+    KvEventSource,
+    Metrics,
+    PushSource,
+    SnapshotSource,
+)
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
-from dynamo.llm import ModelInput
+from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
@@ -59,6 +69,15 @@ _DRAIN_POLL_INTERVAL_S = 0.5
 # `workers/llm_worker.py: connection_id() % 1021`.
 _DISAGG_MACHINE_ID_MAX = 1021
 
+# Server-side wait per poll; idle sleep bounds CPU when the engine is quiet.
+_KV_EVENTS_POLL_TIMEOUT_S = 0.2
+_STATS_POLL_TIMEOUT_S = 0.2
+_IDLE_SLEEP_S = 0.01
+
+# Mirror the legacy `dynamo.trtllm` worker — required for TRT-LLM to actually
+# publish KV cache events. Without this, `get_kv_cache_events` returns empty.
+_DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+
 
 # Bridges trtllm's local enum into the common one. ENCODE absent —
 # rejected up front in from_args().
@@ -67,6 +86,17 @@ _TRTLLM_TO_COMMON_DISAGG = {
     DisaggregationMode.PREFILL: CommonDisaggregationMode.PREFILL,
     DisaggregationMode.DECODE: CommonDisaggregationMode.DECODE,
 }
+
+
+def _to_signed_i64(value: int | None) -> int | None:
+    """Two's-complement cast of a Python int into the signed 64-bit range."""
+    if value is None:
+        return None
+    if value >= 2**63:
+        return value - 2**64
+    if value < -(2**63):
+        return ((value + 2**63) % 2**64) - 2**63
+    return value
 
 
 class TrtllmLLMEngine(LLMEngine):
@@ -80,6 +110,7 @@ class TrtllmLLMEngine(LLMEngine):
         max_num_tokens: int | None = None,
         kv_block_size: int = 32,
         disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+        publish_events_and_metrics: bool = False,
     ):
         self.engine_args = engine_args
         self.model_name = model_name
@@ -90,6 +121,9 @@ class TrtllmLLMEngine(LLMEngine):
         self.kv_block_size = kv_block_size
         # Drives context_only / generation_only branching in generate().
         self.disaggregation_mode = disaggregation_mode
+        # Gates the metrics-poll thread and the kv_event/metrics source
+        # publishers. See `_kv_routing_enabled`.
+        self.publish_events_and_metrics = publish_events_and_metrics
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
         # Per-request GenerationResult handles for `abort()` lookup. TRT-LLM's
@@ -100,6 +134,27 @@ class TrtllmLLMEngine(LLMEngine):
         # Set in start() from worker_id. 10-bit field is a TRT-LLM API
         # constraint; collisions possible at scale (~30 replicas).
         self._disagg_machine_id: int = 0
+        self._publish_stop = threading.Event()
+        self._metrics_thread: Optional[threading.Thread] = None
+        self._kv_events_thread: Optional[threading.Thread] = None
+        self._attention_dp_size: int = 1
+        # Worker invokes on_ready callbacks serially during setup (see
+        # `setup_kv_publishers` in lib/backend-common/src/publisher.rs); the
+        # dict is fully populated before `_kv_events_thread` starts and
+        # read-only thereafter.
+        self._kv_publishers: dict[int, KvEventPublisher] = {}
+        # Written by `_metrics_poll_loop`, read by snapshot lambdas under the
+        # GIL. Per-rank key-level writes are GIL-serialized.
+        self._latest_metrics: dict[int, Metrics] = {}
+        # Per-rank hashes of partial blocks; their later "removed" events
+        # must not reach the router (which never saw them stored). Scoping
+        # by rank prevents a partial block on one rank from suppressing a
+        # legitimate `removed` on another rank.
+        self._partial_block_hashes_by_rank: dict[int, set[int]] = {}
+        self._last_event_id_by_rank: dict[int, int] = {}
+        # One-shot guards so a misbehaving engine doesn't flood logs.
+        self._warned_dispatch_failed = False
+        self._warned_unknown_dp_rank = False
 
     @classmethod
     async def from_args(
@@ -120,6 +175,11 @@ class TrtllmLLMEngine(LLMEngine):
             "scheduler_config": SchedulerConfig(),
             "tensor_parallel_size": config.tensor_parallel_size,
             "pipeline_parallel_size": config.pipeline_parallel_size,
+            "moe_expert_parallel_size": config.expert_parallel_size,
+            # Required for per-rank KV events under attention-DP; without
+            # it `get_attention_dp_size()` collapses to 1 and only rank
+            # 0's publisher is created.
+            "enable_attention_dp": config.enable_attention_dp,
             "backend": Backend.PYTORCH,
             "kv_cache_config": KvCacheConfig(
                 free_gpu_memory_fraction=config.free_gpu_memory_fraction,
@@ -129,6 +189,11 @@ class TrtllmLLMEngine(LLMEngine):
             "max_seq_len": config.max_seq_len,
             "max_beam_width": config.max_beam_width,
             "max_batch_size": config.max_batch_size,
+            "return_perf_metrics": config.publish_events_and_metrics,
+            # enable_iter_perf_stats is required by the PyTorch backend to
+            # compute iteration-level stats (KV cache utilization, hit rate).
+            # See TRT-LLM PR #11243.
+            "enable_iter_perf_stats": config.publish_events_and_metrics,
         }
 
         # Apply --extra-engine-args / --override-engine-args. Match the
@@ -154,6 +219,18 @@ class TrtllmLLMEngine(LLMEngine):
             warn_override_collisions(engine_args, overrides)
             deep_update(engine_args, overrides)
 
+        # Apply event_buffer_max_size AFTER overrides so a user override
+        # that strips the field can't disable KV-event publishing. Mirrors
+        # the legacy `llm_worker` publish_events_and_metrics block; like
+        # legacy, treats `0` as "unset" (TRT-LLM's disabled value).
+        if config.publish_events_and_metrics:
+            kv_cfg = engine_args["kv_cache_config"]
+            if isinstance(kv_cfg, KvCacheConfig):
+                kv_cfg = kv_cfg.model_dump(exclude_none=True)
+            if not kv_cfg.get("event_buffer_max_size"):
+                kv_cfg["event_buffer_max_size"] = _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            engine_args["kv_cache_config"] = kv_cfg
+
         # Use post-override engine_args so EngineConfig matches what the
         # actual TRT-LLM engine got.
         engine = cls(
@@ -165,6 +242,7 @@ class TrtllmLLMEngine(LLMEngine):
             max_num_tokens=engine_args.get("max_num_tokens", config.max_num_tokens),
             kv_block_size=config.kv_block_size,
             disaggregation_mode=config.disaggregation_mode,
+            publish_events_and_metrics=config.publish_events_and_metrics,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -189,6 +267,15 @@ class TrtllmLLMEngine(LLMEngine):
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
 
+        self._attention_dp_size = self._engine.get_attention_dp_size()
+        if self._kv_routing_enabled():
+            self._metrics_thread = threading.Thread(
+                target=self._metrics_poll_loop,
+                daemon=True,
+                name="trtllm-metrics-poll",
+            )
+            self._metrics_thread.start()
+
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
@@ -196,7 +283,186 @@ class TrtllmLLMEngine(LLMEngine):
             kv_cache_block_size=self.kv_block_size,
             max_num_seqs=self.max_batch_size,
             max_num_batched_tokens=self.max_num_tokens,
+            data_parallel_size=self._attention_dp_size,
         )
+
+    # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
+    # thread, so we drive them from dedicated worker threads rather than
+    # the asyncio event loop.
+
+    def _kv_routing_enabled(self) -> bool:
+        # Matches the legacy `workers/llm_worker.py` gate. Decode workers
+        # publish too — legacy only flips `enable_local_indexer` off.
+        return self.publish_events_and_metrics
+
+    async def kv_event_sources(self) -> list[KvEventSource]:
+        if not self._kv_routing_enabled():
+            return []
+        return [
+            PushSource(
+                on_ready=self._make_on_publisher_ready(rank),
+                dp_rank=rank,
+            )
+            for rank in range(self._attention_dp_size)
+        ]
+
+    async def metrics_sources(self) -> list[SnapshotSource]:
+        if not self._kv_routing_enabled():
+            return []
+
+        def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
+            return lambda: self._latest_metrics.get(r)
+
+        return [
+            SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
+            for rank in range(self._attention_dp_size)
+        ]
+
+    def _make_on_publisher_ready(self, rank: int):
+        # Worker invokes on_ready serially during setup; the call that
+        # completes the publisher set starts the dispatch thread.
+        def on_ready(publisher: KvEventPublisher) -> None:
+            self._kv_publishers[rank] = publisher
+            if (
+                len(self._kv_publishers) == self._attention_dp_size
+                and self._kv_events_thread is None
+            ):
+                self._kv_events_thread = threading.Thread(
+                    target=self._kv_events_poll_loop,
+                    daemon=True,
+                    name="trtllm-kv-events-poll",
+                )
+                self._kv_events_thread.start()
+
+        return on_ready
+
+    # Stats payloads use camelCase keys (`attentionDpRank`, `kvCacheStats`);
+    # the KV-event payloads in `_dispatch_kv_event` use snake_case
+    # (`attention_dp_rank`). Both match TRT-LLM's upstream conventions.
+    def _metrics_poll_loop(self) -> None:
+        assert self._engine is not None
+        while not self._publish_stop.is_set():
+            try:
+                snaps = self._engine.llm.get_stats(timeout=_STATS_POLL_TIMEOUT_S)
+            except Exception as e:
+                logger.debug("trtllm get_stats raised: %s", e)
+                time.sleep(_IDLE_SLEEP_S)
+                continue
+            if not snaps:
+                time.sleep(_IDLE_SLEEP_S)
+                continue
+            # Per-rank latest snapshot. Stats from different ranks are
+            # interleaved; keep the freshest per `attentionDpRank`.
+            for snap in snaps:
+                kv_used = snap.get("kvCacheStats", {}).get("usedNumBlocks")
+                if kv_used is None:
+                    continue
+                rank = int(snap.get("attentionDpRank", 0))
+                self._latest_metrics[rank] = Metrics(kv_used_blocks=int(kv_used))
+
+    def _kv_events_poll_loop(self) -> None:
+        assert self._engine is not None
+        while not self._publish_stop.is_set():
+            try:
+                events = self._engine.llm.get_kv_cache_events(
+                    timeout=_KV_EVENTS_POLL_TIMEOUT_S
+                )
+            except Exception as e:
+                logger.debug("trtllm get_kv_cache_events raised: %s", e)
+                time.sleep(_IDLE_SLEEP_S)
+                continue
+            if not events:
+                time.sleep(_IDLE_SLEEP_S)
+                continue
+            for event in events:
+                try:
+                    self._dispatch_kv_event(event)
+                except Exception as e:
+                    if not self._warned_dispatch_failed:
+                        self._warned_dispatch_failed = True
+                        logger.exception(
+                            "Failed to dispatch KV event; suppressing further "
+                            "tracebacks (last error: %s)",
+                            e,
+                        )
+
+    def _dispatch_kv_event(self, event: dict[str, Any]) -> None:
+        """Forward stored / removed events to the right publisher. Other
+        event types are dropped — the Python publisher has no path for them."""
+        rank = int(event.get("attention_dp_rank", 0))
+        event_id = event.get("event_id")
+        if event_id is not None:
+            last = self._last_event_id_by_rank.get(rank)
+            if last is not None and event_id != last + 1:
+                logger.warning(
+                    "Non-consecutive engine event_id on rank=%d: expected %d, got %d",
+                    rank,
+                    last + 1,
+                    event_id,
+                )
+            self._last_event_id_by_rank[rank] = event_id
+        publisher = self._kv_publishers.get(rank)
+        if publisher is None:
+            if not self._warned_unknown_dp_rank:
+                self._warned_unknown_dp_rank = True
+                logger.warning(
+                    "Dropping KV event for unknown attention_dp_rank=%d "
+                    "(have %s); suppressing further warnings",
+                    rank,
+                    sorted(self._kv_publishers.keys()),
+                )
+            return
+        data = event.get("data") or {}
+        kind = data.get("type")
+        if kind == "stored":
+            parent_hash = _to_signed_i64(data.get("parent_hash"))
+            token_ids: list[int] = []
+            num_block_tokens: list[int] = []
+            block_hashes: list[int] = []
+            kv_block_size = self.kv_block_size
+            for block in data.get("blocks", []):
+                block_tokens = block.get("tokens") or []
+                token_num = len(block_tokens)
+                if token_num > kv_block_size:
+                    logger.error(
+                        "Block contains %d tokens > kv_block_size %d",
+                        token_num,
+                        kv_block_size,
+                    )
+                    return
+                block_hash = _to_signed_i64(block.get("block_hash"))
+                if block_hash is None:
+                    continue
+                if token_num < kv_block_size:
+                    self._partial_block_hashes_by_rank.setdefault(rank, set()).add(
+                        block_hash
+                    )
+                    break
+                num_block_tokens.append(token_num)
+                block_hashes.append(block_hash)
+                token_ids.extend(int(t["token_id"]) for t in block_tokens)
+            if not block_hashes:
+                return
+            publisher.publish_stored(
+                token_ids,
+                num_block_tokens,
+                block_hashes,
+                parent_hash,
+                lora_name=data.get("lora_name"),
+            )
+        elif kind == "removed":
+            partial = self._partial_block_hashes_by_rank.get(rank)
+            removed: list[int] = []
+            for raw in data.get("block_hashes", []):
+                block_hash = _to_signed_i64(raw)
+                if block_hash is None:
+                    continue
+                if partial is not None and block_hash in partial:
+                    partial.remove(block_hash)
+                    continue
+                removed.append(block_hash)
+            if removed:
+                publisher.publish_removed(removed)
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -240,6 +506,17 @@ class TrtllmLLMEngine(LLMEngine):
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
 
+        # Honour the router's DP rank decision; without it TRT-LLM picks
+        # its own rank and KV events land on the wrong publisher.
+        rank = validate_global_dp_rank(
+            forced_dp_rank(request), 0, self._attention_dp_size, "TRT-LLM"
+        )
+        scheduling_params = (
+            SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
+            if rank is not None
+            else None
+        )
+
         # Prefill returns one non-streaming chunk carrying the handoff —
         # matches the legacy disagg wire format.
         streaming = not is_prefill
@@ -248,6 +525,7 @@ class TrtllmLLMEngine(LLMEngine):
             sampling_params=sampling_params,
             streaming=streaming,
             disaggregated_params=disaggregated_params,
+            scheduling_params=scheduling_params,
         )
 
         request_id = context.id()
@@ -303,7 +581,7 @@ class TrtllmLLMEngine(LLMEngine):
 
     @staticmethod
     def _decode_prefill_handoff(
-        prefill_result: dict[str, Any]
+        prefill_result: dict[str, Any],
     ) -> LlmDisaggregatedParams:
         """Decode the prefill peer's handoff payload into a TRT-LLM
         `LlmDisaggregatedParams` ready to drive a generation_only call.
@@ -406,6 +684,16 @@ class TrtllmLLMEngine(LLMEngine):
         )
 
     async def cleanup(self) -> None:
+        # Stop the publisher threads BEFORE engine shutdown so they don't
+        # observe a half-torn-down RPC client. Each thread already loops on
+        # `_publish_stop`; the join bounds the wait at the poll timeout.
+        self._publish_stop.set()
+        for thread in (self._kv_events_thread, self._metrics_thread):
+            if thread is not None:
+                thread.join(timeout=_KV_EVENTS_POLL_TIMEOUT_S * 2 + 0.5)
+        self._kv_events_thread = None
+        self._metrics_thread = None
+        self._kv_publishers.clear()
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")

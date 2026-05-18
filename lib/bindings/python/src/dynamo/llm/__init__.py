@@ -4,6 +4,8 @@
 # flake8: noqa
 
 import logging
+from collections.abc import AsyncIterator
+from typing import Any, Protocol
 
 from dynamo._core import AicPerfConfig as AicPerfConfig
 from dynamo._core import EngineType
@@ -32,6 +34,7 @@ from dynamo._core import RadixTree as RadixTree
 from dynamo._core import ReasoningConfig as ReasoningConfig
 from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
+from dynamo._core import RoutingConstraints as RoutingConstraints
 from dynamo._core import SglangArgs as SglangArgs
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq
@@ -45,6 +48,12 @@ from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo._core import unregister_model as unregister_model
 
 from .exceptions import HttpError
+
+
+class RoutedEngine(Protocol):
+    async def generate(self, request: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        ...
+
 
 # Backward-compatible aliases
 fetch_llm = fetch_model

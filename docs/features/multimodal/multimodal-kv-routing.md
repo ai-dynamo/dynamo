@@ -65,6 +65,8 @@ Frontend (Rust + lightseek llm-multimodal + KV router) → Backend Workers
 
 1. The Rust frontend computes an `mm_hash` per image: `xxh3_64` of the decoded bytes for `data:` URIs (and for `http(s)://` when `media_decoder` is enabled on the model), otherwise `xxh3_64` of the full URL string. Two callers will share an `mm_hash` only when they send byte-identical URLs.
 2. The image-placeholder token id is resolved by delegating to lightseek's per-model `ModelProcessorSpec` (one spec per supported VLM family — Qwen3-VL, Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5). Each spec reads the appropriate `config.json` field for its model family (`image_token_id`, `image_token_index`, or `media_placeholder_token_id`) and falls back to probing the tokenizer's vocab when only the placeholder string is registered. Models the registry doesn't recognise fall back to text-prefix-only routing.
+
+> **Note:** Qwen3.5 / Qwen3.6 image token expansion is not yet supported in the Rust frontend for MM routing, so KV routing will only consider the text inputs + unexpanded image token placeholders. Support will come in a follow-up release.
 3. Per-image `(W, H)` is read from a 64KB `Range`-bounded header fetch (or from in-memory bytes for `data:` URIs); the lightseek `llm-multimodal` crate computes the per-image expanded token count.
 4. The single placeholder token is expanded to N copies in `routing_token_ids` (a router-only view); the worker still sees one placeholder per image in `token_ids`.
 5. Per-block MM metadata (`block_mm_infos`) is built from the expanded view; the KV router evaluates overlap across workers including image-bearing blocks.

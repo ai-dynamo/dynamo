@@ -611,28 +611,27 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		gmsServer := findContainer(podSpec, gms.ServerContainerName)
-		require.NotNil(t, gmsServer)
+		require.NotNil(t, gmsServer, "gms-server is a native sidecar (init+restartPolicy=Always)")
 		loader := findContainer(podSpec, GMSLoaderContainer)
-		require.NotNil(t, loader)
-		serverCount := 0
-		loaderCount := 0
+		require.NotNil(t, loader, "gms-loader is a regular sidecar")
+		serverInitCount := 0
 		for _, container := range podSpec.InitContainers {
-			switch container.Name {
-			case gms.ServerContainerName:
-				serverCount++
-			case GMSLoaderContainer:
+			if container.Name == gms.ServerContainerName {
+				serverInitCount++
+			}
+		}
+		loaderCount := 0
+		for _, container := range podSpec.Containers {
+			if container.Name == GMSLoaderContainer {
 				loaderCount++
 			}
 		}
-		assert.Equal(t, 1, serverCount)
-		assert.Equal(t, 1, loaderCount)
+		assert.Equal(t, 1, serverInitCount, "injection is idempotent for server")
+		assert.Equal(t, 1, loaderCount, "injection is idempotent for loader")
 
-		// Restore: server and loader are init sidecars (restartPolicy=Always)
-		assert.NotNil(t, gmsServer.RestartPolicy, "restore gms-server should have RestartPolicy")
 		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
-		assert.Nil(t, gmsServer.StartupProbe, "restore gms-server should not have StartupProbe")
-		assert.NotNil(t, loader.RestartPolicy, "restore gms-loader should have RestartPolicy")
-		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *loader.RestartPolicy)
+		assert.Nil(t, gmsServer.StartupProbe, "no StartupProbe — clients drive readiness via connect-retry")
+		assert.Nil(t, loader.RestartPolicy, "loader is a regular sidecar; pod RestartPolicy applies")
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
