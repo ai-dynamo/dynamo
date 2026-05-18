@@ -1530,15 +1530,14 @@ mod tests {
     /// transport → `Ingress<ManyIn<T>, ManyOut<U>>::handle_payload` →
     /// engine path end to end.
     ///
-    /// `#[ignore]` because the test stands up a full DistributedRuntime with
-    /// a real request-plane TCP server, and under parallel test execution
-    /// the OS resource pressure (concurrent DRT setups, TCP binds, in-memory
-    /// KV churn) intermittently produces a "Connection refused" on the
-    /// first dispatch. Passes deterministically in isolation
-    /// (`cargo test -p dynamo-runtime bidirectional_end_to_end_echo`) and
-    /// under serial execution (`cargo test -- --test-threads=1`).
+    /// `#[ignore]` because `GLOBAL_TCP_SERVER`'s accept loop is `tokio::spawn`'d
+    /// on whichever `#[tokio::test]` runtime first lazy-initializes it, so once
+    /// that runtime drops the listener is gone but the `OnceCell` keeps handing
+    /// out the dead `Arc` to later tests. Run in isolation
+    /// (`cargo test -p dynamo-runtime bidirectional_end_to_end_echo -- --ignored`)
+    /// until the runtime-crate fix lands.
     #[tokio::test]
-    #[ignore = "stands up full DRT; flakes under parallel cargo test load"]
+    #[ignore = "GLOBAL_TCP_SERVER accept loop dies with the first lazy-init runtime; later tests see ECONNREFUSED. Run in isolation."]
     async fn bidirectional_end_to_end_echo() {
         use crate::pipeline::network::Ingress;
 
