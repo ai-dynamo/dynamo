@@ -1291,7 +1291,9 @@ mod tests {
         // the vanished-instance fallback path this test exercises.
         let stale_id = 99999;
         client.override_instance_avail(vec![stale_id]);
-        client.instance_free.store(std::sync::Arc::new(vec![stale_id]));
+        client
+            .instance_free
+            .store(std::sync::Arc::new(vec![stale_id]));
 
         let request = SingleIn::new(42u64);
         let result = router.generate(request).await;
