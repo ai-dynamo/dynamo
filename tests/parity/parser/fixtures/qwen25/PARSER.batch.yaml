@@ -101,14 +101,14 @@ cases:
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name":
           "get_weather", "arguments": {"location": "LA"}}</tool_call>'
-  PARSER.batch.11:
-    description: Separator-character case — n/a for this family's syntax
+  PARSER.batch.30:
+    description: Separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. qwen25 uses a <tool_call> envelope around a JSON object rather than delimiter-splitting multiple calls with an in-band separator, so generic JSON string escaping remains covered by PARSER.batch.7.b.
-  PARSER.batch.12:
-    description: Multi-call separator-character case — n/a for this family's syntax
+      This case is not applicable to qwen25 because it wraps each JSON object in <tool_call>, not a delimiter-separated call body.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. qwen25 uses a <tool_call> envelope around a JSON object rather than delimiter-splitting multiple calls with an in-band separator, so generic JSON string escaping remains covered by PARSER.batch.7.b. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+      This case is not applicable to qwen25 because it wraps each JSON object in <tool_call>, not a delimiter-separated call body.
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
@@ -133,3 +133,7 @@ cases:
         calls: []
         normal_text: '<tool_call>{"name": "unknown_tool", "arguments": {"location": "NYC"}}</tool_call>'
         reason: SGLang treats the unknown qwen25 tool call as ordinary content rather than forwarding it by default.
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to qwen25 because vLLM has no peer parser and SGLang treats this family as ordinary content.

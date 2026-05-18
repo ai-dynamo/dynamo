@@ -110,14 +110,14 @@ cases:
             location: LA
           name: get_weather
         normal_text: ''
-  PARSER.batch.11:
-    description: Separator-character case — n/a for this family's syntax
+  PARSER.batch.30:
+    description: Separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. harmony uses channel/recipient/message envelope tokens plus a JSON payload rather than delimiter-splitting multiple calls with an in-band separator, so this separator-state regression has no separate grammar surface here.
-  PARSER.batch.12:
-    description: Multi-call separator-character case — n/a for this family's syntax
+      This case is not applicable to harmony because it uses channel/recipient/message envelope tokens, not delimiter-separated call bodies.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. harmony uses channel/recipient/message envelope tokens plus a JSON payload rather than delimiter-splitting multiple calls with an in-band separator, so this separator-state regression has no separate grammar surface here. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+      This case is not applicable to harmony because it uses channel/recipient/message envelope tokens, not delimiter-separated call bodies.
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
@@ -146,3 +146,7 @@ cases:
         calls: []
         normal_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}<|call|>
         reason: SGLang treats an unknown harmony recipient as ordinary content rather than forwarding a tool call by default.
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to harmony because there is no peer mixed known/unknown Harmony parser case to align against.

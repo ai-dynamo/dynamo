@@ -115,14 +115,14 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
-  PARSER.batch.11:
-    description: Separator-character case — n/a for this family's syntax
+  PARSER.batch.30:
+    description: Separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. qwen3_coder uses XML-ish function/parameter tags rather than delimiter-splitting call bodies, so generic string-value coverage remains in PARSER.batch.7.b.
-  PARSER.batch.12:
-    description: Multi-call separator-character case — n/a for this family's syntax
+      This case is not applicable to qwen3_coder because it uses XML-ish function/parameter tags, not delimiter-separated call bodies.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. qwen3_coder uses XML-ish function/parameter tags rather than delimiter-splitting call bodies, so generic string-value coverage remains in PARSER.batch.7.b. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+      This case is not applicable to qwen3_coder because it uses XML-ish function/parameter tags, not delimiter-separated call bodies.
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
@@ -158,3 +158,7 @@ cases:
           arguments:
             location: NYC
         normal_text: ''
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to qwen3_coder because there is no peer mixed known/unknown Qwen 3 Coder parser case to align against.

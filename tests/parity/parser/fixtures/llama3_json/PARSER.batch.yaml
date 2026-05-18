@@ -95,8 +95,8 @@ cases:
         normal_text: ''
       vllm: *id006
       sglang: *id006
-  PARSER.batch.11.a:
-    description: Call separator character inside one argument string value
+  PARSER.batch.30.a:
+    description: Llama JSON call separator `;` inside one argument string value
     ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT a; SELECT b"}}'
     tools:
@@ -125,8 +125,8 @@ cases:
           arguments:
             sql: SELECT a; SELECT b
         normal_text: ''
-  PARSER.batch.11.b:
-    description: Structural delimiter inside one argument string value
+  PARSER.batch.30.b:
+    description: JSON structural delimiters `}` and `]` inside one argument string value
     ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}}'
     tools:
@@ -155,8 +155,8 @@ cases:
           arguments:
             sql: SELECT value WHERE note has brace } and bracket ]
         normal_text: ''
-  PARSER.batch.11.c:
-    description: Tool-call marker text inside one argument string value
+  PARSER.batch.30.c:
+    description: Start marker `<|python_tag|>` text inside one argument string value
     ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "literal <|python_tag marker|>{name:x} stays text"}}'
     tools:
@@ -185,8 +185,8 @@ cases:
           arguments:
             sql: literal <|python_tag marker|>{name:x} stays text
         normal_text: ''
-  PARSER.batch.12.a:
-    description: Multi-call response with a separator character inside one argument string value
+  PARSER.batch.31.a:
+    description: Multi-call Llama JSON response with call separator `;` inside the first argument string
     ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT a; SELECT b"}};{"name": "get_time", "arguments":
       {"timezone": "EST"}}'
@@ -231,7 +231,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-  PARSER.batch.12.b:
+  PARSER.batch.31.b:
     description: Multi-call response with structural delimiters inside one argument string value
     ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}};{"name":

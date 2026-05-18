@@ -94,8 +94,8 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
-  PARSER.batch.11.a:
-    description: Call separator character inside one argument string value
+  PARSER.batch.30.a:
+    description: Pythonic call separator `,` inside one argument string value
     ref: dynamo
     model_text: '[run_query(sql="SELECT a, SELECT b")]'
     tools:
@@ -124,8 +124,8 @@ cases:
           arguments:
             sql: SELECT a, SELECT b
         normal_text: ''
-  PARSER.batch.11.b:
-    description: Structural delimiter inside one argument string value
+  PARSER.batch.30.b:
+    description: Pythonic/list structural delimiters `}` and `]` inside one argument string value
     ref: dynamo
     model_text: '[run_query(sql="SELECT value WHERE note has brace } and bracket ]")]'
     tools:
@@ -154,8 +154,8 @@ cases:
           arguments:
             sql: SELECT value WHERE note has brace } and bracket ]
         normal_text: ''
-  PARSER.batch.11.c:
-    description: Tool-call marker text inside one argument string value
+  PARSER.batch.30.c:
+    description: Tool-call marker-looking `[get_time ...]` text inside one argument string value
     ref: dynamo
     model_text: '[run_query(sql="literal [get_time marker] stays text")]'
     tools:
@@ -184,8 +184,8 @@ cases:
           arguments:
             sql: literal [get_time marker] stays text
         normal_text: ''
-  PARSER.batch.12.a:
-    description: Multi-call response with a separator character inside one argument string value
+  PARSER.batch.31.a:
+    description: Multi-call Pythonic list with call separator `,` inside the first argument string
     ref: dynamo
     model_text: '[run_query(sql="SELECT a, SELECT b"), get_time(timezone="EST")]'
     tools:
@@ -229,7 +229,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-  PARSER.batch.12.b:
+  PARSER.batch.31.b:
     description: Multi-call response with structural delimiters inside one argument string value
     ref: dynamo
     model_text: '[run_query(sql="SELECT value WHERE note has brace } and bracket ]"), get_time(timezone="EST")]'

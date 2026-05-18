@@ -54,9 +54,9 @@ fed the full model output as a single string.
 - **`PARSER.batch.8`** Normal text interleaved with tool calls.
 - **`PARSER.batch.9`** Empty content / empty `tool_calls` array / null response.
 - **`PARSER.batch.10`** Duplicate tool calls (same name twice, possibly with same args).
-- **`PARSER.batch.11`** Separator characters inside argument string values.
-- **`PARSER.batch.12`** Multiple calls where one argument contains a separator character.
 - **`PARSER.batch.13`** Unknown / unregistered tool name (valid grammar, name absent from supplied `tools`).
+- **`PARSER.batch.30`** Separator characters inside argument string values.
+- **`PARSER.batch.31`** Multiple calls where one argument contains a separator character.
 
 ### Parser, stream mode
 
@@ -375,59 +375,6 @@ the same arguments.
   distinct IDs. (The runtime / client is responsible for deciding
   whether duplicate invocation is intended.)
 
-## `PARSER.batch.11` — Separator characters inside argument strings
-
-A single call contains a grammar-level separator character inside an
-argument string value. Examples: Llama JSON uses semicolon-separated
-calls while the SQL argument contains `SELECT a; SELECT b`; JSON-array
-families use commas between calls while the SQL argument contains
-`SELECT a, SELECT b`; Gemma4 uses comma/colon/brace delimiters inside
-its custom argument object.
-
-- Applies to delimiter-separated formats.
-- The parser must not split inside a JSON string.
-- Related existing tests: `PARSER.batch.7.b` already covers escaped /
-  special string values, but not a grammar separator embedded in a
-  string. SGLang's `JsonArrayParser` tests cover comma-separator state
-  and `}` inside string values; Dynamo's `base_json_parser` documents
-  the exact `<|python_tag|>` semicolon hazard. Keep this as a separate
-  delimiter-state regression rather than folding it into generic
-  string escaping.
-
-### Sub-cases
-
-- **`PARSER.batch.11.a`** Call separator character inside a single
-  argument string value, such as semicolon or comma.
-- **`PARSER.batch.11.b`** Structural delimiter inside a string value,
-  such as braces or brackets that would otherwise affect wrapper
-  depth tracking.
-- **`PARSER.batch.11.c`** Tool-call marker / format sentinel text
-  inside a string value. Tests marker detection state, not generic
-  Unicode or escaping.
-
-## `PARSER.batch.12` — Separator characters inside one call of a multi-call response
-
-Two or more calls are present, and one call's argument string contains a
-separator-looking character before the real call separator.
-
-- Applies to delimiter-separated formats.
-- Extends `PARSER.batch.11` to the parallel-call path so the parser has to
-  distinguish in-string separators from inter-call separators while continuing
-  to parse later calls.
-- Related existing tests: `PARSER.batch.2.a` covers real call
-  separators, but not a separator-looking character inside the first
-  call's argument. This case is the combined `2.a + 11` state-machine
-  check.
-
-### Sub-cases
-
-- **`PARSER.batch.12.a`** Two or more calls, with a call-separator
-  character inside one argument string before the real inter-call
-  separator.
-- **`PARSER.batch.12.b`** Two or more calls, with nested structures or
-  structural delimiters inside one call before later calls. Streaming
-  chunk-boundary versions remain `PARSER.stream.2` / `.3` co-tags.
-
 ## `PARSER.batch.13` — Unknown / unregistered tool name
 
 The model emits a syntactically valid tool call, but the function name is
@@ -457,6 +404,59 @@ not present in the request's supplied `tools` list.
 - **`PARSER.batch.13.d`** Unknown native index or registry index out
   of range for grammars that reference tools by ordinal instead of
   name.
+
+## `PARSER.batch.30` — Separator characters inside argument strings
+
+A single call contains a grammar-level separator character inside an
+argument string value. Examples: Llama JSON uses semicolon-separated
+calls while the SQL argument contains `SELECT a; SELECT b`; JSON-array
+families use commas between calls while the SQL argument contains
+`SELECT a, SELECT b`; Gemma4 uses comma/colon/brace delimiters inside
+its custom argument object.
+
+- Applies to delimiter-separated formats.
+- The parser must not split inside a JSON string.
+- Related existing tests: `PARSER.batch.7.b` already covers escaped /
+  special string values, but not a grammar separator embedded in a
+  string. SGLang's `JsonArrayParser` tests cover comma-separator state
+  and `}` inside string values; Dynamo's `base_json_parser` documents
+  the exact `<|python_tag|>` semicolon hazard. Keep this as a separate
+  delimiter-state regression rather than folding it into generic
+  string escaping.
+
+### Sub-cases
+
+- **`PARSER.batch.30.a`** Call separator character inside a single
+  argument string value, such as semicolon or comma.
+- **`PARSER.batch.30.b`** Structural delimiter inside a string value,
+  such as braces or brackets that would otherwise affect wrapper
+  depth tracking.
+- **`PARSER.batch.30.c`** Tool-call marker / format sentinel text
+  inside a string value. Tests marker detection state, not generic
+  Unicode or escaping.
+
+## `PARSER.batch.31` — Separator characters inside one call of a multi-call response
+
+Two or more calls are present, and one call's argument string contains a
+separator-looking character before the real call separator.
+
+- Applies to delimiter-separated formats.
+- Extends `PARSER.batch.30` to the parallel-call path so the parser has to
+  distinguish in-string separators from inter-call separators while continuing
+  to parse later calls.
+- Related existing tests: `PARSER.batch.2.a` covers real call
+  separators, but not a separator-looking character inside the first
+  call's argument. This case is the combined `2.a + 30` state-machine
+  check.
+
+### Sub-cases
+
+- **`PARSER.batch.31.a`** Two or more calls, with a call-separator
+  character inside one argument string before the real inter-call
+  separator.
+- **`PARSER.batch.31.b`** Two or more calls, with nested structures or
+  structural delimiters inside one call before later calls. Streaming
+  chunk-boundary versions remain `PARSER.stream.2` / `.3` co-tags.
 
 ---
 

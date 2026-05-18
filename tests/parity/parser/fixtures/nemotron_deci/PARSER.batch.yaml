@@ -27,6 +27,10 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to nemotron_deci because neither vLLM nor SGLang has a peer parser for this family.
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -97,14 +101,14 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
-  PARSER.batch.11:
-    description: Separator-character case — n/a for this family's syntax
+  PARSER.batch.30:
+    description: Separator-character case not applicable
     reason: |-
-      PARSER.batch.11 would only exercise Dynamo-local JSON-array parsing here because neither vLLM nor SGLang has a nemotron_deci peer parser. Until a peer exists, this cross-implementation matrix intentionally treats the separator-state case as n/a for this family.
-  PARSER.batch.12:
-    description: Multi-call separator-character case — n/a for this family's syntax
+      This case is not applicable to nemotron_deci because neither vLLM nor SGLang has a peer parser for this family.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
     reason: |-
-      PARSER.batch.11 would only exercise Dynamo-local JSON-array parsing here because neither vLLM nor SGLang has a nemotron_deci peer parser. Until a peer exists, this cross-implementation matrix intentionally treats the separator-state case as n/a for this family. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+      This case is not applicable to nemotron_deci because neither vLLM nor SGLang has a peer parser for this family.
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo

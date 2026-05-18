@@ -101,8 +101,8 @@ cases:
         calls: []
         normal_text: ''
         reason: "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits"
-  PARSER.batch.11.a:
-    description: Call separator character inside one argument string value
+  PARSER.batch.30.a:
+    description: JSON-array call separator `,` inside one argument string value
     ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_function_call_parser.py#L2736
     model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}][/TOOL_CALLS]'
     tools:
@@ -129,8 +129,8 @@ cases:
         calls: []
         normal_text: ''
         reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
-  PARSER.batch.11.b:
-    description: Structural delimiter inside one argument string value
+  PARSER.batch.30.b:
+    description: JSON structural delimiters `}` and `]` inside one argument string value
     ref: dynamo
     model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}}][/TOOL_CALLS]'
     tools:
@@ -156,8 +156,8 @@ cases:
       sglang:
         calls: []
         normal_text: ''
-  PARSER.batch.11.c:
-    description: Tool-call marker text inside one argument string value
+  PARSER.batch.30.c:
+    description: Mistral wrapper marker `[TOOL_CALLS]...[/TOOL_CALLS]` text inside one argument string value
     ref: dynamo
     model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "literal [TOOL_CALLS marker][][/TOOL_CALLS marker] stays text"}}][/TOOL_CALLS]'
     tools:
@@ -183,8 +183,8 @@ cases:
       sglang:
         calls: []
         normal_text: ''
-  PARSER.batch.12.a:
-    description: Multi-call response with a separator character inside one argument string value
+  PARSER.batch.31.a:
+    description: Multi-call JSON array with call separator `,` inside the first argument string
     ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_function_call_parser.py#L2736
     model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}, {"name": "get_time", "arguments":
       {"timezone": "EST"}}][/TOOL_CALLS]'
@@ -224,7 +224,7 @@ cases:
         calls: []
         normal_text: ''
         reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits
-  PARSER.batch.12.b:
+  PARSER.batch.31.b:
     description: Multi-call response with structural delimiters inside one argument string value
     ref: dynamo
     model_text: '[TOOL_CALLS][{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}},

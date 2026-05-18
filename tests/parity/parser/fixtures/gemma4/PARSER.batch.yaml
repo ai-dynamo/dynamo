@@ -94,8 +94,8 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
-  PARSER.batch.11.a:
-    description: Call separator character inside one argument string value
+  PARSER.batch.30.a:
+    description: Call/body delimiters `,`, `:`, and `{}` inside one argument string value
     ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>SELECT a,b:and{brace}<|"|>}<tool_call|>
     tools:
@@ -124,8 +124,8 @@ cases:
           arguments:
             sql: SELECT a,b:and{brace}
         normal_text: ''
-  PARSER.batch.11.b:
-    description: Structural delimiter inside one argument string value
+  PARSER.batch.30.b:
+    description: Structural delimiters `}` and `]` inside one argument string value
     ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>SELECT value WHERE note has brace } and bracket ]<|"|>}<tool_call|>
     tools:
@@ -154,8 +154,8 @@ cases:
           arguments:
             sql: SELECT value WHERE note has brace } and bracket ]
         normal_text: ''
-  PARSER.batch.11.c:
-    description: Tool-call marker text inside one argument string value
+  PARSER.batch.30.c:
+    description: Tool-call marker `<|tool_call>` text inside one argument string value
     ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>literal <|tool_call marker> call:get_time{} stays text<|"|>}<tool_call|>
     tools:
@@ -184,8 +184,8 @@ cases:
           arguments:
             sql: literal <|tool_call marker> call:get_time{} stays text
         normal_text: ''
-  PARSER.batch.12.a:
-    description: Multi-call response with a separator character inside one argument string value
+  PARSER.batch.31.a:
+    description: Multi-call response with Gemma delimiters `,`, `:`, and `{}` inside the first argument string
     ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>SELECT a,b:and{brace}<|"|>}<tool_call|><|tool_call>call:get_time{timezone:<|"|>EST<|"|>}<tool_call|>
     tools:
@@ -229,7 +229,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-  PARSER.batch.12.b:
+  PARSER.batch.31.b:
     description: Multi-call response with structural delimiters inside one argument string value
     ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>SELECT value WHERE note has brace } and bracket ]<|"|>}<tool_call|><|tool_call>call:get_time{timezone:<|"|>EST<|"|>}<tool_call|>

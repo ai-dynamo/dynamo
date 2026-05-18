@@ -151,11 +151,11 @@ cases:
             location: NYC
         normal_text: ''
         reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
-  PARSER.batch.11:
-    description: Separator-character case — n/a for this family's syntax
+  PARSER.batch.30:
+    description: Separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. hermes uses <tool_call> envelopes around JSON objects rather than delimiter-splitting multiple calls with an in-band separator, so generic JSON string escaping remains covered by PARSER.batch.7.b.
-  PARSER.batch.12:
-    description: Multi-call separator-character case — n/a for this family's syntax
+      This case is not applicable to hermes because it wraps each JSON object in <tool_call>, not a delimiter-separated call body.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. hermes uses <tool_call> envelopes around JSON objects rather than delimiter-splitting multiple calls with an in-band separator, so generic JSON string escaping remains covered by PARSER.batch.7.b. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+      This case is not applicable to hermes because it wraps each JSON object in <tool_call>, not a delimiter-separated call body.

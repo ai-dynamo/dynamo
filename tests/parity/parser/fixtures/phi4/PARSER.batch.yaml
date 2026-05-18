@@ -96,8 +96,8 @@ cases:
       vllm: *id005
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.11.a:
-    description: Call separator character inside one argument string value
+  PARSER.batch.30.a:
+    description: JSON-array call separator `,` inside one argument string value
     model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}]'
     tools:
     - name: run_query
@@ -121,8 +121,8 @@ cases:
         normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.11.b:
-    description: Structural delimiter inside one argument string value
+  PARSER.batch.30.b:
+    description: JSON structural delimiters `}` and `]` inside one argument string value
     ref: dynamo
     model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}}]'
     tools:
@@ -144,8 +144,8 @@ cases:
         calls: []
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.11.c:
-    description: Tool-call marker text inside one argument string value
+  PARSER.batch.30.c:
+    description: Phi-4 marker text `functools` and `[]` inside one argument string value
     ref: dynamo
     model_text: 'functools[{"name": "run_query", "arguments": {"sql": "literal functools marker[] stays text"}}]'
     tools:
@@ -167,8 +167,8 @@ cases:
         calls: []
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.12.a:
-    description: Multi-call response with a separator character inside one argument string value
+  PARSER.batch.31.a:
+    description: Multi-call JSON array with call separator `,` inside the first argument string
     model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}, {"name": "get_time", "arguments":
       {"timezone": "EST"}}]'
     tools:
@@ -205,7 +205,7 @@ cases:
         normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.12.b:
+  PARSER.batch.31.b:
     description: Multi-call response with structural delimiters inside one argument string value
     ref: dynamo
     model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}},

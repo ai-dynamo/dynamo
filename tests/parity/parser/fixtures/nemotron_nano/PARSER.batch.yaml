@@ -34,6 +34,10 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_nano'
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to nemotron_nano because neither vLLM nor SGLang has a peer parser for this family.
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -117,14 +121,14 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_nano'
-  PARSER.batch.11:
-    description: Separator-character case — n/a for this family's syntax
+  PARSER.batch.30:
+    description: Separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. nemotron_nano is a qwen3_coder-style alias with XML-ish function/parameter tags and no vLLM/SGLang peer parser, so this separator-state parity case is n/a for this family.
-  PARSER.batch.12:
-    description: Multi-call separator-character case — n/a for this family's syntax
+      This case is not applicable to nemotron_nano because it is a qwen3_coder-style XML parser with no vLLM/SGLang peer parser.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. nemotron_nano is a qwen3_coder-style alias with XML-ish function/parameter tags and no vLLM/SGLang peer parser, so this separator-state parity case is n/a for this family. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+      This case is not applicable to nemotron_nano because it is a qwen3_coder-style XML parser with no vLLM/SGLang peer parser.
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
