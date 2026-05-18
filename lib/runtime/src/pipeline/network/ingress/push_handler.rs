@@ -206,14 +206,15 @@ where
                 let control_msg: RequestControlMessage = match serde_json::from_slice(&header) {
                     Ok(cm) => cm,
                     Err(err) => {
+                        let json_str = String::from_utf8_lossy(&header);
                         if let Some(m) = self.metrics() {
                             m.error_counter
                                 .with_label_values(&[work_handler::error_types::DESERIALIZATION])
                                 .inc();
                         }
                         return Err(PipelineError::DeserializationError(format!(
-                            "Failed deserializing to RequestControlMessage. err={err}, header_len={}",
-                            header.len()
+                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}, header_len={}",
+                            header.len(),
                         )));
                     }
                 };
