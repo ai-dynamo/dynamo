@@ -61,15 +61,24 @@ import zoneinfo
 from pathlib import Path
 
 import yaml
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = REPO_ROOT / "tests/parity/parser/fixtures"
 PARSER_CASES_MD = REPO_ROOT / "lib/parsers/PARSER_CASES.md"
 PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
 SCRIPT_DIR = Path(__file__).resolve().parent
-HTML_TEMPLATE = SCRIPT_DIR / "parity_chart.html.template"
 
 RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
+
+
+def _make_jinja_env() -> Environment:
+    return Environment(
+        loader=FileSystemLoader(SCRIPT_DIR),
+        trim_blocks=False,
+        lstrip_blocks=True,
+        undefined=StrictUndefined,
+    )
 
 
 def _commit_sha() -> str | None:
@@ -333,6 +342,11 @@ SPLIT_PARENT_SUBCASES = {
     "13": ("13.a",),
 }
 
+_SUB_CASE_GROUP_KEY_BY_LABEL = {
+    label: re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+    for label, _subs in SUB_CASE_GROUPS
+}
+
 _SUB_CASE_DISPLAY_ORDER = {
     sub: (group_idx, sub_idx)
     for group_idx, (_label, subs) in enumerate(SUB_CASE_GROUPS)
@@ -346,6 +360,12 @@ _SUB_CASE_GROUP_INDEX_BY_SUB = {
 }
 
 _SUB_CASE_GROUP_BY_SUB = {sub: label for label, subs in SUB_CASE_GROUPS for sub in subs}
+
+_SUB_CASE_GROUP_KEY_BY_SUB = {
+    sub: _SUB_CASE_GROUP_KEY_BY_LABEL[label]
+    for label, subs in SUB_CASE_GROUPS
+    for sub in subs
+}
 
 
 def _natural_sub_sort_key(sub: str) -> tuple[int, str]:
@@ -367,6 +387,10 @@ def _sub_sort_key(sub: str) -> tuple[int, int, int, str]:
 def _subcase_band_class(sub: str) -> str:
     group_idx = _SUB_CASE_GROUP_INDEX_BY_SUB.get(sub, len(SUB_CASE_GROUPS))
     return f"case-band-{group_idx % 2}"
+
+
+def _subcase_group_key(sub: str) -> str:
+    return _SUB_CASE_GROUP_KEY_BY_SUB.get(sub, "other")
 
 
 def _discover_sub_cases(cases: dict) -> list[str]:
@@ -626,6 +650,29 @@ def render_markdown(
 
 
 _IMPL_DISPLAY = {"dynamo": "Dynamo", "vllm": "vLLM", "sglang": "SGLang"}
+_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+_TRAILING_URL_PUNCTUATION = ".,;:)"
+
+
+def _linkify_text_html(text: str) -> str:
+    """Escape plain text and turn embedded URLs into anchors."""
+    parts: list[str] = []
+    last = 0
+    for match in _URL_RE.finditer(text):
+        raw_url = match.group(0)
+        url = raw_url.rstrip(_TRAILING_URL_PUNCTUATION)
+        if not url:
+            continue
+        parts.append(html_lib.escape(text[last : match.start()]))
+        href = html_lib.escape(url, quote=True)
+        parts.append(
+            f'<a href="{href}" target="_blank" rel="noopener noreferrer">'
+            f"{html_lib.escape(url)}</a>"
+        )
+        parts.append(html_lib.escape(raw_url[len(url) :]))
+        last = match.end()
+    parts.append(html_lib.escape(text[last:]))
+    return "".join(parts)
 
 
 def _format_output_block_html(block, family: str | None = None) -> str:
@@ -875,7 +922,7 @@ def _build_tooltip_html(case: dict, dyn) -> str:
     ref = case.get("ref")
     if isinstance(ref, str) and ref:
         parts.append('<div class="ttip-section">Ref:</div>')
-        parts.append(f'<pre class="ttip-pre">{html_lib.escape(ref)}</pre>')
+        parts.append(f'<pre class="ttip-pre">{_linkify_text_html(ref)}</pre>')
 
     model_text = case.get("model_text")
     if isinstance(model_text, str) and model_text:
@@ -918,7 +965,7 @@ def _build_tooltip_html(case: dict, dyn) -> str:
     reasons = _tooltip_for(case, dyn) if isinstance(dyn, dict) else ""
     if reasons:
         parts.append('<div class="ttip-section">Divergence reason:</div>')
-        parts.append(f'<pre class="ttip-pre">{html_lib.escape(reasons)}</pre>')
+        parts.append(f'<pre class="ttip-pre">{_linkify_text_html(reasons)}</pre>')
 
     dyn_leak = (
         dyn.get("reason")
@@ -927,7 +974,7 @@ def _build_tooltip_html(case: dict, dyn) -> str:
     )
     if dyn_leak:
         parts.append('<div class="ttip-section">↯ Dynamo tool call leaks:</div>')
-        parts.append(f'<pre class="ttip-pre">{html_lib.escape(str(dyn_leak))}</pre>')
+        parts.append(f'<pre class="ttip-pre">{_linkify_text_html(str(dyn_leak))}</pre>')
 
     parts.append("</div>")
     return "".join(parts)
@@ -978,10 +1025,10 @@ def _cell_class(text: str) -> str:
         return "na"
     if "!" in text:
         return "err"
-    if "?" in text:
-        return "research"
     if "↯" in text:
         return "leak"
+    if "?" in text:
+        return "research"
     if text == "=":
         return "ok"
     # V / S / VS with a documented `reason:` — accepted divergence, but
@@ -1001,7 +1048,7 @@ def _build_na_tooltip_html(case: dict) -> str:
     if head:
         parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
     parts.append('<div class="ttip-section">Why n/a:</div>')
-    parts.append(f'<pre class="ttip-pre">{html_lib.escape(str(reason))}</pre>')
+    parts.append(f'<pre class="ttip-pre">{_linkify_text_html(str(reason))}</pre>')
     parts.append("</div>")
     return "".join(parts)
 
@@ -1033,9 +1080,11 @@ def render_cell_html(case: dict | None, family: str, sub: str) -> str:
     text = cell_for(case)
     cls = _cell_class(text)
     band_cls = _subcase_band_class(sub)
+    col_group = html_lib.escape(_subcase_group_key(sub))
+    td_open = f'<td class="cell {cls} {band_cls}" data-col-hide-group="{col_group}">'
     if case is None:
         ttip = _build_missing_tooltip_html(family, sub)
-        return f'<td class="cell {cls} {band_cls}">{text}{ttip}</td>'
+        return f"{td_open}{text}{ttip}</td>"
 
     dyn = case.get("expected", {}).get("dynamo")
     if not isinstance(dyn, dict):
@@ -1043,20 +1092,18 @@ def render_cell_html(case: dict | None, family: str, sub: str) -> str:
         fp = case.get("__fixture_path", "")
         ttip = _build_na_tooltip_html(case)
         if not fp:
-            return f'<td class="cell {cls} {band_cls}">{text}{ttip}</td>'
+            return f"{td_open}{text}{ttip}</td>"
         href = html_lib.escape(fp)
-        return (
-            f'<td class="cell {cls} {band_cls}"><a href="{href}">{text}</a>{ttip}</td>'
-        )
+        return f'{td_open}<a href="{href}">{text}</a>{ttip}</td>'
 
     fp = case.get("__fixture_path", "")
     # Case id + description live in the rich CSS tooltip head — don't also
     # set `title=` on the link, or browsers stack a native tooltip on top.
     ttip = _build_tooltip_html(case, dyn)
     if not fp:
-        return f'<td class="cell {cls} {band_cls}">{text}{ttip}</td>'
+        return f"{td_open}{text}{ttip}</td>"
     href = html_lib.escape(fp)
-    return f'<td class="cell {cls} {band_cls}"><a href="{href}">{text}</a>{ttip}</td>'
+    return f'{td_open}<a href="{href}">{text}</a>{ttip}</td>'
 
 
 def _parser_inheritance_tooltip_html(
@@ -1216,8 +1263,14 @@ def _parser_cell_html(
     elif ref is not None:
         href = f"../../../lib/parsers/src/tool_calling/{ref[0]}"
     else:
-        return f'<td class="parser">{label}{base_suffix}{ttip}</td>'
-    return f'<td class="parser"><a href="{href}">{label}</a>{base_suffix}{ttip}</td>'
+        return (
+            f'<td class="parser" data-col-hide-group="parser">'
+            f"{label}{base_suffix}{ttip}</td>"
+        )
+    return (
+        f'<td class="parser" data-col-hide-group="parser">'
+        f'<a href="{href}">{label}</a>{base_suffix}{ttip}</td>'
+    )
 
 
 def render_row_html(
@@ -1230,14 +1283,19 @@ def render_row_html(
     no_sglang: set[str],
     inheritance: dict[str, dict],
 ) -> str:
-    cells = "".join(
-        render_cell_html(cases.get((family, sub)), family, sub) for sub in sub_cases
-    )
-    return (
-        f'<tr><td class="model">{html_lib.escape(model)}</td>'
-        f"{_parser_cell_html(family, refs, no_vllm, no_sglang, inheritance)}"
-        f"{cells}</tr>"
-    )
+    cells = [
+        f'<tr><td class="model" data-col-hide-group="model">{html_lib.escape(model)}</td>',
+        _column_placeholder_html("model"),
+        _parser_cell_html(family, refs, no_vllm, no_sglang, inheritance),
+        _column_placeholder_html("parser"),
+    ]
+    for run in _subcase_runs(sub_cases):
+        cells.extend(
+            render_cell_html(cases.get((family, sub)), family, sub) for sub in run
+        )
+        cells.append(_column_placeholder_html(_subcase_group_key(run[0])))
+    cells.append("</tr>")
+    return "".join(cells)
 
 
 def _parse_subcase_descriptions() -> dict[str, str]:
@@ -1286,8 +1344,9 @@ def _subcase_header_html(sub: str, descriptions: dict[str, str]) -> str:
     href = "../../../lib/parsers/PARSER_CASES.md"
     title = html_lib.escape(desc) if desc else ""
     band_cls = _subcase_band_class(sub)
+    col_group = html_lib.escape(_subcase_group_key(sub))
     return (
-        f'<th class="case-sub {band_cls}">'
+        f'<th class="case-sub {band_cls}" data-col-hide-group="{col_group}">'
         f'<a href="{href}" title="{title}">{html_lib.escape(sub)}</a></th>'
     )
 
@@ -1296,103 +1355,109 @@ def _subcase_group_label(sub: str) -> str:
     return _SUB_CASE_GROUP_BY_SUB.get(sub, "Other")
 
 
-def _subcase_group_headers_html(sub_cases: list[str]) -> str:
-    """Build semantic group headers spanning the displayed sub-case columns."""
-    spans: list[str] = [
-        '<th rowspan="2">model</th>',
-        '<th rowspan="2">parser</th>',
-    ]
+def _subcase_runs(sub_cases: list[str]) -> list[list[str]]:
+    runs: list[list[str]] = []
     start = 0
     while start < len(sub_cases):
         label = _subcase_group_label(sub_cases[start])
         end = start + 1
         while end < len(sub_cases) and _subcase_group_label(sub_cases[end]) == label:
             end += 1
-        band_cls = _subcase_band_class(sub_cases[start])
-        spans.append(
-            f'<th class="case-group {band_cls}" colspan="{end - start}">'
-            f"{html_lib.escape(label)}</th>"
-        )
+        runs.append(sub_cases[start:end])
         start = end
+    return runs
+
+
+def _column_placeholder_html(key: str, tag: str = "td") -> str:
+    key_attr = html_lib.escape(key)
+    return (
+        f'<{tag} class="col-placeholder col-hidden" '
+        f'data-col-placeholder-group="{key_attr}"></{tag}>'
+    )
+
+
+def _column_control_header_html(
+    key: str,
+    label: str,
+    *,
+    default_visible: bool,
+    css_class: str = "",
+    colspan: int | None = None,
+) -> str:
+    key_attr = html_lib.escape(key)
+    visible = "true" if default_visible else "false"
+    classes = " ".join(part for part in ("column-control", css_class) if part)
+    span_size = colspan if colspan is not None else 1
+    if colspan is not None:
+        span_attr = f'colspan="{colspan}" data-expanded-colspan="{colspan}"'
+    else:
+        span_attr = 'rowspan="2"'
+    return (
+        f'<th class="{html_lib.escape(classes)}" data-col-control-group="{key_attr}" '
+        f"{span_attr}>"
+        f'<button type="button" class="col-toggle" data-col-toggle="{key_attr}" '
+        f'data-col-label="{html_lib.escape(label)}" data-col-span="{span_size}" '
+        f'data-default-visible="{visible}" aria-pressed="{visible}" '
+        f'aria-label="{"Collapse" if default_visible else "Expand"} '
+        f'{html_lib.escape(label)} column">'
+        '<span class="col-toggle-symbol" aria-hidden="true"></span>'
+        f'<span class="col-toggle-label">{html_lib.escape(label)}</span>'
+        "</button></th>"
+    )
+
+
+def _subcase_group_headers_html(sub_cases: list[str]) -> str:
+    """Build semantic group headers spanning the displayed sub-case columns."""
+    spans: list[str] = [
+        _column_control_header_html("model", "Model", default_visible=False),
+        _column_control_header_html("parser", "Parser", default_visible=True),
+    ]
+    for run in _subcase_runs(sub_cases):
+        label = _subcase_group_label(run[0])
+        band_cls = _subcase_band_class(run[0])
+        col_group = html_lib.escape(_subcase_group_key(run[0]))
+        spans.append(
+            _column_control_header_html(
+                col_group,
+                label,
+                default_visible=True,
+                css_class=f"case-group {band_cls}",
+                colspan=len(run),
+            )
+        )
     return "".join(spans)
 
 
-def _glossary_html(descriptions: dict[str, str], sub_cases: list[str]) -> str:
+def _subcase_headers_html(sub_cases: list[str], descriptions: dict[str, str]) -> str:
+    headers: list[str] = []
+    for run in _subcase_runs(sub_cases):
+        headers.extend(_subcase_header_html(sub, descriptions) for sub in run)
+        headers.append(_column_placeholder_html(_subcase_group_key(run[0]), tag="th"))
+    return "".join(headers)
+
+
+def _glossary_groups(
+    descriptions: dict[str, str], sub_cases: list[str]
+) -> list[dict[str, object]]:
     if not descriptions:
-        return ""
-    rows = []
-    for sub in sub_cases:
-        desc = descriptions.get(sub) or descriptions.get(sub.split(".")[0]) or ""
-        rows.append(
-            f'<tr><td class="sub">PARSER.batch.{html_lib.escape(sub)}</td>'
-            f"<td>{html_lib.escape(desc)}</td></tr>"
-        )
-    return (
-        '<h2 id="case-descriptions">Case descriptions</h2>\n'
-        "<p>Source of truth: "
-        '<a href="../../../lib/parsers/PARSER_CASES.md">'
-        "lib/parsers/PARSER_CASES.md</a>.</p>\n"
-        '<table class="glossary"><tbody>' + "".join(rows) + "</tbody></table>"
-    )
+        return []
+    return [
+        {
+            "label": _subcase_group_label(run[0]),
+            "rows": [
+                (
+                    sub,
+                    descriptions.get(sub) or descriptions.get(sub.split(".")[0]) or "",
+                )
+                for sub in run
+            ],
+        }
+        for run in _subcase_runs(sub_cases)
+    ]
 
 
-def _render_html_template(values: dict[str, str]) -> str:
-    text = HTML_TEMPLATE.read_text(encoding="utf-8")
-    placeholders = sorted(set(re.findall(r"@@([A-Z0-9_]+)@@", text)))
-    missing = [name for name in placeholders if name not in values]
-    if missing:
-        raise RuntimeError(f"unfilled HTML template placeholders: {', '.join(missing)}")
-    for key, value in values.items():
-        text = text.replace(f"@@{key}@@", value)
-    return text
-
-
-def _legend_html(versions: dict[str, str]) -> str:
-    """Build the legend block. `versions` is `_peer_versions()` output;
-    when non-empty, the pinned vLLM / SGLang versions are appended as a
-    final line so the legend is self-contained."""
-    peer_line = ""
-    if versions:
-        peer_bits = " · ".join(
-            f"{name} <code>{html_lib.escape(versions[name])}</code>"
-            for name in ("vllm", "sglang")
-            if name in versions
-        )
-        peer_line = (
-            "<br><br>"
-            "<strong>Peer parser versions</strong> pinned in "
-            '<a href="../../../pyproject.toml">pyproject.toml</a>: '
-            f"{peer_bits}."
-        )
-    return (
-        '<p class="legend">'
-        "<strong>Legend:</strong> "
-        '<span style="color:#0a7d2c">=</span> full parity '
-        "(Dynamo, vLLM, and SGLang produce the same results) · "
-        '<span style="color:#555">V/S</span> divergence '
-        "(V = vLLM, S = SGLang; intentional, has <code>reason:</code>) · "
-        '<span style="color:#c63">?</span> more research needed '
-        "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
-        '<span style="color:#555">↯</span> Dynamo leaks tool call markup into <code>normal_text</code> '
-        "(<code>expected.dynamo.reason:</code> carries the explanation) · "
-        '<span style="color:#b00">!</span> expected-error suffix '
-        "(e.g. V!, S! — engine crashes by design) · "
-        '<span style="color:#aaa">n/a</span> not applicable · '
-        '<span style="color:#8a6d3b">—</span> missing fixture coverage · '
-        '<span class="parser-suffix">†</span> = no vLLM peer parser for this family · '
-        '<span class="parser-suffix">§</span> = no SGLang peer parser for this family.'
-        "<br><br>"
-        "<strong>Tooltip fields:</strong> "
-        "<code>input_text</code>=raw model output fed into the parser · "
-        "<code>normal_text</code>=the <em>residual</em> prose left after "
-        "stripping tool calls and reasoning blocks "
-        '(<em>not</em> all of the model\'s output — "normal" as in '
-        '"non-structured", to distinguish it from the structured '
-        "<code>calls</code> and reasoning_content) · "
-        "<code>calls</code>=extracted tool calls."
-        f"{peer_line}"
-        "</p>"
-    )
+def _peer_version_items(versions: dict[str, str]) -> list[tuple[str, str]]:
+    return [(name, versions[name]) for name in ("vllm", "sglang") if name in versions]
 
 
 def _compute_stats(
@@ -1426,27 +1491,13 @@ def _compute_stats(
                 s["parity"] += 1
             elif "!" in text:
                 s["errors"] += 1
+            elif "↯" in text:
+                s["documented"] += 1
             elif "?" in text:
                 s["research"] += 1
             else:
                 s["documented"] += 1
     return s
-
-
-def _stats_html(s: dict[str, int]) -> str:
-    return (
-        '<p class="stats">'
-        f"Stats: {s['families']} families × {s['sub_cases']} sub-cases "
-        f"= {s['slots']} grid slots ({s['na']} n/a, {s['missing']} missing). "
-        f"<strong>{s['real']}</strong> real cases: "
-        f'<span style="color:#0a7d2c">{s["parity"]} full parity</span> · '
-        f'<span style="color:#555">{s["documented"]} documented divergences</span> '
-        "(have <code>reason:</code>) · "
-        f'<span style="color:#c63">{s["research"]} research-needed</span> '
-        "(no <code>reason:</code> yet) · "
-        f'<span style="color:#b00">{s["errors"]} expected-errors</span>.'
-        "</p>"
-    )
 
 
 def render_html(
@@ -1463,13 +1514,14 @@ def render_html(
     inheritance = _build_family_inheritance(refs)
 
     group_headers = _subcase_group_headers_html(sub_cases)
-    sub_headers = "".join(_subcase_header_html(sub, descriptions) for sub in sub_cases)
+    sub_headers = _subcase_headers_html(sub_cases, descriptions)
     n_cols = 2 + len(sub_cases)
 
     body_rows: list[str] = []
     if top_n:
         body_rows.append(
-            f'<tr class="section"><td colspan="{n_cols}">Top-N models</td></tr>'
+            f'<tr class="section"><td data-section-span colspan="{n_cols}">'
+            "Top-N models</td></tr>"
         )
     for model, fam in top_n:
         body_rows.append(
@@ -1478,7 +1530,10 @@ def render_html(
             )
         )
     if others:
-        body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
+        body_rows.append(
+            f'<tr class="section"><td data-section-span colspan="{n_cols}">'
+            "Others</td></tr>"
+        )
     for model, fam in others:
         body_rows.append(
             render_row_html(
@@ -1488,13 +1543,6 @@ def render_html(
 
     all_families = [fam for _, fam in top_n] + [fam for _, fam in others]
     stats = _compute_stats(cases, sub_cases, all_families)
-
-    table_html = (
-        "<table>"
-        f"<thead><tr>{group_headers}</tr><tr>{sub_headers}</tr></thead>"
-        f"<tbody>{''.join(body_rows)}</tbody>"
-        "</table>"
-    )
 
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
@@ -1510,27 +1558,24 @@ def render_html(
         output = f"tests/parity/parser/PARITY.{family_filter}.html"
 
     sha = _commit_sha()
-    if sha:
-        escaped_sha = html_lib.escape(sha)
-        sha_html = (
-            " on commit "
-            f'<a href="https://github.com/ai-dynamo/dynamo/commit/{escaped_sha}">'
-            f"<code>{html_lib.escape(sha[:12])}</code></a>"
-        )
-    else:
-        sha_html = ""
 
-    return _render_html_template(
-        {
-            "TITLE": html_lib.escape(title),
-            "STAMP": html_lib.escape(stamp),
-            "SHA_HTML": sha_html,
-            "COMMAND": f"{html_lib.escape(command)} &gt; {html_lib.escape(output)}",
-            "TABLE_HTML": table_html,
-            "LEGEND_HTML": _legend_html(_peer_versions()),
-            "STATS_HTML": _stats_html(stats),
-            "GLOSSARY_HTML": _glossary_html(descriptions, sub_cases),
-        }
+    return (
+        _make_jinja_env()
+        .get_template("parity_chart.html.j2")
+        .render(
+            title=title,
+            stamp=stamp,
+            sha=sha,
+            short_sha=sha[:12] if sha else "",
+            command=command,
+            output=output,
+            group_headers=group_headers,
+            sub_headers=sub_headers,
+            body_rows=body_rows,
+            peer_versions=_peer_version_items(_peer_versions()),
+            stats=stats,
+            glossary_groups=_glossary_groups(descriptions, sub_cases),
+        )
     )
 
 
