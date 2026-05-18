@@ -118,6 +118,7 @@ impl EngineConfig {
         data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
+        runtime_data = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -132,8 +133,15 @@ impl EngineConfig {
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
-    ) -> Self {
-        Self {
+        runtime_data: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let runtime_data = runtime_data
+            .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
+            .transpose()
+            .map_err(to_pyerr)?
+            .unwrap_or_default();
+
+        Ok(Self {
             inner: RsEngineConfig {
                 model,
                 served_model_name,
@@ -146,8 +154,9 @@ impl EngineConfig {
                 data_parallel_start_rank,
                 bootstrap_host,
                 bootstrap_port,
+                runtime_data,
             },
-        }
+        })
     }
 
     #[getter]
@@ -193,6 +202,12 @@ impl EngineConfig {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+    #[getter]
+    fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.inner.runtime_data)
+            .map(|value| value.unbind())
+            .map_err(to_pyerr)
     }
 }
 
@@ -535,6 +550,10 @@ impl LLMEngine for PyLLMEngine {
                 data_parallel_start_rank: opt_attr::<u32>(bound, "data_parallel_start_rank")?,
                 bootstrap_host: opt_attr::<String>(bound, "bootstrap_host")?,
                 bootstrap_port: opt_attr::<u16>(bound, "bootstrap_port")?,
+                runtime_data: match bound.getattr("runtime_data") {
+                    Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
+                    _ => HashMap::new(),
+                },
             })
         })
         .map_err(py_err_to_dynamo)

@@ -157,19 +157,19 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         libuuid-devel \
         zlib-devel
 
-# Build hwloc >= 2.3 from source (RHEL8 ships 2.2 which lacks hwloc_location API
-# required by nixl v1.0.x libfabric topology code)
-ARG HWLOC_VERSION=2.12.0
-RUN HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1-2)" && \
-    cd /tmp && \
-    curl --retry 3 -LO "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
-    tar xf hwloc-${HWLOC_VERSION}.tar.gz && \
-    cd hwloc-${HWLOC_VERSION} && \
-    ./configure --prefix=/usr/local && \
-    make -j$(nproc) && \
+# Default comes from context.yaml; keep it in sync with upstream NIXL's
+# contrib/Dockerfile.manylinux. NIXL v1.0.x needs newer hwloc than RHEL8 ships.
+ARG HWLOC_VERSION
+RUN cd /tmp && \
+    HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1,2)" && \
+    wget -q "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
+    tar -xzf "hwloc-${HWLOC_VERSION}.tar.gz" && \
+    cd "hwloc-${HWLOC_VERSION}" && \
+    ./configure --prefix=/usr/local --disable-nvml && \
+    make -j"$(nproc)" && \
     make install && \
     ldconfig && \
-    rm -rf /tmp/hwloc-*
+    rm -rf "/tmp/hwloc-${HWLOC_VERSION}" "/tmp/hwloc-${HWLOC_VERSION}.tar.gz"
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -495,7 +495,8 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
 ##### wheel_builder ##############
 ##################################
 {% if "nixl_ref" in context[framework] %}
-# Builds nixl (native + Python wheel) and kvbm wheel, then consolidates all wheels.
+# Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
+# consolidates all wheels.
 # Runtime templates COPY from this stage.
 
 FROM wheel_builder_base AS wheel_builder
@@ -626,6 +627,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
 {% else %}
 # SGLang uses NIXL from the upstream lmsysorg/sglang runtime image and does not
 # build Dynamo KVBM. Keep this alias so downstream stages can still COPY Dynamo

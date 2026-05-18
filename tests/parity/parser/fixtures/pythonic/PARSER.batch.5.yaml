@@ -9,7 +9,7 @@ cases:
     ref: dynamo
     model_text: '[get_weather(location="NYC")'
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,32 +17,60 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_5_a
+      dynamo: &id001
         calls: []
         normal_text: '[get_weather(location="NYC")'
-      vllm: *d_5_a
-      sglang: *d_5_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.5.b:
     description: Closing `]` without matching `[` open
     ref: dynamo
     model_text: get_weather(location="NYC")]
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_b
+      dynamo: &id003
         calls: []
         normal_text: get_weather(location="NYC")]
-      vllm: *d_5_b
-      sglang: *d_5_b
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.5.c:
     description: Truncation mid-argument value
     ref: dynamo
     model_text: '[get_weather(location="N'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_c
+      dynamo: &id004
         calls: []
         normal_text: '[get_weather(location="N'
-      vllm: *d_5_c
-      sglang: *d_5_c
+      vllm: *id004
+      sglang: *id004
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time![get_weather(location="Boston"),
+      get_weather(location="New York")
+    tools:
+    - *id002
+    expected:
+      dynamo: &id005
+        calls: []
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time![get_weather(location="Boston"),
+          get_weather(location="New York")
+      vllm: *id005
+      sglang: *id005
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time![get_weather(location="Boston"),
+      get_weather(location="New York
+    tools:
+    - *id002
+    expected:
+      dynamo: &id006
+        calls: []
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time![get_weather(location="Boston"),
+          get_weather(location="New York
+      vllm: *id006
+      sglang: *id006
