@@ -265,8 +265,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "Byte transfer backend for restore. "
             "'nixl' uses NIXL POSIX with host staging; "
             "'nixl-gds' uses NIXL GDS_MT for direct file-to-GPU transfers; "
-            "'sharded-ssd' uses the sharded SSD prototype with "
-            "pinned host buffers and cudaMemcpyAsync."
+            "'sharded-ssd' shards reads across local SSD roots using the "
+            "same NIXL POSIX host-staging path."
         ),
     )
     load_p.add_argument(

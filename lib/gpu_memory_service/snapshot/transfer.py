@@ -107,7 +107,7 @@ def create_transfer_backend(
         return NixlTransferBackend(config=config)
 
     if name == NIXL_GDS_TRANSFER_BACKEND:
-        from gpu_memory_service.snapshot.backends.nixl import NixlGDSTransferBackend
+        from gpu_memory_service.snapshot.backends.nixl_gds import NixlGDSTransferBackend
 
         return NixlGDSTransferBackend(config=config)
 
