@@ -275,35 +275,13 @@ impl AddressedPushRouter {
             request_stream_connection_info: Some(req_stream_conn_info),
         };
 
-        // Peel the first frame off `input` for the envelope body. The
-        // worker is already reserved (PushRouter ran `select_next_worker`
-        // up front), so this is the first wire-visible synchronization
-        // point on the live session. Cancellation listens to
-        // `engine_ctx.killed()` so a frontend disconnect during a
-        // never-sends session doesn't strand the await.
-        let first_frame = tokio::select! {
-            biased;
-            _ = engine_ctx.killed() => {
-                self.cancel_both(&recv_subject, &send_subject).await;
-                anyhow::bail!("bidirectional context killed before first frame arrived");
-            }
-            next = input.next() => match next {
-                Some(frame) => frame,
-                None => {
-                    self.cancel_both(&recv_subject, &send_subject).await;
-                    anyhow::bail!("bidirectional input stream closed before first frame");
-                }
-            },
-        };
-
+        // Bidirectional envelope is header-only: every request frame
+        // (including the first) flows uniformly on the request-stream
+        // socket, so the wire shape doesn't have to mirror the unary
+        // `[control_msg, request]` two-part layout. The worker decodes
+        // the control message, dials back for both streams, and pulls
+        // frames off the request-stream as the engine asks for them.
         let ctrl = match serde_json::to_vec(&control_message) {
-            Ok(v) => v,
-            Err(e) => {
-                self.cancel_both(&recv_subject, &send_subject).await;
-                return Err(e.into());
-            }
-        };
-        let data = match serde_json::to_vec(&first_frame) {
             Ok(v) => v,
             Err(e) => {
                 self.cancel_both(&recv_subject, &send_subject).await;
@@ -313,12 +291,11 @@ impl AddressedPushRouter {
 
         tracing::trace!(
             request_id,
-            "packaging bidirectional two-part message; ctrl: {} bytes, first frame: {} bytes",
+            "packaging bidirectional header-only envelope; ctrl: {} bytes",
             ctrl.len(),
-            data.len()
         );
 
-        let msg = TwoPartMessage::from_parts(ctrl.into(), data.into());
+        let msg = TwoPartMessage::from_header(ctrl.into());
         let codec = TwoPartCodec::default();
         let buffer = match codec.encode_message(msg) {
             Ok(v) => v,
