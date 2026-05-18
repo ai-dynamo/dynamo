@@ -112,11 +112,9 @@ features:
     pre_deployment_sweeping_mode: rapid
 ```
 
-The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest, which automatically profiles your model:
-
-```bash
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
-```
+The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest,
+which automatically profiles your model. See [Planner Examples](planner-examples.md)
+for copyable DGDR manifests.
 
 See [Planner Guide](planner-guide.md) for the full workflow.
 
