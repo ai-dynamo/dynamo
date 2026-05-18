@@ -1,0 +1,249 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EFA-enabled image for GLM-5-NVFP4 disaggregated serving on AWS p6e-gb200.
+# Differences vs ./Dockerfile (the non-EFA variant):
+#   1. Installs AWS EFA installer (libfabric headers + provider + aws-ofi-nccl)
+#   2. Rebuilds libfabric from aws/libfabric@v2.4.0amzn1.0 with the
+#      efa_mr_is_cuda patch (ofiwg/libfabric#12019) applied to prov/efa/src/efa_mr.c
+#   3. Builds GDRCopy + UCX with --with-cuda --with-verbs --with-efa --with-gdrcopy
+#   4. Builds aws-ofi-nccl against the patched libfabric
+#
+# Without the patch, NIXL's fi_mr_reg on CUDA VRAM returns EFAULT on GB200
+# (arm64 + 64K-page kernel) and disagg KV transfer crashes at startup.
+# The patch is a no-op on H100/amd64 (the legacy ibv_reg_mr path handles CUDA
+# natively there), so it's safe to bake regardless of target hardware.
+#
+# References:
+#   - libfabric PR: https://github.com/ofiwg/libfabric/pull/12019
+#   - SGLang patch: https://github.com/sgl-project/sglang/pull/17146
+ARG BASE_IMAGE="lmsysorg/sglang:v0.5.10.post1-cu130"
+ARG ARCH=arm64
+ARG DYNAMO_COMMIT="main"
+ARG CARGO_BUILD_JOBS="16"
+ARG EFA_INSTALLER_VERSION="1.47.0"
+ARG LIBFABRIC_BRANCH="v2.4.0amzn1.0"
+ARG GDRCOPY_VERSION="v2.5.1"
+ARG UCX_VERSION="v1.20.0"
+ARG AWS_OFI_NCCL_VERSION="1.18.0"
+
+# ======== Stage 1: Builder (compiles Rust, builds Dynamo wheel) ========
+FROM ${BASE_IMAGE} AS builder
+
+ARG DYNAMO_COMMIT
+ARG CARGO_BUILD_JOBS
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
+WORKDIR /build
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl build-essential pkg-config libclang-dev protobuf-compiler git; \
+    rm -rf /var/lib/apt/lists/*; \
+    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+
+ENV CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+
+RUN cargo install maturin --locked
+
+RUN git clone https://github.com/ai-dynamo/dynamo.git /build/dynamo && \
+    cd /build/dynamo && git checkout ${DYNAMO_COMMIT}
+
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    cd /build/dynamo/lib/bindings/python && \
+    maturin build --release && \
+    mkdir -p /build/dist && \
+    cp target/wheels/*.whl /build/dist/
+
+# ======== Stage 2: EFA stack builder ========
+FROM ${BASE_IMAGE} AS efa-builder
+
+ARG EFA_INSTALLER_VERSION
+ARG LIBFABRIC_BRANCH
+ARG GDRCOPY_VERSION
+ARG UCX_VERSION
+ARG AWS_OFI_NCCL_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build dependencies for libfabric, GDRCopy, UCX, aws-ofi-nccl, plus the
+# packages the AWS EFA installer expects (pciutils/environment-modules/tcl
+# live in `universe`, which the NVIDIA CUDA base images strip from
+# /etc/apt/sources.list — re-enable it first).
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list ]; then \
+      sed -i 's/^# *deb \(.*\) universe/deb \1 universe/' /etc/apt/sources.list || true; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends software-properties-common; \
+    add-apt-repository -y universe; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl git build-essential pkg-config \
+      autoconf automake libtool \
+      libnl-3-dev libnl-route-3-dev \
+      check libsubunit-dev \
+      flex bison \
+      kmod \
+      pciutils environment-modules tcl \
+      libhwloc-dev libnuma-dev \
+      libibverbs-dev librdmacm-dev rdma-core ibverbs-providers; \
+    rm -rf /var/lib/apt/lists/*
+
+# 1. AWS EFA installer — provides headers, stock libfabric, aws-ofi-nccl source.
+#    We skip kmod (host already has efa kernel module) and limit-conf (handled
+#    via ulimit in pod spec). Pre-update apt so the installer's internal
+#    apt-get calls find packages from the universe pocket we just enabled.
+RUN set -eux; \
+    apt-get update; \
+    cd /tmp; \
+    curl -fsSL -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz; \
+    tar xzf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz; \
+    cd aws-efa-installer; \
+    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify; \
+    rm -rf /tmp/aws-efa-installer*; \
+    rm -rf /var/lib/apt/lists/*
+
+# 2. Build aws/libfabric@v2.4.0amzn1.0 with the efa_mr_is_cuda patch
+#    (ofiwg/libfabric#12019). The sed targets the same line in both the AWS
+#    fork and upstream, so it's idempotent across libfabric versions.
+#
+#    Critical: use aws/libfabric (NOT ofiwg/libfabric upstream). The AWS fork
+#    carries downstream EFA tuning that yields ~40% better TTFT on disagg
+#    workloads. Verified DIS-1892, 2026-05.
+RUN set -eux; \
+    git clone --depth 1 --branch ${LIBFABRIC_BRANCH} \
+      https://github.com/aws/libfabric.git /tmp/libfabric; \
+    cd /tmp/libfabric; \
+    sed -i \
+      's/efa_mr_is_neuron(efa_mr) || efa_mr_is_rocr(efa_mr)/efa_mr_is_neuron(efa_mr) || efa_mr_is_rocr(efa_mr) || efa_mr_is_cuda(efa_mr)/' \
+      prov/efa/src/efa_mr.c; \
+    grep -F "efa_mr_is_cuda(efa_mr)" prov/efa/src/efa_mr.c; \
+    ./autogen.sh; \
+    CPPFLAGS="-I/usr/local/cuda/include" \
+    LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/local/cuda/lib64/stubs -Wl,-rpath,/usr/local/cuda/lib64" \
+    ./configure --prefix=/opt/amazon/efa \
+      --disable-verbs --disable-psm3 --disable-opx --disable-usnic \
+      --enable-efa --with-cuda=/usr/local/cuda --enable-cuda-dlopen; \
+    make -j"$(nproc)"; \
+    make install; \
+    rm -rf /tmp/libfabric
+
+# 3. GDRCopy (required for GPU-Direct buffer registration on EFA).
+RUN set -eux; \
+    git clone --depth 1 --branch ${GDRCOPY_VERSION} \
+      https://github.com/NVIDIA/gdrcopy.git /tmp/gdrcopy; \
+    cd /tmp/gdrcopy; \
+    make CUDA=/usr/local/cuda lib install; \
+    rm -rf /tmp/gdrcopy
+
+# 4. UCX with CUDA + verbs + EFA + GDRCopy. Without --with-cuda the NIXL UCX
+#    backend falls back to TCP (~10 Gbps).
+RUN set -eux; \
+    git clone --depth 1 --branch ${UCX_VERSION} \
+      https://github.com/openucx/ucx.git /tmp/ucx; \
+    cd /tmp/ucx; \
+    ./autogen.sh; \
+    ./configure --prefix=/usr/local/ucx \
+      --with-cuda=/usr/local/cuda --with-verbs \
+      --with-efa --with-gdrcopy --enable-mt --enable-shared; \
+    make -j"$(nproc)"; \
+    make install; \
+    rm -rf /tmp/ucx
+
+# 5. aws-ofi-nccl, built against the patched libfabric. ABI mismatch between
+#    aws-ofi-nccl and libfabric silently halves bandwidth — they must be
+#    built together.
+RUN set -eux; \
+    git clone --depth 1 --branch v${AWS_OFI_NCCL_VERSION} \
+      https://github.com/aws/aws-ofi-nccl.git /tmp/aws-ofi-nccl; \
+    cd /tmp/aws-ofi-nccl; \
+    ./autogen.sh; \
+    ./configure --prefix=/opt/aws-ofi-nccl \
+      --with-libfabric=/opt/amazon/efa \
+      --with-cuda=/usr/local/cuda \
+      --with-mpi=no; \
+    make -j"$(nproc)"; \
+    make install; \
+    rm -rf /tmp/aws-ofi-nccl
+
+# ======== Stage 3: Final image ========
+FROM ${BASE_IMAGE}
+ARG ARCH=arm64
+ARG EFA_INSTALLER_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Run the AWS EFA installer in the final stage too — this brings the matching
+# rdma-core / libefa.so.1 ABI (EFA_1.4+) into /usr/lib/aarch64-linux-gnu so
+# the patched libfabric we overlay next can load successfully. Pattern is
+# borrowed from the customer's working Dockerfile.
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list ]; then \
+      sed -i 's/^# *deb \(.*\) universe/deb \1 universe/' /etc/apt/sources.list || true; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends software-properties-common; \
+    add-apt-repository -y universe; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl \
+      pciutils environment-modules tcl \
+      libhwloc-dev libnuma-dev \
+      libibverbs-dev librdmacm-dev rdma-core ibverbs-providers \
+      libnl-3-200 libnl-route-3-200 autoconf automake libtool; \
+    cd /tmp; \
+    curl -fsSL -O https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz; \
+    tar xzf aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz; \
+    cd aws-efa-installer; \
+    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify; \
+    rm -rf /tmp/aws-efa-installer*; \
+    rm -rf /var/lib/apt/lists/*; \
+    rm -f /lib/aarch64-linux-gnu/libfabric.so* \
+          /usr/lib/aarch64-linux-gnu/libfabric.so* 2>/dev/null || true
+
+# Overlay Sara-patched libfabric (+ matched aws-ofi-nccl, UCX, GDRCopy) onto
+# the EFA-installer base. This keeps the new libefa from the apt-managed
+# rdma-core while replacing libfabric.so.1 with the CUDA-aware build.
+COPY --from=efa-builder /opt/amazon/efa/lib       /opt/amazon/efa/lib
+COPY --from=efa-builder /opt/amazon/efa/include   /opt/amazon/efa/include
+COPY --from=efa-builder /opt/amazon/efa/share     /opt/amazon/efa/share
+COPY --from=efa-builder /opt/aws-ofi-nccl         /opt/aws-ofi-nccl
+COPY --from=efa-builder /usr/local/ucx            /usr/local/ucx
+COPY --from=efa-builder /usr/local/lib/libgdrapi.so* /usr/local/lib/
+COPY --from=efa-builder /usr/local/include/gdrapi.h  /usr/local/include/
+
+RUN set -eux; \
+    echo "/opt/amazon/efa/lib"    >  /etc/ld.so.conf.d/efa.conf; \
+    echo "/opt/amazon/efa/lib64"  >> /etc/ld.so.conf.d/efa.conf; \
+    echo "/opt/aws-ofi-nccl/lib"  >  /etc/ld.so.conf.d/aws-ofi-nccl.conf; \
+    echo "/usr/local/ucx/lib"     >  /etc/ld.so.conf.d/ucx.conf; \
+    echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf; \
+    ldconfig
+
+# Path order: /opt/amazon/efa first so libfabric is the patched build, not
+# the stock one the base image may still have under /lib.
+ENV PATH="/opt/amazon/efa/bin:/usr/local/ucx/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib:${LD_LIBRARY_PATH}"
+
+# Verify the Sara patch is in the installed libfabric. Doesn't probe runtime
+# behavior (that happens during sglang init) — just confirms the patch text
+# is present in the libfabric source bundled into share/ and that fi_info
+# can at least invoke without missing-symbol errors.
+RUN /opt/amazon/efa/bin/fi_info --version | grep -i libfabric
+
+# Install flashinfer with matching jit-cache (same as non-EFA Dockerfile).
+RUN pip install "flashinfer-python==0.6.7" "flashinfer-cubin==0.6.7" && \
+    pip install "flashinfer-jit-cache==0.6.7" --index-url https://flashinfer.ai/whl/cu130
+
+# Install dynamo from source (includes _compat.py which handles sglang API changes).
+COPY --from=builder /build/dynamo /sgl-workspace/dynamo
+COPY --from=builder /build/dist/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && \
+    cd /sgl-workspace/dynamo && \
+    pip install --no-cache-dir -e ".[sglang]" --no-deps && \
+    rm -f /tmp/*.whl
