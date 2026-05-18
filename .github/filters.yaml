@@ -141,6 +141,8 @@ planner:
   # Power-aware planner (PR #9369): per-node power agent component
   - 'components/power_agent/**'
   - 'deploy/helm/charts/power-agent/**'
+  # Power-aware planner (PR #9369): repo-shared conftest used by planner tests
+  - 'components/src/conftest.py'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'

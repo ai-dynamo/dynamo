@@ -31,7 +31,7 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.virtual import VirtualConnector
-from dynamo.planner.core.budget import _initialize_gpu_counts
+from dynamo.planner.core.budget import POWER_ANNOTATION_KEY, _initialize_gpu_counts
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -744,6 +744,78 @@ class NativePlannerBase:
         """Override in subclasses to report metrics and apply scaling."""
         pass
 
+    async def _apply_power_annotations(self) -> None:
+        """Annotate worker pods with per-GPU power limits (Phase 1).
+
+        Reads the actual annotation from each Pod object returned by
+        get_component_pods(). Only PATCHes when annotation is missing or wrong.
+        K8s is the source of truth — no local cache.
+
+        Called after _apply_effects() on every tick so newly-created pods
+        pick up the cap within one tick, and AIC-driven cap changes (Phase 3+)
+        propagate to all running pods automatically.
+        """
+        if not self.config.enable_power_awareness:
+            return
+        if not isinstance(self.connector, KubernetesConnector):
+            return
+
+        pods_and_limits: list[tuple] = []
+        if self.require_prefill:
+            for pod in self.connector.get_component_pods(SubComponentType.PREFILL):
+                pods_and_limits.append(
+                    (pod, str(self.config.prefill_engine_gpu_power_limit))
+                )
+        if self.require_decode:
+            for pod in self.connector.get_component_pods(SubComponentType.DECODE):
+                pods_and_limits.append(
+                    (pod, str(self.config.decode_engine_gpu_power_limit))
+                )
+
+        for pod, limit_str in pods_and_limits:
+            current = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
+            if current == limit_str:
+                continue
+            try:
+                self.connector.kube_api.patch_pod_annotation(
+                    pod.metadata.name, POWER_ANNOTATION_KEY, limit_str
+                )
+                logger.info(
+                    "Annotated pod %s with %s=%s",
+                    pod.metadata.name,
+                    POWER_ANNOTATION_KEY,
+                    limit_str,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to patch power annotation on pod %s: %s",
+                    pod.metadata.name,
+                    e,
+                )
+
+    def _publish_power_budget_metrics(self, num_p: int, num_d: int) -> None:
+        """Emit power budget gauges (Phase 1, dashboard observability only).
+
+        Uses static config values — not DCGM — so budget enforcement in
+        _apply_power_budget() is unaffected when DCGM goes down.
+        """
+        if self.prometheus_port == 0 or not self.config.enable_power_awareness:
+            return
+        if self.config.total_gpu_power_limit is None:
+            return
+
+        p_gpu = self.config.prefill_engine_num_gpu or 0
+        d_gpu = self.config.decode_engine_num_gpu or 0
+        projected = (
+            num_p * self.config.prefill_engine_gpu_power_limit * p_gpu
+            + num_d * self.config.decode_engine_gpu_power_limit * d_gpu
+        )
+        budget = self.config.total_gpu_power_limit
+        pm = self.prometheus_metrics
+        pm.power_budget_total_watts.set(budget)
+        pm.power_projected_watts.set(projected)
+        pm.power_budget_utilization.set(projected / budget if budget > 0 else 0.0)
+
     async def _apply_scaling_targets(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:
@@ -838,6 +910,7 @@ class NativePlannerBase:
         self.prometheus_metrics.num_prefill_replicas.set(num_p)
         self.prometheus_metrics.num_decode_replicas.set(num_d)
         self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
+        self._publish_power_budget_metrics(num_p, num_d)
 
     def _report_diagnostics(self, tick: ScheduledTick, diag: TickDiagnostics) -> None:
         if self.prometheus_port == 0:
@@ -888,6 +961,7 @@ class NativePlannerBase:
                 self._publish_inventory_and_gpu_hours(tick_input)
                 effects = self.state_machine.on_tick(next_tick, tick_input)
                 await self._apply_effects(effects)
+                await self._apply_power_annotations()  # Phase 1: annotate pods with GPU power limit
                 self._report_diagnostics(next_tick, effects.diagnostics)
                 self._log_decision_summary(effects)
 

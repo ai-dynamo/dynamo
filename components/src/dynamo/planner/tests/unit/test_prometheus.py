@@ -206,6 +206,71 @@ def test_get_average_metric_one_matching_container(mock_prometheus_result):
         assert result == 42.7
 
 
+def test_get_average_metric_frontend_path_filters_nan_values():
+    """Frontend-source path: NaN samples (from 0/0 increase ratios on quiet
+    windows) must be dropped, matching the router-source NaN handling.
+    Without this, Metrics.is_valid() would silently fail on a quiet cluster."""
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    nan_then_valid = [
+        {
+            "metric": {
+                "container": "main",
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [0.0, "NaN"],
+        },
+        {
+            "metric": {
+                "container": "main",
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [0.0, 12.0],
+        },
+    ]
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.return_value = nan_then_valid
+        result = client._get_average_metric(
+            full_metric_name="test_metric",
+            interval="60s",
+            operation_name="test operation",
+            model_name="target_model",
+        )
+
+    assert result == 12.0
+
+
+def test_get_average_metric_frontend_path_returns_zero_when_only_nan():
+    """If every matching container is NaN, the path must return 0
+    (not propagate NaN), so downstream Metrics.is_valid() stays meaningful."""
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    only_nan = [
+        {
+            "metric": {
+                "container": "main",
+                "dynamo_namespace": "target_namespace",
+                "model": "target_model",
+            },
+            "value": [0.0, "NaN"],
+        }
+    ]
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.return_value = only_nan
+        result = client._get_average_metric(
+            full_metric_name="test_metric",
+            interval="60s",
+            operation_name="test operation",
+            model_name="target_model",
+        )
+
+    assert result == 0
+
+
 def test_get_average_metric_with_validation_error():
     """Test _get_average_metric with one valid container and one that fails validation"""
     client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
@@ -484,3 +549,88 @@ class TestPrometheusAPIClientRouterSource:
             "dynamo_component_router_requests_total" in r.message
             for r in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# Power-aware planner DCGM queries (regression suite for bug #1)
+#
+# These methods MUST live on PrometheusAPIClient — they were briefly placed
+# on DirectRouterMetricsClient by mistake, which would have silently disabled
+# the AIC closed loop because base.py calls them on prometheus_traffic_client
+# (a PrometheusAPIClient instance).  Each test below exists to detect that
+# class of regression.
+# ---------------------------------------------------------------------------
+
+
+class TestPowerAwareDcgmQueries:
+    """Smoke tests pinning the DCGM power queries to PrometheusAPIClient."""
+
+    def _client(self) -> PrometheusAPIClient:
+        return PrometheusAPIClient("http://localhost:9090", "test_namespace")
+
+    def test_get_total_dgd_power_is_method_on_prometheus_api_client(self):
+        """The method must exist on PrometheusAPIClient — not on a sibling class."""
+        client = self._client()
+        assert hasattr(client, "get_total_dgd_power"), (
+            "get_total_dgd_power missing from PrometheusAPIClient — was it "
+            "accidentally placed on DirectRouterMetricsClient?"
+        )
+        assert callable(client.get_total_dgd_power)
+
+    def test_get_total_dgd_power_returns_float_on_match(self):
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = [{"value": [0, "1234.5"]}]
+            result = client.get_total_dgd_power(
+                k8s_namespace="kube-namespace", dgd_name="my-dgd"
+            )
+            assert result == pytest.approx(1234.5)
+            call_args = str(mock_query.call_args).replace("'", '"')
+            assert "DCGM_FI_DEV_POWER_USAGE" in call_args
+            # exported_namespace carries the K8s namespace, NOT the dynamo
+            # logical namespace.  Bare `namespace` would label the DCGM
+            # exporter pod itself (DCGM exporter runs in its own ns), so
+            # using it would silently match nothing once attribution works.
+            assert 'exported_namespace="kube-namespace"' in call_args
+            # exported_pod (not bare `pod`) is the workload pod label.
+            # The operator emits `<dgd>-<replica-idx>-<service-key-lc>-<hash>`
+            # so the regex must accept the `-<digits>-` segment.
+            assert 'exported_pod=~"^my-dgd-[0-9]+-.*"' in call_args
+            # The old broken regex must not appear.
+            assert "(prefill|decode|agg|frontend)" not in call_args
+
+    def test_get_total_dgd_power_returns_none_on_empty(self):
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = []
+            result = client.get_total_dgd_power(
+                k8s_namespace="kube-namespace", dgd_name="my-dgd"
+            )
+            assert result is None
+
+    def test_get_total_dgd_power_returns_none_on_exception(self):
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.side_effect = RuntimeError("prom down")
+            result = client.get_total_dgd_power(
+                k8s_namespace="kube-namespace", dgd_name="my-dgd"
+            )
+            assert result is None
+
+    def test_get_total_dgd_power_uses_exported_pod_not_bare_pod(self):
+        """Regression guard for the original DCGM attribution bug.
+
+        Bare ``pod`` labels the DCGM exporter pod itself; only ``exported_pod``
+        is rewritten to the workload pod by the DCGM exporter.  Mixing them
+        up is a silent failure mode (no exception, just zero results).
+        """
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = []
+            client.get_total_dgd_power(k8s_namespace="ns", dgd_name="dgd")
+            # The query string must use exported_pod, not the bare pod label.
+            query_str = mock_query.call_args[0][0]
+            assert "exported_pod=~" in query_str
+            # No bare `pod=~` pattern should leak in.
+            assert "{pod=~" not in query_str
+            assert ",pod=~" not in query_str

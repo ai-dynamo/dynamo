@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Temporary Role + RoleBinding to validate the planner's actuation knobs against
+# a live cluster running operator chart <= 1.2.0. The
+# `dynamo-platform-dynamo-operator-planner` ClusterRole in those versions does
+# NOT grant any `pods` permissions, so the planner cannot list worker pods or
+# patch TGP annotations without this addition.
+#
+# Apply only in the dev namespace:
+#     kubectl apply -f deploy/planner-pod-rbac-dev.yaml -n <your-namespace>
+#
+# DEPRECATED — operator chart 1.2.1+ ships with these rules built in
+# (deploy/helm/charts/platform/components/operator/templates/planner.yaml).
+# Once the cluster's operator is upgraded, delete this file with:
+#     kubectl delete role planner-pod-actuation-dev -n <your-namespace>
+#     kubectl delete rolebinding planner-pod-actuation-dev -n <your-namespace>
+#     git rm deploy/planner-pod-rbac-dev.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: planner-pod-actuation-dev
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: planner-pod-actuation-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: planner-pod-actuation-dev
+subjects:
+  - kind: ServiceAccount
+    name: planner-dev-sa

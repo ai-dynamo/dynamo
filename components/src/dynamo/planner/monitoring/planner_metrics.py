@@ -153,3 +153,17 @@ class PlannerPrometheusMetrics:
             "Inflight (scheduled) decode KV tokens per engine (from FPM)",
             labelnames=_engine_labels,
         )
+
+        # -- Power-aware scaling (Phase 1) --------------------------------
+        self.power_budget_total_watts = Gauge(
+            f"{PREFIX}_power_budget_total_watts",
+            "Configured total GPU power budget for this DGD (watts).",
+        )
+        self.power_projected_watts = Gauge(
+            f"{PREFIX}_power_projected_watts",
+            "Projected GPU power draw at current replica counts and caps (watts).",
+        )
+        self.power_budget_utilization = Gauge(
+            f"{PREFIX}_power_budget_utilization",
+            "Ratio of projected power to total budget (0.0–1.0+).",
+        )

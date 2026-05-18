@@ -106,6 +106,16 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     # Advisory mode: compute and log decisions without executing scaling
     advisory = False
 
+    # Power-aware scaling (Phase 1 + 2, disabled by default for backward compat).
+    # total_gpu_power_limit and power_agent_safe_default_watts are required when
+    # enable_power_awareness=True (validator enforces). Defaults are None — not
+    # placeholder integers — so the type itself signals "operator must set".
+    enable_power_awareness: bool = False
+    total_gpu_power_limit: Optional[int] = None
+    prefill_engine_gpu_power_limit: int = 300  # watts per GPU, prefill replicas
+    decode_engine_gpu_power_limit: int = 300  # watts per GPU, decode replicas
+    power_agent_safe_default_watts: Optional[int] = None
+
 
 class SubComponentType(str, Enum):
     PREFILL = "prefill"

@@ -36,6 +36,11 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.errors import DeploymentValidationError
 from dynamo.runtime.logging import configure_dynamo_logging
 
+# Pod annotation key for per-GPU power limit (watts).
+# Written by the planner on each worker pod and read by the Power Agent DaemonSet,
+# which calls nvmlDeviceSetPowerManagementLimit() with this value.
+POWER_ANNOTATION_KEY = "dynamo.nvidia.com/gpu-power-limit"
+
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 

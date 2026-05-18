@@ -246,6 +246,43 @@ class PlannerConfig(BaseModel):
     # Advisory mode: compute and log decisions without executing scaling
     advisory: bool = SLAPlannerDefaults.advisory
 
+    # --- Power-aware scaling (Phase 1 + 2) ---
+    enable_power_awareness: bool = Field(
+        default=False,
+        description=(
+            "Enable power-aware replica scaling and pod annotation. "
+            "Requires total_gpu_power_limit and power_agent_safe_default_watts."
+        ),
+    )
+    total_gpu_power_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Total GPU power budget in watts for this DGD. Required when "
+            "enable_power_awareness=True. Recommended formula: "
+            "(rack_capacity_W × headroom_factor) − non_gpu_overhead with "
+            "headroom_factor ≈ 0.85–0.9."
+        ),
+    )
+    prefill_engine_gpu_power_limit: int = Field(
+        default=SLAPlannerDefaults.prefill_engine_gpu_power_limit,
+        description="Per-GPU power cap (watts) applied to prefill replicas via NVML.",
+    )
+    decode_engine_gpu_power_limit: int = Field(
+        default=SLAPlannerDefaults.decode_engine_gpu_power_limit,
+        description="Per-GPU power cap (watts) applied to decode replicas via NVML.",
+    )
+    power_agent_safe_default_watts: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-GPU fail-closed cap (watts) the Power Agent applies on cold-start "
+            "GPUs (no prior cap) when annotation parsing fails. Required when "
+            "enable_power_awareness=True. Recommended: ~70%% of SKU TDP "
+            "(e.g. 500W on H200 SXM, 490W on H100 SXM)."
+        ),
+    )
+
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
         default=24.0,
@@ -302,6 +339,24 @@ class PlannerConfig(BaseModel):
                 f"fpm_sample_bucket_size must be a perfect square, "
                 f"got {self.fpm_sample_bucket_size}"
             )
+
+        # Power-awareness validation
+        if self.enable_power_awareness:
+            if self.total_gpu_power_limit is None:
+                raise ValueError(
+                    "total_gpu_power_limit is required when enable_power_awareness=True. "
+                    "Recommended: (rack_capacity_W × headroom_factor) − non_gpu_overhead "
+                    "with headroom_factor ≈ 0.85–0.9. Setting this incorrectly "
+                    "could silently cap your cluster — there is no safe default."
+                )
+            if self.power_agent_safe_default_watts is None:
+                raise ValueError(
+                    "power_agent_safe_default_watts is required when "
+                    "enable_power_awareness=True. This is the cold-start fail-closed cap "
+                    "the Power Agent applies on a fresh GPU (no prior cap) when "
+                    "annotation parsing fails. Recommended: ~70%% of SKU TDP "
+                    "(e.g. 500W on H200 SXM)."
+                )
 
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(

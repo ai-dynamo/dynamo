@@ -201,7 +201,13 @@ class PrometheusAPIClient:
                         and container.metric.model.lower() == model_name.lower()
                         and container.metric.dynamo_namespace == self.dynamo_namespace
                     ):
-                        values.append(container.value[1])
+                        # Drop NaN: increase(_sum)/increase(_count) is 0/0 on
+                        # quiet windows, which Prometheus reports as NaN. We
+                        # treat that as "no data" — symmetric with the router
+                        # path below — to keep Metrics.is_valid() honest.
+                        v = container.value[1]
+                        if not math.isnan(v):
+                            values.append(v)
                 if not values:
                     logger.warning(
                         f"No prometheus metric data available for {full_metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead"
@@ -408,6 +414,42 @@ class PrometheusAPIClient:
                 )
         except Exception as e:
             logger.warning(f"Could not check router scraping status: {e}")
+
+    # ------------------------------------------------------------------
+    # Power-aware planner DCGM queries (Phase 1 dashboard + Phase 3 EMA)
+    # ------------------------------------------------------------------
+
+    def get_total_dgd_power(
+        self,
+        k8s_namespace: str,
+        dgd_name: str,
+    ) -> Optional[float]:
+        """Sum of DCGM-reported per-GPU watts across this DGD (all components).
+
+        Used for the dynamo_planner_power_projected_watts dashboard gauge.
+        Returns None when DCGM is unavailable or the query returns no results.
+
+        DCGM workload-attribution labels (added by the DCGM exporter when
+        kubelet/CRI exposes pod info) are ``exported_namespace`` (the
+        Kubernetes namespace the workload runs in) and ``exported_pod``
+        (the workload pod name).  The bare ``namespace`` and ``pod`` labels
+        identify the DCGM exporter pod itself, not the workload.
+
+        The pod-name regex matches the operator's pod-name format
+        ``<dgd_name>-<replica-index>-<service-key-lowercase>-<hash>``
+        (e.g. ``qwen3-quickstart-0-vllmworker-86nvj``).
+        """
+        try:
+            result = self.prom.custom_query(
+                f"sum(DCGM_FI_DEV_POWER_USAGE{{"
+                f'exported_namespace="{k8s_namespace}",'
+                f'exported_pod=~"^{dgd_name}-[0-9]+-.*"}})'
+            )
+            if result:
+                return float(result[0]["value"][1])
+        except Exception as e:
+            logger.debug("get_total_dgd_power query failed: %s", e)
+        return None
 
 
 def parse_frontend_metric_containers(
