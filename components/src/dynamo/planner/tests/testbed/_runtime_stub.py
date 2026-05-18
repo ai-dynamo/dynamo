@@ -141,6 +141,8 @@ def install_stub_if_needed() -> bool:
         "ReasoningConfig",
         "RouterConfig",
         "RouterMode",
+        # Added on main (PR #9558) — referenced at dynamo.llm import time.
+        "RoutingConstraints",
         "SglangArgs",
         "WorkerMetricsPublisher",
         "ModelDeploymentCard",
