@@ -172,3 +172,29 @@ def test_trace_headers_delegates_to_context():
     ctx = _FakeContext(trace_headers_value=headers)
     assert telemetry.trace_headers(ctx) is headers
     assert telemetry.trace_headers(_FakeContext()) is None
+
+
+def test_engine_trace_kwargs_default_kwarg_name():
+    headers = {"traceparent": "00-1234-5678-01"}
+    ctx = _FakeContext(trace_headers_value=headers)
+    assert telemetry.engine_trace_kwargs(ctx) == {"trace_headers": headers}
+
+
+def test_engine_trace_kwargs_custom_kwarg_name_for_sglang():
+    headers = {"traceparent": "00-1234-5678-01"}
+    ctx = _FakeContext(trace_headers_value=headers)
+    assert telemetry.engine_trace_kwargs(ctx, kwarg_name="external_trace_header") == {
+        "external_trace_header": headers
+    }
+
+
+def test_engine_trace_kwargs_returns_empty_when_disabled_or_no_headers():
+    # SGLang's --enable-trace=False gate: omit the kwarg entirely.
+    assert (
+        telemetry.engine_trace_kwargs(
+            _FakeContext(trace_headers_value={"traceparent": "x"}), enabled=False
+        )
+        == {}
+    )
+    # No upstream traceparent → omit the kwarg entirely.
+    assert telemetry.engine_trace_kwargs(_FakeContext()) == {}

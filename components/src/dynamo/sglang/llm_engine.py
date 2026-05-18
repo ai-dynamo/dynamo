@@ -25,6 +25,7 @@ from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
+from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
@@ -278,15 +279,17 @@ class SglangLLMEngine(LLMEngine):
             "SGLang",
         )
 
-        trace_header = context.trace_headers() if self.enable_trace else None
-
         stream = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
             stream=True,
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
-            external_trace_header=trace_header,
+            **telemetry.engine_trace_kwargs(
+                context,
+                kwarg_name="external_trace_header",
+                enabled=self.enable_trace,
+            ),
             **bootstrap_kwargs,
         )
 

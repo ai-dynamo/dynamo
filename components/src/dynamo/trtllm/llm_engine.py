@@ -32,6 +32,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
+from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
@@ -520,14 +521,13 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff —
         # matches the legacy disagg wire format.
         streaming = not is_prefill
-        trace_headers = context.trace_headers()
         generation_result = self._engine.llm.generate_async(
             inputs=token_ids,
             sampling_params=sampling_params,
             streaming=streaming,
             disaggregated_params=disaggregated_params,
             scheduling_params=scheduling_params,
-            trace_headers=trace_headers,
+            **telemetry.engine_trace_kwargs(context),
         )
 
         request_id = context.id()

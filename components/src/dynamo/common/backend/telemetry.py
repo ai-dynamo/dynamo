@@ -59,11 +59,25 @@ def trace_headers(context: Context) -> dict[str, str] | None:
     """W3C trace headers to forward to the underlying inference engine.
 
     Thin wrapper over ``Context.trace_headers()``; see that method's
-    docstring for return semantics. Example::
-
-        headers = telemetry.trace_headers(context)
-        gen = self.engine_client.generate(
-            prompt, params, request_id, trace_headers=headers,
-        )
+    docstring for return semantics. Most engine code should prefer
+    :func:`engine_trace_kwargs` instead — it builds the splat-ready kwargs
+    dict with the right name and gate per backend.
     """
     return context.trace_headers()
+
+
+def engine_trace_kwargs(
+    context: Context,
+    *,
+    kwarg_name: str = "trace_headers",
+    enabled: bool = True,
+) -> dict[str, dict[str, str]]:
+    """Splat-ready ``{kwarg_name: headers}`` for the inference-engine call,
+    or ``{}`` when no traceparent / ``enabled=False``. See CLAUDE.md for
+    per-backend kwarg names + gates."""
+    if not enabled:
+        return {}
+    headers = context.trace_headers()
+    if headers is None:
+        return {}
+    return {kwarg_name: headers}
