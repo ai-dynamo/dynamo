@@ -482,22 +482,23 @@ Workspace state:
 
 - Worktree: `/private/tmp/dynamo-gms-transfer-mainbase`
 - Git state: detached `HEAD`
-- `HEAD`: `232b2e0f22a625b97419d7f783ee5e6d43d78bf7`
+- `HEAD`: `ab81d22485e25c5135e714939490fc5b58886103`
 - Corresponding PR: `ai-dynamo/dynamo#9635`
   (`https://github.com/ai-dynamo/dynamo/pull/9635`)
 - PR branch: `schwinns/gms-transfer-backends-draft`
 - PR base: `main`
 - Main repo checkout remains separate at `/Users/schwinns/dynamo` on `main`.
-- The transfer worktree is dirty.
+- The transfer worktree was clean immediately after pushing
+  `ab81d22485e25c5135e714939490fc5b58886103`.
 
-Dirty tracked files:
+Tracked files changed by the pushed refactor commit:
 
 - `lib/gpu_memory_service/cli/storage_runner.py`
 - `lib/gpu_memory_service/snapshot/backends/nixl.py`
 - `lib/gpu_memory_service/snapshot/backends/sharded_ssd.py`
 - `lib/gpu_memory_service/snapshot/transfer.py`
 
-Untracked files:
+New files added by the pushed refactor commit:
 
 - `gms-multigpu-benchmark-worklog.md`
 - `lib/gpu_memory_service/snapshot/backends/nixl_common.py`
