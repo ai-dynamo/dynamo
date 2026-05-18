@@ -585,7 +585,10 @@ impl LocalModel {
             .collect();
         let harvested =
             harvest_extra_files(&self.full_path, &typed_filenames).with_context(|| {
-                format!("harvesting extra metadata files from {:?}", self.full_path)
+                format!(
+                    "harvesting extra metadata files from {}",
+                    self.full_path.display()
+                )
             })?;
         self.card.extra_files.extend(harvested);
 
@@ -714,12 +717,17 @@ pub(crate) fn self_host_base_url(
 /// Scan `model_dir` for files to advertise alongside the typed MDC slots.
 /// Skips weights, dotfiles / README (`is_ignored`), already-typed
 /// filenames, and anything that isn't a regular file. Non-recursive.
+/// Results are sorted by filename so the resulting `mdcsum` is stable
+/// across filesystems that return `read_dir` entries in different
+/// orders.
 fn harvest_extra_files(
     model_dir: &Path,
     typed_filenames: &HashSet<String>,
 ) -> anyhow::Result<Vec<CheckedFile>> {
     let mut out = Vec::new();
-    for entry in fs::read_dir(model_dir).with_context(|| format!("read_dir {model_dir:?}"))? {
+    for entry in
+        fs::read_dir(model_dir).with_context(|| format!("read_dir {}", model_dir.display()))?
+    {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -736,6 +744,7 @@ fn harvest_extra_files(
         }
         out.push(CheckedFile::from_disk(&path)?);
     }
+    out.sort_by(|a, b| a.path().cmp(&b.path()));
     Ok(out)
 }
 

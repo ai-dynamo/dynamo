@@ -755,6 +755,11 @@ pub struct LoraInfo {
 }
 
 impl ModelDeploymentCard {
+    /// Number of typed metadata slots (`model_info`, `tokenizer`,
+    /// `prompt_formatter`, `chat_template_file`, `gen_config`). Used as
+    /// a capacity hint for [`Self::iter_metadata_files`].
+    const TYPED_SLOT_COUNT: usize = 5;
+
     pub fn builder() -> ModelDeploymentCardBuilder {
         ModelDeploymentCardBuilder::default()
     }
@@ -993,7 +998,8 @@ impl ModelDeploymentCard {
     /// is `(file, is_custom)` — `is_custom` is only ever true for
     /// operator-supplied chat templates, which can't fall back to HF.
     pub fn iter_metadata_files(&self) -> Vec<(&CheckedFile, bool)> {
-        let mut out: Vec<(&CheckedFile, bool)> = Vec::with_capacity(5 + self.extra_files.len());
+        let mut out: Vec<(&CheckedFile, bool)> =
+            Vec::with_capacity(Self::TYPED_SLOT_COUNT + self.extra_files.len());
         if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_ref() {
             out.push((cf, false));
         }
@@ -1019,7 +1025,8 @@ impl ModelDeploymentCard {
 
     /// Mutable mirror of [`Self::iter_metadata_files`].
     pub fn iter_metadata_files_mut(&mut self) -> Vec<(&mut CheckedFile, bool)> {
-        let mut out: Vec<(&mut CheckedFile, bool)> = Vec::with_capacity(5 + self.extra_files.len());
+        let mut out: Vec<(&mut CheckedFile, bool)> =
+            Vec::with_capacity(Self::TYPED_SLOT_COUNT + self.extra_files.len());
         if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_mut() {
             out.push((cf, false));
         }
