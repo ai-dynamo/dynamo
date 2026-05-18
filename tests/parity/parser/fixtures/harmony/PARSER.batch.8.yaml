@@ -19,12 +19,17 @@ cases:
             type: string
     expected:
       dynamo:
-        reason: "Dynamo leaks the full envelope (narration + analysis + commentary) into normal_text instead of extracting the tool call and preserving the narration"
-        calls: []
-        normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: I will check the weather.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: I will check the weather.
       sglang:
         calls:
         - name: get_weather
@@ -40,12 +45,17 @@ cases:
     - *id001
     expected:
       dynamo:
-        reason: "Dynamo leaks the full envelope (analysis + commentary + trailing narration) into normal_text instead of extracting the tool call and keeping the trailing prose"
-        calls: []
-        normal_text: <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: Let me know if you need more.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: Let me know if you need more.
       sglang:
         calls:
         - name: get_weather
@@ -54,28 +64,34 @@ cases:
         normal_text: Let me know if you need more.
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
-    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_openai_tool_parser.py#L220
+    ref: "OpenAI Harmony: analysis is hidden and preambles should be commentary messages; originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_openai_tool_parser.py#L220; spec https://developers.openai.com/cookbook/articles/openai-harmony#channels"
     model_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
       to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.
     tools:
     - *id001
     expected:
       dynamo:
-        reason: "Dynamo leaks the sandwich (leading + envelope + trailing) into normal_text instead of extracting the tool call and stitching the surrounding prose"
-        calls: []
-        normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: I will check the weather.  Let me know if you need more.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: I will check the weather.  Let me know if you need more.
       sglang:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: I will check the weather.   Let me know if you need more.
+        reason: "No spec-correct winner on whitespace: analysis is correctly hidden and the same call is extracted; surrounding prose is outside Harmony messages, so whitespace is recovery-only"
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
-    ref: dynamo
+    ref: "OpenAI Harmony: analysis is hidden and preambles should be commentary messages: https://developers.openai.com/cookbook/articles/openai-harmony#channels"
     model_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
       to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Then check LA weather. <|channel|>commentary
       to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
@@ -83,13 +99,23 @@ cases:
     - *id001
     expected:
       dynamo:
-        reason: "Dynamo leaks multi-call sequence with interspersed narration into normal_text instead of extracting both calls and preserving the inter-call prose"
-        calls: []
-        normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Then check LA weather. <|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: I will check the weather.  Then check LA weather.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: I will check the weather.  Then check LA weather.
       sglang:
         calls:
         - name: get_weather
@@ -99,3 +125,4 @@ cases:
           arguments:
             location: LA
         normal_text: I will check the weather.   Then check LA weather.
+        reason: "No spec-correct winner on whitespace: analysis is correctly hidden and the same calls are extracted; surrounding prose is outside Harmony messages, so whitespace is recovery-only"

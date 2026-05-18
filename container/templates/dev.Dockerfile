@@ -91,7 +91,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ltrace \
         # JSON/YAML + filesystem helpers
         jq \
-        yq \
         tree \
         fd-find \
         ripgrep \
@@ -110,6 +109,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         clang \
         libclang-dev \
         libfontconfig-dev && \
+    # Use system python explicitly: some runtime bases put a framework venv first on PATH.
+    PIP_BREAK_SYSTEM_PACKAGES="" && \
+    if /usr/bin/python3 -m pip install --help | grep -q -- "--break-system-packages"; then \
+        PIP_BREAK_SYSTEM_PACKAGES="--break-system-packages"; \
+    fi && \
+    /usr/bin/python3 -m pip install ${PIP_BREAK_SYSTEM_PACKAGES} --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
@@ -187,19 +192,44 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
         fi; \
     fi
 
+# Copy UCX and NIXL libraries for dev stage compilation.
+# The upstream SGLang runtime image doesn't include NIXL, but cargo build needs to link against
+# -lnixl, -lnixl_build, and -lnixl_common. Runtime stage doesn't need this since it uses pre-built
+# wheels, but dev stage needs it for maturin develop and cargo build from source.
+# - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
+# - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
+ARG TARGETARCH
+RUN --mount=from=wheel_builder,target=/wheel_builder \
+    if [ "${FRAMEWORK}" = "sglang" ]; then \
+        if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
+            mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
+            cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
+            cp -r /wheel_builder/usr/local/ucx /usr/local/; \
+            cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
+            cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
+            cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
+            echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
+        fi; \
+    fi
+
 {% if device == "xpu" %}
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
-{% elif framework != "sglang" %}
-# Non-SGLang runtimes use the Dynamo-built NIXL install from wheel_builder.
-# Reset the same values already set in runtime (no harm).
+{% elif framework == "vllm" %}
+# Reuse the stable symlink created by the upstream vLLM runtime stage so dev
+# builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
+ENV NIXL_PREFIX=/opt/dynamo/nixl \
+    NIXL_LIB_DIR=/opt/dynamo/nixl \
+    NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+{% else %}
+# NIXL is installed under lib64 (manylinux/AlmaLinux convention used by the wheel_builder).
+# For trtllm/none: this resets the same values already set in runtime.
+# For sglang: this sets them after copying NIXL from wheel_builder above.
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
-{% endif %}
 
-{% if device != "xpu" %}
 # Set universal CUDA development environment variables (all frameworks)
 # vLLM: Dockerfile.vllm line 533, 597
 # TRT-LLM: Dockerfile.trtllm lines 600-606
@@ -215,18 +245,15 @@ ENV CUDA_HOME=/usr/local/cuda \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% endif %}
 
-{% if framework != "sglang" %}
 # Base LD_LIBRARY_PATH with universal paths (all frameworks have these)
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
+ARG PYTHON_VERSION
 ENV LD_LIBRARY_PATH=\
 ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 ${LD_LIBRARY_PATH}
-{% else %}
-# SGLang dev/local-dev inherit the upstream SGLang/NIXL runtime stack.
-{% endif %}
 
 # Copy shell profile script for framework-specific environment variables
 # This script conditionally adds PATH/LD_LIBRARY_PATH entries based on what exists
@@ -282,12 +309,17 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
-    cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/. \
+    cp -r /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
           /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
     chmod -R g+w /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/ && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
+{% elif framework == "vllm" %}
+# vLLM inherits upstream's system Python solve; keep dev installs in our venv.
+RUN mkdir -p /opt/dynamo/venv && \
+    python3 -m venv --system-site-packages /opt/dynamo/venv && \
+    ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv
 {% elif framework == "dynamo" %}
 # framework=none: Create venv if runtime stage didn't already provide one
 RUN if [ ! -d /opt/dynamo/venv ]; then \
@@ -307,7 +339,7 @@ ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/requirements.dev.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     # Cache uv downloads; uv handles its own locking for this cache.
-    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    --mount=type=cache,target=/root/.cache/uv \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --index-strategy unsafe-best-match \

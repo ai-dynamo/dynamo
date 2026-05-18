@@ -804,7 +804,7 @@ impl ModelWatcher {
             // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
             //
             // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that busy-state updates (via update_free_instances) are visible to the
+            // so that busy-state updates (via set_busy_instances) are visible to the
             // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
             // Using a different Client instance would cause the PushRouter to never see
             // busy workers, since each Client::new() creates independent ArcSwap state.
@@ -853,8 +853,13 @@ impl ModelWatcher {
                 })?;
                 let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
                     let routed_engine = routing
-                        .build_prefill_pipeline()
-                        .context("PreprocessedRouting::build_prefill_pipeline")?;
+                        .build_preprocessed_pipeline(
+                            card,
+                            self.migration_limit,
+                            self.migration_max_seq_len,
+                            self.metrics.clone(),
+                        )
+                        .context("PreprocessedRouting::build_preprocessed_pipeline")?;
                     factory(mcid.clone(), card.clone(), routed_engine)
                         .await
                         .context("python chat_engine_factory")?

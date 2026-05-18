@@ -20,7 +20,6 @@ dependencies = [
     "prometheus_client>=0.23.1,<1.0",
     "msgspec>=0.19.0",
     "pyzmq>=26.0.0",
-    "msgpack==1.1.2",
 ]
 
 classifiers = [
@@ -52,9 +51,9 @@ vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
     "vllm[flashinfer,runai,otel]==0.20.1",
-    # vllm-omni is installed separately in container builds (see
-    # container/deps/vllm/install_vllm.sh). Do not add it to ai-dynamo[vllm]:
-    # pip/uv dependency resolution for omni can override the vLLM torch stack.
+    # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
+    # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
+    # for omni can override the vLLM torch stack.
     # "vllm-omni==...",
     "blake3>=1.0.0,<2.0.0",
     "soundfile>=0.13.1",
@@ -397,7 +396,6 @@ module = [
     "filterpy.*",
     "prophet",
     "prophet.*",
-    "msgpack",
     "nixl",
     "nixl.*",
     "imageio",

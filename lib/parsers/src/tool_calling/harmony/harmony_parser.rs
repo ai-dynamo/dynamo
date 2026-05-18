@@ -2,45 +2,188 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::ToolDefinition;
-use super::super::json::base_json_parser::try_repair_truncated_json;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 use openai_harmony::chat::{Content::Text, Role};
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, load_harmony_encoding};
-use regex::Regex;
+use regex::{Captures, Regex};
 use serde_json::Value;
 use std::sync::OnceLock;
 
 static COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
+static COMMENTARY_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
+static COMMENTARY_HEADER_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
+static ANALYSIS_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
+static MESSAGE_CALL_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
+static SPECIAL_TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Regex fallback used only when `openai_harmony`'s tokenizer rejects the
 /// input — alternative on this path is silent-drop. Worst case is missing
-/// a call, never fabricating one (full structural signature required).
+/// a call, never fabricating one: Harmony tool calls must end with `<|call|>`.
 fn commentary_block_regex() -> &'static Regex {
     COMMENTARY_BLOCK_REGEX.get_or_init(|| {
         // Name is `[\w.\-]+` (alphanumeric / dot / hyphen / underscore).
         // Between name and `<|message|>` we tolerate optional
         // `<|constrain|>json` and whitespace by using non-greedy `.*?`.
-        // Args end at either `<|call|>` (normal close) or end-of-string
-        // (`\z`, the bare-envelope PARSER.batch.5 variant where the model never
-        // emitted `<|call|>` before EOS / max_tokens).
+        // Args must end at `<|call|>`, the required Harmony tool-call stop token.
         Regex::new(
-            r"(?s)<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)(?:<\|call\|>|\z)",
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
         )
         .expect("commentary block regex")
     })
 }
 
+fn commentary_block_cleanup_regex() -> &'static Regex {
+    COMMENTARY_BLOCK_CLEANUP_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary(?:\s+to=functions\.(?P<name>[\w.\-]+))?.*?<\|message\|>.*?(?:<\|call\|>|\z)",
+        )
+        .expect("commentary block cleanup regex")
+    })
+}
+
+fn commentary_header_cleanup_regex() -> &'static Regex {
+    COMMENTARY_HEADER_CLEANUP_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary(?:\s+to=functions\.(?P<name>[\w.\-]+))?.*\z",
+        )
+        .expect("commentary header cleanup regex")
+    })
+}
+
+fn analysis_block_cleanup_regex() -> &'static Regex {
+    ANALYSIS_BLOCK_CLEANUP_REGEX.get_or_init(|| {
+        Regex::new(r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis<\|message\|>(?P<body>.*?)(?:<\|end\|>|\z)")
+            .expect("analysis block cleanup regex")
+    })
+}
+
+fn message_call_cleanup_regex() -> &'static Regex {
+    MESSAGE_CALL_CLEANUP_REGEX.get_or_init(|| {
+        Regex::new(r"(?s)<\|message\|>.*?(?:<\|call\|>|\z)").expect("message call cleanup regex")
+    })
+}
+
+fn special_token_regex() -> &'static Regex {
+    SPECIAL_TOKEN_REGEX.get_or_init(|| {
+        Regex::new(r"<\|(?:start|channel|constrain|message|call|end|return)\|>")
+            .expect("special token cleanup regex")
+    })
+}
+
+fn push_unique(items: &mut Vec<String>, item: String) {
+    if !items.iter().any(|existing| existing == &item) {
+        items.push(item);
+    }
+}
+
+fn record_special_tokens(text: &str, items: &mut Vec<String>) {
+    for m in special_token_regex().find_iter(text) {
+        push_unique(items, format!("special_token:{}", m.as_str()));
+    }
+}
+
+fn strip_harmony_protocol_from_normal_text(text: &str, reason: &'static str) -> String {
+    let mut stripped = Vec::new();
+
+    let cleaned = commentary_block_cleanup_regex()
+        .replace_all(text, |caps: &Captures<'_>| {
+            record_special_tokens(&caps[0], &mut stripped);
+            let item = match caps.name("name").map(|m| m.as_str()) {
+                Some(name) => format!("commentary_tool_call:functions.{name}"),
+                None => "commentary_tool_call:missing_recipient".to_string(),
+            };
+            push_unique(&mut stripped, item);
+            ""
+        })
+        .into_owned();
+
+    let cleaned = commentary_header_cleanup_regex()
+        .replace_all(&cleaned, |caps: &Captures<'_>| {
+            record_special_tokens(&caps[0], &mut stripped);
+            let item = match caps.name("name").map(|m| m.as_str()) {
+                Some(name) => format!("commentary_tool_call_without_message:functions.{name}"),
+                None => "commentary_tool_call_without_message:missing_recipient".to_string(),
+            };
+            push_unique(&mut stripped, item);
+            ""
+        })
+        .into_owned();
+
+    let cleaned = analysis_block_cleanup_regex()
+        .replace_all(&cleaned, |caps: &Captures<'_>| {
+            record_special_tokens(&caps[0], &mut stripped);
+            push_unique(&mut stripped, "analysis_envelope".to_string());
+            ""
+        })
+        .into_owned();
+
+    let cleaned = message_call_cleanup_regex()
+        .replace_all(&cleaned, |caps: &Captures<'_>| {
+            record_special_tokens(&caps[0], &mut stripped);
+            push_unique(&mut stripped, "message_call_payload".to_string());
+            ""
+        })
+        .into_owned();
+
+    let cleaned = special_token_regex()
+        .replace_all(&cleaned, |caps: &Captures<'_>| {
+            push_unique(&mut stripped, format!("special_token:{}", &caps[0]));
+            ""
+        })
+        .into_owned();
+
+    if stripped.is_empty() {
+        return text.to_string();
+    }
+
+    let cleaned = cleaned.trim().to_string();
+
+    tracing::warn!(
+        family = "harmony",
+        reason,
+        stripped = ?stripped,
+        original_len = text.len(),
+        cleaned_len = cleaned.len(),
+        "stripped harmony protocol content from normal_text"
+    );
+
+    cleaned
+}
+
+fn normal_text_after_parse_failure(text: &str, reason: &'static str) -> String {
+    let cleaned = strip_harmony_protocol_from_normal_text(text, reason);
+    if cleaned == text && !text.trim().is_empty() {
+        tracing::warn!(
+            family = "harmony",
+            reason,
+            original_len = text.len(),
+            "dropped bare text without a Harmony final/commentary message"
+        );
+        String::new()
+    } else {
+        cleaned
+    }
+}
+
+fn serialize_harmony_arguments(raw_args: &str) -> String {
+    let trimmed = raw_args.trim();
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_string()),
+        Err(_) => trimmed.to_string(),
+    }
+}
+
 /// Extract calls via regex when harmony's strict tokenizer rejects the input
 /// (truncated JSON, multiple back-to-back commentary blocks, etc.).
 /// Returns (calls, residual_text) where residual_text is everything not
-/// consumed by a matched commentary block — preserved so analysis prose and
-/// non-tool suffixes aren't dropped.
+/// consumed by a matched commentary block — preserved so non-tool user-visible
+/// spans aren't dropped.
 fn extract_calls_via_regex(text: &str) -> (Vec<ToolCallResponse>, String) {
     let mut out = Vec::new();
     let mut residual = String::new();
     let mut cursor = 0;
-    for (i, cap) in commentary_block_regex().captures_iter(text).enumerate() {
+    for cap in commentary_block_regex().captures_iter(text) {
         let m = cap.get(0).expect("regex match has full span");
         residual.push_str(&text[cursor..m.start()]);
         cursor = m.end();
@@ -50,17 +193,10 @@ fn extract_calls_via_regex(text: &str) -> (Vec<ToolCallResponse>, String) {
         if name.is_empty() {
             continue;
         }
-        let args_json = match serde_json::from_str::<Value>(raw_args) {
-            Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| raw_args.to_string()),
-            Err(_) => match try_repair_truncated_json(raw_args)
-                .and_then(|r| serde_json::from_str::<Value>(&r).ok())
-            {
-                Some(v) => serde_json::to_string(&v).unwrap_or_else(|_| raw_args.to_string()),
-                None => raw_args.to_string(),
-            },
-        };
+        let args_json = serialize_harmony_arguments(raw_args);
+        let call_idx = out.len() + 1;
         out.push(ToolCallResponse {
-            id: format!("call-{}", i + 1),
+            id: format!("call-{call_idx}"),
             tp: ToolCallType::Function,
             function: CalledFunction {
                 name: name.to_string(),
@@ -100,9 +236,9 @@ pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::
 /// or token-by-token streaming, making it more efficient for complete chunks.
 ///
 /// # Arguments
-/// * `text` - The full Harmony-format string to be parsed, excluding any trailing stop tokens.
+/// * `text` - The full Harmony-format string to be parsed, including required Harmony stop tokens.
 ///   Example:
-///   `<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}`
+///   `<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}<|call|>`
 /// * `_config` - Parser configuration (currently unused but kept for API consistency)
 ///
 /// # Returns
@@ -110,14 +246,15 @@ pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::
 /// * `Err(e)` - If parsing fails due to encoding or tokenization errors
 pub async fn parse_tool_calls_harmony_complete(
     text: &str,
-    config: &JsonParserConfig,
+    _config: &JsonParserConfig,
     _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let enc = match get_harmony_encoding().await.as_ref() {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Failed to load harmony encoding: {e}. Tool calls will not be parsed.");
-            return Ok((vec![], Some(text.to_string())));
+            let normal_text = normal_text_after_parse_failure(text, "harmony_encoding_unavailable");
+            return Ok((vec![], Some(normal_text)));
         }
     };
 
@@ -129,24 +266,29 @@ pub async fn parse_tool_calls_harmony_complete(
             tracing::debug!(
                 "Failed to parse messages from completion tokens: {e}. Falling back to regex extraction."
             );
-            // Recovery: harmony rejects parallel commentary blocks and
-            // truncated JSON. Gated on `allow_eof_recovery` so streaming
-            // jails (where the tokenizer often rejects mid-chunk before all
-            // tokens have arrived) don't extract a partial call.
-            if config.allow_eof_recovery {
-                let (calls, residual) = extract_calls_via_regex(text);
-                if !calls.is_empty() {
-                    return Ok((calls, Some(residual)));
-                }
+            // Recovery: harmony rejects parallel commentary blocks even when
+            // every call is explicitly closed. Only EOF/truncated recovery is
+            // gated, so streaming jails do not synthesize incomplete calls.
+            // Harmony differs from generic JSON/XML recovery: a tool call is
+            // complete only once `<|call|>` is present. Do not synthesize a
+            // call from EOF; that would diverge from vLLM/openai_harmony.
+            let (calls, residual) = extract_calls_via_regex(text);
+            if !calls.is_empty() {
+                let normal_text =
+                    strip_harmony_protocol_from_normal_text(&residual, "regex_recovery_residual");
+                return Ok((calls, Some(normal_text)));
             }
-            return Ok((vec![], Some(text.to_string())));
+            let normal_text =
+                normal_text_after_parse_failure(text, "parse_failed_no_recovered_calls");
+            return Ok((vec![], Some(normal_text)));
         }
     };
 
-    let mut normal_text = String::new();
-
     let mut res = Vec::with_capacity(messages.len());
     let mut call_idx = 0; // Index of the tool call
+    let mut final_text: Option<String> = None;
+    let mut commentary_text: Option<String> = None;
+    let has_tool_call_stop = text.contains("<|call|>");
 
     for message in messages.iter() {
         if message.author.role != Role::Assistant {
@@ -158,6 +300,10 @@ pub async fn parse_tool_calls_harmony_complete(
 
         // Handle commentary channel
         if channel == Some("commentary") && recipient.starts_with("functions.") {
+            if !has_tool_call_stop {
+                continue;
+            }
+
             let Some(fname) = message
                 .recipient
                 .as_ref()
@@ -168,49 +314,38 @@ pub async fn parse_tool_calls_harmony_complete(
                 continue;
             };
 
-            let args = match message.content.first() {
-                Some(Text(text)) => {
-                    let trimmed = text.text.trim();
-                    match serde_json::from_str::<Value>(trimmed) {
-                        Ok(value) => value,
-                        Err(_) if config.allow_eof_recovery => {
-                            // Truncation recovery: balance unclosed strings /
-                            // braces (max_tokens / EOS pattern) and retry.
-                            // Gated so streaming early-exit doesn't extract
-                            // a partial call with synthesized closers.
-                            try_repair_truncated_json(trimmed)
-                                .and_then(|r| serde_json::from_str::<Value>(&r).ok())
-                                .unwrap_or(Value::Null)
-                        }
-                        Err(_) => Value::Null,
-                    }
-                }
-                _ => {
-                    Value::Null // Set args to null if it's not a text content
-                }
+            let Some(args_json) = message.content.first().and_then(|content| match content {
+                Text(text) => Some(serialize_harmony_arguments(&text.text)),
+                _ => None,
+            }) else {
+                continue;
             };
-            // Add tool call to result if args is valid JSON
-            if !args.is_null() {
-                call_idx += 1;
-                res.push(ToolCallResponse {
-                    id: format!("call-{}", call_idx),
-                    tp: ToolCallType::Function,
-                    function: CalledFunction {
-                        name: fname.to_string(),
-                        // Safety: `Value::Object` is always valid JSON, so serialization cannot fail
-                        arguments: serde_json::to_string(&args).unwrap(),
-                    },
-                });
-            }
-        // Handle reasoning(analysis) channel
-        } else if channel == Some("analysis") {
-            normal_text.push_str(match &message.content[0] {
-                Text(t) => &t.text,
-                _ => "",
+
+            call_idx += 1;
+            res.push(ToolCallResponse {
+                id: format!("call-{}", call_idx),
+                tp: ToolCallType::Function,
+                function: CalledFunction {
+                    name: fname.to_string(),
+                    arguments: args_json,
+                },
             });
+        } else if channel == Some("final") {
+            if let Some(Text(text)) = message.content.first() {
+                final_text = Some(text.text.clone());
+            }
+        } else if channel == Some("commentary")
+            && recipient.is_empty()
+            && let Some(Text(text)) = message.content.first()
+        {
+            commentary_text = Some(text.text.clone());
         }
     }
-    Ok((res, Some(normal_text.to_string())))
+    let normal_text = final_text
+        .filter(|text| !text.is_empty())
+        .or_else(|| commentary_text.filter(|text| !text.is_empty()))
+        .unwrap_or_default();
+    Ok((res, Some(normal_text)))
 }
 
 pub fn detect_tool_call_start_harmony(
@@ -296,7 +431,7 @@ mod tests {
 
     #[tokio::test] // PARSER.batch.1, PARSER.harmony.2
     async fn test_parse_tool_calls_harmony_complete_basic() {
-        let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
+        let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
@@ -315,7 +450,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(normal_content, Some(text.trim().to_string()));
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 0);
     }
 
@@ -326,10 +461,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -344,41 +476,48 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
         assert_eq!(args["location"], "San Francisco");
     }
 
-    // Harmony's `<|call|>` plays the role of an outer end-token. When
-    // max_tokens fires before it lands, the existing `analysis ... <|end|>`
-    // envelope still gives the parser enough context to recover the call —
-    // this test pins that recovery behavior. The bare-envelope variant
-    // (no preceding analysis block) currently does NOT recover, but adding
-    // a test for that is a parser-change discussion.
-    // Pin current behavior on two back-to-back commentary blocks. The
-    // harmony parser today does NOT extract both calls — the second
-    // `<|start|>assistant<|channel|>commentary` block is left in normal
-    // content. Same failure class as PARSER.batch.5: parser drops in-flight work,
-    // customer sees HTTP 200 with fewer tool_calls than the model emitted.
-    // Promoting this to recovery is a parser change.
+    #[tokio::test] // PARSER.batch.3 — gpt-oss
+    async fn test_parse_harmony_bare_text_without_final_message_is_dropped() {
+        let text = "Hello, how can I help you today?";
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert!(tool_calls.is_empty());
+        assert_eq!(normal_content, Some("".to_string()));
+    }
+
+    #[tokio::test] // PARSER.batch.3 — gpt-oss
+    async fn test_parse_harmony_final_message_returns_normal_text() {
+        let text = r#"<|channel|>final<|message|>Hello, how can I help you today?<|return|>"#;
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert!(tool_calls.is_empty());
+        assert_eq!(
+            normal_content,
+            Some("Hello, how can I help you today?".to_string())
+        );
+    }
+
+    // Harmony's strict tokenizer rejects two back-to-back commentary
+    // blocks, so EOF recovery falls back to regex extraction and pins that
+    // both calls are surfaced without leaking the raw envelopes.
     #[tokio::test] // PARSER.batch.2 — gpt-oss
     async fn test_parse_harmony_multiple_calls_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
-        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
-            text,
-            &JsonParserConfig {
-                allow_eof_recovery: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
+        let (tool_calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
         assert_eq!(tool_calls.len(), 2);
         let (n0, a0) = extract_name_and_args(tool_calls[0].clone());
         let (n1, a1) = extract_name_and_args(tool_calls[1].clone());
@@ -388,11 +527,20 @@ mod tests {
         assert_eq!(a1["y"], 2);
     }
 
-    // Pin current behavior on truncated JSON args. harmony today drops the
-    // call entirely rather than falling back to a string-form arguments or
-    // surfacing an explicit error.
     #[tokio::test] // PARSER.batch.4 — gpt-oss
-    async fn test_parse_harmony_truncated_json_recovers() {
+    async fn test_parse_harmony_malformed_json_preserves_raw_arguments() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at all<|call|>"#;
+        let (tool_calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, "not json at all");
+    }
+
+    #[tokio::test] // PARSER.batch.4 — gpt-oss
+    async fn test_parse_harmony_unterminated_json_preserves_raw_arguments() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
         let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
             text,
@@ -405,18 +553,17 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tool_calls.len(), 1);
-        let (name, args) = extract_name_and_args(tool_calls[0].clone());
-        assert_eq!(name, "get_weather");
-        assert_eq!(args["location"], "NYC");
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, r#"{"location":"NYC"#);
     }
 
     // Bare-envelope PARSER.batch.5: no preceding `analysis` block, no `<|call|>`
-    // at the end. harmony's tokenizer rejects this; the regex fallback
-    // accepts EOS as a synthetic close.
+    // at the end. Harmony requires the explicit call stop token, so fallback
+    // must not accept EOS as a synthetic close.
     #[tokio::test] // PARSER.batch.5 — gpt-oss
-    async fn test_parse_harmony_bare_envelope_no_call_token_recovers() {
+    async fn test_parse_harmony_bare_envelope_no_call_token_drops() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
-        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
+        let (tool_calls, normal) = parse_tool_calls_harmony_complete(
             text,
             &JsonParserConfig {
                 allow_eof_recovery: true,
@@ -426,10 +573,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(tool_calls.len(), 1);
-        let (name, args) = extract_name_and_args(tool_calls[0].clone());
-        assert_eq!(name, "get_weather");
-        assert_eq!(args["location"], "NYC");
+        assert!(tool_calls.is_empty());
+        assert_eq!(normal, Some("".to_string()));
     }
 
     // The regex fallback must preserve any non-tool spans (prose before
@@ -457,6 +602,42 @@ mod tests {
             normal.contains("SUFFIX"),
             "normal must keep suffix: {normal:?}"
         );
+        assert!(
+            !normal.contains("<|start|>"),
+            "normal must not leak harmony start token: {normal:?}"
+        );
+        assert!(
+            !normal.contains("assistant"),
+            "normal must not leak harmony assistant marker: {normal:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_parse_failure_strips_protocol_from_normal_text() {
+        let text = r#"Before <|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"<|call|> After"#;
+        let (tool_calls, normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert!(tool_calls.is_empty());
+        let normal = normal.unwrap_or_default();
+        assert_eq!(normal, "Before  After");
+        for token in [
+            "<|start|>",
+            "<|channel|>",
+            "<|constrain|>",
+            "<|message|>",
+            "<|call|>",
+        ] {
+            assert!(
+                !normal.contains(token),
+                "normal_text must not leak {token}: {normal:?}"
+            );
+        }
+        assert!(
+            !normal.contains("commentary"),
+            "normal_text must not leak tool-call metadata: {normal:?}"
+        );
     }
 
     #[tokio::test] // PARSER.batch.4, PARSER.batch.5, PARSER.harmony.2
@@ -466,12 +647,8 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(normal_content, Some("We need to call get_weather function. The user asks \"What's the weather like in San Francisco in Celsius?\" So location: \"San Francisco, CA\" unit: \"celsius\". Let's call function.".to_string()));
-        assert_eq!(tool_calls.len(), 1);
-        let (name, args) = extract_name_and_args(tool_calls[0].clone());
-        assert_eq!(name, "get_weather");
-        assert_eq!(args["location"], "San Francisco, CA");
-        assert_eq!(args["unit"], "celsius");
+        assert_eq!(normal_content, Some("".to_string()));
+        assert!(tool_calls.is_empty());
     }
 
     /// Parser-level invariant: the harmony parser is byte-stable — it
@@ -482,7 +659,7 @@ mod tests {
     /// cross-parser finish_reason mapping work-item (tracked separately).
     #[tokio::test]
     async fn test_harmony_parser_output_independent_of_upstream_finish() {
-        let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
+        let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>"#;
         let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
             .await
             .unwrap();
@@ -493,8 +670,7 @@ mod tests {
     /// the function name.
     #[tokio::test] // PARSER.batch.6 — gpt-oss
     async fn test_parse_harmony_empty_args() {
-        let text =
-            r#"<|channel|>commentary to=functions.current_time <|constrain|>json<|message|>{}"#;
+        let text = r#"<|channel|>commentary to=functions.current_time <|constrain|>json<|message|>{}<|call|>"#;
         let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
             .await
             .unwrap();

@@ -15,8 +15,8 @@ use dynamo_kv_router::{
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, TokensWithHashes, WorkerConfigLike, WorkerId,
-        WorkerWithDpRank, compute_block_hash_for_seq,
+        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
+        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::TierOverlapBlocks,
 };
@@ -296,6 +296,14 @@ pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
     format!("worker_kv_indexer_query_dp{dp_rank}")
 }
 
+/// Generates a query endpoint name for a dp_rank whose events are attributed to `worker_id`.
+pub fn worker_kv_indexer_query_endpoint_for_worker(worker_id: WorkerId, dp_rank: DpRank) -> String {
+    format!(
+        "{}_worker{worker_id}",
+        worker_kv_indexer_query_endpoint(dp_rank)
+    )
+}
+
 fn log_routing_input_hashes(
     request_id: Option<&str>,
     block_size: u32,
@@ -529,6 +537,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<BestMatchDetails> {
         let start = Instant::now();
 
@@ -633,6 +642,7 @@ where
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
+                routing_constraints,
                 shared_cache_hits,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
@@ -696,6 +706,7 @@ where
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let result = self
             .find_best_match_details(
@@ -709,6 +720,7 @@ where
                 expected_output_tokens,
                 None,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await?;
         Ok((result.worker, result.cache_hit.rounded_overlap_blocks()))
@@ -1072,6 +1084,7 @@ where
             RouterRequest::New {
                 tokens,
                 block_mm_infos,
+                routing_constraints,
             } => {
                 let (best_worker, overlap_blocks) = self
                     .find_best_match(
@@ -1084,6 +1097,7 @@ where
                         0.0,
                         None,
                         None,
+                        routing_constraints,
                     )
                     .await?;
 
@@ -1311,6 +1325,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                RoutingConstraints::default(),
             )
             .await
             .unwrap();
@@ -1344,6 +1359,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                RoutingConstraints::default(),
             )
             .await
             .unwrap();

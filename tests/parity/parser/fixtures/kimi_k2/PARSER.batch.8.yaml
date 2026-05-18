@@ -17,24 +17,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Dallas
-        normal_text: I'll check the weather.
-      vllm:
+      dynamo: &d_8_a
         calls:
         - name: get_weather
           arguments:
             location: Dallas
         normal_text: 'I''ll check the weather. '
-      sglang:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Dallas
-        normal_text: 'I''ll check the weather. '
+      vllm: *d_8_a
+      sglang: *d_8_a
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L435
@@ -43,24 +33,17 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Dallas
-        normal_text: Let me know if you need more.
-      vllm:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Dallas
-        normal_text: ''
-      sglang:
+      # Kimi tool-call turns are intermediate: official API content is empty
+      # while tool_calls are emitted, so post-wrapper narration is not final
+      # user-facing text. This matches vLLM/SGLang.
+      dynamo: &d_8_b
         calls:
         - name: get_weather
           arguments:
             location: Dallas
         normal_text: ''
+      vllm: *d_8_b
+      sglang: *d_8_b
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
@@ -69,24 +52,17 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Dallas
-        normal_text: I'll check the weather.  Let me know if you need more.
-      vllm:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Dallas
-        normal_text: 'I''ll check the weather. '
-      sglang:
+      # Preserve prefix content emitted before tool_calls, but drop
+      # post-wrapper text because Kimi tool-call turns are intermediate; final
+      # user-facing content should come after tool results.
+      dynamo: &d_8_c
         calls:
         - name: get_weather
           arguments:
             location: Dallas
         normal_text: 'I''ll check the weather. '
+      vllm: *d_8_c
+      sglang: *d_8_c
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -95,25 +71,10 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Dallas
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: First check Dallas.  Then check NYC.
-      vllm:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Dallas
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: 'First check Dallas. '
-      sglang:
+      # Multiple tool sections are still one intermediate Kimi tool-call turn:
+      # keep prefix content before the first section, but drop inter-wrapper
+      # narration until tool results produce the final user-facing answer.
+      dynamo: &d_8_d
         calls:
         - name: get_weather
           arguments:
@@ -122,3 +83,5 @@ cases:
           arguments:
             location: NYC
         normal_text: 'First check Dallas. '
+      vllm: *d_8_d
+      sglang: *d_8_d

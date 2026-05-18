@@ -22,15 +22,15 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: I will check the weather.
-      vllm:
+        normal_text: 'I will check the weather. '
+      vllm: *id001
+      sglang:
         calls:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: 'I will check the weather. '
-        reason: vLLM glm47 keeps trailing whitespace before the first <tool_call>; Dynamo and SGLang both trim it
-      sglang: *id001
+        normal_text: I will check the weather.
+        reason: SGLang glm47 trims trailing whitespace before the first <tool_call>; Dynamo and vLLM keep it verbatim
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -44,15 +44,15 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: Let me know if you need more.
-      vllm:
+        normal_text: ''
+      vllm: *id003
+      sglang:
         calls:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: ''
-        reason: vLLM glm47 only emits the prefix before the first <tool_call> as normal_text — content after the last </tool_call> is dropped; Dynamo and SGLang both preserve it
-      sglang: *id003
+        normal_text: Let me know if you need more.
+        reason: SGLang glm47 preserves trailing normal_text after the last </tool_call>; Dynamo and vLLM drop it
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
@@ -66,15 +66,15 @@ cases:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: I will check the weather.  Let me know if you need more.
-      vllm:
+        normal_text: 'I will check the weather. '
+      vllm: *id004
+      sglang:
         calls:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: 'I will check the weather. '
-        reason: vLLM glm47 only emits the prefix before the first <tool_call> as normal_text — content after the </tool_call> is dropped; Dynamo and SGLang both concatenate the prefix and the trailing prose
-      sglang: *id004
+        normal_text: 'I will check the weather.  Let me know if you need more.'
+        reason: SGLang glm47 concatenates the prefix and trailing prose; Dynamo and vLLM drop the post-wrapper text
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -91,8 +91,9 @@ cases:
         - name: get_weather
           arguments:
             location: LA
-        normal_text: I will check the weather.  Then check LA weather.
-      vllm:
+        normal_text: 'I will check the weather. '
+      vllm: *id005
+      sglang:
         calls:
         - name: get_weather
           arguments:
@@ -100,6 +101,5 @@ cases:
         - name: get_weather
           arguments:
             location: LA
-        normal_text: 'I will check the weather. '
-        reason: vLLM glm47 only emits the prefix before the first <tool_call> as normal_text — prose between successive calls is dropped; Dynamo and SGLang concatenate all non-tool-call segments
-      sglang: *id005
+        normal_text: 'I will check the weather.  Then check LA weather.'
+        reason: SGLang glm47 concatenates inter-call narration and trailing prose; Dynamo and vLLM only emit the prefix before the first <tool_call>
