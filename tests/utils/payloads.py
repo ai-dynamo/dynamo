@@ -927,12 +927,18 @@ class MetricsPayload(BasePayload):
 
     Validates common dynamo_component_* metrics shared across all backends.
     Backend-specific subclasses handle engine-specific metrics.
+
+    Set ``check_lifecycle_gauges=True`` to additionally assert the unified-
+    only framework gauges (``cleanup_time_seconds``, ``drain_time_seconds``,
+    ``kv_cache_hit_rate``). Off by default because legacy entry points
+    don't emit them.
     """
 
     endpoint: str = "/metrics"
     method: str = "GET"
     port: int = DefaultPort.SYSTEM1.value
     min_num_requests: int = 1
+    check_lifecycle_gauges: bool = False
 
     def with_model(self, model):
         # Metrics does not use model in request body
@@ -1020,11 +1026,30 @@ class MetricsPayload(BasePayload):
                     f"SUCCESS: Found {name} = {float(value):.2f}s"
                 ),
             ),
-            # Framework-owned lifecycle gauge (Rust-side LifecycleGauges).
-            # Registered at Worker setup, observed at shutdown — while the
-            # worker is serving, the value is 0. The "name appears" check
-            # is what catches the regression where the gauge silently
-            # fails to register against the runtime's MetricsRegistry.
+        ]
+
+    def _get_lifecycle_gauge_checks(self) -> list[MetricCheck]:
+        """Unified-only framework lifecycle gauges. Legacy entry points
+        don't emit these — gated by ``check_lifecycle_gauges`` so legacy
+        callers don't trip on the absence.
+
+        - cleanup_time / drain_time: Rust-side ``LifecycleGauges``, owned
+          by ``dynamo_backend_common::Worker``. While the worker is
+          serving the values are 0 (set at shutdown). The "name appears"
+          check catches regressions where the gauges silently fail to
+          register against the runtime's ``MetricsRegistry``.
+        - kv_cache_hit_rate: Python-side ``LLMBackendMetrics`` gauge.
+          Has no data rows until the engine populates per-rank values,
+          so check HELP-line presence via multiline. Catches the bridge
+          regression where ``LLMBackendMetrics`` construction was gated
+          on the engine returning per-rank sources.
+        """
+        prefix = prometheus_names.name_prefix.COMPONENT
+
+        def metric_pattern(name):
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+
+        return [
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.lifecycle.CLEANUP_TIME_SECONDS}",
                 pattern=metric_pattern,
@@ -1039,11 +1064,6 @@ class MetricsPayload(BasePayload):
                 error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
             ),
-            # Engine-side hit-rate gauge (Python LLMBackendMetrics). Has
-            # no data rows until the engine populates per-rank values, so
-            # check HELP-line presence via multiline. Catches the bridge
-            # regression where LLMBackendMetrics construction is gated on
-            # the engine returning per-rank sources.
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.kvstats.KV_CACHE_HIT_RATE}",
                 pattern=lambda name: rf"^# HELP {name}\b",
@@ -1115,9 +1135,11 @@ class MetricsPayload(BasePayload):
         """Validate Prometheus metrics output"""
         content = self._filter_bucket_metrics(content)
 
-        # Collect all checks: common + backend-specific
+        # Collect all checks: common + backend-specific (+ lifecycle if opted in)
         metrics_to_check = self._get_common_metric_checks()
         metrics_to_check.extend(self._get_backend_specific_checks())
+        if self.check_lifecycle_gauges:
+            metrics_to_check.extend(self._get_lifecycle_gauge_checks())
 
         # Run all validations
         self._validate_metric_checks(metrics_to_check, content)

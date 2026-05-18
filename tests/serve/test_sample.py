@@ -46,8 +46,10 @@ sample_configs = {
             # (including the framework-owned cleanup_time/drain_time
             # Rust gauges and the engine-side model_load_time/
             # kv_cache_hit_rate Python gauges). Runs after the chat +
-            # completion payloads so requests_total >= 2.
-            metric_payload_default(min_num_requests=2),
+            # completion payloads so requests_total >= 2. Sample
+            # backend is unified-only, so opt into the lifecycle-gauge
+            # assertions.
+            metric_payload_default(min_num_requests=2, check_lifecycle_gauges=True),
         ],
     ),
 }
