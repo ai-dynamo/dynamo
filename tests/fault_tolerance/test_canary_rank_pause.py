@@ -143,6 +143,7 @@ def _wait_for_status(url: str, target: int, deadline_s: float) -> int:
 
 
 @pytest.mark.fault_tolerance
+@pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.gpu_1

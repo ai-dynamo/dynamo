@@ -10,7 +10,10 @@ import pytest
 
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
-except ImportError:
+except Exception:
+    # vllm_omni's import chain can raise NotImplementedError (and other
+    # non-ImportError types) on platforms it doesn't support — e.g. a
+    # CPU-only runner where vllm._C can't load libcuda.so.1.
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 from tests.serve.common import (
@@ -257,6 +260,7 @@ def vllm_omni_config_test(request):
 
 
 @pytest.mark.vllm
+@pytest.mark.multimodal
 @pytest.mark.e2e
 def test_omni_serve_deployment(
     vllm_omni_config_test,

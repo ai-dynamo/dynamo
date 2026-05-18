@@ -396,7 +396,7 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 //
 // The combined length of these names must not exceed 45 characters.
 func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
-	pcsName := dynamo.PCSNameForDGD(v.deployment.Name, v.deployment.Spec.Services)
+	pcsName := dynamo.PCSNameForAlphaDGDServices(v.deployment.Name, v.deployment.Spec.Services)
 	lowerServiceName := strings.ToLower(serviceName)
 
 	isMultinode := service.GetNumberOfNodes() > 1

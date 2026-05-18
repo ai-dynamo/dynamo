@@ -12,8 +12,8 @@ from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 from kvbm.utils import is_dyn_runtime_enabled, nvtx_annotate
-from tensorrt_llm._torch.pyexecutor import kv_cache_connector
-from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
+from tensorrt_llm._torch.pyexecutor.connectors import kv_cache_connector
+from tensorrt_llm._torch.pyexecutor.connectors.kv_cache_connector import (
     KvCacheConnectorScheduler,
     SchedulerOutput,
 )

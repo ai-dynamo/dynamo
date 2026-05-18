@@ -31,3 +31,20 @@ cache_transceiver_config:
 For example, see `examples/backends/trtllm/engine_configs/gpt-oss-120b/prefill.yaml`.
 
 **Related Issue:** [#4327](https://github.com/ai-dynamo/dynamo/issues/4327)
+
+## Driver mismatch produces cryptic PyTorch errors
+
+When the host NVIDIA driver is too old for the container's CUDA version, PyTorch surfaces the failure as:
+
+```text
+RuntimeError: The NVIDIA driver on your system is too old (found version 570). Please update your GPU driver by downloading and installing a new version from the URL: http://www.nvidia.com/Download/index.aspx
+```
+
+This is the symptom, not the cause — the cause is that the container image you pulled needs a newer driver than the host ships.
+
+**Fix:**
+
+- Check the minimum driver for the tag you pulled in the [Container / driver matrix](./README.md#container--driver-matrix).
+- Either upgrade the host driver, or pull a lower-CUDA variant (e.g. `vllm-runtime:1.0.2` on driver `575+` instead of `vllm-runtime:1.0.2-cuda13` on driver `580+`).
+
+> The driver-mismatch error message itself is being improved — tracked as an engineering follow-up.

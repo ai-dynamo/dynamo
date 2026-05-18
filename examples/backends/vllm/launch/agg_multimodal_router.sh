@@ -1,89 +1,116 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-# Launch script for vLLM MM Frontend Routing demo:
-#   Frontend (vllm processor + KvRouter + ImageLoader) -> vLLM backend
 #
-# This replaces the separate MM Router Worker approach.  The frontend runs
-# vLLM's HF processor for image token expansion and hash computation, builds
-# mm_routing_info, and uses KvRouter directly for MM-aware routing.
+# Lightseek-powered exact MM-aware routing.
 #
-# Benefits over mm_router_worker:
-#   - No extra network hop for base64 image data
-#   - Model-agnostic (no Qwen-specific token expansion)
-#   - Single HF processor call (frontend only; backend skips via NIXL, when enabled)
+# Architecture:
+#   HTTP client
+#     -> Rust frontend
+#          - resolves the image-placeholder token id via lightseek's
+#            per-model ModelProcessorSpec (Qwen3-VL, Qwen2.5-VL, Qwen2-VL,
+#            LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5);
+#            each spec reads the appropriate config.json field
+#          - lightseek `calculate_num_tokens(W,H)` per image (header-only fetch)
+#          - expands placeholder -> N copies in routing_token_ids
+#          - hashes URL (xxh3) -> u64 -> 64-char hex -> extra_args["mm_hashes"]
+#          - builds block_mm_infos and feeds the KV router
+#     -> N x vLLM worker
+#          - publishes KV events via zmq (one port per worker)
+#          - vLLM's mm_uuid is the frontend's hex string -> events match
+#            the router's routing-side block hashes -> bit-exact cache hits
+#
+# Build prerequisite (run once inside the dynamo dev container):
+#   cd /workspace/lib/bindings/python && maturin develop --release --features lightseek-mm
+#
+# Run inside the dynamo container that already has /workspace mounted.
 
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DYNAMO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 cd "${DYNAMO_ROOT}"
+# shellcheck source=../../../common/gpu_utils.sh
+source "${SCRIPT_DIR}/../../../common/gpu_utils.sh"
+# shellcheck source=../../../common/launch_utils.sh
+source "${SCRIPT_DIR}/../../../common/launch_utils.sh"
 
-# ---------------------------------------------------------------------------
-# Configuration (override with environment variables)
-# ---------------------------------------------------------------------------
 MODEL="${MODEL:-Qwen/Qwen3-VL-2B-Instruct}"
-NAMESPACE="${NAMESPACE:-dynamo}"
-HTTP_PORT="${HTTP_PORT:-8000}"
-BLOCK_SIZE="${BLOCK_SIZE:-16}"            # Must match vLLM backend KV block size
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.40}"  # Split GPU between 2 workers
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"   # Reduced for 2 workers on 1 GPU
-NUM_WORKERS="${NUM_WORKERS:-2}"          # Number of backend workers
+NAMESPACE="${NAMESPACE:-lightseek-poc}"
+HTTP_PORT="${HTTP_PORT:-${DYN_HTTP_PORT:-8000}}"
+BLOCK_SIZE="${BLOCK_SIZE:-16}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
 # --single-gpu / SINGLE_GPU: Packs all workers onto GPU 0 for functional
 # testing on machines with a single GPU.  Reduces performance by sharing
-# GPU memory between workers.
+# GPU memory between workers; production deployments should leave it false.
 SINGLE_GPU="${SINGLE_GPU:-false}"
-NUM_FRONTENDS="${NUM_FRONTENDS:-1}"           # Number of frontend replicas (>1 for parallel HF processing)
-
-# KV cache override for parallel-safe GPU memory control
-KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
-if [[ -n "$KV_BYTES" ]]; then
-    GPU_MEM_ARGS="--kv-cache-memory-bytes $KV_BYTES --gpu-memory-utilization 0.01"
-else
-    GPU_MEM_ARGS="--gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}"
-fi
-
 NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
-
 VLLM_SYSTEM_PORT_BASE="${VLLM_SYSTEM_PORT_BASE:-18081}"
+KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-5557}"
+DYN_LOG_VAL="${DYN_LOG:-info,lightseek_mm=debug,dynamo_kv_router::scheduling=debug}"
 
-# ImageLoader cache size (number of images kept in-memory LRU)
-export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-32}"
-
-# Extra args (word-splitting is intentional for shell-style overrides)
+# Pass-through extra args for `python -m dynamo.vllm`.
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
-FRONTEND_EXTRA_ARGS="${FRONTEND_EXTRA_ARGS:-}"
 
-echo "=== vLLM MM Frontend Routing Launch Script ==="
-echo "Working directory: ${DYNAMO_ROOT}"
+PASSTHRU_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --model) MODEL="$2"; shift 2 ;;
+        --num-workers) NUM_WORKERS="$2"; shift 2 ;;
+        --single-gpu) SINGLE_GPU="true"; shift ;;
+        -h|--help)
+            cat <<EOF
+Usage: $0 [--model NAME] [--num-workers N] [--single-gpu] [EXTRA_VLLM_ARGS...]
+
+Env vars:
+  MODEL                       (default Qwen/Qwen3-VL-2B-Instruct)
+  NUM_WORKERS                 (default 2)
+  GPU_MEMORY_UTILIZATION      (default 0.20 — sized for 2 workers on 1 GPU)
+  HTTP_PORT                   (default 8000)
+  BLOCK_SIZE                  (default 16)
+  MAX_MODEL_LEN               (default 4096)
+  KV_EVENTS_PORT_BASE         (default 5557 — worker i uses port BASE + (i-1))
+  DYN_LOG                     (default info + lightseek_mm + scheduling debug)
+
+Routing test (run after the script reports "All services are ready"):
+  # Same image twice -> 2nd request should pin to same worker (high overlap_blocks)
+  IMG_A=http://images.cocodataset.org/val2017/000000039769.jpg
+  IMG_B=http://images.cocodataset.org/val2017/000000000139.jpg
+  for url in "\$IMG_A" "\$IMG_A" "\$IMG_B"; do
+    curl -s http://127.0.0.1:${HTTP_PORT}/v1/chat/completions \\
+      -H 'Content-Type: application/json' \\
+      -d '{"model":"'"\${MODEL}"'","messages":[{"role":"user","content":[
+            {"type":"text","text":"Describe this image."},
+            {"type":"image_url","image_url":{"url":"'\$url'"}}]}],"max_tokens":4}' \\
+      | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['usage'])"
+  done
+
+Watch the frontend log for 'Selected worker' + 'Formula' lines. Same-image
+requests should route to the same worker_id and report ~26 effective cached
+blocks; the different-image request should route to a fresh worker (or the
+same one with low overlap).
+EOF
+            exit 0
+            ;;
+        *) PASSTHRU_ARGS+=("$1"); shift ;;
+    esac
+done
+
+echo "=== Lightseek MM Exact Routing Launch ==="
 echo "MODEL=${MODEL}"
-echo "NAMESPACE=${NAMESPACE}"
-echo "HTTP_PORT=${HTTP_PORT}"
-echo "BLOCK_SIZE=${BLOCK_SIZE}"
-echo "NUM_WORKERS=${NUM_WORKERS}"
-echo "SINGLE_GPU=${SINGLE_GPU}"
-echo "NUM_FRONTENDS=${NUM_FRONTENDS}"
-echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
-echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
-echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
-echo "NATS_SERVER=${NATS_SERVER}"
-echo "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
-echo "VLLM_SYSTEM_PORT_BASE=${VLLM_SYSTEM_PORT_BASE}"
-echo
+echo "NUM_WORKERS=${NUM_WORKERS}, BLOCK_SIZE=${BLOCK_SIZE}, GPU_MEM_FRAC=${GPU_MEMORY_UTILIZATION}"
+echo "HTTP_PORT=${HTTP_PORT}, NAMESPACE=${NAMESPACE}"
 
-# Clear the trap inside the handler so `kill 0` (which sends SIGTERM to the
-# script itself) doesn't re-enter this trap and loop forever.
-trap 'trap - EXIT INT TERM; echo; echo "Cleaning up..."; kill 0' EXIT INT TERM
+# Clear the trap inside the handler so `kill 0` (which SIGTERMs the script
+# itself) doesn't re-enter this trap and loop forever.
+trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
 wait_ready() {
-    local url="$1"
-    local name="$2"
-    local timeout_s="${3:-240}"
+    local url="$1" name="$2" timeout_s="${3:-900}"
     local deadline=$((SECONDS + timeout_s))
-
-    echo "Waiting for ${name} at ${url} ..."
+    echo "Waiting for ${name} ..."
     while (( SECONDS < deadline )); do
         if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
             echo "${name} is ready"
@@ -91,120 +118,50 @@ wait_ready() {
         fi
         sleep 1
     done
-
-    echo "Timed out waiting for ${name} (${url})" >&2
     return 1
 }
-
-wait_frontend_models() {
-    local url="$1"
-    local timeout_s="${2:-240}"
-    local deadline=$((SECONDS + timeout_s))
-
-    echo "Waiting for frontend models API at ${url} ..."
-    while (( SECONDS < deadline )); do
-        if curl -fsS "${url}" >/dev/null 2>&1; then
-            echo "Frontend is ready"
-            return 0
-        fi
-        sleep 1
-    done
-
-    echo "Timed out waiting for frontend (${url})" >&2
-    return 1
-}
-
-echo "Prerequisite: start etcd and NATS yourself before running this script."
-echo "Example:"
-echo "  docker compose -f deploy/docker-compose.yml up -d"
-echo
 
 COMMON_ENV=(
     "DYN_NAMESPACE=${NAMESPACE}"
     "DYN_REQUEST_PLANE=tcp"
     "NATS_SERVER=${NATS_SERVER}"
     "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
+    "DYN_MM_ALLOW_INTERNAL=1"
 )
+
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
-    KV_EVENTS_PORT=$((${KV_EVENTS_PORT_BASE:-29080} + i - 1))
+    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
+    if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
-    if [[ "${SINGLE_GPU}" == "true" ]]; then
-        GPU_ID=0
-    else
-        GPU_ID=$((i - 1))
-    fi
+    KV_EVENTS_CONFIG="{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
 
-    echo
-    echo "=== Starting vLLM backend worker $i (GPU ${GPU_ID}, port ${WORKER_PORT}, kv_events ${KV_EVENTS_PORT}) ==="
+    echo "--- launching vLLM worker $i (GPU=${GPU_ID}, system_port=${WORKER_PORT}, kv_events=tcp://*:${KV_EVENTS_PORT}) ---"
     env "${COMMON_ENV[@]}" \
         "DYN_SYSTEM_PORT=${WORKER_PORT}" \
         "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
     python -m dynamo.vllm \
-            --model "${MODEL}" \
-            --enable-multimodal \
-            --block-size "${BLOCK_SIZE}" \
-            --enforce-eager \
-            --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\",\"enable_kv_cache_events\":true}" \
-            $GPU_MEM_ARGS \
-            --max-model-len "${MAX_MODEL_LEN}" \
-            ${VLLM_EXTRA_ARGS} &
-    # trap 'kill 0' handles cleanup
-    # Wait for this worker before starting the next one to avoid ZMQ port races.
-    wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
+        --model "${MODEL}" \
+        --enable-multimodal \
+        --block-size "${BLOCK_SIZE}" \
+        --enforce-eager \
+        --max-model-len "${MAX_MODEL_LEN}" \
+        --kv-events-config "${KV_EVENTS_CONFIG}" \
+        ${GPU_MEM_ARGS} ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
+    wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 
-echo
-echo "=== Starting frontend (with vLLM processor + KV router) ==="
-# Key flags:
-#   --dyn-chat-processor vllm    : run vLLM's HF processor in the frontend
-#   --router-mode kv             : use KvRouter for MM-aware routing
-#   --kv-cache-block-size        : must match backend's --block-size
-#
-# The frontend's VllmProcessor:
-#   1. Pre-downloads images via ImageLoader (LRU cache + dedup)
-#   2. Runs vLLM's process_inputs() → mm_features with hashes + placeholders
-#   3. Builds mm_routing_info from mm_features → passes to KvRouter
-#   4. Forwards mm_hashes to backend for hash consistency
-FRONTEND_SYSTEM_PORT_BASE="${FRONTEND_SYSTEM_PORT_BASE:-9080}"
+echo "=== Starting frontend (KV router, lightseek MM exact routing) ==="
+env "${COMMON_ENV[@]}" \
+    "DYN_LOG=${DYN_LOG_VAL}" \
+python -m dynamo.frontend \
+    --http-port "${HTTP_PORT}" \
+    --router-mode kv \
+    --kv-cache-block-size "${BLOCK_SIZE}" &
 
-for f in $(seq 1 "${NUM_FRONTENDS}"); do
-    FE_HTTP_PORT=$((HTTP_PORT + f - 1))
-    FE_SYSTEM_PORT=$((FRONTEND_SYSTEM_PORT_BASE + f - 1))
-
-    # Only reset states on the first replica to avoid wiping shared state.
-    RESET_ARGS=""
-    if [[ "$f" -eq 1 ]]; then
-        RESET_ARGS="--router-reset-states"
-    fi
-
-    # Enable replica sync when running multiple frontends.
-    SYNC_ARGS=""
-    if [[ "${NUM_FRONTENDS}" -gt 1 ]]; then
-        SYNC_ARGS="--router-replica-sync"
-    fi
-
-    echo
-    echo "=== Starting frontend replica ${f} (HTTP ${FE_HTTP_PORT}, system ${FE_SYSTEM_PORT}) ==="
-    env "${COMMON_ENV[@]}" \
-        "DYN_LOG=debug" \
-        "DYN_SYSTEM_PORT=${FE_SYSTEM_PORT}" \
-        python -m dynamo.frontend \
-            --http-port "${FE_HTTP_PORT}" \
-            --dyn-chat-processor vllm \
-            --router-mode kv \
-            --kv-cache-block-size "${BLOCK_SIZE}" \
-            ${RESET_ARGS} \
-            ${SYNC_ARGS} \
-            --model-name "${MODEL}" \
-            ${FRONTEND_EXTRA_ARGS} &
-    # trap 'kill 0' handles cleanup
-    wait_frontend_models "http://127.0.0.1:${FE_HTTP_PORT}/v1/models" 300
-done
-
-# Wait until the first frontend can serve a real request (processor loaded).
-echo "Waiting for frontend processor to initialize (this may take a while for custom models)..."
+echo "Waiting for frontend to accept requests ..."
 DEADLINE=$((SECONDS + 300))
 while (( SECONDS < DEADLINE )); do
     HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
@@ -212,52 +169,38 @@ while (( SECONDS < DEADLINE )); do
         -H "Content-Type: application/json" \
         -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
         2>/dev/null || echo "000")
-    if [[ "$HTTP_CODE" == "200" ]]; then
-        echo "Frontend processor is ready"
-        break
-    fi
+    [[ "$HTTP_CODE" == "200" ]] && { echo "Frontend ready"; break; }
     sleep 2
 done
-if (( SECONDS >= DEADLINE )); then
-    echo "Warning: Frontend processor may not be fully ready (timed out)" >&2
-fi
 
 echo
 echo "=== All services are ready ==="
-for f in $(seq 1 "${NUM_FRONTENDS}"); do
-    echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
-done
+echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
+    echo "Worker $i health: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
+    echo "Worker $i kv-events: tcp://*:$((KV_EVENTS_PORT_BASE + (i - 1)))"
 done
 echo
-echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"
-echo "  - No separate MM Router Worker needed"
-echo "  - ImageLoader LRU cache size: ${DYN_MM_IMAGE_CACHE_SIZE}"
+echo "Architecture: Rust frontend + lightseek -> ${NUM_WORKERS}x vLLM workers"
+echo "  - mm_hashes forwarded as multi_modal_uuids -> bit-exact match with vLLM KV events"
+echo "  - Image dims via header-only HTTP fetch (Range: bytes=0-65535)"
+echo "  - No PyO3, no GIL, no Python deps in the routing path"
 echo
-echo "Test routing: send the same image request 3 times."
-echo "  - Request 1: routed to any worker (no cache yet)"
-echo "  - Request 2: routed to SAME worker (KV cache overlap from request 1)"
-echo "  - Request 3 with different image: may route to the OTHER worker"
+echo "Routing test (recommended):"
+echo "  IMG_A=http://images.cocodataset.org/val2017/000000039769.jpg"
+echo "  IMG_B=http://images.cocodataset.org/val2017/000000000139.jpg"
+echo "  for url in \"\$IMG_A\" \"\$IMG_A\" \"\$IMG_B\"; do"
+echo "    curl -s http://127.0.0.1:${HTTP_PORT}/v1/chat/completions \\"
+echo "      -H 'Content-Type: application/json' \\"
+echo "      -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":["
+echo "            {\"type\":\"text\",\"text\":\"Describe this image.\"},"
+echo "            {\"type\":\"image_url\",\"image_url\":{\"url\":\"'\$url'\"}}]}],\"max_tokens\":4}' \\"
+echo "      | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['usage'])\""
+echo "  done"
 echo
-echo "Watch for 'Selected worker' in logs to see routing decisions change."
-echo
-echo "Example (same image twice, then different image):"
-echo "  # Request 1 - image A"
-echo "  curl http://127.0.0.1:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this image\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"http://images.cocodataset.org/test2017/000000000001.jpg\"}}]}],\"max_tokens\":32}'"
-echo
-echo "  # Request 2 - same image A (should route to same worker)"
-echo "  curl http://127.0.0.1:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this image\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"http://images.cocodataset.org/test2017/000000000001.jpg\"}}]}],\"max_tokens\":32}'"
-echo
-echo "  # Request 3 - different image B (may route to other worker)"
-echo "  curl http://127.0.0.1:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Describe this image\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"http://images.cocodataset.org/test2017/000000000016.jpg\"}}]}],\"max_tokens\":32}'"
+echo "Watch frontend logs for 'Selected worker: ... worker_id=...' and"
+echo "'Formula for worker_id=X dp_rank=0 with N effective cached blocks'."
 echo
 echo "Press Ctrl+C to stop all services"
 
-wait
+wait_any_exit

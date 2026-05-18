@@ -17,15 +17,21 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'I will check the weather. [get_weather(location="NYC")]'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        calls: []
+        normal_text: I will check the weather. [get_weather(location="NYC")]
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -33,15 +39,21 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-    # TODO(research): vllm diverges — vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '[get_weather(location="NYC")] Let me know if you need more.'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '[get_weather(location="NYC")] Let me know if you need more.'
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ' Let me know if you need more.'
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
@@ -49,15 +61,21 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'I will check the weather. [get_weather(location="NYC")] Let me know if you need more.'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        calls: []
+        normal_text: I will check the weather. [get_weather(location="NYC")] Let me know if you need more.
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.  Let me know if you need more.
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -65,12 +83,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'I will check the weather. [get_weather(location="NYC")] Then check LA weather. [get_weather(location="LA")]'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        calls: []
+        normal_text: I will check the weather. [get_weather(location="NYC")] Then check LA weather. [get_weather(location="LA")]
+      sglang:
+        calls: []
+        normal_text: 'I will check the weather. '

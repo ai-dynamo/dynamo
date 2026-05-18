@@ -26,6 +26,7 @@ use crate::pipeline::network::codec::TwoPartMessage;
 use crate::pipeline::network::tcp;
 use crate::pipeline::{ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
+use crate::traits::DistributedRuntimeProvider;
 
 use anyhow::{Error, Result};
 use futures::stream::Stream;
@@ -137,6 +138,11 @@ impl<T> AddressedRequest<T> {
         }
     }
 
+    pub fn for_instance(request: T, instance: Instance) -> Self {
+        let address = instance.transport.address().to_string();
+        Self::with_instance(request, address, instance)
+    }
+
     pub(crate) fn into_parts(self) -> (T, String, Option<Instance>) {
         (self.request, self.address, self.instance)
     }
@@ -163,6 +169,21 @@ impl AddressedPushRouter {
             req_client,
             resp_transport,
         }))
+    }
+
+    pub async fn from_runtime_provider(
+        provider: &impl DistributedRuntimeProvider,
+    ) -> Result<Arc<Self>> {
+        let manager = provider.drt().network_manager();
+        let req_client = manager.create_client()?;
+        let resp_transport = provider.drt().tcp_server().await?;
+
+        tracing::debug!(
+            transport = req_client.transport_name(),
+            "Creating AddressedPushRouter with request plane client"
+        );
+
+        Self::new(req_client, resp_transport)
     }
 
     /// Cancel all pending response-stream registrations for an instance.

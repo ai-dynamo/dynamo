@@ -152,6 +152,44 @@ fn find_section_end(
     best
 }
 
+/// True for prefix-only narration before a tool section where vLLM preserves
+/// the wrapper-adjacent trailing space (PARSER.batch.8.a).
+fn should_preserve_vllm_prefix_trailing_space(normal_parts: &[&str]) -> bool {
+    let mut non_empty_parts = normal_parts
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| !part.trim().is_empty());
+
+    matches!(
+        non_empty_parts.next(),
+        Some((0, part)) if part.chars().next_back().is_some_and(|ch| ch.is_whitespace())
+    ) && non_empty_parts.next().is_none()
+}
+
+/// True when the first visible normal text appears only after a parsed tool
+/// section, so the intermediate Kimi tool-call turn should expose no content
+/// (PARSER.batch.8.b).
+fn should_drop_post_tool_text_without_prefix(normal_parts: &[&str]) -> bool {
+    normal_parts
+        .iter()
+        .enumerate()
+        .find(|(_, part)| !part.trim().is_empty())
+        .is_some_and(|(idx, _)| idx != 0)
+}
+
+/// True when there is prefix narration before the first tool section plus
+/// post-wrapper or inter-wrapper narration that should be dropped for Kimi
+/// tool-call turns (PARSER.batch.2.c, 8.c, 8.d).
+fn should_drop_post_tool_text_after_prefix(normal_parts: &[&str]) -> bool {
+    normal_parts
+        .first()
+        .is_some_and(|prefix| !prefix.trim().is_empty())
+        && normal_parts
+            .iter()
+            .skip(1)
+            .any(|part| !part.trim().is_empty())
+}
+
 /// Extract tool calls and normal text from message.
 ///
 /// ## Difference from Moonshot's reference implementation
@@ -218,7 +256,31 @@ fn extract_tool_calls(
         }
     }
 
-    let normal_text = normal_parts.join("").trim().to_string();
+    let joined_normal_text = normal_parts.join("");
+    let normal_text =
+        if !calls.is_empty() && should_drop_post_tool_text_without_prefix(&normal_parts) {
+            // Kimi tool-call responses are intermediate assistant turns: the
+            // official API flow treats content as empty while tool_calls are
+            // emitted, then asks the client to execute tools before returning
+            // final user-facing content. Match vLLM/SGLang by not surfacing
+            // post-wrapper text when there is no prefix narration.
+            String::new()
+        } else if !calls.is_empty() && should_drop_post_tool_text_after_prefix(&normal_parts) {
+            // Kimi tool-call responses are intermediate assistant turns even
+            // when a single section contains multiple calls or a turn contains
+            // multiple sections. Preserve only the prefix emitted before the
+            // first tool section and drop post-wrapper/inter-wrapper text;
+            // final user-facing content should be produced after tool results.
+            normal_parts[0].trim_start().to_string()
+        } else if !calls.is_empty() && should_preserve_vllm_prefix_trailing_space(&normal_parts) {
+            // vLLM preserves wrapper-adjacent trailing whitespace when the
+            // response has only prefix narration before a Kimi tool section.
+            // Keep this compatibility path narrow to avoid changing Dynamo's
+            // existing handling of post-wrapper/inter-wrapper narration.
+            normal_parts[0].trim_start().to_string()
+        } else {
+            joined_normal_text.trim().to_string()
+        };
     Ok((normal_text, calls))
 }
 
@@ -392,18 +454,72 @@ mod tests {
         assert_eq!(args1["timezone"], "EST");
     }
 
-    #[test] // PARSER.batch.8
-    fn test_parse_with_normal_text() {
+    #[test] // PARSER.batch.8.c
+    fn test_parse_keeps_prefix_drops_post_tool_text() {
         let config = default_config();
         let input = r#"I'll help you with that. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check."#;
 
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(
-            normal,
-            Some("I'll help you with that.  Let me check.".to_string())
-        );
+        assert_eq!(normal, Some("I'll help you with that. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.8.a
+    fn test_parse_preserves_vllm_prefix_trailing_space() {
+        let config = default_config();
+        let input = r#"I'll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("I'll check the weather. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.8.a
+    fn test_parse_prefix_only_ignores_post_wrapper_whitespace() {
+        let config = default_config();
+        let input = r#"I'll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>   "#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("I'll check the weather. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.2.c
+    fn test_parse_parallel_calls_with_surrounding_text() {
+        let config = default_config();
+        let input = r#"I will check both. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|> Done."#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_time");
+        assert_eq!(normal, Some("I will check both. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.8.d
+    fn test_parse_multiple_sections_drops_inter_wrapper_text() {
+        let config = default_config();
+        let input = r#"First check Dallas. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Then check NYC. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_eq!(normal, Some("First check Dallas. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.8.b
+    fn test_parse_drops_post_tool_text_without_prefix() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check."#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("".to_string()));
     }
 
     #[test] // PARSER.batch.6

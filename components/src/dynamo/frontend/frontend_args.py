@@ -89,6 +89,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
     def validate(self) -> None:
+        if self.load_aware:
+            self.router_mode = "kv"
+        self.apply_load_aware_preset()
+
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
@@ -174,6 +178,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             )
         if self.conditional_prefill_enabled and self.router_mode != "kv":
             raise ValueError("--router-conditional-prefill requires --router-mode=kv")
+        self.apply_no_admission_control()
 
 
 @register_encoder(FrontendConfig)

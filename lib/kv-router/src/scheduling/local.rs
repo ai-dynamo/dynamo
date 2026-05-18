@@ -17,6 +17,7 @@ use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
+use crate::protocols::RoutingConstraints;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
@@ -185,6 +186,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<crate::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -201,6 +203,7 @@ where
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens,
+            routing_constraints,
             router_config_override: router_config_override.cloned(),
             update_states,
             lora_name,
@@ -457,6 +460,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -501,6 +505,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -545,6 +550,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -590,6 +596,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -613,6 +620,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -657,6 +665,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -680,6 +689,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -738,6 +748,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -761,6 +772,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -818,6 +830,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -841,6 +854,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::RoutingConstraints::default(),
                         None,
                     )
                     .await
@@ -896,6 +910,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -996,6 +1011,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await
@@ -1094,6 +1110,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::RoutingConstraints::default(),
                 None,
             )
             .await

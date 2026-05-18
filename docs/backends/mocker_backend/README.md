@@ -71,28 +71,9 @@ reachable via `NATS_SERVER` / `ETCD_ENDPOINTS` env vars.
 
 ## Writing your own Rust backend
 
-1. New crate depending on `dynamo-backend-common`; place under `lib/`.
-2. Implement
-   [`LLMEngine`](../../../lib/backend-common/src/engine.rs)
-   plus an inherent
-   `from_args(argv) -> Result<(Self, WorkerConfig), DynamoError>`.
-3. Mirror the mocker example's three-line `main.rs`.
-4. Run the conformance kit in your tests:
-
-   ```toml
-   [dev-dependencies]
-   dynamo-backend-common = { workspace = true, features = ["testing"] }
-   ```
-
-   ```rust
-   #[tokio::test]
-   async fn my_engine_satisfies_contract() {
-       let engine = MyEngine::new_for_test();
-       dynamo_backend_common::testing::run_conformance(engine)
-           .await
-           .expect("conformance");
-   }
-   ```
+See [Writing a Rust Unified Backend](../../development/rust-backend-guide.md)
+— a step-by-step walkthrough that uses this mocker example as its
+reference engine.
 
 ## Layout
 

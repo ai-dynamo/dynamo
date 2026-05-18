@@ -1149,7 +1149,7 @@ fn derive_decode_router_config(
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = base_router_config(args, router_config);
-    config.overlap_score_weight = 0.0;
+    config.overlap_score_credit = 0.0;
     config.router_assume_kv_reuse = false;
     config.router_track_prefill_tokens = false;
     config.router_prefill_load_model = dynamo_kv_router::config::RouterPrefillLoadModel::None;
@@ -1327,7 +1327,7 @@ mod tests {
     #[test]
     fn test_derive_stage_router_configs_force_required_overrides() {
         let config = KvRouterConfig {
-            overlap_score_weight: 2.0,
+            overlap_score_credit: 1.0,
             router_track_active_blocks: true,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: true,
@@ -1338,7 +1338,7 @@ mod tests {
         let decode = derive_decode_router_config(&args, Some(config));
 
         assert!(!prefill.router_track_active_blocks);
-        assert_eq!(decode.overlap_score_weight, 0.0);
+        assert_eq!(decode.overlap_score_credit, 0.0);
         assert!(!decode.router_assume_kv_reuse);
         assert!(!decode.router_track_prefill_tokens);
     }
