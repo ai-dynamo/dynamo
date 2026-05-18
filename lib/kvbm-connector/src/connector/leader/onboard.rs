@@ -15,6 +15,20 @@ use crate::G3;
 /// Future type returned by `FindMatchesResult::wait_for_completion()`.
 type StagingCompletion = Either<Ready<Result<()>>, BoxFuture<'static, Result<()>>>;
 
+/// Reset a slot back to `Inactive` after a failed onboarding transfer.
+///
+/// `start_onboarding` calls `txn_start_onboarding` *before* spawning the
+/// transfer task, so a transfer error would otherwise wedge the slot in
+/// `Onboarding` forever and block any future reuse of this `request_id`.
+/// Mirrors the cancel-path pivot used by `prepare_intra_pass_onboarding`
+/// (`txn_to_error` → `txn_take_error`), which is the only state path out
+/// of `Onboarding` that does not require the worker callback we are not
+/// going to receive on this failure.
+fn reset_slot_after_failed_onboarding(slot: &mut slot::RequestSlot) {
+    slot.txn_to_error(); // Onboarding → Error(Onboarding)
+    let _ = slot.txn_take_error(); // Error(Onboarding) → Inactive (state dropped)
+}
+
 /// Collect the G2 blocks destined for onboarding from every shard, honoring
 /// the `[effective_start .. final_end)` span (first-hole contiguous match).
 ///
@@ -259,7 +273,7 @@ impl ConnectorLeader {
 
         let bypass_host = self.runtime.config().cache.bypass_host_cache();
         handle.spawn(async move {
-            match execute_onboarding(
+            let transfer_result = execute_onboarding(
                 leader.clone(),
                 shared_slot.clone(),
                 onboard_blocks_ids.clone(),
@@ -267,39 +281,51 @@ impl ConnectorLeader {
                 block_size,
                 bypass_host,
             )
-            .await
-            {
-                Ok(()) => {
-                    tracing::debug!("Onboarding completed successfully");
-                }
-                Err(_e) => {
-                    tracing::error!("Onboarding failed: {}", _e);
-                    // we were unable to execute the local transfer, so we need to report to each worker which block_ids
-                    // did not get the expected values; the scheduler will be responsible for handling these errors.
-                    leader
-                        .workers
-                        .get()
-                        .unwrap()
-                        .mark_failed_onboarding(request_id, onboard_blocks_ids)
-                        .await
-                        .expect("Failed to mark failed onboarding");
-                    todo!("clean up session and free resources")
-                }
+            .await;
+
+            if let Err(e) = &transfer_result {
+                tracing::error!("Onboarding failed: {}", e);
+                // Notify workers that these block_ids did NOT get the
+                // expected values; the scheduler is responsible for handling
+                // these errors. Clone request_id so it stays live for the
+                // mark_onboarding_complete call below.
+                leader
+                    .workers
+                    .get()
+                    .unwrap()
+                    .mark_failed_onboarding(request_id.clone(), onboard_blocks_ids)
+                    .await
+                    .expect("Failed to mark failed onboarding");
+            } else {
+                tracing::debug!("Onboarding completed successfully");
             }
 
-            // Release server-side state for every shard's async session (Ready
-            // variants return None).
-            let session_ids: Vec<_> = shared_slot
-                .lock()
-                .onboarding_state()
-                .map(|state| {
-                    state
-                        .shards
-                        .iter()
-                        .filter_map(|s| s.find_session.session_id())
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Collect session IDs for release before any state transition —
+            // onboarding_state() returns Some only while the slot is in
+            // Onboarding. On Err, also clear the slot's Onboarding state so
+            // the request_id can be reused; without this the slot wedges in
+            // Onboarding because txn_start_onboarding already transitioned
+            // it before the transfer was awaited.
+            let session_ids: Vec<_> = {
+                let mut slot_guard = shared_slot.lock();
+                let ids: Vec<_> = slot_guard
+                    .onboarding_state()
+                    .map(|state| {
+                        state
+                            .shards
+                            .iter()
+                            .filter_map(|s| s.find_session.session_id())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if transfer_result.is_err() {
+                    reset_slot_after_failed_onboarding(&mut slot_guard);
+                }
+                ids
+            };
+
+            // Release server-side state for every shard's async session
+            // (Ready variants return None).
             if !session_ids.is_empty() {
                 let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
                 for session_id in session_ids {
@@ -307,10 +333,11 @@ impl ConnectorLeader {
                 }
             }
 
-            // regardess of error, we mark the onboarding as complete
-            // an error here is a CRITICAL failure, one or more workers have been lost or can not be reached.
-            // not completeing this transaction will result in resources being leaked and the system will eventually
-            // deadlock or fail.
+            // Regardless of error, mark the onboarding as complete.
+            // An error here is a CRITICAL failure: one or more workers have
+            // been lost or cannot be reached. Not completing this transaction
+            // will result in resources being leaked and the system will
+            // eventually deadlock or fail.
             leader
                 .workers
                 .get()
@@ -553,5 +580,71 @@ mod tests {
 
         // Block at index 15 (after 15 computed blocks)
         assert_eq!(result, vec![115]);
+    }
+
+    // -------------------------------------------------------------------
+    // reset_slot_after_failed_onboarding — regression coverage for the
+    // multi-shard host-bypass + (any other) error path. start_onboarding
+    // drives the slot into Onboarding before spawning the transfer task;
+    // if the transfer returns Err and we don't pivot the slot back to
+    // Inactive, the request_id is stuck until the slot is destroyed.
+    //
+    // A true end-to-end reproducer (panic in spawned task) needs the full
+    // ConnectorLeader + WorkerClients harness; these tests guard the
+    // narrower invariant the spawn-Err arm now relies on: the helper
+    // must return *any* Onboarding slot to Inactive.
+    // -------------------------------------------------------------------
+
+    use crate::common::Request;
+    use crate::connector::leader::slot::{RequestSlot, TransactionState};
+    use kvbm_engine::leader::{FindMatchesResult, ReadyResult};
+
+    fn build_test_slot() -> RequestSlot {
+        let tokens: Vec<u32> = (0..16).collect(); // 4 complete blocks of size 4
+        let request = Request::new("test-request", tokens, None, None, None);
+        RequestSlot::new(request, 4).expect("Failed to create RequestSlot")
+    }
+
+    fn mock_onboarding_pair() -> (usize, FindMatchesResult) {
+        let ready = ReadyResult::new(vec![], Default::default());
+        (100, FindMatchesResult::Ready(ready))
+    }
+
+    #[test]
+    fn test_reset_slot_after_failed_onboarding_clears_onboarding_state() {
+        let mut slot = build_test_slot();
+        let (num_computed_tokens, find_session) = mock_onboarding_pair();
+
+        // Drive the slot to Onboarding, matching what start_onboarding does
+        // before awaiting execute_onboarding.
+        slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
+            .unwrap();
+        slot.txn_start_onboarding().unwrap();
+        assert!(
+            matches!(slot.txn_state(), TransactionState::Onboarding(_)),
+            "precondition: slot should be Onboarding, was {:?}",
+            slot.txn_state()
+        );
+
+        reset_slot_after_failed_onboarding(&mut slot);
+
+        assert!(
+            slot.txn_state().is_inactive(),
+            "slot must be Inactive after reset; was {:?}",
+            slot.txn_state()
+        );
+    }
+
+    #[test]
+    fn test_reset_slot_after_failed_onboarding_is_idempotent() {
+        // Calling reset on a slot already in Inactive must be a no-op,
+        // not a panic — the spawn-Err arm runs reset under a lock and we
+        // don't want a torn lock if reset is ever called twice.
+        let mut slot = build_test_slot();
+        assert!(slot.txn_state().is_inactive());
+
+        reset_slot_after_failed_onboarding(&mut slot);
+
+        assert!(slot.txn_state().is_inactive());
     }
 }
