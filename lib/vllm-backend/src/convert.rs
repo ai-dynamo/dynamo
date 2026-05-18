@@ -166,7 +166,15 @@ fn structured_outputs_from_guided_decoding(
         choice: guided.choice.clone(),
         grammar: guided.grammar.clone(),
         whitespace_pattern: guided.whitespace_pattern.clone(),
+        structural_tag: guided.structural_tag.as_ref().map(structural_tag_to_string),
         ..Default::default()
+    }
+}
+
+fn structural_tag_to_string(tag: &serde_json::Value) -> String {
+    match tag {
+        serde_json::Value::String(tag) => tag.clone(),
+        tag => tag.to_string(),
     }
 }
 
