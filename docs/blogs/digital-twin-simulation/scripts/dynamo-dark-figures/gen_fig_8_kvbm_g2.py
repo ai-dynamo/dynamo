@@ -157,8 +157,16 @@ def main() -> None:
         shapes=[],
     )
 
+    # Subtitle: 22pt, parked 2px below the title's descender bottom (snug).
+    # Uses font-size * 1.00 as the title height (cap + descender), not 0.80,
+    # so titles with g/y/p/j don't collide with the subtitle.
+    #   title_top    = (1 - 0.96) * 560 = 22.4
+    #   title_bottom = 22.4 + 42 * 1.00 = 64.4
+    #   subtitle_top = 64.4 + 2         = 66.4   # +2 px = snug
+    #   plot_h       = 560 - 180 - 120  = 260
+    #   paper_y      = 1 + (180 - 66.4) / 260 = 1.437
     fig.add_annotation(
-        x=-0.049, y=1.458,
+        x=-0.049, y=1.437,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
         text="B200 / MiniMax-M2.5 / TP=4 / 1 worker / Mooncake trace — KVBM G2 reduces TTFT across all concurrencies vs baseline.",

@@ -173,12 +173,17 @@ def main() -> None:
         shapes=[],
     )
 
-    # Subtitle: 22pt, parked exactly 5px below the title's bottom edge.
-    # Empirically y=1.155 sits ~5px below the rendered title bottom for a
-    # 42pt title at figure-y=0.96 with height=620 / top_margin=130 / plot_h=420.
+    # Subtitle: 22pt, parked 5px below the title's descender bottom.
+    # Uses font-size * 1.00 as the title height (cap + descender), not 0.80,
+    # so titles with g/y/p/j don't collide with the subtitle.
+    #   title_top    = (1 - 0.96) * 620 = 24.8
+    #   title_bottom = 24.8 + 42 * 1.00 = 66.8
+    #   subtitle_top = 66.8 + 2         = 68.8  # +2 px = snug
+    #   plot_h       = 620 - 130 - 70   = 420
+    #   paper_y      = 1 + (130 - 68.8) / 420 = 1.146
     #   paper_x = (title_x*W - margin_l)/plot_w = (0.02*1240 - 80)/1120 = -0.049
     fig.add_annotation(
-        x=-0.049, y=1.155,
+        x=-0.049, y=1.146,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
         text="B200 / MiniMax-M2.5 / TP=4 / ISL/OSL 1K/1K — DynoSim closes the AIC–hardware gap to ~50 ms on TTFT.",

@@ -263,12 +263,12 @@ def main() -> None:
     # Subtitle parked 5px below the title's bottom edge. Derived from
     # the standard formula in plotting.md:
     #   title_top    = (1 - 0.96) * 560 = 22.4
-    #   title_bottom = 22.4 + 42 * 0.80 = 56.0
-    #   subtitle_top = 56.0 + 5         = 61.0
+    #   title_bottom = 22.4 + 42 * 1.00 = 64.4   # 1.00 = cap + descender
+    #   subtitle_top = 64.4 + 2         = 66.4   # +2 px = snug
     #   plot_h       = 560 - 180 - 120  = 260
-    #   paper_y      = 1 + (180 - 61) / 260 = 1.458
+    #   paper_y      = 1 + (180 - 66.4) / 260 = 1.437
     fig.add_annotation(
-        x=-0.049, y=1.458,
+        x=-0.049, y=1.437,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
         text="Qwen3-32B / TP=2 / H200 — Planner holds p90 TTFT under SLA at ~30% of the static config's cumulative GPU-hours.",

@@ -205,16 +205,17 @@ def main() -> None:
         ),
     )
 
-    # Subtitle: 22pt, parked ~25px below title. x=-0.013 maps to the
-    # FIGURE's x=0.02 mark to align with the title:
+    # Subtitle: 22pt, parked 2px below the title's descender bottom (snug).
+    # x=-0.013 maps to the figure's x=0.02 mark to align with the title:
     #   (0.02*1240 - 40) / 1160 = -0.013
-    # y=1.26 is in plot-area paper coords; computed so the subtitle top
-    # sits ~25px below the title baseline (plot_h=300):
-    #   title bottom ≈ 76px from figure top
-    #   subtitle top  = 101px from figure top = 79px above plot top
-    #   paper_y = 1 + 79/300 ≈ 1.26
+    # Uses font-size * 1.00 as the title height (cap + descender):
+    #   title_top    = (1 - 0.95) * 520 = 26
+    #   title_bottom = 26 + 42 * 1.00   = 68
+    #   subtitle_top = 68 + 2           = 70   # +2 px = snug
+    #   plot_h       = 520 - 180 - 40   = 300
+    #   paper_y      = 1 + (180 - 70) / 300 = 1.367
     fig.add_annotation(
-        x=-0.013, y=1.33,
+        x=-0.013, y=1.367,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
         text="Sweep in sim, verify on the cluster, calibrate from telemetry.",

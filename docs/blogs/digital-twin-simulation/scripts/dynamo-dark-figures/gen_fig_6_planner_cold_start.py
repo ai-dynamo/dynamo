@@ -174,12 +174,12 @@ def main() -> None:
     # Subtitle parked 5px below the title's bottom edge. Derived from
     # the standard formula in plotting.md:
     #   title_top    = (1 - 0.95) * 560 = 28
-    #   title_bottom = 28 + 42 * 0.80   = 61.6
-    #   subtitle_top = 61.6 + 5         = 66.6
+    #   title_bottom = 28 + 42 * 1.00   = 70.0   # 1.00 = cap + descender
+    #   subtitle_top = 70.0 + 2         = 72.0   # +2 px = snug
     #   plot_h       = 560 - 180 - 80   = 300
-    #   paper_y      = 1 + (180 - 66.6) / 300 = 1.378
+    #   paper_y      = 1 + (180 - 72) / 300 = 1.360
     fig.add_annotation(
-        x=-0.049, y=1.378,
+        x=-0.049, y=1.360,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
         text="Qwen3-32B / TP=2 / H200 — p90 TTFT is flat through ~180 s of startup time, then crosses the SLA.",

@@ -192,7 +192,7 @@ def build_svg() -> str:
             size=42, weight="300", anchor="start",
         ),
         text(
-            0.02 * W, 92,
+            0.02 * W, 88,
             "Engine cores, Router, Planner — one simulated clock, one harness.",
             family="Helvetica Neue, HelveticaNeue, sans-serif",
             size=22, weight="300", color=TEXT_MUTED, anchor="start",
