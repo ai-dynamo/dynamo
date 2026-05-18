@@ -9,7 +9,11 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
-use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
+use dynamo_runtime::{
+    error::{DynamoError, ErrorType as DynamoErrorType},
+    pipeline::SingleIn,
+    protocols::maybe_error::MaybeError,
+};
 
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
@@ -288,9 +292,9 @@ impl PrefillRouter {
 
         match prefill_router {
             InnerPrefillRouter::KvRouter(r) => {
-                let (worker, _overlap) = r
+                let outcome = r
                     .chooser
-                    .find_best_match(
+                    .find_best_match_details(
                         None,
                         token_ids,
                         block_mm_infos,
@@ -299,10 +303,31 @@ impl PrefillRouter {
                         lora_name,
                         priority_jump,
                         None,
+                        None,
                         allowed_worker_ids,
                         routing_constraints,
                     )
                     .await?;
+                let (worker, _overlap) = match outcome {
+                    crate::kv_router::FindBestMatchOutcome::Routed {
+                        worker,
+                        overlap_blocks,
+                        ..
+                    } => (worker, overlap_blocks),
+                    crate::kv_router::FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queue_depth,
+                        max_queue_depth,
+                    } => {
+                        return Err(DynamoError::builder()
+                            .error_type(DynamoErrorType::ResourceExhausted)
+                            .message(format!(
+                                "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+                            ))
+                            .build()
+                            .into());
+                    }
+                };
                 Ok((worker.worker_id, Some(worker.dp_rank)))
             }
             InnerPrefillRouter::SimpleRouter(r) => {

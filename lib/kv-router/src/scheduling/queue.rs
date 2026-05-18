@@ -14,10 +14,12 @@ use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    RoutingEligibility, SchedulingContext, SchedulingRequest, SchedulingResponse,
+    KvSchedulerError, RoutingEligibility, SchedulingContext, SchedulingRequest, SchedulingResponse,
     pinned_worker_config,
 };
-use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -72,6 +74,8 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
+    /// Optional maximum queued requests per worker slot.
+    max_queue_depth_per_worker: Option<usize>,
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
@@ -87,10 +91,12 @@ impl<
     Sel: WorkerSelector<C>,
 > SchedulerQueue<P, C, S, Sel>
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
+        max_queue_depth_per_worker: Option<usize>,
         block_size: u32,
         selector: Sel,
         policy: S,
@@ -107,6 +113,7 @@ impl<
             slots,
             workers_with_configs,
             threshold_frac,
+            max_queue_depth_per_worker,
             start_time: Instant::now(),
             block_size,
             selector,
@@ -156,6 +163,7 @@ impl<
         let _admission = self.admission_gate.lock().await;
         let decay_now = Instant::now();
 
+
         let Some(threshold) = self.threshold_frac else {
             self.admit_one(request, decay_now).await;
             return;
@@ -167,6 +175,17 @@ impl<
         }
 
         if self.all_workers_busy(threshold, request.eligibility(), decay_now) {
+            let queue_depth = self.pending_count.load(AtomicOrdering::Relaxed);
+            if let Some(max_queue_depth) = self.effective_max_queue_depth()
+                && queue_depth >= max_queue_depth
+            {
+                request.respond(Err(KvSchedulerError::Backpressure {
+                    reason: RouterBackpressureReason::MaxQueueDepthExceeded,
+                    queue_depth,
+                    max_queue_depth: Some(max_queue_depth),
+                }));
+                return;
+            }
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = {
@@ -345,6 +364,13 @@ impl<
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
 
+    fn effective_max_queue_depth(&self) -> Option<usize> {
+        self.max_queue_depth_per_worker.map(|depth| {
+            let worker_count = self.workers_with_configs.borrow().len();
+            depth.saturating_mul(worker_count)
+        })
+    }
+
     /// Check if all eligible workers are busy based on threshold.
     /// When `pinned_worker` is `Some`, only that exact worker/rank is considered.
     /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
@@ -409,7 +435,7 @@ mod tests {
     use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::protocols::{WorkerSelectionResult, WorkerWithDpRank};
+    use crate::protocols::{RouterBackpressureReason, WorkerSelectionResult, WorkerWithDpRank};
     use crate::scheduling::types::KvSchedulerError;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -511,8 +537,14 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let (queue, slots, _tx) =
-            make_queue_with_sender(num_workers, block_size, isl, threshold_frac, None);
+        let (queue, slots, _tx) = make_queue_with_sender_with_max_depth(
+            num_workers,
+            block_size,
+            isl,
+            threshold_frac,
+            None,
+            None,
+        );
         (queue, slots)
     }
 
@@ -575,6 +607,29 @@ mod tests {
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
     ) {
+        make_queue_with_sender_with_max_depth(
+            num_workers,
+            block_size,
+            isl,
+            threshold_frac,
+            None,
+            prefill_load_estimator,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_sender_with_max_depth(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        max_queue_depth_per_worker: Option<usize>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
+    ) {
         let dp_range: HashMap<u64, (u32, u32)> =
             (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
@@ -603,6 +658,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
+            max_queue_depth_per_worker,
             block_size,
             selector,
             FcfsPolicy,
@@ -818,6 +874,40 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_backpressure_when_max_queue_depth_per_worker_reached() {
+        let block_size = 16;
+        let isl = 512;
+
+        let (queue, _slots, _cfg_tx) =
+            make_queue_with_sender_with_max_depth(1, block_size, isl, Some(0.0), Some(1), None);
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _resp1 = rx1.await.unwrap().unwrap();
+
+        let (req2, _rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        let (req3, rx3) = make_request("req-3", isl);
+        queue.enqueue(req3).await;
+
+        let resp3 = rx3.await.expect("oneshot dropped");
+        assert!(
+            matches!(
+                resp3,
+                Err(KvSchedulerError::Backpressure {
+                    reason: RouterBackpressureReason::MaxQueueDepthExceeded,
+                    queue_depth: 1,
+                    max_queue_depth: Some(1),
+                })
+            ),
+            "expected backpressure when queue is full, got {resp3:?}"
+        );
+        assert_eq!(queue.pending_count(), 1);
     }
 
     #[tokio::test(start_paused = true)]

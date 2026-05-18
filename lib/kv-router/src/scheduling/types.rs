@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use crate::protocols::{
-    DpRank, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    DpRank, RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::sequences::PrefillTokenDeltas;
 
@@ -35,6 +36,15 @@ pub struct PotentialLoad {
 pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
+
+    #[error(
+        "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+    )]
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queue_depth: usize,
+        max_queue_depth: Option<usize>,
+    },
 
     #[error("pinned worker {worker_id} is not in allowed worker set")]
     PinnedWorkerNotAllowed { worker_id: WorkerId },
