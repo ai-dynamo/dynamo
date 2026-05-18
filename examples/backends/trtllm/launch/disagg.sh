@@ -61,8 +61,16 @@ print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL_PATH" "$H
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 
+# Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which both
+# workers would otherwise share. Use DYN_SYSTEM_PORT{1,2} to assign distinct
+# system-status-server ports per worker (matches disagg_same_gpu.sh pattern).
+unset DYN_SYSTEM_PORT
+
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m "$WORKER_MODULE" \
+OTEL_SERVICE_NAME=dynamo-worker-prefill \
+CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
@@ -71,7 +79,10 @@ OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIB
   "${TRACE_ARGS[@]}" &
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m "$WORKER_MODULE" \
+OTEL_SERVICE_NAME=dynamo-worker-decode \
+CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
