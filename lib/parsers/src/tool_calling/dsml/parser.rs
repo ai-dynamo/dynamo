@@ -306,6 +306,12 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // DEPRECATED(parser-fixture-duplicate): Legacy V4 coverage manifest.
+    // The blackbox case mapping now lives in the YAML parser fixtures under
+    // tests/parity/parser/fixtures/deepseek_v4/ and the taxonomy in
+    // lib/parsers/PARSER_CASES.md; keep this temporarily as a pointer while
+    // the duplicate Rust tests are being retired.
+    //
     // DeepSeek V4 coverage (see lib/parsers/PARSER_CASES.md for PARSER.* taxonomy).
     //
     // Covered by the V4 tests below (or by a shared DSML generic test):
@@ -397,6 +403,7 @@ mod tests {
         assert_eq!(&text[pos..], "more");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.yaml.
     #[test] // PARSER.batch.1
     fn test_parse_single_tool_call_string_param() {
         let input = r#"<｜DSML｜function_calls>
@@ -425,6 +432,7 @@ mod tests {
         assert_eq!(args["location"], "San Francisco");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1, PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml, tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.yaml.
     #[test] // PARSER.batch.1, PARSER.batch.7
     fn test_parse_single_tool_call_mixed_params() {
         let input = r#"<｜DSML｜function_calls>
@@ -444,6 +452,7 @@ mod tests {
         assert_eq!(args["topn"], 10);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.2.yaml.
     #[test] // PARSER.batch.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<｜DSML｜function_calls>
@@ -471,6 +480,7 @@ mod tests {
     }
 
     /// `PARSER.batch.2` multi-calls + `PARSER.batch.8` interleaved-text (prefix text before the block).
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.c, PARSER.batch.8.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.2.yaml, tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.2, PARSER.fmt.3 — V4 variant
     fn test_parse_deepseek_v4_multiple_tool_calls() {
         let input = r#"Let's check this. <｜DSML｜tool_calls>
@@ -504,6 +514,7 @@ mod tests {
     }
 
     /// `PARSER.batch.6` — empty args (no-parameter invoke).
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.6.yaml.
     #[test] // PARSER.batch.6, PARSER.fmt.3 — V4 variant
     fn test_parse_deepseek_v4_no_parameters() {
         let input = r#"<｜DSML｜tool_calls>
@@ -521,6 +532,7 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.8
     fn test_parse_with_normal_text() {
         let input = r#"Here's the result: <｜DSML｜function_calls>
@@ -568,6 +580,7 @@ mod tests {
         assert_eq!(normal, Some(input.to_string()));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_json_parameter_value() {
         let input = r#"<｜DSML｜function_calls>
@@ -586,6 +599,7 @@ mod tests {
         assert_eq!(args["config"]["count"], 42);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_array_parameter_value() {
         let input = r#"<｜DSML｜function_calls>
@@ -604,6 +618,7 @@ mod tests {
         assert_eq!(args["items"][2], 3);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_boolean_parameters() {
         let input = r#"<｜DSML｜function_calls>
@@ -622,6 +637,7 @@ mod tests {
         assert_eq!(args["disabled"], false);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_number_parameters() {
         let input = r#"<｜DSML｜function_calls>
@@ -642,6 +658,7 @@ mod tests {
         assert_eq!(args["negative"], -100);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_mixed_types_realistic() {
         // Realistic example based on test data
@@ -664,6 +681,7 @@ mod tests {
         assert_eq!(args["source"], "web");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_nested_object_parameter() {
         let input = r#"<｜DSML｜function_calls>
@@ -684,6 +702,7 @@ mod tests {
         assert_eq!(args["settings"]["endpoints"][0], "a");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_empty_string_parameter() {
         let input = r#"<｜DSML｜function_calls>
@@ -858,6 +877,7 @@ mod tests {
         );
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a, PARSER.batch.9 in tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.7.yaml, tests/parity/parser/fixtures/deepseek_v3_2/PARSER.batch.yaml.
     #[test] // PARSER.batch.7, PARSER.batch.9
     fn test_parse_null_parameter() {
         let input = r#"<｜DSML｜function_calls>
@@ -896,6 +916,7 @@ mod tests {
     /// into `normal_text` when block-start appears but no invokes parse —
     /// it returns the pre-block text only (empty here, since the input
     /// starts with the block-start fence). The call is still dropped.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.5, PARSER.fmt.3 — V4 variant
     fn test_parse_deepseek_v4_missing_end_token() {
         // Start fence + complete invoke, but no </｜DSML｜tool_calls>.
@@ -927,6 +948,7 @@ mod tests {
     /// absence of the closing fence prevents the block regex from matching.
     /// All calls are dropped. If the parser ever gains partial-block
     /// recovery, this test will fail and force an intentional update.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a, PARSER.batch.5.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.2.yaml, tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.2, PARSER.batch.5, PARSER.fmt.3
     fn test_parse_deepseek_v4_missing_end_token_multiple_calls() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -952,6 +974,7 @@ mod tests {
     /// (unwrap_or_else → Value::String). Pin the fallback so removing it
     /// (which would cause the whole call to 500 on ragged-edge JSON) is a
     /// deliberate change.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4, PARSER.fmt.3
     fn test_parse_deepseek_v4_malformed_json_value_falls_back_to_string() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -976,6 +999,7 @@ mod tests {
     /// `PARSER.batch.4` — malformed invoke (missing `</｜DSML｜invoke>` but block fences
     /// intact). The invoke regex requires its own close tag, so the call is
     /// silently dropped. Pin the behavior.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4, PARSER.fmt.3
     fn test_parse_deepseek_v4_missing_invoke_close_drops_call() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -1000,6 +1024,7 @@ mod tests {
     /// TODO(PARSER.batch.4) — BUG, NEEDS FIX: parser silently loses the parameter
     /// and ships an under-specified call to the user. The fix should keep
     /// the raw value up to `</｜DSML｜invoke>`. Flip this test once fixed.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4, PARSER.fmt.3
     fn test_parse_deepseek_v4_missing_parameter_close_loses_param() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -1030,6 +1055,7 @@ mod tests {
     /// silently dropped — caller receives wrong args for A and never sees
     /// B at all. Fix: anchor on `<｜DSML｜invoke name=` to re-sync between
     /// invokes. Flip this test once fixed.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4, PARSER.fmt.3
     fn test_parse_deepseek_v4_middle_invoke_truncation_corrupts_next() {
         let input = "<｜DSML｜tool_calls>\n\
@@ -1079,6 +1105,7 @@ mod tests {
     /// `<think>...</think>` before the DSML block; the tool parser is
     /// concerned only with the DSML, but normal text must round-trip
     /// the reasoning markup verbatim for the reasoning parser to pick up.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.8
     fn test_parse_reasoning_plus_tool_v4() {
         let input = "<think>Let me check the weather.</think>\
@@ -1150,6 +1177,7 @@ mod tests {
 
     /// `PARSER.batch.9` — empty / null content variants. Pin behavior on truly
     /// empty bytes and whitespace-only inputs.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.yaml.
     #[test] // PARSER.batch.9
     fn test_parse_empty_and_whitespace_inputs_v4() {
         let config = get_v4_test_config();
@@ -1173,6 +1201,7 @@ mod tests {
 
     /// `PARSER.batch.10` — duplicate calls (same invoke name twice in one block).
     /// Universal gap noted in the test taxonomy; first DSML coverage.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/deepseek_v4/PARSER.batch.yaml.
     #[test] // PARSER.batch.10
     fn test_parse_duplicate_invokes_same_name_v4() {
         let input = "<｜DSML｜tool_calls>\n\
