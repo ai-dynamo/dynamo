@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: jamba
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Tool_calls wrapper with garbage
+    ref: dynamo
+    model_text: <tool_calls>not a json array</tool_calls>
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        reason: "Dynamo's jamba parser leaves <tool_calls> envelope in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: <tool_calls>not a json array</tool_calls>
+      vllm: *id001
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.4.b:
+    description: Missing close brace in JSON
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"]</tool_calls>'
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        reason: "Dynamo's jamba parser leaves <tool_calls> envelope in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"]</tool_calls>'
+      vllm: *id003
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.4.c:
+    description: Missing name key
+    ref: dynamo
+    model_text: '<tool_calls>[{"arguments": {"location": "NYC"}}]</tool_calls>'
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_calls>[{"arguments": {"location": "NYC"}}]</tool_calls>'
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.4.d:
+    description: Missing </tool_calls> close
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in PARSER.batch.4.a through 4.d.

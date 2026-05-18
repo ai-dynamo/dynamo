@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import base64
 import os
-import re
 import tempfile
 import threading
 import time
@@ -45,13 +44,17 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
+from tests.utils.router_logs import (
+    extract_router_kv_overlap_records,
+    wait_for_router_kv_overlap,
+)
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
 NAMESPACE = "router-rust-mm"
 
 pytestmark = [
-    pytest.mark.pre_merge,
+    pytest.mark.post_merge,
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,
@@ -60,11 +63,6 @@ pytestmark = [
     pytest.mark.requested_vllm_kv_cache_bytes(1_719_075_000),
     pytest.mark.profiled_vram_gib(18.7),
 ]
-
-# Format produced by lib/llm/src/kv_router/push_router.rs's [ROUTING] log.
-_ROUTING_RECORD_PATTERN = re.compile(
-    r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
-)
 
 
 def _check_ready(response) -> bool:
@@ -78,7 +76,6 @@ def _make_process_env(
     log_level: str = (
         "info,mm_routing=debug,"
         "dynamo_kv_router::scheduling=debug,"
-        # The [ROUTING] log line we parse below lives here at debug level.
         "dynamo_llm::kv_router=debug"
     ),
     **extra,
@@ -224,34 +221,15 @@ def _build_payload(
     }
 
 
-def _extract_routing_records(log_text: str) -> list[tuple[int, int]]:
-    return [
-        (int(overlap), int(total))
-        for overlap, total in _ROUTING_RECORD_PATTERN.findall(log_text)
-    ]
-
-
-def _wait_for_new_routing_score(
-    router_proc: ManagedProcess,
-    pre_request_records: int,
-    timeout_s: float = 25.0,
-) -> tuple[int, int]:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        records = _extract_routing_records(router_proc.read_logs())
-        if len(records) >= pre_request_records + 1:
-            return records[-1]
-        time.sleep(1)
-    return 0, 0
-
-
 def _send(
     frontend_port: int,
     router_proc: ManagedProcess,
     payload: dict[str, Any],
     label: str,
 ) -> tuple[int, int, dict[str, Any]]:
-    pre_count = len(_extract_routing_records(router_proc.read_logs()))
+    pre_request_logs = router_proc.read_logs()
+    start_offset = len(pre_request_logs)
+    pre_request_record_count = len(extract_router_kv_overlap_records(pre_request_logs))
     resp = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
@@ -260,7 +238,13 @@ def _send(
     assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text}"
     data = resp.json()
     assert "choices" in data, f"missing choices in response: {data}"
-    overlap, total = _wait_for_new_routing_score(router_proc, pre_count)
+    overlap, total, _recent_logs = wait_for_router_kv_overlap(
+        router_proc.read_logs,
+        start_offset=start_offset,
+        pre_request_record_count=pre_request_record_count,
+        context=label,
+        log_label="frontend",
+    )
     print(
         f"[ROUTER_RUST_MM] {label}: overlap={overlap}/{total} usage={data.get('usage')}"
     )

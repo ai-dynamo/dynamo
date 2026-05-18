@@ -19,7 +19,6 @@ This component is **fully configurable** and works with any Dynamo backend (vLLM
 python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
     --router-block-size 64 \
-    --router-reset-states \
     --no-router-track-active-blocks
 ```
 
@@ -33,12 +32,13 @@ All router options use the `--router-*` prefix (e.g., `--router-block-size`, `--
 
 ## Architecture
 
-The standalone router exposes two endpoints via the Dynamo runtime:
+The standalone router exposes three endpoints via the Dynamo runtime:
 
 1. **`generate`**: Routes requests to the best worker and streams back generation results (KV-aware routing).
 2. **`best_worker_id`**: Given token IDs, returns the best worker ID for the request without routing; useful for debugging or custom routing logic.
+3. **`get_overlap_scores`**: Given token IDs, returns per-worker/per-DP-rank matched block counts for device, host-pinned, disk, and configured shared-cache tiers without routing.
 
-Clients call the `generate` endpoint to stream completions, or call `best_worker_id` to decide which worker to use and then contact that worker directly.
+Clients call the `generate` endpoint to stream completions, call `best_worker_id` to decide which worker to use and then contact that worker directly, or call `get_overlap_scores` when an external scheduler wants the raw tiered overlap signal.
 
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
@@ -47,7 +47,7 @@ Clients call the `generate` endpoint to stream completions, or call `best_worker
 >
 > Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 
-See [`examples/backends/vllm/launch/disagg_router.sh`](/examples/backends/vllm/launch/disagg_router.sh) for a complete example.
+For an integrated frontend disaggregated example, see [`examples/backends/vllm/launch/disagg_router.sh`](/examples/backends/vllm/launch/disagg_router.sh). For explicit multi-router composition, see the [Global Router README](/components/src/dynamo/global_router/README.md).
 
 ```bash
 # Start frontend router for decode workers
@@ -60,7 +60,6 @@ python -m dynamo.frontend \
 python -m dynamo.router \
     --endpoint dynamo.prefill.generate \
     --router-block-size 64 \
-    --router-reset-states \
     --no-router-track-active-blocks
 
 # Start decode workers
@@ -70,6 +69,8 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 &
 python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode prefill &
 ```
 
+For event-driven prefix-cache state, add the backend-specific KV event publishing flags to the workers that the router indexes. Use `--no-router-kv-events` on the router only when approximate cache-state prediction is acceptable.
+
 >[!Note]
 > **Why `--no-router-track-active-blocks` for prefill routing?**
 > Active block tracking is used for load balancing across decode (generation) phases. For prefill-only routing, decode load is not relevant, so disabling this reduces overhead and simplifies the router state.
@@ -77,8 +78,8 @@ python -m dynamo.vllm --model MODEL_NAME --block-size 64 --disaggregation-mode p
 > **When should I use `--no-router-track-prefill-tokens`?**
 > Use it on decode-only routers that should ignore already-completed prompt work. This keeps `active_prefill_tokens`, queue pressure, and load estimates focused on decode-side work after a prefill-to-decode handoff.
 >
-> **Why `--router-block-size` is required for standalone routers:**
-> Unlike the frontend router which can infer block size from the ModelDeploymentCard (MDC) during worker registration, standalone routers cannot access the MDC and must have the block size explicitly specified. This is a work in progress to enable automatic inference.
+> **Why `--router-block-size` should be set for standalone routers:**
+> Standalone routers default to block size `128`, but they do not infer block size from the ModelDeploymentCard (MDC) during worker registration. Set the value explicitly so routing decisions match the backend worker block size.
 
 ## Configuration Best Practices
 

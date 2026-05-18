@@ -112,11 +112,9 @@ features:
     pre_deployment_sweeping_mode: rapid
 ```
 
-The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest, which automatically profiles your model:
-
-```bash
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
-```
+The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest,
+which automatically profiles your model. See [Planner Examples](planner-examples.md)
+for copyable DGDR manifests.
 
 See [Planner Guide](planner-guide.md) for the full workflow.
 
@@ -159,7 +157,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 | `--min-endpoint` | `1` | Minimum replicas per worker type |
 | `--decode-engine-num-gpu` | `1` | GPUs per decode engine |
 | `--prefill-engine-num-gpu` | `1` | GPUs per prefill engine |
-| `--no-operation` | `false` | Observation mode (no actual scaling) |
+| `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |
 | **Throughput-based scaling** | | |
 | `--enable-throughput-scaling` | `true` | Enable throughput-based scaling |
 | `--adjustment-interval` | `180` | Seconds between throughput-based scaling decisions |
@@ -208,14 +206,36 @@ When `PLANNER_PROMETHEUS_PORT` is set, the planner serves its own metrics endpoi
 - TTFT and ITL distributions
 - Input/output sequence lengths
 
+Planner can read these traffic signals from either the public `Frontend` or a pool-local `LocalRouter`. Use `throughput_metrics_source: "frontend"` for a single-DGD deployment. Use `throughput_metrics_source: "router"` for GlobalPlanner / multi-pool deployments so each pool Planner reads its own router traffic instead of the shared public endpoint.
+
+| Planner input | Frontend source | Router source |
+|---|---|---|
+| Request count | `dynamo_frontend_requests_total` | `dynamo_component_router_requests_total` |
+| TTFT | `dynamo_frontend_time_to_first_token_seconds` | `dynamo_component_router_time_to_first_token_seconds` |
+| ITL | `dynamo_frontend_inter_token_latency_seconds` | `dynamo_component_router_inter_token_latency_seconds` |
+| Request duration | `dynamo_frontend_request_duration_seconds` | `dynamo_component_request_duration_seconds` until router-specific duration metrics are available |
+| Input sequence length / ISL | `dynamo_frontend_input_sequence_tokens` | `dynamo_component_router_input_sequence_tokens` |
+| Output sequence length / OSL | `dynamo_frontend_output_sequence_tokens` | `dynamo_component_router_output_sequence_tokens` |
+| KV hit rate | Not available from frontend source | `dynamo_component_router_kv_hit_rate` |
+
+The throughput planner uses request count, ISL, OSL, and optional KV hit rate as the core traffic forecast inputs. TTFT, ITL, and request duration are also scraped and exported as observed diagnostics.
+
 **Load-based scaling** uses ForwardPassMetrics (FPM) from the Dynamo event plane:
 - Per-iteration wall time, scheduled prefill/decode tokens, and queued request status
 - Delivered via `FpmEventSubscriber` with automatic engine discovery and lifecycle tracking
 - No router `/metrics` scraping required
 
-Core gauges on the planner port include replica counts (`dynamo_planner_num_prefill_replicas`, `dynamo_planner_num_decode_replicas`), observed traffic (`dynamo_planner_observed_*`), replica decisions (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), and cumulative `dynamo_planner_gpu_hours`.
+FPM observes engine-side scheduled and queued work. It does not include requests still queued in the `LocalRouter` before engine assignment.
+
+Core gauges on the planner port include replica counts (`dynamo_planner_num_prefill_replicas`, `dynamo_planner_num_decode_replicas`), observed traffic (`dynamo_planner_observed_*`), replica recommendations (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), and cumulative `dynamo_planner_gpu_hours`.
 
 Throughput prediction gauges `dynamo_planner_predicted_requests_per_second`, `dynamo_planner_predicted_input_sequence_tokens`, and `dynamo_planner_predicted_output_sequence_tokens` are wired from throughput-scaling traffic prediction and exposed alongside observed sequence-length metrics.
+
+### Advisory mode
+
+Set `advisory: true` to run the local Planner in suggestion-only mode. This is recommended when you are evaluating a new Planner configuration, validating SLA targets, or reviewing how the Planner would react to production traffic before allowing it to scale workers.
+
+In advisory mode, the Planner still observes traffic and FPM data, computes recommended prefill and decode replica counts, logs recommendation summaries, exports predicted replica metrics, and includes recommendations in diagnostics reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions, send replica changes to Kubernetes or GlobalPlanner, or mutate the deployment.
 
 #### Diagnostics metrics
 
@@ -236,4 +256,4 @@ Configure this in `PlannerConfig` (or the equivalent YAML / constructor wiring y
 - `report_output_dir`: directory where HTML files are written (default `./planner_reports`).
 - `live_dashboard_port`: port for a real-time HTTP dashboard (default `8080`). Set to `0` to disable. An aiohttp server starts on the given port and serves the current accumulated snapshot data as an interactive Plotly report at `http://<host>:<port>/`. Unlike periodic reports, the live dashboard does **not** clear snapshots — it always shows all data accumulated since the last periodic report (or since startup if periodic reports are disabled).
 
-Reports aggregate per-tick snapshots and use `TickInput.now_s` for timestamps, so they behave the same in live runs (wall clock) and in **replay** with a simulated clock. Typical charts cover worker counts, observed versus estimated latencies versus SLA targets, request rate, engine capacity, scaling decision timelines, and input/output sequence lengths.
+Reports aggregate per-tick snapshots and use `TickInput.now_s` for timestamps, so they behave the same in live runs (wall clock) and in **replay** with a simulated clock. Typical charts cover worker counts, recommended replica counts, observed versus estimated latencies versus SLA targets, request rate, engine capacity, scaling decision timelines, and input/output sequence lengths. In the Replica Counts plot, actual replicas are shown as lines and the Planner's recommended prefill and decode replica counts are shown as discrete markers at the ticks where recommendations were produced. This is especially useful with `advisory: true` because those recommendations are suggestions only.

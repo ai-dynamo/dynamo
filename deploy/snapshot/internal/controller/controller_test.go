@@ -28,13 +28,21 @@ const testNodeName = "test-node"
 const testContainerID = "test-container"
 
 // fakeRuntime is a minimal Runtime implementation for controller reconciliation
-// tests. Resolve paths aren't exercised by the reconciler filter tests.
-type fakeRuntime struct{}
+// tests.
+type fakeRuntime struct {
+	containerIDByPod string
+}
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
 
 func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	return 0, nil, errors.New("not implemented")
+}
+func (r *fakeRuntime) ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error) {
+	if r.containerIDByPod != "" {
+		return r.containerIDByPod, nil
+	}
+	return "", errors.New("not implemented")
 }
 func (r *fakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns, ctr string) (int, *specs.Spec, error) {
 	return 0, nil, errors.New("not implemented")
@@ -113,6 +121,9 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 		Status: corev1.PodStatus{
 			Phase:      phase,
 			Conditions: conditions,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "main", Ready: ready, ContainerID: "containerd://" + testContainerID},
+			},
 		},
 	}
 }
@@ -684,6 +695,80 @@ func TestReconcileRestorePodRejectsTargetNameThatCannotFitStatusAnnotation(t *te
 	w.reconcileRestorePod(context.Background(), pod)
 	if len(w.inFlight) != 0 {
 		t.Fatalf("expected restore not to start for overlong annotation key, got inFlight=%v", w.inFlight)
+	}
+}
+
+func TestReconcileRestorePodResolvesContainerBeforePodStatus(t *testing.T) {
+	labels := map[string]string{
+		snapshotprotocol.CheckpointIDLabel: "abc123",
+	}
+	w := makeTestController(t)
+	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	clientset := w.clientset.(*fake.Clientset)
+
+	pod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, labels, nil)
+	pod.Status.ContainerStatuses = nil
+	dir := filepath.Join(w.config.Storage.BasePath, "abc123", "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	w.reconcileRestorePod(context.Background(), pod)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, action := range clientset.Actions() {
+			create, ok := action.(clientgotesting.CreateAction)
+			if !ok || create.GetResource().Resource != "events" {
+				continue
+			}
+			event, ok := create.GetObject().(*corev1.Event)
+			if ok && event.Reason == "RestoreRequested" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected RestoreRequested event after node-runtime container resolution; actions=%#v", clientset.Actions())
+}
+
+func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
+	checkpointID := "abc123"
+	labels := map[string]string{
+		snapshotprotocol.CheckpointIDLabel: checkpointID,
+	}
+	stalePod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, labels, nil)
+	stalePod.Status.ContainerStatuses = nil
+
+	w := makeTestController(t)
+	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	clientset := w.clientset.(*fake.Clientset)
+	dir := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	resolveKey := "default/test-pod/main/resolve"
+	restoreAttemptKey := "default/test-pod/main/" + testContainerID
+	w.inFlight[resolveKey] = struct{}{}
+	w.inFlight[restoreAttemptKey] = struct{}{}
+	w.pollForContainerID(context.Background(), stalePod, "main", checkpointID, "default/test-pod", resolveKey)
+
+	if _, held := w.inFlight[resolveKey]; held {
+		t.Fatal("expected resolver key to be released")
+	}
+	if _, held := w.inFlight[restoreAttemptKey]; !held {
+		t.Fatal("expected existing restore attempt key to remain held")
+	}
+	for _, action := range clientset.Actions() {
+		create, ok := action.(clientgotesting.CreateAction)
+		if !ok || create.GetResource().Resource != "events" {
+			continue
+		}
+		event, ok := create.GetObject().(*corev1.Event)
+		if ok && event.Reason == "RestoreRequested" {
+			t.Fatalf("stale resolver should not start restore while attempt key is held; actions=%#v", clientset.Actions())
+		}
 	}
 }
 

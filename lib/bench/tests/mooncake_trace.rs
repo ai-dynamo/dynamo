@@ -388,6 +388,18 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
     Ok(())
 }
 
+#[test]
+fn removed_legacy_branch_sharded_name_is_rejected() {
+    let removed_name = format!("{}-{}-branch-sharded-crtc", "anchor", "aware");
+    let error = MooncakeIndexerConfig::from_short_name(&removed_name, 4).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("Unknown indexer"));
+    assert!(message.contains("branch-sharded-crtc"));
+    let valid_names = message.split("Valid names: ").nth(1).unwrap_or("");
+    assert!(!valid_names.contains(&removed_name));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Result<()> {
     let trace = Trace {

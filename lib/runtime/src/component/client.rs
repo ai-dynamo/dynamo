@@ -12,6 +12,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures::StreamExt;
+use rand::Rng;
 
 use crate::component::{Endpoint, Instance};
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
@@ -34,7 +35,30 @@ impl RoutingOccupancyState {
 
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
-        let id = *instance_ids.iter().min_by_key(|&&id| self.load(id))?;
+
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform without allocating in this locked hot path.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        let id = selected?;
         self.increment(id);
         Some(id)
     }
@@ -131,8 +155,8 @@ pub struct Client {
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
     // These are the instance source ids less those reported as down from sending rpc
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
-    // These are the instance source ids less those reported as busy (above threshold)
-    instance_free: Arc<ArcSwap<Vec<u64>>>,
+    // These are the instance ids reported as busy (above threshold)
+    instance_busy: Arc<ArcSwap<HashSet<u64>>>,
     // Watch sender for available instance IDs (for sending updates)
     instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
     // Watch receiver for available instance IDs (for cloning to external subscribers)
@@ -177,8 +201,8 @@ impl Client {
             endpoint: endpoint.clone(),
             endpoint_discovery_source,
             instance_source: instance_source.clone(),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
+            instance_avail: Arc::new(ArcSwap::from_pointee(initial_ids.clone())),
+            instance_busy: Arc::new(ArcSwap::from_pointee(HashSet::new())),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,
@@ -200,8 +224,14 @@ impl Client {
         self.instance_avail.load()
     }
 
-    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
-        self.instance_free.load()
+    pub fn instance_ids_free(&self) -> Vec<u64> {
+        let instance_ids = self.instance_ids();
+        let busy_ids = self.instance_busy.load();
+
+        instance_ids
+            .into_iter()
+            .filter(|id| !busy_ids.contains(id))
+            .collect()
     }
 
     /// Get a watcher for available instance IDs
@@ -259,14 +289,11 @@ impl Client {
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
-    /// Update the set of free instances based on busy instance IDs
-    pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
-        let all_instance_ids = self.instance_ids();
-        let free_ids: Vec<u64> = all_instance_ids
-            .into_iter()
-            .filter(|id| !busy_instance_ids.contains(id))
-            .collect();
-        self.instance_free.store(Arc::new(free_ids));
+    /// Replace the set of busy instances reported by the worker monitor.
+    pub fn set_busy_instances(&self, busy_instance_ids: &[u64]) {
+        self.instance_busy.store(Arc::new(
+            busy_instance_ids.iter().copied().collect::<HashSet<_>>(),
+        ));
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -289,9 +316,7 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
-                // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
-                client.instance_free.store(Arc::new(instance_ids.clone()));
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 let registry = client.endpoint.drt().routing_occupancy_states();
@@ -499,6 +524,92 @@ mod tests {
         rt.shutdown();
     }
 
+    #[tokio::test]
+    async fn test_instance_reconciliation_preserves_busy_existing_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_busy_reconciliation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_free().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+        assert!(
+            client.instance_ids_free().contains(&worker_id),
+            "worker should be free after initial discovery reconciliation"
+        );
+
+        client.set_busy_instances(&[worker_id]);
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "worker should be busy before periodic reconciliation"
+        );
+
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "periodic reconciliation should not mark an existing busy worker free"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_instance_ids_free_excludes_busy_new_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let worker_id = drt.connection_id();
+        let ns = drt
+            .namespace("test_new_busy_reconciliation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        client.set_busy_instances(&[worker_id]);
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        assert_eq!(instances[0].id(), worker_id);
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "newly discovered busy worker should not be free"
+        );
+
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "discovery reconciliation should not affect recomputed free workers"
+        );
+
+        rt.shutdown();
+    }
+
     /// Test that instance_avail_watcher receives updates when instances change.
     #[tokio::test]
     async fn test_instance_avail_watcher() {
@@ -551,6 +662,31 @@ mod tests {
         assert_eq!(state.load(100), 30);
         assert_eq!(state.load(200), 30);
         assert_eq!(state.load(300), 30);
+    }
+
+    #[tokio::test]
+    async fn test_select_exact_min_and_increment_randomizes_ties() {
+        let mut selected = [false; 3];
+
+        for _ in 0..120 {
+            let state = RoutingOccupancyState::default();
+            let picked = state
+                .select_exact_min_and_increment(&[10, 20, 30])
+                .await
+                .unwrap();
+            match picked {
+                10 => selected[0] = true,
+                20 => selected[1] = true,
+                30 => selected[2] = true,
+                _ => panic!("unexpected worker id: {picked}"),
+            }
+        }
+
+        let selected_count = selected.into_iter().filter(|seen| *seen).count();
+        assert!(
+            selected_count > 1,
+            "tie-breaking should not always select the first minimum-load worker"
+        );
     }
 
     #[tokio::test]
