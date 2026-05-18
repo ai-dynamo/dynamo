@@ -1,0 +1,201 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Close mirror of the production Qwen3-30B-A3B disagg deployment that
+# exhibits the cascade in field. Differences from prod (see
+# dynamo-observe/.../incidents/ads_dgd.yaml) and rationale:
+#
+# - Hardware: prod runs A100-40GB (P4D); we run on H100-80GB and cap to
+#   ~36 GB / GPU via --gpu-memory-utilization=0.45 (= 0.9 * 40 GB).
+#   That matches prod's vLLM memory budget exactly. HBM bandwidth and
+#   FP8 tensor-core throughput on H100 still differ — we emulate KV
+#   pressure / NIXL behaviour, not raw decode TPS.
+# - Topology: prod is 102 FE / 204 PF / 102 DE (≈ 2:1 PF:DE ratio).
+#   This template encodes a **single unit** = 1 FE / 2 PF (TP=2) / 1 DE
+#   (TP=2) = 6 GPUs, fits one 8×H100-80GB node. Tests multiply each
+#   service's replica count by `runtime_env.units` (CLI: `--units N`):
+#     - N=1 → 1 FE / 2 PF / 1 DE (6 GPUs)  — isolates per-unit cascade
+#     - N=2 → 2 FE / 4 PF / 2 DE (12 GPUs) — same footprint as
+#       `disagg_qwen3_30b_4p2d_2f_prod.yaml`
+#     - N=3 → 3 FE / 6 PF / 3 DE (18 GPUs)
+#   Same PF:DE ratio as prod at every N.
+# - Image: prod runs a custom lise-dynamo image off vllm 1.0.1
+#   (vllm_1.0.1_0.16.0). We use the released vllm-runtime:1.0.1 — same
+#   vllm + Dynamo base, missing only prod's custom patches.
+#
+# Everything else (model, args, FP8 GEMM env, UCX/NCCL tuning) is
+# copied verbatim from the prod DGD spec.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  # Short name keeps PVC-verify Job label under the 63-char limit. Tests
+  # may suffix this with the unit count (e.g. `vllm-q3-prod-units-2`)
+  # before applying — keep the base name short to leave headroom.
+  name: vllm-q3-prod-agg-units
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 2
+      resources:
+        requests:
+          gpu: "2"
+        limits:
+          gpu: "2"
+      # Per-service envs mirror the prod DGD's FP8 GEMM + UCX/NCCL
+      # tuning. Values are exact copies from ads_dgd.yaml.
+      envs:
+        - name: VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
+          value: "1"
+        - name: VLLM_USE_DEEP_GEMM
+          value: "1"
+        - name: VLLM_USE_DEEP_GEMM_E8M0
+          value: "1"
+        - name: VLLM_MOE_USE_DEEP_GEMM
+          value: "0"
+        - name: VLLM_USE_FLASHINFER_MOE_FP8
+          value: "0"
+        - name: UCX_MAX_RMA_LANES
+          value: "4"
+        - name: UCX_MAX_COMPONENT_MDS
+          value: "32"
+        - name: UCX_ADDRESS_VERSION
+          value: "v2"
+        - name: UCX_KEEPALIVE_INTERVAL
+          value: "inf"
+        - name: UCX_PROTO_INFO
+          value: "y"
+        - name: UCX_LOG_LEVEL
+          value: "INFO"
+        - name: NCCL_LAUNCH_MODE
+          value: "PARALLEL"
+        - name: NCCL_NET_SHARED_COMMS
+          value: "0"
+        - name: NCCL_DEBUG
+          value: "WARN"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+            # vllm-runtime:1.0.1 uses --disaggregation-mode; the customer's
+            # lise-dynamo fork uses --is-prefill-worker (both functionally
+            # equivalent for vLLM disagg).
+            - --disaggregation-mode
+            - prefill
+            - --tensor-parallel-size
+            - "2"
+            - --gpu-memory-utilization
+            - "0.45"
+            - --max-model-len
+            - "10240"
+            - --max-num-seqs
+            - "512"
+            - --dyn-reasoning-parser
+            - qwen3
+            - --enable-expert-parallel
+            - --async-scheduling
+            - --disable-cascade-attn
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --kv-events-config
+            - '{"enable_kv_cache_events":false}'
+
+    # AGG-enum variant: decode worker has kv_events ENABLED. Combined with
+    # the missing --disaggregation-mode flag (i.e. AGG enum default), this
+    # is the exact configuration that fires the 2026-05-03 radix_tree
+    # WARN storm: publisher-skip gate at main.py:316 is bypassed because
+    # disaggregation_mode != DECODE, AND not bypassed at main.py:324
+    # because enable_kv_cache_events=True. Both must hold to wire up
+    # LocalKvIndexer + drive the radix_tree warnings.
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        requests:
+          gpu: "2"
+        limits:
+          gpu: "2"
+      envs:
+        - name: VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER
+          value: "1"
+        - name: VLLM_USE_DEEP_GEMM
+          value: "1"
+        - name: VLLM_USE_DEEP_GEMM_E8M0
+          value: "1"
+        - name: VLLM_MOE_USE_DEEP_GEMM
+          value: "0"
+        - name: VLLM_USE_FLASHINFER_MOE_FP8
+          value: "0"
+        - name: UCX_MAX_RMA_LANES
+          value: "4"
+        - name: UCX_MAX_COMPONENT_MDS
+          value: "32"
+        - name: UCX_ADDRESS_VERSION
+          value: "v2"
+        - name: UCX_KEEPALIVE_INTERVAL
+          value: "inf"
+        - name: UCX_PROTO_INFO
+          value: "y"
+        - name: UCX_LOG_LEVEL
+          value: "INFO"
+        - name: NCCL_LAUNCH_MODE
+          value: "PARALLEL"
+        - name: NCCL_NET_SHARED_COMMS
+          value: "0"
+        - name: NCCL_DEBUG
+          value: "WARN"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
+            # AGG-enum variant: deliberately OMIT --disaggregation-mode
+            # so the v1.0.1 default (AGGREGATED) takes effect, which
+            # wires up the kv-events publisher + LocalKvIndexer and
+            # reproduces the 2026-05-03 radix_tree WARN storm pre-condition.
+            - --tensor-parallel-size
+            - "2"
+            - --gpu-memory-utilization
+            - "0.45"
+            - --max-model-len
+            - "10240"
+            - --max-num-seqs
+            - "1024"
+            - --max-num-batched-tokens
+            - "1024"
+            - --dyn-reasoning-parser
+            - qwen3
+            - --enable-expert-parallel
+            - --async-scheduling
+            - --disable-cascade-attn
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            # AGG-enum variant: kv events ENABLED on decode so the
+            # publisher-skip gate at main.py:324 does NOT fire.
+            - --kv-events-config
+            - '{"enable_kv_cache_events":true}'

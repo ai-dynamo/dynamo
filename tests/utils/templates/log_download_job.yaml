@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Template for log download Job
+# Fields marked with TEMPLATE_ are replaced at runtime by ManagedDeployment
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: TEMPLATE_JOB_NAME
+  namespace: TEMPLATE_NAMESPACE
+  labels:
+    app: log-download
+    managed-by: managed-deployment
+    deployment: TEMPLATE_DEPLOYMENT_NAME
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: log-download
+        job-name: TEMPLATE_JOB_NAME
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: log-downloader
+          image: busybox:1.35
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "=== LOG DOWNLOAD JOB STARTED at $(date --iso-8601=seconds) ==="
+              echo "Deployment: TEMPLATE_DEPLOYMENT_NAME"
+              echo "Namespace: TEMPLATE_NAMESPACE"
+              echo "Container log dir: TEMPLATE_CONTAINER_LOG_DIR"
+              echo "Job name: TEMPLATE_JOB_NAME"
+
+              # Create archive directory
+              mkdir -p /tmp/log_archive
+
+              if [ ! -d "TEMPLATE_CONTAINER_LOG_DIR" ]; then
+                  echo "Log directory TEMPLATE_CONTAINER_LOG_DIR does not exist, creating it..."
+                  mkdir -p TEMPLATE_CONTAINER_LOG_DIR
+              fi
+
+              # Mark job as ready (tar will be created on-demand at extraction time)
+              echo "ready" > /tmp/log_archive/job_ready.txt
+
+              echo "=== LOG DOWNLOAD JOB READY at $(date --iso-8601=seconds) ==="
+              echo "Waiting for extraction signal. Logs will be archived on-demand."
+
+              # Keep container alive for extraction
+              while true; do
+                  LOG_COUNT=$(find TEMPLATE_CONTAINER_LOG_DIR -name "*.log" -type f 2>/dev/null | wc -l)
+                  echo "[$(date '+%H:%M:%S')] Log download job alive - $LOG_COUNT log files available"
+                  sleep 60
+              done
+          volumeMounts:
+            - name: service-logs
+              mountPath: TEMPLATE_CONTAINER_LOG_DIR
+              subPath: service_logs  # Only access service_logs/ subdirectory on PVC
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: service-logs
+          persistentVolumeClaim:
+            claimName: TEMPLATE_PVC_NAME

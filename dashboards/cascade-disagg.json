@@ -1,0 +1,319 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "$$hashKey": "object:1",
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "name": "cascade-injects",
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "matchAny": false,
+        "tags": ["cascade"],
+        "type": "tags"
+      }
+    ]
+  },
+  "description": "vLLM disagg cascade scenario dashboard — per-worker queueing, KV usage, NIXL transfer time, preemptions, plus frontend TTFT/RTT.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "panels": [],
+      "title": "Per-worker queueing",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never"}, "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 1},
+      "id": 1,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (pod, dynamo_subcomponent) (vllm:num_requests_waiting{namespace=~\"$namespace\", pod=~\".*$dgd.*\"})",
+          "legendFormat": "{{pod}} ({{dynamo_subcomponent}})",
+          "refId": "A"
+        }
+      ],
+      "title": "vllm:num_requests_waiting (per worker)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never"}, "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 1},
+      "id": 2,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (pod, dynamo_subcomponent) (vllm:num_requests_running{namespace=~\"$namespace\", pod=~\".*$dgd.*\"})",
+          "legendFormat": "{{pod}} ({{dynamo_subcomponent}})",
+          "refId": "A"
+        }
+      ],
+      "title": "vllm:num_requests_running (per worker)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 10},
+      "id": 101,
+      "panels": [],
+      "title": "KV cache + NIXL transfer",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never"}, "unit": "percentunit", "max": 1, "min": 0},
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 11},
+      "id": 3,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "max by (pod, dynamo_subcomponent) (vllm:kv_cache_usage_perc{namespace=~\"$namespace\", pod=~\".*$dgd.*\"})",
+          "legendFormat": "{{pod}} ({{dynamo_subcomponent}})",
+          "refId": "A"
+        }
+      ],
+      "title": "vllm:kv_cache_usage_perc (per worker)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 11},
+      "id": 4,
+      "options": {"calculate": false, "cellGap": 1, "color": {"exponent": 0.5, "fill": "dark-orange", "mode": "scheme", "reverse": false, "scale": "exponential", "scheme": "Spectral", "steps": 64}, "exemplars": {"color": "rgba(255,0,255,0.7)"}, "filterValues": {"le": 1e-9}, "legend": {"show": true}, "rowsFrame": {"layout": "auto"}, "tooltip": {"mode": "single", "showColorScale": false, "yHistogram": false}, "yAxis": {"axisPlacement": "left", "reverse": false, "unit": "s"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (le) (rate(vllm:nixl_post_time_seconds_bucket{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
+        }
+      ],
+      "title": "vllm:nixl_post_time_seconds heatmap",
+      "type": "heatmap"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 20},
+      "id": 102,
+      "panels": [],
+      "title": "NIXL counter rates + preemptions",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never"}, "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 21},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (pod) (rate(vllm:nixl_num_failed_transfers{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m]))",
+          "legendFormat": "fail / {{pod}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (pod) (rate(vllm:nixl_num_kv_expired_reqs{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m]))",
+          "legendFormat": "expired / {{pod}}",
+          "refId": "B"
+        }
+      ],
+      "title": "NIXL failures + KV-expired (per second)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never"}, "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 21},
+      "id": 6,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (pod) (rate(vllm:num_preemptions_total{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m]))",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "title": "vllm preemptions (per second)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never"}, "unit": "short"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 21},
+      "id": 7,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (model) (dynamo_frontend_queued_requests{namespace=~\"$namespace\", pod=~\".*$dgd.*\"})",
+          "legendFormat": "queued — {{model}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "sum by (model) (dynamo_frontend_inflight_requests{namespace=~\"$namespace\", pod=~\".*$dgd.*\"})",
+          "legendFormat": "inflight — {{model}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Frontend — queued + inflight",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 29},
+      "id": 103,
+      "panels": [],
+      "title": "Latency (TTFT, ITL, request_duration)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 30},
+      "id": 8,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.99, sum by (le, model) (rate(dynamo_frontend_time_to_first_token_seconds_bucket{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m])))",
+          "legendFormat": "TTFT p99 — {{model}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum by (le, model) (rate(dynamo_frontend_time_to_first_token_seconds_bucket{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m])))",
+          "legendFormat": "TTFT p50 — {{model}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.99, sum by (le, model) (rate(dynamo_frontend_inter_token_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m])))",
+          "legendFormat": "ITL p99 — {{model}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Frontend TTFT + ITL",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 30},
+      "id": 9,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.99, sum by (le, model) (rate(dynamo_frontend_request_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m])))",
+          "legendFormat": "RTT p99 — {{model}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "histogram_quantile(0.50, sum by (le, model) (rate(dynamo_frontend_request_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\".*$dgd.*\"}[1m])))",
+          "legendFormat": "RTT p50 — {{model}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Frontend request_duration",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["dynamo", "cascade", "vllm-disagg"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "neelays-test", "value": "neelays-test"},
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "definition": "label_values(vllm:num_requests_running, namespace)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Namespace",
+        "multi": false,
+        "name": "namespace",
+        "options": [],
+        "query": {"query": "label_values(vllm:num_requests_running, namespace)", "refId": "StandardVariableQuery"},
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "current": {"selected": false, "text": "vllm-disagg-qwen3-30b", "value": "vllm-disagg-qwen3-30b"},
+        "hide": 0,
+        "label": "DGD (substring of pod name)",
+        "name": "dgd",
+        "options": [{"selected": true, "text": "vllm-disagg-qwen3-30b", "value": "vllm-disagg-qwen3-30b"}],
+        "query": "vllm-disagg-qwen3-30b",
+        "skipUrlSync": false,
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {"refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]},
+  "timezone": "",
+  "title": "Dynamo Cascade — vLLM Disagg",
+  "uid": "dynamo-cascade-disagg",
+  "version": 1,
+  "weekStart": ""
+}

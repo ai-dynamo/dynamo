@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# DEPRECATED: This module is part of the legacy test framework.
+# New tests should use the event-based framework in test_deployment_scenario.py.
+# See tests/fault_tolerance/deploy/TESTING.md for the reference guide.
+
 """Factory functions for generating checker lists for scenarios.
 
 This module provides factory functions that determine which checkers

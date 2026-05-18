@@ -1,0 +1,371 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Scenario framework for fault tolerance testing.
+
+Provides:
+- ScenarioContext: Runtime context holding deployment, events, checks, reports
+- run_scenario(): Main entry point for running test scenarios
+
+Usage:
+    await run_scenario(
+        request=request,
+        deployment_spec=DeploymentSpec("..."),
+        events=[StartLoad(...), Wait(...), StopLoad()],
+        checks=[ZeroErrors(), MinRequests(min_count=50)],
+    )
+"""
+
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Optional
+
+from tests.fault_tolerance.deploy.checks import Check
+from tests.fault_tolerance.deploy.events import Event, StartLoad
+from tests.fault_tolerance.deploy.reports import Report
+from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+
+if TYPE_CHECKING:
+    from tests.utils.resource_monitor import ResourceMonitorConfig, ResourceSnapshot
+
+# =============================================================================
+# ScenarioContext
+# =============================================================================
+
+
+@dataclass
+class RuntimeEnv:
+    """Bundle of CLI-driven runtime knobs forwarded into ``run_scenario``.
+
+    Lets a test declare just one ``runtime_env`` fixture instead of
+    seven individual ones. Forward to ``run_scenario`` via
+    ``run_scenario(..., runtime_env=runtime_env)``.
+    """
+
+    namespace: str
+    image: Optional[str] = None
+    skip_service_restart: bool = True
+    storage_class: Optional[str] = None
+    log_pvc: Optional[str] = None
+    recreate_log_pvc: bool = False
+    model_pvc: Optional[str] = None
+    prefetch_model: bool = False
+
+
+@dataclass
+class ScenarioContext:
+    """Runtime context - holds deployment, events, checks, and reports.
+
+    No helper methods - callers iterate/filter events themselves.
+
+    Note: deployment may be None after context manager exits - only use events/reports
+    data for checks and report generation.
+    """
+
+    deployment: Optional[ManagedDeployment]
+    events: list[Event]
+    checks: list[Check]
+    reports: list[Report]
+    logger: logging.Logger
+    namespace: str
+    log_dir: str
+    resource_history: list["ResourceSnapshot"] = field(default_factory=list)
+    # Snapshot of deployment-level metrics, captured before the deployment
+    # context exits so reports can still read them (they run after the
+    # deployment reference has been cleared).
+    startup_seconds: Optional[float] = None
+    # Per-pod restart count + last terminated reason, snapshotted just
+    # before deployment teardown. Checks that need to inspect kubelet
+    # restart state (e.g. RestartCountIncreased) read from here because
+    # ctx.deployment is None at validate() time.
+    # Shape: {service_name: {pod_name: {"restartCount": int, "lastReason": str|None}}}
+    pod_restart_state: dict = field(default_factory=dict)
+    # Per-service catted pod logs, snapshotted just before deployment
+    # teardown. Checks that call ``collect_service_logs()`` from
+    # ``validate()`` (WorkerPanics, ServiceLogPatternRate,
+    # ServiceLogContains, ServiceLogNotContains, EngineDeathDetected)
+    # read from here when ``ctx.deployment is None``.
+    # Shape: {service_name: str}  (one big concatenated string per service)
+    service_logs: dict = field(default_factory=dict)
+
+
+# =============================================================================
+# run_scenario() - Main Entry Point
+# =============================================================================
+
+
+async def run_scenario(
+    deployment_spec: DeploymentSpec,
+    events: list[Event],
+    checks: list[Check],
+    test_name: str | None = None,
+    runtime_env: Optional[RuntimeEnv] = None,
+    # ----- legacy individual kwargs (kept for back-compat) -----
+    # Tests written before RuntimeEnv landed pass these directly.
+    # New tests should pass ``runtime_env=runtime_env`` instead.
+    namespace: str | None = None,
+    image: str | None = None,
+    skip_service_restart: bool = True,
+    storage_class: str | None = None,
+    log_pvc: str | None = None,
+    recreate_log_pvc: bool = False,
+    model_pvc: str | None = None,
+    prefetch_model: bool = False,
+    reports: list[Report] | None = None,
+    resource_config: Optional["ResourceMonitorConfig"] = None,
+) -> ScenarioContext:
+    """
+    Run a test scenario.
+
+    Args:
+        deployment_spec: What to deploy
+        events: Actions to execute in sequence
+        checks: Validations to run after events complete
+        namespace: Kubernetes namespace
+        image: Container image override (applied to all services)
+        test_name: Test name for logging and output directory
+        skip_service_restart: Skip restarting NATS/etcd
+        storage_class: Storage class for PVC log collection
+        reports: Optional report generators
+        resource_config: Optional resource monitoring configuration
+
+    Flow:
+    1. Setup deployment
+    2. Start resource monitoring (if configured)
+    3. Execute all events
+    4. Stop all events (collects results from unfinished loads)
+    5. Stop resource monitoring (collects metrics)
+    6. [Deployment cleanup happens here - context manager exits]
+    7. Generate reports (BEFORE checks, so failures don't block reports)
+    8. Run checks (assertions happen last)
+    """
+    # Collapse runtime_env (preferred) or individual kwargs (legacy) into
+    # one source of truth. RuntimeEnv values win when both are passed.
+    if runtime_env is not None:
+        namespace = runtime_env.namespace
+        image = runtime_env.image
+        skip_service_restart = runtime_env.skip_service_restart
+        storage_class = runtime_env.storage_class
+        log_pvc = runtime_env.log_pvc
+        recreate_log_pvc = runtime_env.recreate_log_pvc
+        model_pvc = runtime_env.model_pvc
+        prefetch_model = runtime_env.prefetch_model
+    if namespace is None:
+        raise ValueError(
+            "run_scenario: namespace required. Pass either "
+            "runtime_env=runtime_env (preferred) or namespace=...."
+        )
+
+    # Resolve the test output dir ONCE so every component (ManagedDeployment,
+    # ManagedLoad, the FaultToleranceReport, the conftest test.log handler)
+    # writes to the same canonical location. Without this, ManagedLoad lands
+    # under cwd and ManagedDeployment under /tmp/dynamo_tests, which made
+    # logs hard to find.
+    from tests.utils.test_output import resolve_test_output_path
+
+    log_dir = resolve_test_output_path(test_name or "scenario")
+    logger = logging.getLogger(test_name or "scenario")
+
+    reports = reports or []
+
+    # Log scenario overview
+    logger.info("=" * 60)
+    logger.info("SCENARIO OVERVIEW")
+    logger.info("=" * 60)
+    logger.info(f"Events ({len(events)}):")
+    for i, event in enumerate(events, 1):
+        logger.info(f"  {i}. {event.description}")
+    logger.info(f"Checks ({len(checks)}):")
+    for i, check in enumerate(checks, 1):
+        logger.info(f"  {i}. {check.description}")
+    if reports:
+        logger.info(f"Reports ({len(reports)}):")
+        for i, report in enumerate(reports, 1):
+            logger.info(f"  {i}. {report.description}")
+    if resource_config:
+        logger.info("Resource monitoring: ENABLED")
+    logger.info("=" * 60)
+
+    # Apply image override
+    if image:
+        deployment_spec.set_image(image)
+
+    # Enable logging
+    deployment_spec.set_logging(True, "info")
+
+    # Enable PVC-based log collection. The framework now always reuses a
+    # single canonical log PVC per DGD (`<dgd-name>-logs`) — created once
+    # on first run, kept bound across runs, contents cleared in-place
+    # after each extraction. The `--log-pvc` flag is retained for
+    # back-compat but no longer changes behaviour beyond overriding the
+    # PVC name.
+    log_collection_kwargs = {
+        "pvc_size": "500Mi",
+        "container_log_dir": "/tmp/service_logs",
+    }
+    if storage_class:
+        log_collection_kwargs["storage_class"] = storage_class
+    if log_pvc:
+        log_collection_kwargs["pvc_name"] = log_pvc
+    deployment_spec.enable_log_collection(**log_collection_kwargs)
+
+    # If --model-pvc was passed, mount that PVC as the HF model cache
+    # on every worker. Avoids re-downloading large model weights
+    # between test runs.
+    if model_pvc:
+        deployment_spec.enable_model_cache(model_pvc)
+
+    # Create context (will be populated during deployment)
+    ctx = ScenarioContext(
+        deployment=None,
+        events=events,
+        checks=checks,
+        reports=reports,
+        logger=logger,
+        namespace=namespace,
+        log_dir=log_dir,
+        resource_history=[],
+    )
+
+    # Phase 1: Deployment and event execution
+    async with ManagedDeployment(
+        namespace=namespace,
+        log_dir=log_dir,
+        deployment_spec=deployment_spec,
+        skip_service_restart=skip_service_restart,
+        reuse_log_pvc=bool(log_pvc),
+        recreate_log_pvc=bool(log_pvc) and bool(recreate_log_pvc),
+        model_pvc=model_pvc if prefetch_model else None,
+    ) as deployment:
+        ctx.deployment = deployment
+
+        # Start resource monitoring if configured
+        monitor = None
+        if resource_config:
+            from tests.utils.resource_monitor import ResourceMonitor
+
+            monitor = ResourceMonitor(deployment, resource_config)
+            await monitor.start()
+
+        try:
+            # Execute all events
+            logger.info("=" * 60)
+            logger.info("EXECUTING EVENTS")
+            logger.info("=" * 60)
+            for i, event in enumerate(events, 1):
+                logger.info(f"Event {i}/{len(events)}: {event.description}")
+                # timed_execute wraps the subclass's execute() with
+                # started_at/ended_at timestamps so reports can bucket
+                # time-stamped data (e.g. aiperf records) by event boundary.
+                await event.timed_execute(ctx)
+                logger.info(f"Event {i} completed")
+
+            # Stop all events (collects results from unfinished loads)
+            logger.info("=" * 60)
+            logger.info("STOPPING EVENTS")
+            logger.info("=" * 60)
+            for event in reversed(events):
+                await event.stop(ctx)
+
+        finally:
+            # Emergency cleanup for events
+            for event in events:
+                try:
+                    await event.stop(ctx)
+                except Exception as e:
+                    logger.warning(f"Cleanup error for {event.description}: {e}")
+
+            # Stop resource monitoring before deployment cleanup
+            if monitor:
+                logger.info("Stopping resource monitoring...")
+                ctx.resource_history = await monitor.stop()
+                await monitor.save_history_locally(log_dir)
+
+        # Log results summary (while deployment still exists)
+        logger.info("=" * 60)
+        logger.info("RESULTS SUMMARY")
+        logger.info("=" * 60)
+        for event in events:
+            if isinstance(event, StartLoad) and event.results:
+                data = event.results
+                request_count = data.get("request_count", {}).get("avg", 0)
+                error_result = data.get("error_request_count")
+                error_count = error_result.get("avg", 0) if error_result else 0
+                throughput = data.get("request_throughput", {}).get("avg", 0)
+                logger.info(f"Load '{event.name}':")
+                logger.info(f"  Requests: {request_count}")
+                logger.info(f"  Errors: {error_count}")
+                logger.info(f"  Throughput: {throughput:.2f} req/s")
+
+    # Cache deployment-level data on ctx before clearing the reference,
+    # so reports (which run after __aexit__) can still see it.
+    ctx.startup_seconds = getattr(ctx.deployment, "startup_seconds", None)
+
+    # Snapshot per-pod restart counts so post-teardown checks (e.g.
+    # RestartCountIncreased) can validate without a live deployment.
+    try:
+        services_seen = set()
+        for ev in events:
+            for attr in ("services", "service"):
+                v = getattr(ev, attr, None)
+                if isinstance(v, str):
+                    services_seen.add(v)
+                elif isinstance(v, list):
+                    services_seen.update(s for s in v if isinstance(s, str))
+        for chk in checks:
+            v = getattr(chk, "services", None)
+            if isinstance(v, list):
+                services_seen.update(s for s in v if isinstance(s, str))
+        if services_seen:
+            pods_by_svc = ctx.deployment.get_pods(list(services_seen))
+            for svc, pods in pods_by_svc.items():
+                bucket = ctx.pod_restart_state.setdefault(svc, {})
+                for pod in pods:
+                    statuses = (pod.raw.get("status", {}) or {}).get(
+                        "containerStatuses"
+                    ) or []
+                    if not statuses:
+                        continue
+                    rc = int(statuses[0].get("restartCount", 0))
+                    reason = (
+                        (statuses[0].get("lastState") or {}).get("terminated") or {}
+                    ).get("reason")
+                    bucket[pod.name] = {"restartCount": rc, "lastReason": reason}
+    except Exception as e:
+        logger.warning(f"Could not snapshot pod restart state: {e}")
+
+    # Per-service catted pod logs are NOT snapshotted in-memory pre-teardown:
+    # ManagedDeployment doesn't expose a collect_service_logs() helper.
+    # Instead the deployment's PVC extractor writes per-pod log files
+    # to <log_dir>/<service>/<pod>_<ts>.log during teardown, and
+    # _get_service_logs(ctx) in checks.py reads those files at check time.
+
+    # Deployment context has exited - cleanup completed
+    ctx.deployment = None  # Mark that deployment is no longer active
+
+    # Phase 2: Reports and checks (AFTER deployment cleanup)
+    # Reports run first so check failures don't block report generation
+    if reports:
+        logger.info("=" * 60)
+        logger.info("GENERATING REPORTS")
+        logger.info("=" * 60)
+        for i, report in enumerate(reports, 1):
+            logger.info(f"Report {i}/{len(reports)}: {report.description}")
+            report.generate(ctx)
+            logger.info(f"Report {i} generated")
+
+    # Checks run last (may raise AssertionError)
+    logger.info("=" * 60)
+    logger.info("RUNNING CHECKS")
+    logger.info("=" * 60)
+    for i, check in enumerate(checks, 1):
+        logger.info(f"Check {i}/{len(checks)}: {check.description}")
+        check.validate(ctx)
+        logger.info(f"Check {i} PASSED")
+
+    logger.info("=" * 60)
+    logger.info("ALL CHECKS PASSED")
+    logger.info("=" * 60)
+
+    return ctx
