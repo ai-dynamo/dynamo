@@ -178,6 +178,7 @@ impl<Resp> RetryManager<Resp>
 where
     Resp: Data + HasTokenIds,
 {
+    #[allow(clippy::too_many_arguments)]
     pub async fn build(
         context: Arc<dyn AsyncEngineContext>,
         metadata: BTreeMap<String, String>,
@@ -701,6 +702,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             0,
@@ -752,6 +754,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -804,6 +807,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -857,6 +861,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let retry_manager_result = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -897,6 +902,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -956,6 +962,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1020,6 +1027,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let retry_manager_result = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1099,6 +1107,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3, // migration_limit=3 — should be ignored for guided-decoding requests
@@ -1176,6 +1185,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1247,6 +1257,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1312,6 +1323,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1390,6 +1402,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             1,
