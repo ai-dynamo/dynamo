@@ -878,6 +878,69 @@ mod tests {
         );
     }
 
+    /// Reader-side panic must abort the writer and return promptly rather than
+    /// hanging on `tokio::join!`. Locks in the fix added with this function's
+    /// sequential-await + writer-abort behavior.
+    ///
+    /// Setup: spawn a reader task that panics immediately (so
+    /// `reader_task.await` yields `Err(JoinError::panic)`), and a writer task
+    /// that parks indefinitely waiting for application bytes (so without the
+    /// abort, `tokio::join!` on the previous implementation would never wake).
+    /// Expect: `wait_for_connection_tasks` returns Err within the timeout.
+    #[tokio::test]
+    async fn test_connection_monitor_aborts_writer_when_reader_panics() {
+        // Reader task that panics immediately. The explicit JoinHandle type
+        // pins the inferred return type to the one wait_for_connection_tasks
+        // expects; `panic!` is type `!`, which coerces to that type.
+        let reader_task: tokio::task::JoinHandle<
+            FramedRead<ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        > = tokio::spawn(async {
+            panic!("simulated reader panic to trigger JoinError");
+        });
+
+        // Writer task that would block indefinitely waiting on application
+        // bytes. Under the pre-fix `tokio::join!` implementation, this would
+        // prevent the function from returning when the reader panicked.
+        // After the fix, the abort drives this task to completion promptly.
+        let writer_task: tokio::task::JoinHandle<
+            Result<FramedWrite<WriteHalf<tokio::net::TcpStream>, TwoPartCodec>>,
+        > = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            unreachable!()
+        });
+
+        let controller = Arc::new(Controller::default());
+        let context: Arc<dyn AsyncEngineContext> = controller.clone();
+
+        // 250 ms is generous — the abort + JoinHandle resolution should fire
+        // sub-millisecond. We are checking for "doesn't hang", not "fast".
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            wait_for_connection_tasks(
+                reader_task,
+                writer_task,
+                context,
+                None,
+                "test-reader-panic".to_string(),
+            ),
+        )
+        .await;
+
+        // Outer timeout must not fire: the abort path must surface the reader
+        // JoinError before the writer would have produced any bytes.
+        assert!(
+            result.is_ok(),
+            "wait_for_connection_tasks must return after reader panic, \
+             not hang waiting on the writer"
+        );
+
+        // The inner result must be Err — the reader's JoinError propagates.
+        assert!(
+            result.unwrap().is_err(),
+            "reader panic should propagate as Err from wait_for_connection_tasks"
+        );
+    }
+
     // ==================== handle_reader tests ====================
 
     struct ReaderHarness {
