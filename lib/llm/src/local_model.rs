@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,9 @@ use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as _};
 
+use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
@@ -564,6 +567,28 @@ impl LocalModel {
         let suffix = model_suffix.unwrap_or(dynamo_runtime::metadata_registry::BASE_SUFFIX);
         let registry = drt.metadata_artifacts();
 
+        // Advertise non-typed siblings (preprocessor_config.json,
+        // special_tokens_map.json, …) so external preprocessors that load
+        // via `from_pretrained(slug_dir)` see a complete model dir. Skip
+        // weight files (mx's deny-list) and dotfiles/README. Already-typed
+        // filenames are excluded so we don't double-advertise.
+        let typed_filenames: HashSet<String> = self
+            .card
+            .iter_metadata_files()
+            .iter()
+            .filter_map(|(cf, _)| {
+                cf.path()
+                    .and_then(Path::file_name)
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        let harvested =
+            harvest_extra_files(&self.full_path, &typed_filenames).with_context(|| {
+                format!("harvesting extra metadata files from {:?}", self.full_path)
+            })?;
+        self.card.extra_files.extend(harvested);
+
         let mut rewritten = 0usize;
         for (cf, _) in self.card.iter_metadata_files_mut() {
             let Some(local_path) = cf.path().map(Path::to_path_buf) else {
@@ -686,6 +711,34 @@ pub(crate) fn self_host_base_url(
     Ok(Some(format!("http://{host}:{}", info.port())))
 }
 
+/// Scan `model_dir` for files to advertise alongside the typed MDC slots.
+/// Skips weights, dotfiles / README (`is_ignored`), already-typed
+/// filenames, and anything that isn't a regular file. Non-recursive.
+fn harvest_extra_files(
+    model_dir: &Path,
+    typed_filenames: &HashSet<String>,
+) -> anyhow::Result<Vec<CheckedFile>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(model_dir).with_context(|| format!("read_dir {model_dir:?}"))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if typed_filenames.contains(name)
+            || HuggingFaceProvider::is_weight_file(name)
+            || HuggingFaceProvider::is_ignored(name)
+        {
+            continue;
+        }
+        out.push(CheckedFile::from_disk(&path)?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod env_self_host_metadata_tests {
     use super::*;
@@ -708,5 +761,50 @@ mod env_self_host_metadata_tests {
             assert!(env_self_host_metadata_default(), "expected ON for {v:?}");
         }
         unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
+    }
+}
+
+#[cfg(test)]
+mod harvest_extra_files_tests {
+    use super::*;
+
+    #[test]
+    fn filters_weights_typed_and_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let touch = |name: &str| {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        };
+        // typed slot (excluded by name)
+        touch("config.json");
+        // weight (excluded by extension)
+        touch("model.safetensors");
+        // dotfile / README (excluded by is_ignored)
+        touch(".gitattributes");
+        touch("README.md");
+        // genuine extras (kept)
+        touch("preprocessor_config.json");
+        touch("special_tokens_map.json");
+        // subdir (skipped — not a file)
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+
+        let typed: HashSet<String> = ["config.json".to_string()].into_iter().collect();
+        let mut names: Vec<String> = harvest_extra_files(dir.path(), &typed)
+            .unwrap()
+            .iter()
+            .map(|cf| {
+                cf.path()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["preprocessor_config.json", "special_tokens_map.json"]
+        );
     }
 }

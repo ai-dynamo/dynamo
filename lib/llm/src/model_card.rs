@@ -731,6 +731,14 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config: Option<RouterConfig>,
 
+    /// Non-typed sibling files the worker found next to the typed slots
+    /// (`preprocessor_config.json`, `special_tokens_map.json`, etc.).
+    /// Populated by the worker for self-host; ride the same
+    /// resolve-and-cache pipeline as typed slots so external preprocessors
+    /// see a complete `slug_dir`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_files: Vec<CheckedFile>,
+
     #[serde(skip, default)]
     checksum: OnceLock<String>,
 }
@@ -980,18 +988,12 @@ impl ModelDeploymentCard {
 
     /// Iterate populated metadata slots in deterministic order:
     /// model_info, tokenizer, prompt_formatter, chat_template_file,
-    /// gen_config. Each entry is `(file, is_custom)` — `is_custom` is
-    /// only ever true for operator-supplied chat templates, which
-    /// can't fall back to HF.
-    ///
-    /// TODO(gh-8749): external preprocessors (vllm/sglang) read
-    /// `from_pretrained(slug_dir)` and may expect siblings outside the
-    /// typed slots — `preprocessor_config.json`, `special_tokens_map.json`,
-    /// `added_tokens.json`, etc. Add an `extra_files: Vec<CheckedFile>`
-    /// MDC field so the worker can advertise everything in its model dir
-    /// minus weights. Frontend pipeline is already generic over slot count.
+    /// gen_config, then any `extra_files` siblings the worker harvested
+    /// (preprocessor_config.json, special_tokens_map.json, etc.). Each entry
+    /// is `(file, is_custom)` — `is_custom` is only ever true for
+    /// operator-supplied chat templates, which can't fall back to HF.
     pub fn iter_metadata_files(&self) -> Vec<(&CheckedFile, bool)> {
-        let mut out: Vec<(&CheckedFile, bool)> = Vec::with_capacity(5);
+        let mut out: Vec<(&CheckedFile, bool)> = Vec::with_capacity(5 + self.extra_files.len());
         if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_ref() {
             out.push((cf, false));
         }
@@ -1009,12 +1011,15 @@ impl ModelDeploymentCard {
         if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = self.gen_config.as_ref() {
             out.push((cf, false));
         }
+        for cf in &self.extra_files {
+            out.push((cf, false));
+        }
         out
     }
 
     /// Mutable mirror of [`Self::iter_metadata_files`].
     pub fn iter_metadata_files_mut(&mut self) -> Vec<(&mut CheckedFile, bool)> {
-        let mut out: Vec<(&mut CheckedFile, bool)> = Vec::with_capacity(5);
+        let mut out: Vec<(&mut CheckedFile, bool)> = Vec::with_capacity(5 + self.extra_files.len());
         if let Some(ModelInfoType::HfConfigJson(cf)) = self.model_info.as_mut() {
             out.push((cf, false));
         }
@@ -1032,6 +1037,9 @@ impl ModelDeploymentCard {
             out.push((pf_checked_file_mut(c), is_custom));
         }
         if let Some(GenerationConfig::HfGenerationConfigJson(cf)) = self.gen_config.as_mut() {
+            out.push((cf, false));
+        }
+        for cf in &mut self.extra_files {
             out.push((cf, false));
         }
         out
@@ -1317,6 +1325,7 @@ impl ModelDeploymentCard {
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
+            extra_files: Vec::new(),
             checksum: OnceLock::new(),
         })
     }
