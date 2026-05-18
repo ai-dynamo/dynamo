@@ -14,7 +14,7 @@
 #   - dynamo-platform HelmRelease applied
 #   - Cluster nodes: p6e-gb200.36xlarge (arm64, 4 GB200 + 4 EFA NICs per node)
 #   - Model weights at /models/nvidia-GLM-5-NVFP4 on shared NFS PVC
-#   - Container built from recipes/glm-5-nvfp4/Dockerfile.efa
+#   - Container built from recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa
 #   - HF_TOKEN secret: kubectl create secret generic hf-token-secret \
 #       --from-literal=HF_TOKEN=<your-token> -n <namespace>
 #
@@ -401,27 +401,3 @@ spec:
     resourceClaimTemplate:
       name: glm5-efa-compute-domain-channel
   numNodes: 5
----
-apiVersion: resource.k8s.io/v1
-kind: ResourceClaimTemplate
-metadata:
-  name: glm5-efa-compute-domain-channel
-  namespace: <your-namespace>
-spec:
-  spec:
-    devices:
-      config:
-      - opaque:
-          driver: compute-domain.nvidia.com
-          parameters:
-            allocationMode: Single
-            apiVersion: resource.nvidia.com/v1beta1
-            kind: ComputeDomainChannelConfig
-        requests:
-        - channel
-      requests:
-      - exactly:
-          allocationMode: ExactCount
-          count: 1
-          deviceClassName: compute-domain-default-channel.nvidia.com
-        name: channel
