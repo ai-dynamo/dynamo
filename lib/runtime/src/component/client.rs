@@ -171,6 +171,35 @@ impl Client {
         self.instance_free.load()
     }
 
+    /// Instances that load-balancing modes should consider as candidates:
+    /// the registry-alive set (`instance_avail`) intersected with the
+    /// not-busy set (`instance_free`, i.e. excluding instances flagged
+    /// over the admission threshold by the worker load monitor). When no
+    /// monitor is attached or no thresholds are configured, the free set
+    /// covers all discovered workers and this returns the same set as
+    /// `instance_ids_avail`.
+    pub fn instance_ids_routable(&self) -> Vec<u64> {
+        let avail = self.instance_avail.load();
+        let free = self.instance_free.load();
+
+        // Fast path: when nothing has been flagged busy, `free` covers the
+        // full discovered set and `avail` is the only filter that matters.
+        // Avoid the per-id contains() check in that common case.
+        if free.len() >= self.instance_ids().len() {
+            return avail.iter().copied().collect();
+        }
+
+        // Pre-build a small HashSet for the contains() check below — `free`
+        // is the busy-filtered subset; intersecting it with `avail` gives
+        // alive-AND-not-busy.
+        let free_set: std::collections::HashSet<u64> = free.iter().copied().collect();
+        avail
+            .iter()
+            .copied()
+            .filter(|id| free_set.contains(id))
+            .collect()
+    }
+
     /// Get a watcher for available instance IDs
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
         self.instance_avail_rx.clone()
@@ -449,6 +478,45 @@ mod tests {
             "Instance 2 should be removed after report_instance_down"
         );
         assert!(avail.contains(&3), "Instance 3 should still be available");
+
+        rt.shutdown();
+    }
+
+    /// `instance_ids_routable` must exclude both reported-down and busy
+    /// instances. `instance_ids_avail` filters down; `instance_ids_free`
+    /// (after `update_free_instances`) filters busy; routable is the
+    /// intersection.
+    #[tokio::test]
+    async fn test_instance_ids_routable_excludes_busy_and_down() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_routable".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = endpoint.client().await.unwrap();
+
+        // Seed both avail and free with the same three instances.
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+        client.instance_free.store(Arc::new(vec![1, 2, 3]));
+        assert_eq!(client.instance_ids_routable(), vec![1u64, 2, 3]);
+
+        // Mark instance 2 busy: routable drops 2 but keeps 1 and 3.
+        client.update_free_instances(&[2]);
+        let routable = client.instance_ids_routable();
+        assert!(routable.contains(&1), "busy filter should not drop 1");
+        assert!(!routable.contains(&2), "busy worker 2 must not be routable");
+        assert!(routable.contains(&3), "busy filter should not drop 3");
+
+        // Report instance 1 as down (while 2 is still busy): routable
+        // should now be only [3].
+        client.report_instance_down(1);
+        let routable = client.instance_ids_routable();
+        assert!(!routable.contains(&1), "down worker 1 must not be routable");
+        assert!(!routable.contains(&2), "busy worker 2 must not be routable");
+        assert!(routable.contains(&3), "only 3 is alive and not busy");
 
         rt.shutdown();
     }
