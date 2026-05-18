@@ -25,11 +25,10 @@ cases:
         normal_text: I will check the weather.
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: ''
-        reason: "drops trailing normal_text after tool-call wrapper end"
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.8.b:
@@ -39,13 +38,13 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_8_b
+      dynamo: &id002
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_8_b
+      vllm: *id002
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.8.c:
@@ -64,11 +63,10 @@ cases:
         normal_text: I will check the weather.
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: ''
-        reason: "drops trailing normal_text after tool-call wrapper end"
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.8.d:
@@ -90,10 +88,9 @@ cases:
         normal_text: I will check the weather.
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: ''
-        reason: "drops trailing normal_text after tool-call wrapper end"
       sglang:
         unavailable: SGLang has no detector for family='phi4'

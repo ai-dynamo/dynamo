@@ -11,8 +11,8 @@
 //! - `free: VecDeque<BlockId>` — reset pool (FIFO).
 //! - `inactive: Box<dyn InactiveIndex>` — pluggable eviction-order index
 //!   over slots in `Inactive` state.
-//! - `active_by_hash: HashMap<SequenceHash, BlockId>` — primary block_id
-//!   for each currently-registered hash.
+//! - `active_by_hash: SeqHashMap<BlockId>` — primary block_id for each
+//!   currently-registered hash (identity-hashed; see [`IdHasher`](super::IdHasher)).
 //!
 //! Active-pool lookup, slot transitions, and resurrection all happen
 //! under one lock, so no across-lock gap can leave a hash unreachable
@@ -23,7 +23,7 @@
 //! `BlockRegistrationHandle.attachments` (Mutex inside the registry) →
 //! `BlockStore.inner` (Mutex). Never the reverse.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
 
 // Under `#[cfg(test)]` use `tracing-mutex`'s parking_lot wrapper, which
@@ -44,6 +44,10 @@ use crate::blocks::{
 };
 use crate::metrics::BlockPoolMetrics;
 use crate::registry::BlockRegistrationHandle;
+
+// Identity hashing for `SequenceHash`-keyed maps lives in `pools` — it is
+// shared by `active_by_hash` here and by the inactive-pool backends.
+use super::SeqHashMap;
 
 /// Index trait for inactive-pool eviction backends. T-free: backends only
 /// need `(SequenceHash, BlockId)` pairs.
@@ -188,7 +192,9 @@ pub(crate) struct BlockStoreInner<T: BlockMetadata> {
     inactive: Box<dyn InactiveIndex>,
     /// Primary `block_id` for each currently-registered sequence hash.
     /// Updated atomically with the slot's `Primary`/`Inactive` state.
-    active_by_hash: HashMap<SequenceHash, BlockId>,
+    /// Uses the identity [`IdHasher`](super::IdHasher) — the key is
+    /// already a content hash.
+    active_by_hash: SeqHashMap<BlockId>,
     /// Per-slot "reset on last drop" override, indexed by `BlockId`.
     /// Length is fixed to `total_blocks` at construction.
     ///
@@ -272,7 +278,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                 slots,
                 free,
                 inactive,
-                active_by_hash: HashMap::new(),
+                active_by_hash: SeqHashMap::default(),
                 reset_on_release,
             }),
             block_size,
@@ -500,20 +506,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         out
     }
 
-    /// Promote up to `hashes.len()` inactive slots to `Primary`, building
-    /// fresh `ImmutableBlockInner`s. Stops on first miss.
-    pub(crate) fn find_inactive_primaries(
-        self: &Arc<Self>,
-        hashes: &[SequenceHash],
-        touch: bool,
-    ) -> Vec<Arc<ImmutableBlockInner<T>>> {
-        self.promote_inactive(hashes, touch, /*scan*/ false)
-            .into_iter()
-            .map(|(_, inner_arc)| inner_arc)
-            .collect()
-    }
-
-    /// Scan-style version of [`find_inactive_primaries`] — does not stop on miss.
+    /// Promote inactive slots to `Primary`, building fresh
+    /// `ImmutableBlockInner`s. Scan-style — does not stop on first miss.
     pub(crate) fn scan_inactive_primaries(
         self: &Arc<Self>,
         hashes: &[SequenceHash],
@@ -581,6 +575,41 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         };
         inner.active_by_hash.insert(seq_hash, block_id);
         Some(inner_arc)
+    }
+
+    /// Batched active-or-inactive prefix lookup under **one** store-mutex
+    /// acquisition. Walks `hashes` left-to-right, stopping at the first
+    /// hash that hits neither pool.
+    ///
+    /// Per hash this is exactly [`acquire_for_hash_locked`] — active hit /
+    /// eager `Primary → Inactive` on a dead `Weak` / inactive resurrection —
+    /// so the `self_ptr` race handling and eager-transition semantics are
+    /// unchanged. This is literally the per-hash [`acquire_for_hash`] body
+    /// hoisted above a single `lock()`, replacing the old N-acquisitions
+    /// per-hash loop in `BlockManager::match_blocks`.
+    ///
+    /// Passes `touch = false`: the frequency tracker is **not** touched
+    /// here. The caller is responsible for touching the returned hashes
+    /// *after* this returns (store lock released) — see
+    /// `BlockManager::match_blocks`. Keeping the explicit touch outside the
+    /// store lock avoids widening the store-lock hold across the TinyLFU
+    /// mutex. (The eager `Primary → Inactive` branch still nests
+    /// store → frequency-tracker via `inactive.insert`, exactly as it does
+    /// on the pre-existing per-call path — that ordering is consistent and
+    /// not affected by this batching.)
+    pub(crate) fn match_prefix_locked_batch(
+        self: &Arc<Self>,
+        hashes: &[SequenceHash],
+    ) -> Vec<Arc<ImmutableBlockInner<T>>> {
+        let mut inner = self.inner.lock();
+        let mut out = Vec::with_capacity(hashes.len());
+        for &h in hashes {
+            match self.acquire_for_hash_locked(&mut inner, h, /*touch*/ false) {
+                Some(arc) => out.push(arc),
+                None => break,
+            }
+        }
+        out
     }
 
     /// Atomic registration of a [`CompleteBlock`]: lookup-then-transition
@@ -975,4 +1004,69 @@ pub(crate) fn upgrade_or_resurrect<T: BlockMetadata + Sync>(
     touch: bool,
 ) -> Option<Arc<ImmutableBlockInner<T>>> {
     store.acquire_for_hash(handle.seq_hash(), touch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pools::IdBuildHasher;
+
+    /// A handful of distinct, realistically-constructed `SequenceHash`
+    /// values. `SequenceHash` (`PositionalLineageHash`) packs
+    /// `(current_hash, parent_hash, position)` into its backing `u128`,
+    /// so varying any component yields a distinct key.
+    fn sample_keys() -> Vec<SequenceHash> {
+        vec![
+            SequenceHash::new(0x1234, None, 0),
+            SequenceHash::new(0x1234, Some(0x1234), 1),
+            SequenceHash::new(0x5678, Some(0x1234), 2),
+            SequenceHash::new(0xdead_beef, Some(0x5678), 3),
+            SequenceHash::new(0xffff_ffff_ffff_ffff, Some(0xdead_beef), 255),
+        ]
+    }
+
+    /// A `SeqHashMap` must round-trip `SequenceHash` keys. This locks in
+    /// the assumption behind [`IdHasher`]: the derived `Hash` for
+    /// `SequenceHash` forwards to `write_u128` (so `IdHasher::write`'s
+    /// `unreachable!` is never hit — the test would panic there), and
+    /// distinct keys do not collide into the same slot.
+    #[test]
+    fn seq_hash_map_round_trips_keys() {
+        let keys = sample_keys();
+        let mut map: SeqHashMap<u32> = SeqHashMap::default();
+
+        for (i, &k) in keys.iter().enumerate() {
+            map.insert(k, i as u32);
+        }
+        assert_eq!(map.len(), keys.len(), "no key collisions / overwrites");
+        for (i, &k) in keys.iter().enumerate() {
+            assert_eq!(map.get(&k).copied(), Some(i as u32), "round-trip key {i}");
+        }
+
+        // Overwrite + remove behave as a normal HashMap.
+        map.insert(keys[0], 999);
+        assert_eq!(map.get(&keys[0]).copied(), Some(999));
+        assert_eq!(map.remove(&keys[1]), Some(1));
+        assert!(!map.contains_key(&keys[1]));
+    }
+
+    /// `IdHasher` must produce distinct digests for distinct keys (no
+    /// catastrophic folding collision among realistic values) and must
+    /// run through `write_u128` — never the `write` byte-slice path
+    /// (`hash_one` would panic in `IdHasher::write` if a key did not).
+    #[test]
+    fn id_hasher_distinguishes_distinct_keys() {
+        use std::collections::HashSet;
+        use std::hash::BuildHasher;
+
+        let digests: HashSet<u64> = sample_keys()
+            .iter()
+            .map(|k| IdBuildHasher.hash_one(k))
+            .collect();
+        assert_eq!(
+            digests.len(),
+            5,
+            "distinct keys must produce distinct digests"
+        );
+    }
 }

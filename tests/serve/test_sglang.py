@@ -28,9 +28,11 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     guided_decoding_chat_payload_default,
+    kv_events_metrics_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
+    router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
     ImageGenerationPayload,
@@ -189,6 +191,65 @@ sglang_configs = {
             ),
         ],
     ),
+    "disaggregated_same_gpu_chat_processor": SGLangConfig(
+        # Same as disaggregated_same_gpu but routes chat through the Python
+        # sglang_processor (DYN_CHAT_PROCESSOR=sglang) instead of the default
+        # Rust pre/post processor.
+        name="disaggregated_same_gpu_chat_processor",
+        directory=sglang_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.requested_sglang_kv_tokens(37472),
+            pytest.mark.timeout(420),
+            pytest.mark.post_merge,
+            pytest.mark.skipif(
+                _is_cuda13(),
+                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
+            ),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={"DYN_CHAT_PROCESSOR": "sglang"},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor_kv_router": SGLangConfig(
+        # sglang Python chat processor + KV router.
+        name="disaggregated_same_gpu_chat_processor_kv_router",
+        directory=sglang_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.requested_sglang_kv_tokens(37472),
+            pytest.mark.timeout(420),
+            pytest.mark.post_merge,
+            pytest.mark.skipif(
+                _is_cuda13(),
+                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
+            ),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={
+            "DYN_CHAT_PROCESSOR": "sglang",
+            "DYN_ROUTER_MODE": "kv",
+            # Deterministic hash for KV event IDs.
+            "PYTHONHASHSEED": "0",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "kv_events": SGLangConfig(
         name="kv_events",
         directory=sglang_dir,
@@ -198,18 +259,11 @@ sglang_configs = {
             pytest.mark.pre_merge,
         ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
         model="Qwen/Qwen3-0.6B",
-        env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            chat_payload_default(
-                expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(engine_seq=\d+(?:, [^)]*)?\)",
-                    r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                ]
-            )
+            router_selection_chat_payload_default(),
+            kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
     ),
     "template_verification": SGLangConfig(
