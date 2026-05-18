@@ -186,12 +186,7 @@ where
                 // Create context with trace information
                 let py_ctx = Py::new(
                     py,
-                    Context::new(
-                        ctx_python.clone(),
-                        current_trace_context,
-                        None,
-                        metadata,
-                    ),
+                    Context::new(ctx_python.clone(), current_trace_context, None, metadata),
                 )?;
 
                 let gen_result = if has_context {
