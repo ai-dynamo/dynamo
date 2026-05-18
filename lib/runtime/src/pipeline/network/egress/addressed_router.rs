@@ -191,18 +191,18 @@ impl AddressedPushRouter {
     }
 
     /// Bidirectional sibling of the `AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>>`
-    /// impl: dispatch `first_frame` + a follow-on `ManyIn<T>` to a specific
-    /// `(instance, address)` pair, with subsequent request frames carried on
-    /// the request-stream half of the call-home TCP transport. The address /
-    /// instance pair has already been resolved by the caller (typically
-    /// `PushRouter`'s bidirectional impl which has selected a sticky worker
-    /// on first-frame arrival).
+    /// impl: dispatch a `ManyIn<T>` to a specific `(instance, address)`
+    /// pair, with the first frame packed into the initial request-plane
+    /// envelope and subsequent frames forwarded on the request-stream half
+    /// of the call-home TCP transport. The address / instance pair has
+    /// already been resolved by the caller (typically `PushRouter`'s
+    /// bidirectional impl, which reserves a sticky worker up front before
+    /// observing any inbound frame).
     pub async fn generate_bidirectional<T, U>(
         &self,
         instance: Instance,
         address: String,
-        first_frame: T,
-        mut rest: ManyIn<T>,
+        mut input: ManyIn<T>,
     ) -> Result<ManyOut<U>, Error>
     where
         T: Data + Serialize,
@@ -212,7 +212,7 @@ impl AddressedPushRouter {
         REQUEST_PLANE_INFLIGHT.inc();
         let inflight_guard = InflightGuard::new();
 
-        let engine_ctx = rest.context();
+        let engine_ctx = input.context();
         let request_id = engine_ctx.id().to_string();
         let engine_ctx_for_stream = engine_ctx.clone();
         let engine_ctx_for_forwarder = engine_ctx.clone();
@@ -273,6 +273,27 @@ impl AddressedPushRouter {
             connection_info: resp_stream_conn_info,
             frontend_send_ts_ns: None,
             request_stream_connection_info: Some(req_stream_conn_info),
+        };
+
+        // Peel the first frame off `input` for the envelope body. The
+        // worker is already reserved (PushRouter ran `select_next_worker`
+        // up front), so this is the first wire-visible synchronization
+        // point on the live session. Cancellation listens to
+        // `engine_ctx.killed()` so a frontend disconnect during a
+        // never-sends session doesn't strand the await.
+        let first_frame = tokio::select! {
+            biased;
+            _ = engine_ctx.killed() => {
+                self.cancel_both(&recv_subject, &send_subject).await;
+                anyhow::bail!("bidirectional context killed before first frame arrived");
+            }
+            next = input.next() => match next {
+                Some(frame) => frame,
+                None => {
+                    self.cancel_both(&recv_subject, &send_subject).await;
+                    anyhow::bail!("bidirectional input stream closed before first frame");
+                }
+            },
         };
 
         let ctrl = match serde_json::to_vec(&control_message) {
@@ -382,11 +403,13 @@ impl AddressedPushRouter {
             }
         };
 
-        // Spawn the forwarder task that pumps `rest` to the worker via the
-        // request-stream send half. Exit on stream end, context kill/stop,
-        // or send error (worker dropped its receiver).
+        // Spawn the forwarder task that pumps the remaining frames in
+        // `input` (after the first one we already packed into the envelope)
+        // to the worker via the request-stream send half. Exit on stream
+        // end, context kill/stop, or send error (worker dropped its
+        // receiver).
         tokio::spawn(async move {
-            while let Some(item) = rest.next().await {
+            while let Some(item) = input.next().await {
                 if engine_ctx_for_forwarder.is_stopped() || engine_ctx_for_forwarder.is_killed() {
                     break;
                 }

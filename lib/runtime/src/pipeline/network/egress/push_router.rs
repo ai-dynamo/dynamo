@@ -1009,18 +1009,16 @@ where
 {
     /// Bidirectional sibling of [`Self::generate_with_fault_detection`].
     /// Resolves `(address, instance)` for `instance_id`, calls
-    /// [`AddressedPushRouter::generate_bidirectional`] with the first frame
-    /// plus the remainder of the input stream, then applies the same
-    /// fault-detection / inactivity-timeout wrap on the response stream as
-    /// the unary path.
+    /// [`AddressedPushRouter::generate_bidirectional`] with the bidirectional
+    /// input stream, then applies the same fault-detection / inactivity-
+    /// timeout wrap on the response stream as the unary path.
     async fn bidirectional_dispatch(
         &self,
         mut instance_id: u64,
-        first_frame: T,
-        rest: ManyIn<T>,
+        input: ManyIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
-        let request_id = rest.context().id().to_string();
+        let request_id = input.context().id().to_string();
         let route_span = tracing::info_span!(
             "router.route_request_bidirectional",
             request_id = %request_id,
@@ -1115,7 +1113,7 @@ where
         let _nvtx_transport = dynamo_nvtx_range!(_transport_kind);
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
-            .generate_bidirectional(instance, address, first_frame, rest)
+            .generate_bidirectional(instance, address, input)
             .instrument(route_span)
             .await;
 
@@ -1189,16 +1187,32 @@ where
 }
 
 /// Bidirectional `AsyncEngine` impl for streaming-input workloads (e.g. the
-/// OpenAI Realtime API). Selects a sticky instance on the first inbound frame
-/// and binds the whole input stream to that worker. KV and Direct modes
-/// inherit the same `bail!` invariants as the unary impl.
+/// OpenAI Realtime API). Reserves a sticky worker up front — before any
+/// inbound frame is observed — and binds the whole input stream to that
+/// worker. KV and Direct modes inherit the same `bail!` invariants as the
+/// unary impl.
+///
+/// **Reserve-before-observe rationale.** Worker selection happens before
+/// `input.next()` is polled. The router-mode strategies (`RoundRobin`,
+/// `Random`, `PowerOfTwoChoices`, `LeastLoaded`, `DeviceAwareWeighted`)
+/// don't consume the first frame's content, so there's nothing to gain by
+/// waiting for it. Doing the pick up front means:
+///   - `bidirectional_dispatch` and `AddressedPushRouter::generate_bidirectional`
+///     take a unified `ManyIn<T>` instead of a `(first_frame, rest)` pair.
+///   - Connection setup (register both halves, build envelope, wait for
+///     worker dial-in) can run concurrently with the client producing its
+///     first frame.
+/// A client that connects but never sends a frame still releases the slot
+/// via the same response-stream-drop path the unary side uses; the
+/// upstream-side `cancel_both` cleanup in the dispatch path handles the
+/// early-bail case.
 #[async_trait]
 impl<T, U> AsyncEngine<ManyIn<T>, ManyOut<U>, Error> for PushRouter<T, U>
 where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
-    async fn generate(&self, mut input: ManyIn<T>) -> Result<ManyOut<U>, Error> {
+    async fn generate(&self, input: ManyIn<T>) -> Result<ManyOut<U>, Error> {
         match self.router_mode {
             RouterMode::KV => {
                 anyhow::bail!("KV routing should not call generate on PushRouter");
@@ -1211,18 +1225,11 @@ where
             _ => {}
         }
 
-        // Wait for the first frame so the sticky-instance pick reflects the
-        // session's actual start, not router construction time. Keep the
-        // first frame so the dispatch can include it in the initial envelope.
-        let first_frame = input.next().await.ok_or_else(|| {
-            anyhow::anyhow!("bidirectional input stream closed before first frame")
-        })?;
         let instance_id = self
             .select_next_worker()
             .ok_or_else(|| anyhow::anyhow!("no instances available for bidirectional routing"))?;
 
-        self.bidirectional_dispatch(instance_id, first_frame, input)
-            .await
+        self.bidirectional_dispatch(instance_id, input).await
     }
 }
 
