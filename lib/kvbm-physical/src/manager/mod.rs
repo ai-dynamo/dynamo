@@ -265,7 +265,9 @@ impl TransferManager {
             use_planner,
         ) = options.dissolve();
 
-        let mut internal_options = TransferOptionsInternal::builder().use_planner(use_planner);
+        let mut internal_options = TransferOptionsInternal::builder()
+            .use_planner(use_planner)
+            .handles(src_handle, dst_handle);
 
         if let Some(range) = layer_range {
             internal_options = internal_options.layer_range(range);
@@ -391,7 +393,8 @@ impl TransferManager {
 
         let mut internal_options = TransferOptionsInternal::builder()
             .use_planner(true)
-            .axis_slices(axis_slices);
+            .axis_slices(axis_slices)
+            .handles(src_handle, dst_handle);
 
         if let Some(range) = layer_range {
             internal_options = internal_options.layer_range(range);

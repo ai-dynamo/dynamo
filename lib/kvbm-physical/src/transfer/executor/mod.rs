@@ -14,6 +14,7 @@ use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext};
 use crate::BlockId;
 use crate::layout::KvBlockLayout;
+use crate::manager::LayoutHandle;
 use crate::transfer::BounceBufferInternal;
 use crate::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
@@ -66,14 +67,16 @@ pub(crate) fn select_transform_kernel(
 
     match (src_layout, dst_layout) {
         // Operational to Universal
-        (KvBlockLayout::OperationalNHD | KvBlockLayout::OperationalHND, KvBlockLayout::Universal) => {
-            TransformKernel::BlockToUniversal { src_layout }
-        }
+        (
+            KvBlockLayout::OperationalNHD | KvBlockLayout::OperationalHND,
+            KvBlockLayout::Universal,
+        ) => TransformKernel::BlockToUniversal { src_layout },
 
         // Universal to Operational
-        (KvBlockLayout::Universal, KvBlockLayout::OperationalNHD | KvBlockLayout::OperationalHND) => {
-            TransformKernel::UniversalToBlock { dst_layout }
-        }
+        (
+            KvBlockLayout::Universal,
+            KvBlockLayout::OperationalNHD | KvBlockLayout::OperationalHND,
+        ) => TransformKernel::UniversalToBlock { dst_layout },
 
         // Operational NHD <-> HND transpose
         (KvBlockLayout::OperationalNHD, KvBlockLayout::OperationalHND)
@@ -136,6 +139,9 @@ pub(crate) struct TransferOptionsInternal {
     /// Non-empty requires `use_planner = true`; the planner threads
     /// them into [`crate::transfer::plan::TransferSelection`].
     pub(crate) axis_slices: Vec<kvbm_common::AxisIntersection>,
+    /// Registry handles for the physical layouts. Present for normal
+    /// manager-driven transfers and used as the prepared-plan cache key.
+    pub(crate) plan_handles: Option<(LayoutHandle, LayoutHandle)>,
 }
 
 impl TransferOptionsInternal {
@@ -155,6 +161,7 @@ pub(crate) struct TransferOptionsInternalBuilder {
     metric_route: Option<KvbmTransferRoute>,
     use_planner: bool,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
+    plan_handles: Option<(LayoutHandle, LayoutHandle)>,
 }
 
 impl TransferOptionsInternalBuilder {
@@ -228,6 +235,11 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    pub(crate) fn handles(mut self, src: LayoutHandle, dst: LayoutHandle) -> Self {
+        self.plan_handles = Some((src, dst));
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
         if !self.axis_slices.is_empty() && !self.use_planner {
             anyhow::bail!("TransferOptionsInternal: axis_slices requires use_planner=true");
@@ -242,6 +254,7 @@ impl TransferOptionsInternalBuilder {
             metric_route: self.metric_route,
             use_planner: self.use_planner,
             axis_slices: self.axis_slices,
+            plan_handles: self.plan_handles,
         })
     }
 }
@@ -327,6 +340,7 @@ pub(crate) fn execute_transfer(
             options.use_planner,
             options.bounce_buffer.as_ref(),
             options.axis_slices,
+            options.plan_handles,
             ctx,
         ),
         TransferPlan::TwoHop {
@@ -368,6 +382,7 @@ fn execute_direct_transfer(
     use_planner: bool,
     bounce_buffer: Option<&BounceBufferInternal>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
+    plan_handles: Option<(LayoutHandle, LayoutHandle)>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     // axis_slices is only meaningful on planner paths; the legacy
@@ -418,6 +433,7 @@ fn execute_direct_transfer(
                     strategy,
                     cuda_stream,
                     axis_slices,
+                    plan_handles,
                     ctx,
                 );
             }
@@ -458,6 +474,7 @@ fn execute_direct_transfer(
                     strategy,
                     bounce_buffer,
                     axis_slices,
+                    plan_handles,
                     ctx,
                 );
             }
@@ -589,6 +606,7 @@ async fn execute_two_hop_transfer_chunk(
         false,      // Two-hop chunks stay on the legacy path for now
         None,       // bounce_buffer only used by use_planner=true NIXL transforms
         Vec::new(), // axis_slices: two-hop chunks never carry slices (rejected upstream)
+        None,       // two-hop chunks do not map to the original handle pair
         ctx,
     )?
     .await?;
@@ -604,6 +622,7 @@ async fn execute_two_hop_transfer_chunk(
         false, // Two-hop chunks stay on the legacy path for now
         None,
         Vec::new(), // axis_slices: two-hop chunks never carry slices
+        None,       // two-hop chunks do not map to the original handle pair
         ctx,
     )?
     .await?;

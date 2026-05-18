@@ -10,7 +10,8 @@
 #   bash start-hub.sh <log_path>
 #
 # Env vars honored (with defaults):
-#   KVBM_HUB_BIN     (default: $REPO/target/debug/kvbm_hub)
+#   KVBM_REPO        (default: worktree root inferred from this script's path)
+#   KVBM_HUB_BIN     (default: $KVBM_REPO/target/debug/kvbm_hub)
 #   KVBM_HUB_MODEL   (default: Qwen/Qwen3-0.6B)
 #   KVBM_HUB_PREFILL_URL (default: http://127.0.0.1:8000)
 #   KVBM_HUB_DISCOVERY_PORT (default: 1337)
@@ -18,13 +19,23 @@
 #   KVBM_HUB_VELO_PORT      (default: 1338)
 #   RUST_LOG                (default: info,kvbm_hub=debug,kvbm_connector=debug,kvbm_audit=info)
 #
+# Repo auto-detection: the script lives at
+#   <repo>/.claude/skills/disagg-bringup/start-hub.sh
+# so the default $KVBM_REPO is the directory four levels above this file.
+# This makes the script work correctly when run from a git worktree without
+# requiring the caller to set KVBM_REPO=/path/to/worktree explicitly —
+# previously the hard-coded /home/ryan/repos/dynamo default would silently
+# launch the main repo's (stale) binary even when invoked from a worktree.
+#
 # The script runs the hub in the FOREGROUND.  Background it from the
 # caller (e.g. `bash start-hub.sh hub.log &`).
 
 set -eu
 
 LOG=${1:?"usage: $0 <log_path>"}
-REPO=${KVBM_REPO:-/home/ryan/repos/dynamo}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DEFAULT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO=${KVBM_REPO:-$REPO_DEFAULT}
 HUB=${KVBM_HUB_BIN:-$REPO/target/debug/kvbm_hub}
 MODEL=${KVBM_HUB_MODEL:-Qwen/Qwen3-0.6B}
 PREFILL_URL=${KVBM_HUB_PREFILL_URL:-http://127.0.0.1:8000}

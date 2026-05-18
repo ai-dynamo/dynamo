@@ -22,6 +22,7 @@ use crate::transfer::benchmark::{
     BenchmarkCache, BenchmarkCandidate, BenchmarkKey, BenchmarkOutcome,
 };
 use crate::transfer::graph_cache::GraphCache;
+use crate::transfer::prepared::PreparedPlanCache;
 
 // Notifications module is declared in ../mod.rs
 // Re-export for convenience
@@ -68,6 +69,14 @@ pub struct TransferConfig {
     /// Shared observability registry and metrics.
     #[builder(default, setter(strip_option))]
     observability: Option<SharedKvbmObservability>,
+
+    /// Enable compact prepared-plan caching for manager-driven transfers.
+    #[builder(default = "true")]
+    prepared_plan_cache_enabled: bool,
+
+    /// Maximum entries in the remote prepared-plan LRU.
+    #[builder(default = "1024")]
+    prepared_plan_remote_capacity: usize,
 }
 
 impl TransferConfigBuilder {
@@ -242,6 +251,9 @@ pub struct TransferContext {
     /// `score_candidate` via `SelectionContext::benchmark_outcome`.
     /// Drops with the last `TransferContext` clone.
     benchmark_cache: Arc<BenchmarkCache>,
+
+    /// Compact prepared-plan cache for handle-keyed transfer templates.
+    prepared_plan_cache: Arc<PreparedPlanCache>,
 }
 
 impl TransferContext {
@@ -261,6 +273,8 @@ impl TransferContext {
             cuda_pool_reserve_size,
             cuda_pool_release_threshold,
             observability,
+            prepared_plan_cache_enabled,
+            prepared_plan_remote_capacity,
             // Fields already consumed by the builder path before this fn runs:
             nixl_agent_name: _,
             nixl_backend_config: _,
@@ -337,6 +351,10 @@ impl TransferContext {
             observability,
             graph_cache: Arc::new(GraphCache::new()),
             benchmark_cache: Arc::new(BenchmarkCache::new()),
+            prepared_plan_cache: Arc::new(PreparedPlanCache::new(
+                prepared_plan_cache_enabled,
+                prepared_plan_remote_capacity,
+            )),
         })
     }
 
@@ -436,6 +454,11 @@ impl TransferContext {
     /// Shared across all clones of this context.
     pub(crate) fn benchmark_cache(&self) -> &Arc<BenchmarkCache> {
         &self.benchmark_cache
+    }
+
+    /// Get the compact prepared-plan cache.
+    pub(crate) fn prepared_plan_cache(&self) -> &Arc<PreparedPlanCache> {
+        &self.prepared_plan_cache
     }
 
     /// PR-7.5.1: Benchmark a set of candidates for a given layout-pair key

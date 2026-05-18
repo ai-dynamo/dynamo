@@ -46,6 +46,7 @@ use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
 use crate::BlockId;
 use crate::layout::KvBlockLayout;
+use crate::manager::LayoutHandle;
 use crate::transfer::benchmark::{BenchmarkKey, BenchmarkOutcome};
 use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::graph_cache::{GraphCache, ManagedExecHandle};
@@ -56,6 +57,7 @@ use crate::transfer::lower::{
 use crate::transfer::plan::{
     AnnotatedLayout, CopyOp, CopyPlan, CopyPolicy, TransferSelection, TransformReason, plan_copy,
 };
+use crate::transfer::prepared::{PreparedPlanKey, PreparedTransferPlan};
 
 /// Dispatch a CudaAsync transfer through the stride-aware planner.
 ///
@@ -84,6 +86,7 @@ pub(crate) fn execute_planner_cuda_transfer(
     strategy: TransferStrategy,
     cuda_stream: Option<Arc<CudaStream>>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
+    plan_handles: Option<(LayoutHandle, LayoutHandle)>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     validate_cuda_planner_entry(
@@ -104,6 +107,7 @@ pub(crate) fn execute_planner_cuda_transfer(
     // the SelectionContext inside can consult the outcome.  Returns None when
     // startup_benchmark is disabled (the default) — zero cost on the hot path.
     let benchmark_outcome = lookup_benchmark_outcome(src, dst, strategy, ctx);
+    let prepared_plan = lookup_prepared_plan(src, dst, strategy, &axis_slices, plan_handles, ctx)?;
     let outcome = plan_and_lower(
         src,
         dst,
@@ -113,6 +117,7 @@ pub(crate) fn execute_planner_cuda_transfer(
         ctx.capabilities(),
         CopyPolicy::default(),
         benchmark_outcome,
+        prepared_plan,
         axis_slices,
     )?;
 
@@ -242,6 +247,7 @@ pub(crate) fn execute_planner_nixl_transfer(
     strategy: TransferStrategy,
     bounce_buffer: Option<&crate::transfer::BounceBufferInternal>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
+    plan_handles: Option<(LayoutHandle, LayoutHandle)>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     validate_nixl_planner_entry(
@@ -271,6 +277,7 @@ pub(crate) fn execute_planner_nixl_transfer(
         min_inner_bytes: 0,
         coalesce: true,
     };
+    let prepared_plan = lookup_prepared_plan(src, dst, strategy, &axis_slices, plan_handles, ctx)?;
     let ops = match plan_and_lower(
         src,
         dst,
@@ -280,6 +287,7 @@ pub(crate) fn execute_planner_nixl_transfer(
         ctx.capabilities(),
         nixl_policy,
         nixl_benchmark_outcome,
+        prepared_plan,
         axis_slices,
     )? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
@@ -535,6 +543,47 @@ fn lookup_benchmark_outcome(
     ctx.benchmark_cache().lookup(&key)
 }
 
+fn lookup_prepared_plan(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    strategy: TransferStrategy,
+    axis_slices: &[kvbm_common::AxisIntersection],
+    plan_handles: Option<(LayoutHandle, LayoutHandle)>,
+    ctx: &TransferContext,
+) -> Result<Option<PreparedTransferPlan>> {
+    let Some((src_handle, dst_handle)) = plan_handles else {
+        return Ok(None);
+    };
+
+    let key = PreparedPlanKey::new(src_handle, dst_handle, strategy, axis_slices);
+    ctx.prepared_plan_cache()
+        .get_or_insert_with(ctx.worker_id(), key, || {
+            let src_kv = src.layout().block_layout();
+            let dst_kv = dst.layout().block_layout();
+            if src_kv.requires_transform(&dst_kv) {
+                if !axis_slices.is_empty() {
+                    bail!(
+                        "lookup_prepared_plan: axis_slices not supported when the layout pair \
+                         requires a permute-kernel transform (src={:?}, dst={:?})",
+                        src_kv,
+                        dst_kv,
+                    );
+                }
+                return Ok(PreparedTransferPlan::Transform {
+                    invocation: build_transform_invocation(src, dst)?,
+                });
+            }
+
+            let src_view = physical_to_layout_view(src)?;
+            let dst_view = physical_to_layout_view(dst)?;
+            Ok(PreparedTransferPlan::Direct {
+                src: AnnotatedLayout::from_view(&src_view)?,
+                dst: AnnotatedLayout::from_view(&dst_view)?,
+            })
+        })
+        .map(Some)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn plan_and_lower(
     src: &PhysicalLayout,
@@ -545,6 +594,7 @@ fn plan_and_lower(
     capabilities: &crate::transfer::TransferCapabilities,
     policy: CopyPolicy,
     benchmark_outcome: Option<BenchmarkOutcome>,
+    prepared_plan: Option<PreparedTransferPlan>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
 ) -> Result<PlanOutcome> {
     if validate_planner_block_ids(src_block_ids, dst_block_ids)?.is_noop() {
@@ -589,7 +639,16 @@ fn plan_and_lower(
                     dst_kv,
                 );
             }
-            let invocation = build_transform_invocation(src, dst)?;
+            let invocation = match prepared_plan {
+                Some(PreparedTransferPlan::Transform { invocation }) => invocation,
+                Some(PreparedTransferPlan::Direct { .. }) => bail!(
+                    "plan_and_lower: cached direct plan used for transform pair \
+                     (src={:?}, dst={:?}); prepared-plan key is inconsistent",
+                    src_kv,
+                    dst_kv,
+                ),
+                None => build_transform_invocation(src, dst)?,
+            };
             return Ok(PlanOutcome::Transform {
                 invocation,
                 block_pairs,
@@ -597,10 +656,21 @@ fn plan_and_lower(
         }
     }
 
-    let src_view = physical_to_layout_view(src)?;
-    let dst_view = physical_to_layout_view(dst)?;
-    let src_al = AnnotatedLayout::from_view(&src_view)?;
-    let dst_al = AnnotatedLayout::from_view(&dst_view)?;
+    let (src_al, dst_al) = match prepared_plan {
+        Some(PreparedTransferPlan::Direct { src, dst }) => (src, dst),
+        Some(PreparedTransferPlan::Transform { .. }) => bail!(
+            "plan_and_lower: cached transform plan used for direct layout pair; \
+             prepared-plan key is inconsistent"
+        ),
+        None => {
+            let src_view = physical_to_layout_view(src)?;
+            let dst_view = physical_to_layout_view(dst)?;
+            (
+                AnnotatedLayout::from_view(&src_view)?,
+                AnnotatedLayout::from_view(&dst_view)?,
+            )
+        }
+    };
 
     // `block_pairs` was already built above; `plan_copy` consumes
     // a `usize`-typed pair list. AB-1d: thread caller-supplied
@@ -1373,6 +1443,7 @@ impl OwnedStagedContext {
             strategy,
             &self.capabilities,
             leg_policy,
+            None,
             None,
             Vec::new(), // axis_slices: staged NIXL legs run full-extent
         )?;
