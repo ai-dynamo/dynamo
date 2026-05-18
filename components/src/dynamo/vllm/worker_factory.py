@@ -275,6 +275,23 @@ class WorkerFactory:
                 ]
             )
 
+        # ModelExpress v2 mid-training weight refit endpoints. Activated by
+        # the same env var the launcher uses in main.py:setup_vllm_engine to
+        # inject MxRefitWorkerExtension as worker_extension_cls. We read the
+        # env directly rather than checking engine_args because worker_factory
+        # runs BEFORE setup_vllm_engine — the attribute isn't set yet.
+        mx_refit_enabled = os.environ.get("DYN_MX_REFIT_ENABLED") == "1"
+        if mx_refit_enabled:
+            mx_refit_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.update_weights_via_mx"
+            )
+            prepare_refit_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.prepare_refit_info"
+            )
+            shutdown_endpoints.extend(
+                [mx_refit_endpoint, prepare_refit_endpoint]
+            )
+
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
@@ -333,6 +350,33 @@ class WorkerFactory:
             encode_worker_client=encode_worker_client,
         )
         handler.add_temp_dir(prometheus_temp_dir)
+
+        # ModelExpress v2 receiver-side polling.
+        # The trainer publishes weights to the MX server with no trigger
+        # RPC, so each worker process watches the MX server itself and
+        # refits whenever a newer version appears. We start the poller
+        # on every TP rank via collective_rpc so each engine-core worker
+        # has its own background thread + per-rank MxV2RefitReceiver. The
+        # poller targets MxRefitWorkerExtension.start_mx_refit_poller,
+        # which the worker_extension_cls injection wires onto the Worker
+        # class at vLLM startup (see main.py:setup_vllm_engine).
+        if mx_refit_enabled:
+            mx_server_url = os.environ.get(
+                "MODEL_EXPRESS_URL", "modelexpress-server:8001"
+            )
+            try:
+                await engine_client.collective_rpc(
+                    "start_mx_refit_poller",
+                    kwargs={
+                        "mx_config": {"mx_server_url": mx_server_url},
+                        "poll_interval_s": 5.0,
+                    },
+                )
+                logger.info("[mx-refit] receiver-side poller started on all ranks")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[mx-refit] failed to start receiver-side poller: %s", exc
+                )
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -475,6 +519,20 @@ class WorkerFactory:
                         ),
                         list_loras_endpoint.serve_endpoint(
                             handler.list_loras,
+                            metrics_labels=model_metrics_labels,
+                        ),
+                    ]
+                )
+
+            if mx_refit_enabled:
+                serve_tasks.extend(
+                    [
+                        mx_refit_endpoint.serve_endpoint(
+                            handler.update_weights_via_mx,
+                            metrics_labels=model_metrics_labels,
+                        ),
+                        prepare_refit_endpoint.serve_endpoint(
+                            handler.prepare_refit_info,
                             metrics_labels=model_metrics_labels,
                         ),
                     ]
