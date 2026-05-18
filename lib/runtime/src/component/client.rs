@@ -268,9 +268,13 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
-                // TODO: this resets both tracked available and free instances
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
-                client.instance_free.store(Arc::new(instance_ids.clone()));
+                // Intentionally NOT writing instance_free here — it's
+                // owned by update_free_instances (the worker monitor's
+                // push path). Resetting it on reconcile would clobber
+                // the per-worker busy filter every reconcile_interval,
+                // making over-threshold workers reappear as routable
+                // until the next monitor push.
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 let registry = client.endpoint.drt().routing_occupancy_states();
