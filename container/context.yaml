@@ -80,12 +80,12 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: v0.5.11-cu129-runtime
+    runtime_image_tag: v0.5.12-cu129-runtime
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.11-cu130-runtime
+    runtime_image_tag: v0.5.12-cu130-runtime
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
