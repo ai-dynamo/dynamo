@@ -110,15 +110,47 @@ runs:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
-        set -x
-        # The K8s version must be supported by the kr8s Python library used in deploy tests.
-        # This is independent of the host cluster version.
-        vcluster create ${VCLUSTER_NAME} \
-          --namespace ${NAMESPACE} \
-          --connect=false \
-          --upgrade \
-          --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }}
+
+        # When two parallel matrix jobs both hit the Self-bootstrap (rerun) path,
+        # they race on `vcluster create` because the underlying `helm upgrade
+        # --install` is not atomic — one job's release-secret commit wins and the
+        # other fails with `release: already exists`. The `--upgrade` flag does
+        # not serialize this. Recover by re-checking `vcluster list`: if a
+        # concurrent job already produced the cluster, treat as success and let
+        # the subsequent "Wait for vCluster pod to be ready" step block on that
+        # job's bootstrap finishing.
+        #
+        # The K8s version must be supported by the kr8s Python library used in
+        # deploy tests; this is independent of the host cluster version.
+        create_ok=false
+        for attempt in 1 2 3 4 5 6; do
+          set -x
+          if vcluster create ${VCLUSTER_NAME} \
+               --namespace ${NAMESPACE} \
+               --connect=false \
+               --upgrade \
+               --set controlPlane.distro.k8s.enabled=true \
+               --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }}; then
+            set +x
+            create_ok=true
+            break
+          fi
+          set +x
+          if vcluster list -n "${NAMESPACE}" --output json 2>/dev/null \
+             | jq -e --arg name "${VCLUSTER_NAME}" \
+               'map(select(.Name == $name)) | length > 0' &>/dev/null; then
+            echo "vCluster ${VCLUSTER_NAME} now visible (concurrent matrix job won the create race); proceeding"
+            create_ok=true
+            break
+          fi
+          echo "vcluster create failed and ${VCLUSTER_NAME} not visible; retrying in 10s (attempt ${attempt}/6)..."
+          sleep 10
+        done
+
+        if [ "${create_ok}" != "true" ]; then
+          echo "::error::vcluster create did not succeed after 6 attempts"
+          exit 1
+        fi
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
