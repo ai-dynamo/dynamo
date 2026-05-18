@@ -99,7 +99,12 @@ impl From<SerializableTransferOptions> for TransferOptions {
             metric_route: opts.metric_route,
             // use_planner is a per-side optimization toggle; the wire form
             // intentionally does not propagate it. Each receiver picks its
-            // own planner policy.
+            // own planner policy. c6 made the receiver-side rule load-
+            // bearing: `executor::execute_transfer` auto-promotes
+            // use_planner = true when `requires_transform(src, dst)` is
+            // true, so the `false` hardcode here is safe for the
+            // cross-leader case (Universal↔Universal under c3 semantics
+            // → requires_transform = false → auto-promote never fires).
             use_planner: false,
         }
     }

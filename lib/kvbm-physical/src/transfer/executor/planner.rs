@@ -748,29 +748,47 @@ fn build_transform_invocation(
     let src_kv = src.layout().block_layout();
     let dst_kv = dst.layout().block_layout();
     let cfg = src.layout().config();
-    if cfg != dst.layout().config() {
+    let dst_cfg = dst.layout().config();
+    // Per-block-shape gate: ignore `num_blocks` (per-tier capacity)
+    // and compare everything else. G1 (GPU HBM) and G2 (pinned host)
+    // routinely hold different block counts; rejecting that case
+    // makes cross-tier Universal-mode transfers impossible.
+    if !cfg.has_same_block_shape(dst_cfg) {
         bail!(
-            "build_transform_invocation: src.config != dst.config — the catalog only \
-             dispatches transforms between same-shape layouts (got src.num_blocks={}, \
-             src.num_layers={}, src.outer_dim={}, src.page_size={}, src.inner_dim={}, \
-             dst.num_blocks={}, dst.num_layers={}, dst.outer_dim={}, dst.page_size={}, \
-             dst.inner_dim={})",
-            cfg.num_blocks,
+            "build_transform_invocation: src and dst differ on per-block shape — the \
+             catalog only dispatches transforms between layouts with identical block \
+             geometry (got src.num_layers={}, src.outer_dim={}, src.page_size={}, \
+             src.inner_dim={}, src.num_heads={:?}, dst.num_layers={}, dst.outer_dim={}, \
+             dst.page_size={}, dst.inner_dim={}, dst.num_heads={:?}). num_blocks is \
+             allowed to differ.",
             cfg.num_layers,
             cfg.outer_dim,
             cfg.page_size,
             cfg.inner_dim,
-            dst.layout().config().num_blocks,
-            dst.layout().config().num_layers,
-            dst.layout().config().outer_dim,
-            dst.layout().config().page_size,
-            dst.layout().config().inner_dim,
+            cfg.num_heads,
+            dst_cfg.num_layers,
+            dst_cfg.outer_dim,
+            dst_cfg.page_size,
+            dst_cfg.inner_dim,
+            dst_cfg.num_heads,
         );
     }
-    let dtype = cfg.dtype.ok_or_else(|| {
+    // Effective dtype: prefers explicit `cfg.dtype`, falls back to
+    // `derive_tensor_dtype_from_width`. Production layouts historically
+    // set only `dtype_width_bytes`; the catalog needs a concrete type.
+    // For permute kernels (the only transforms today) F16 vs BF16
+    // produce identical bytes, so the derived BF16 default is correct
+    // wherever the explicit dtype isn't plumbed. FP8 derives to
+    // `TensorDataType::FP8` and `match_kernel` rejects it at the
+    // catalog (no kernel template) — clean failure rather than silent
+    // wrong dispatch.
+    let dtype = cfg.effective_dtype().ok_or_else(|| {
         anyhow!(
-            "build_transform_invocation: cfg.dtype is required for transform dispatch \
-             (catalog dispatches on real TensorDataType, not byte width)"
+            "build_transform_invocation: cannot determine dtype — \
+             LayoutConfig.dtype is None and dtype_width_bytes={} has no \
+             derivation (validated widths are {{1, 2, 4, 8}}; outside that \
+             set is a config-validation gap)",
+            cfg.dtype_width_bytes,
         )
     })?;
     let nh = cfg.num_heads.ok_or_else(|| {
@@ -1078,6 +1096,20 @@ pub(crate) fn dispatch_transform_kernel(
     let univ_dev = stream.clone_htod(&univ_ptrs)?;
     let (op_ptr_dev_raw, _op_guard) = op_dev.device_ptr(stream.as_ref());
     let (univ_ptr_dev_raw, _univ_guard) = univ_dev.device_ptr(stream.as_ref());
+
+    tracing::debug!(
+        target: "kvbm_physical::planner",
+        kind = ?invocation.kind,
+        num_blocks = block_pairs.len(),
+        nh = nh,
+        nl = nl,
+        no = no,
+        nt = nt,
+        hd = hd,
+        dtype = ?invocation.dtype,
+        block_layout = ?invocation.block_layout,
+        "fused permute kernel dispatch"
+    );
 
     let status = match invocation.kind {
         KernelKind::UniversalFromBlock => {

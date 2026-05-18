@@ -410,3 +410,221 @@ async fn use_planner_small_inner_threshold_fallback_d2d() -> Result<()> {
     }
     Ok(())
 }
+
+// ────────────────── c6: auto-promote on requires_transform ──────────────────
+//
+// Production layout builders historically set `dtype_width_bytes` but
+// leave `LayoutConfig.dtype` as `None` (only the bench harness sets
+// the typed enum). The c6 round-trip reproducers exercise the
+// derive-from-width path by passing a `dtype=None` config; the
+// `layer_range + transform` rejection test deliberately keeps the
+// standard config to confirm the layer_range bail fires before the
+// dtype derive.
+
+/// Build an FC PhysicalLayout on Device(0) with an explicit
+/// `KvBlockLayout` and `LayoutConfig.dtype = None`. Matches the shape
+/// of layouts that production code (vLLM connector, engine builders)
+/// emits today — `dtype_width_bytes` set, typed `dtype` unset. Used by
+/// the c6 reproducers to exercise the `effective_dtype` derive path.
+fn build_fc_dtype_none(
+    agent: NixlAgent,
+    block_layout: KvBlockLayout,
+    num_blocks: usize,
+) -> PhysicalLayout {
+    let mut config = standard_config(num_blocks);
+    config.dtype = None;
+    PhysicalLayout::builder(agent)
+        .with_config(config)
+        .with_block_layout(block_layout)
+        .fully_contiguous()
+        .allocate_device(0)
+        .build()
+        .unwrap()
+}
+
+//
+// c3 made G2 = KvBlockLayout::Universal in BlockLayoutMode::Universal
+// while G1 stayed OperationalNHD. The offload pipeline's default
+// TransferOptions (use_planner = false) routes through the legacy CUDA
+// executor whose validate_layout_compatibility rejects cross-layout
+// pairs — so G1↔G2 transfers under Universal mode bail at runtime even
+// though the fused permute kernel is fully wired in the planner.
+//
+// c6 makes `executor::execute_transfer` detect `requires_transform` and
+// auto-promote `use_planner = true`. These three reproducers pin that
+// contract.
+
+/// G1 (OperationalNHD) ↔ G2 (Universal) round-trip with default
+/// TransferOptionsInternal — the exact call shape produced by
+/// `kvbm-engine::offload::pipeline::execute_transfer` and
+/// `worker/physical.rs::execute_local_transfer` under Universal mode.
+///
+/// On `wt/kvcc` HEAD (pre-c6) the first transfer fails in
+/// `validate_layout_compatibility` with "Layout transformation not
+/// supported: src=OperationalNHD, dst=Universal". After c6 both
+/// transfers dispatch the fused permute kernel and the final
+/// destination matches the source byte-for-byte.
+///
+/// Reproducer-first regression guard: src/dst hold 4 blocks while
+/// the Universal intermediate holds 8. Production G1↔G2 have
+/// differently-sized tiers (G1 GPU HBM is typically much larger
+/// than G2 pinned host); the first cut of c6 missed this because
+/// the reproducers used identical num_blocks, which trivially
+/// passed `build_transform_invocation`'s per-block-shape gate. The
+/// gate now ignores `num_blocks` (per-tier capacity, not
+/// per-block geometry) but enforces everything else.
+#[tokio::test]
+async fn auto_promote_g1_nhd_to_g2_univ_default_options_dispatches_kernel() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+
+    let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
+    // dtype-None configs match production layout builders (vLLM
+    // connector + engine sites); the c6 effective_dtype derive
+    // turns this into BF16 at the catalog gate.
+    let src = build_fc_dtype_none(agent.clone(), KvBlockLayout::OperationalNHD, 4);
+    let mid = build_fc_dtype_none(agent.clone(), KvBlockLayout::Universal, 8);
+    let dst = build_fc_dtype_none(agent.clone(), KvBlockLayout::OperationalNHD, 4);
+
+    let src_blocks = vec![0, 1];
+    let mid_blocks = vec![2, 3];
+    let dst_blocks = vec![0, 1];
+
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None).unwrap();
+
+    // Regression guard: the contract is "default options must work for
+    // requires_transform pairs because the executor auto-promotes."
+    // If `TransferOptionsInternal::default()` ever changes to
+    // `use_planner = true`, this guard becomes a no-op but the test
+    // still exercises the same path.
+    assert!(
+        !TransferOptionsInternal::default().use_planner,
+        "regression guard: TransferOptionsInternal::default() should be use_planner=false; \
+         c6's auto-promote is the load-bearing mechanism for this test",
+    );
+    assert!(
+        src.layout().config().dtype.is_none(),
+        "regression guard: src config must have dtype=None to exercise the c6 \
+         effective_dtype derive path (production layouts emit dtype=None today)",
+    );
+
+    let forward = execute_transfer(
+        &src,
+        &mid,
+        &src_blocks,
+        &mid_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    forward.await?;
+
+    let reverse = execute_transfer(
+        &mid,
+        &dst,
+        &mid_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    reverse.await?;
+
+    verify_checksums_by_position(&src_checksums, &src_blocks, &dst, &dst_blocks)?;
+    Ok(())
+}
+
+/// HND variant of the NHD round-trip above. Pins HND coverage
+/// separately because the c3 Universal-mode rule applies to both
+/// operational variants and the `kernel_catalog` dispatch picks a
+/// different kernel direction per source layout. Same mismatched-
+/// num_blocks shape (src=dst=4, mid=8) as the NHD test.
+#[tokio::test]
+async fn auto_promote_g1_hnd_to_g2_univ_default_options_dispatches_kernel() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+
+    let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
+    let src = build_fc_dtype_none(agent.clone(), KvBlockLayout::OperationalHND, 4);
+    let mid = build_fc_dtype_none(agent.clone(), KvBlockLayout::Universal, 8);
+    let dst = build_fc_dtype_none(agent.clone(), KvBlockLayout::OperationalHND, 4);
+
+    let src_blocks = vec![0, 1];
+    let mid_blocks = vec![2, 3];
+    let dst_blocks = vec![0, 1];
+
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None).unwrap();
+
+    let forward = execute_transfer(
+        &src,
+        &mid,
+        &src_blocks,
+        &mid_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    forward.await?;
+    let reverse = execute_transfer(
+        &mid,
+        &dst,
+        &mid_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    reverse.await?;
+
+    verify_checksums_by_position(&src_checksums, &src_blocks, &dst, &dst_blocks)?;
+    Ok(())
+}
+
+/// `layer_range` + `requires_transform = true` must reject with a
+/// precise message naming both incompatibilities. The planner does
+/// not support layer-restricted transforms today (executor/mod.rs's
+/// pre-existing `use_planner + layer_range` bail), and silently
+/// auto-promoting would swap one symptom for another. c6's executor
+/// entry detects the conflict and bails before any storage touch.
+///
+/// On pre-c6 HEAD this call returns a generic "Layout transformation
+/// not supported" message from `validate_layout_compatibility` that
+/// does not mention `layer_range`; the message assertion fails. After
+/// c6 the message names both terms.
+#[tokio::test]
+async fn auto_promote_layer_range_plus_transform_rejects_loudly() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+
+    let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
+    // Mismatched num_blocks (cross-tier shape) to confirm this test
+    // exercises the same production call shape as the round-trip
+    // tests above and isn't a degenerate same-shape case.
+    let src = build_fc_with_block_layout(agent.clone(), KvBlockLayout::OperationalNHD, 4);
+    let dst = build_fc_with_block_layout(agent.clone(), KvBlockLayout::Universal, 8);
+
+    let src_blocks = vec![0];
+    let dst_blocks = vec![0];
+
+    let ctx = create_transfer_context(agent, None).unwrap();
+
+    let options = TransferOptionsInternal::builder()
+        .layer_range(0..1)
+        .build()?;
+    let result = execute_transfer(
+        &src,
+        &dst,
+        &src_blocks,
+        &dst_blocks,
+        options,
+        ctx.context(),
+    );
+    let err = match result {
+        Ok(_) => panic!("layer_range + requires_transform must reject, but call succeeded"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:#}").to_lowercase();
+    assert!(
+        msg.contains("layer_range") && msg.contains("transform"),
+        "error must name both 'layer_range' and 'transform'; got: {err:#}"
+    );
+    Ok(())
+}

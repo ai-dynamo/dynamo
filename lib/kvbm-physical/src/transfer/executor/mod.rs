@@ -269,6 +269,48 @@ pub(crate) fn execute_transfer(
     // Validate block IDs
     validate_block_transfer(src_block_ids, dst_block_ids, None, src, dst, None)?;
 
+    // c6: auto-promote to the planner path when the layout pair requires
+    // a kernel transform. The legacy `cuda::execute_cuda_transfer` path
+    // calls `validate_layout_compatibility`, which rejects any pair where
+    // `requires_transform = true`. The planner handles these via the
+    // kernel catalog (see `executor::planner::plan_and_lower` →
+    // `PlanOutcome::Transform` → `dispatch_transform_kernel`). c3 made
+    // G2 = `KvBlockLayout::Universal` in `BlockLayoutMode::Universal`
+    // while G1 stays operational, so the offload pipeline's default-
+    // options call path (`TransferOptions::default()` → `use_planner =
+    // false`) now needs this promotion.
+    //
+    // `layer_range + requires_transform` stays unsupported (the planner
+    // builds whole-block transform invocations today; see roadmap
+    // phase 4b in c6 plan). Bail loudly so the caller learns the
+    // specific incompatibility, not a generic "Layout transformation
+    // not supported" from the legacy executor.
+    let mut options = options;
+    let needs_transform = src
+        .layout()
+        .block_layout()
+        .requires_transform(&dst.layout().block_layout());
+    if needs_transform {
+        if options.layer_range.is_some() {
+            anyhow::bail!(
+                "execute_transfer: layer_range is incompatible with requires_transform=true \
+                 (src={:?}, dst={:?}, layer_range={:?}); layer-restricted transforms are not \
+                 supported on the planner path today (c6 roadmap phase 4b)",
+                src.layout().block_layout(),
+                dst.layout().block_layout(),
+                options.layer_range,
+            );
+        }
+        if !options.use_planner {
+            tracing::debug!(
+                src = ?src.layout().block_layout(),
+                dst = ?dst.layout().block_layout(),
+                "executor: auto-promoting to use_planner=true for cross-layout transform"
+            );
+            options.use_planner = true;
+        }
+    }
+
     // Select transfer plan based on locations and capabilities
     let plan = select_strategy(src, dst, ctx)?;
 

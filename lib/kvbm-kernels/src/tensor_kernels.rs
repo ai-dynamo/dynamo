@@ -22,6 +22,17 @@ use std::ffi::c_void;
 use cudarc::runtime::sys::{cudaError_t, cudaStream_t};
 
 /// Numeric tags passed across the FFI boundary to select the CUDA template.
+///
+/// `FP8` is a 1-byte forward-looking marker. The kernel C++ side has no
+/// FP8 template specialization today; the planner's kernel catalog
+/// returns `None` for FP8, so the launcher is never called with this
+/// value. The C++ enum's `default` arm would return
+/// `cudaErrorInvalidValue` if it ever were. The marker exists so
+/// `derive_tensor_dtype_from_width` can produce a stable mapping for
+/// 1-byte layouts (FP8 E4M3 / E5M2) and projection code can route
+/// pre-transform paths through the catalog cleanly even on FP8
+/// configs; transform dispatch on FP8 stays rejected at the catalog
+/// until kernel work lands.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TensorDataType {
@@ -29,6 +40,7 @@ pub enum TensorDataType {
     BF16 = 1,
     F32 = 2,
     F64 = 3,
+    FP8 = 4,
 }
 
 /// Identifies how each `[nt, nh, hd]` chunk is laid out in device memory.

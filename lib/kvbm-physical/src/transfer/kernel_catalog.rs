@@ -83,9 +83,15 @@ pub(crate) struct KernelInvocation {
 pub(crate) fn match_kernel(
     src_kv: KvBlockLayout,
     dst_kv: KvBlockLayout,
-    _dtype: TensorDataType,
+    dtype: TensorDataType,
 ) -> Option<KernelKind> {
     use KvBlockLayout::*;
+    // FP8 has no kernel template specialization today; reject at the
+    // catalog so the launcher never sees an unmappable dtype. When
+    // FP8 kernel support lands this guard goes away.
+    if matches!(dtype, TensorDataType::FP8) {
+        return None;
+    }
     match (src_kv, dst_kv) {
         // Operational → Universal: universal_from_block kernel.
         // The template selects NHD vs HND from `block_layout` at
