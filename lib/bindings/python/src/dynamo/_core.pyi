@@ -1338,7 +1338,7 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
-        router_max_queue_depth_per_worker: Optional[int] = None,
+        router_queue_depth_by_missing_isl: list[tuple[int, int]] = [],
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
@@ -1376,14 +1376,20 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
-            router_max_queue_depth_per_worker: Maximum queued requests allowed per worker slot.
-                This is a per-worker scaling heuristic, NOT a total frontend queue cap:
-                the actual rejection threshold is `router_max_queue_depth_per_worker *
-                current_worker_count`, so a 10-worker pool with this set to 4 will admit
-                up to 40 queued requests, while a 20-worker pool will admit up to 80.
-                When the threshold is exceeded, requests that would otherwise queue return
-                backpressure immediately (surfaced as DynamoErrorType.ResourceExhausted, which
-                the frontend maps to a non-migratable rejection). Leave as None to disable.
+            router_queue_depth_by_missing_isl: Tiered absolute queue-depth caps
+                keyed on the request's best-case missing prefill tokens
+                (ISL minus best cached tokens across eligible workers). Each
+                entry is a `(missing_isl_floor, max_queue_depth)` tuple; the
+                tier with the highest matched floor wins. The list must:
+                  * be empty (disables capping), OR
+                  * start with `missing_isl_floor == 0`, be strictly ascending
+                    in floor, and have `max_queue_depth > 0` for each tier.
+                Caps are absolute totals (not multiplied by worker count).
+                Example: `[(0, 128), (1024, 8), (4096, 2)]` admits cheap
+                requests with up to 128 pending, requests missing >=1024
+                tokens with up to 8, and requests missing >=4096 with up to 2.
+                Backpressure (ResourceExhausted) is returned when the cap is
+                reached.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.

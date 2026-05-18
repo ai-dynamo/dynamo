@@ -37,7 +37,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_reset_states",
     "router_ttl_secs",
     "router_queue_threshold",
-    "router_max_queue_depth_per_worker",
+    "router_queue_depth_by_missing_isl",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
@@ -117,7 +117,7 @@ class KvRouterConfigBase(ConfigBase):
     router_reset_states: bool
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
-    router_max_queue_depth_per_worker: Optional[int]
+    router_queue_depth_by_missing_isl: list[tuple[int, int]] = []
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
@@ -312,22 +312,10 @@ class KvRouterArgGroup(ArgGroup):
             help="KV Router: Number of messages in stream before triggering a snapshot.",
             arg_type=int,
         )
-        add_argument(
-            g,
-            flag_name="--router-max-queue-depth-per-worker",
-            env_var="DYN_ROUTER_MAX_QUEUE_DEPTH_PER_WORKER",
-            default=None,
-            help=(
-                "KV Router: Per-worker scaling heuristic for the router's quick-reject queue. "
-                "NOT a total frontend queue cap: the effective rejection threshold is this value "
-                "multiplied by the current worker count, so it scales with topology (e.g. a "
-                "10-worker pool with the flag set to 4 admits up to 40 queued requests; a 20-worker "
-                "pool admits up to 80). When the threshold is exceeded, requests that would "
-                "otherwise queue return backpressure (ResourceExhausted) immediately. "
-                "Leave unset to disable."
-            ),
-            arg_type=int,
-        )
+        # router_queue_depth_by_missing_isl is config-file-only:
+        # it's a structured list of (missing_isl_floor, max_queue_depth) tuples
+        # that doesn't map cleanly to a single CLI flag. Set it via the Python
+        # KvRouterConfig constructor or the JSON/YAML config file.
         add_negatable_bool_argument(
             g,
             flag_name="--router-reset-states",

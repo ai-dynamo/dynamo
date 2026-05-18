@@ -685,13 +685,6 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_f64("DYN_ROUTER_PREDICTED_TTL_SECS") {
         cfg.router_predicted_ttl_secs = Some(v);
     }
-    if let Some(v) = std::env::var("DYN_ROUTER_MAX_QUEUE_DEPTH_PER_WORKER")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        cfg.router_max_queue_depth_per_worker = Some(v);
-    }
-
     tracing::info!(
         overlap_score_credit = cfg.overlap_score_credit,
         prefill_load_scale = cfg.prefill_load_scale,
@@ -703,7 +696,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_track_prefill_tokens = cfg.router_track_prefill_tokens,
         router_queue_threshold = ?cfg.router_queue_threshold,
         router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
-        router_max_queue_depth_per_worker = ?cfg.router_max_queue_depth_per_worker,
+        queue_depth_tier_count = cfg.router_queue_depth_by_missing_isl.len(),
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 

@@ -143,6 +143,32 @@ impl FromStr for SharedCacheType {
     }
 }
 
+/// One row of the missing-ISL-keyed queue-depth table.
+///
+/// Requests whose best-case missing prefill tokens meet `missing_isl_floor`
+/// are subject to this tier's `max_queue_depth` cap. A request matches every
+/// tier whose floor it clears; the tier with the highest matched floor wins
+/// (i.e. the most expensive bucket the request falls into determines the
+/// cap).
+///
+/// When configured, the tier vec must:
+/// - contain at least one element,
+/// - start with `missing_isl_floor == 0` so every request matches a tier,
+/// - be strictly ascending in `missing_isl_floor`,
+/// - have `max_queue_depth > 0`.
+///
+/// `max_queue_depth` is an absolute total queue depth — it does NOT scale
+/// with worker count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterQueueDepthByMissingIslTier {
+    /// Minimum best-case missing prefill tokens (ISL minus best cached tokens
+    /// across eligible workers) for this tier to apply.
+    pub missing_isl_floor: usize,
+    /// Absolute total queue depth cap when this tier is the highest one a
+    /// request matches. Independent of worker count.
+    pub max_queue_depth: usize,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
@@ -305,7 +331,7 @@ struct KvRouterConfigSerde {
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
     #[serde(default)]
-    router_max_queue_depth_per_worker: Option<usize>,
+    router_queue_depth_by_missing_isl: Vec<RouterQueueDepthByMissingIslTier>,
     router_event_threads: u32,
     skip_initial_worker_wait: bool,
     router_queue_policy: RouterQueuePolicy,
@@ -338,7 +364,7 @@ impl Default for KvRouterConfigSerde {
             router_reset_states: config.router_reset_states,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
-            router_max_queue_depth_per_worker: config.router_max_queue_depth_per_worker,
+            router_queue_depth_by_missing_isl: config.router_queue_depth_by_missing_isl.clone(),
             router_event_threads: config.router_event_threads,
             skip_initial_worker_wait: config.skip_initial_worker_wait,
             router_queue_policy: config.router_queue_policy,
@@ -426,10 +452,22 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
-    /// Maximum number of queued requests allowed per worker slot.
-    /// Effective queue limit is this value multiplied by the current worker slot count.
-    /// When exceeded, requests that would otherwise queue are rejected with backpressure.
-    pub router_max_queue_depth_per_worker: Option<usize>,
+    /// Tiered absolute queue-depth caps keyed on best-case missing prefill
+    /// tokens (ISL minus best cached tokens across eligible workers).
+    ///
+    /// For each request, the tier with the highest matched floor wins, and
+    /// that tier's `max_queue_depth` is the cap. Example:
+    ///   [(0, 128), (1024, 8), (4096, 2)]
+    /// - request missing 500 tokens  → matches (0, 128)            → cap = 128
+    /// - request missing 2000 tokens → matches (1024, 8) wins      → cap = 8
+    /// - request missing 8000 tokens → matches (4096, 2) wins      → cap = 2
+    ///
+    /// When configured, the vec must start with `missing_isl_floor = 0` and
+    /// be strictly ascending in floor. The first tier therefore matches
+    /// every request, so admission always has a cap. Empty vec disables
+    /// queue-depth capping entirely. See [`RouterQueueDepthByMissingIslTier`].
+    #[serde(default)]
+    pub router_queue_depth_by_missing_isl: Vec<RouterQueueDepthByMissingIslTier>,
 
     /// Number of KV indexer worker threads.
     /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
@@ -496,7 +534,7 @@ impl Default for KvRouterConfig {
             router_reset_states: false,
             router_ttl_secs: 120.0,
             router_queue_threshold: Some(16.0),
-            router_max_queue_depth_per_worker: None,
+            router_queue_depth_by_missing_isl: Vec::new(),
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
@@ -542,7 +580,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
-            router_max_queue_depth_per_worker: compat.router_max_queue_depth_per_worker,
+            router_queue_depth_by_missing_isl: compat.router_queue_depth_by_missing_isl,
             router_event_threads: compat.router_event_threads,
             skip_initial_worker_wait: compat.skip_initial_worker_wait,
             router_queue_policy: compat.router_queue_policy,
@@ -598,6 +636,28 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
         return Err(ValidationError::new(
             "router_predicted_ttl_secs requires use_kv_events=true",
         ));
+    }
+    let tiers = &config.router_queue_depth_by_missing_isl;
+    if !tiers.is_empty() {
+        if tiers[0].missing_isl_floor != 0 {
+            return Err(ValidationError::new(
+                "router_queue_depth_by_missing_isl: first tier must have missing_isl_floor == 0",
+            ));
+        }
+        for window in tiers.windows(2) {
+            if window[1].missing_isl_floor <= window[0].missing_isl_floor {
+                return Err(ValidationError::new(
+                    "router_queue_depth_by_missing_isl: floors must be strictly ascending",
+                ));
+            }
+        }
+        for tier in tiers {
+            if tier.max_queue_depth == 0 {
+                return Err(ValidationError::new(
+                    "router_queue_depth_by_missing_isl: max_queue_depth must be > 0",
+                ));
+            }
+        }
     }
     Ok(())
 }
