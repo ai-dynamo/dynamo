@@ -148,6 +148,16 @@ navigation:
   # ==================== User Guides ====================
   - section: User Guides
     contents:
+      - section: Agents
+        slug: agents
+        path: ../pages-dev/agents/README.md
+        contents:
+          - page: Agent Tracing
+            path: ../pages-dev/agents/agent-tracing.md
+          - page: Agent Hints
+            path: ../pages-dev/agents/agent-hints.md
+          - page: Use Pi-Mono with Dynamo
+            path: ../pages-dev/agents/pi-mono.md
       - page: Disaggregated Serving
         path: ../pages-dev/features/disaggregated-serving/README.md
       - page: KV Cache Aware Routing
@@ -198,16 +208,6 @@ navigation:
         path: ../pages-dev/features/lora/README.md
       - page: Fastokens Tokenizer
         path: ../pages-dev/features/tokenizer/README.md
-      - section: Agents
-        slug: agents
-        path: ../pages-dev/agents/README.md
-        contents:
-          - page: Agent Tracing
-            path: ../pages-dev/agents/agent-tracing.md
-          - page: Agent Hints
-            path: ../pages-dev/agents/agent-hints.md
-          - page: SGLang for Agentic Workloads
-            path: ../pages-dev/backends/sglang/agents.md
       - section: Observability (Local)
         path: ../pages-dev/observability/README.md
         contents:
@@ -258,14 +258,17 @@ navigation:
         contents:
           - page: Reference Guide
             path: ../pages-dev/backends/sglang/sglang-reference-guide.md
-          - page: Frontend Processor Fallback
-            path: ../pages-dev/backends/sglang/sglang-chat-processor.md
           - page: Examples
             path: ../pages-dev/backends/sglang/sglang-examples.md
           - page: Disaggregation
             path: ../pages-dev/backends/sglang/sglang-disaggregation.md
+          - page: HiCache
+            slug: hi-cache
+            path: ../pages-dev/backends/sglang/sglang-hicache.md
           - page: Diffusion
             path: ../pages-dev/backends/sglang/sglang-diffusion.md
+          - page: Frontend Processor Fallback
+            path: ../pages-dev/backends/sglang/sglang-chat-processor.md
           - page: Observability
             path: ../pages-dev/backends/sglang/sglang-observability.md
           - page: Agentic Workloads
@@ -355,8 +358,6 @@ navigation:
     contents:
       - page: LMCache
         path: ../pages-dev/integrations/lmcache-integration.md
-      - page: SGLang HiCache
-        path: ../pages-dev/integrations/sglang-hicache.md
       - page: FlexKV
         path: ../pages-dev/integrations/flexkv-integration.md
       - page: KV Events for Custom Engines
