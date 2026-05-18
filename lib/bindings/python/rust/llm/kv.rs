@@ -237,7 +237,7 @@ impl MultimodalEmbeddingCachePublisher {
     }
 
     #[pyo3(signature = (cache_keys))]
-    fn publish(&self, mut cache_keys: Vec<String>) -> PyResult<()> {
+    fn publish(&self, cache_keys: Vec<String>) -> PyResult<()> {
         self.inner.publish(cache_keys).map_err(to_pyerr)
     }
 }
