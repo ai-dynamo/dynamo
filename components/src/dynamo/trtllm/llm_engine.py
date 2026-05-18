@@ -650,7 +650,7 @@ class TrtllmLLMEngine(LLMEngine):
             )
             return None
         tokenizer = None
-        if self._engine is not None and self._engine.is_initialized():
+        if self._engine is not None and self._engine._llm is not None:
             tokenizer = self._engine.llm.tokenizer
         # priority=1.0 is TRT-LLM's max — keeps the canary off the starvation path.
         return build_health_check_payload(

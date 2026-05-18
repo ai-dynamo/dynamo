@@ -104,7 +104,7 @@ def test_unified_canary_honors_operator_override(
     num_system_ports,  # noqa: ARG001
     predownload_models,  # noqa: ARG001
 ) -> None:
-    """`DYN_HEALTH_CHECK_PAYLOAD={}` exercises the `#[serde(default)]` backfill on `PreprocessedRequest`."""
+    """A minimal `DYN_HEALTH_CHECK_PAYLOAD` overrides the engine default end-to-end."""
     config = dataclasses.replace(
         _sample_config("agg"), frontend_port=dynamo_dynamic_ports.frontend_port
     )
@@ -112,7 +112,7 @@ def test_unified_canary_honors_operator_override(
     extra_env = {
         "DYN_HEALTH_CHECK_ENABLED": "true",
         "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": '["generate"]',
-        "DYN_HEALTH_CHECK_PAYLOAD": "{}",
+        "DYN_HEALTH_CHECK_PAYLOAD": '{"token_ids": [1]}',
         "DYN_HTTP_PORT": str(dynamo_dynamic_ports.frontend_port),
         "DYN_SYSTEM_PORT": str(system_port),
     }

@@ -540,14 +540,13 @@ class SglangLLMEngine(LLMEngine):
                 rid,
                 exc_info=True,
             )
-            if rid is not None:
-                self._abort_sglang_request(rid)
+            self._abort_sglang_request(rid)
 
-    def _abort_sglang_request(self, rid: str) -> None:
+    def _abort_sglang_request(self, rid: Optional[str]) -> None:
         """Best-effort abort. Failures here are swallowed — SGLang is
         already in a bad state and we want to surface the original
         failure, not a follow-up abort error."""
-        if self.engine is None:
+        if rid is None or self.engine is None:
             return
         tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
         if tokenizer_manager is None:
