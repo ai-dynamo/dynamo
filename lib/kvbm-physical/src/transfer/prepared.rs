@@ -397,11 +397,18 @@ impl PreparedTransferPlan {
     /// `op_layout` is the operational-side `PhysicalLayout` (caller picks
     /// based on `invocation.kind`). `op_block_ids` and `univ_block_ids`
     /// are the projected block-id slices from `block_pairs`.
+    ///
+    /// `layer_range` restricts the layer iteration to a contiguous
+    /// subrange. `None` walks the full extent (`0..invocation.num_layers`).
+    /// The universal-side pointer array is unaffected by the layer range
+    /// — the kernel uses `nl_full`/`nl_offset` to address the slice
+    /// within each universal block.
     pub(crate) fn emit_universal_kind_pointers<O, U>(
         &self,
         op_layout: &PhysicalLayout,
         op_block_ids: &[BlockId],
         univ_block_ids: &[BlockId],
+        layer_range: Option<&std::ops::Range<usize>>,
         op_sink: &mut O,
         univ_sink: &mut U,
     ) -> Result<()>
@@ -426,12 +433,27 @@ impl PreparedTransferPlan {
                 self.invocation.kind
             );
         }
-        let nl = self.invocation.num_layers;
+        let nl_full = self.invocation.num_layers;
+        let layer_iter = match layer_range {
+            Some(r) => {
+                if r.end > nl_full || r.start > r.end {
+                    bail!(
+                        "emit_universal_kind_pointers: layer_range {:?} out of bounds for \
+                         invocation.num_layers={}",
+                        r,
+                        nl_full,
+                    );
+                }
+                r.clone()
+            }
+            None => 0..nl_full,
+        };
+        let nl_subset = layer_iter.len();
         let no = self.invocation.outer_dim;
-        op_sink.reserve(op_block_ids.len() * nl * no);
+        op_sink.reserve(op_block_ids.len() * nl_subset * no);
         univ_sink.reserve(univ_block_ids.len());
         for &block_id in op_block_ids {
-            for layer in 0..nl {
+            for layer in layer_iter.clone() {
                 for outer in 0..no {
                     let region = op_layout
                         .layout()
@@ -455,12 +477,17 @@ impl PreparedTransferPlan {
     /// Fill the src/dst pointer arrays (both `block × layer × outer`) for
     /// an `NhdHndTranspose` (op↔op) transform. Both sides are walked via
     /// `Layout::memory_region`.
+    ///
+    /// `layer_range` restricts the layer iteration to a contiguous
+    /// subrange on both sides. `None` walks the full extent.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_oo_transpose_pointers<S, D>(
         &self,
         src_layout: &PhysicalLayout,
         dst_layout: &PhysicalLayout,
         src_block_ids: &[BlockId],
         dst_block_ids: &[BlockId],
+        layer_range: Option<&std::ops::Range<usize>>,
         src_sink: &mut S,
         dst_sink: &mut D,
     ) -> Result<()>
@@ -481,13 +508,27 @@ impl PreparedTransferPlan {
                 dst_block_ids.len()
             );
         }
-        let nl = self.invocation.num_layers;
+        let nl_full = self.invocation.num_layers;
+        let layer_iter = match layer_range {
+            Some(r) => {
+                if r.end > nl_full || r.start > r.end {
+                    bail!(
+                        "emit_oo_transpose_pointers: layer_range {:?} out of bounds for \
+                         invocation.num_layers={}",
+                        r,
+                        nl_full,
+                    );
+                }
+                r.clone()
+            }
+            None => 0..nl_full,
+        };
         let no = self.invocation.outer_dim;
-        let chunks_per_block = nl * no;
+        let chunks_per_block = layer_iter.len() * no;
         src_sink.reserve(src_block_ids.len() * chunks_per_block);
         dst_sink.reserve(dst_block_ids.len() * chunks_per_block);
-        emit_op_table(src_layout, src_block_ids, nl, no, src_sink, "src")?;
-        emit_op_table(dst_layout, dst_block_ids, nl, no, dst_sink, "dst")?;
+        emit_op_table(src_layout, src_block_ids, &layer_iter, no, src_sink, "src")?;
+        emit_op_table(dst_layout, dst_block_ids, &layer_iter, no, dst_sink, "dst")?;
         Ok(())
     }
 
@@ -524,13 +565,13 @@ impl PreparedTransferPlan {
 fn emit_op_table<S: PointerSink>(
     layout: &PhysicalLayout,
     block_ids: &[BlockId],
-    nl: usize,
+    layer_iter: &std::ops::Range<usize>,
     no: usize,
     sink: &mut S,
     side: &'static str,
 ) -> Result<()> {
     for &block_id in block_ids {
-        for layer in 0..nl {
+        for layer in layer_iter.clone() {
             for outer in 0..no {
                 let region = layout
                     .layout()

@@ -578,46 +578,172 @@ async fn auto_promote_g1_hnd_to_g2_univ_default_options_dispatches_kernel() -> R
     Ok(())
 }
 
-/// `layer_range` + `requires_transform = true` must reject with a
-/// precise message naming both incompatibilities. The planner does
-/// not support layer-restricted transforms today (executor/mod.rs's
-/// pre-existing `use_planner + layer_range` bail), and silently
-/// auto-promoting would swap one symptom for another. c6's executor
-/// entry detects the conflict and bails before any storage touch.
-///
-/// On pre-c6 HEAD this call returns a generic "Layout transformation
-/// not supported" message from `validate_layout_compatibility` that
-/// does not mention `layer_range`; the message assertion fails. After
-/// c6 the message names both terms.
+// ────────────────── c6 phase 4b: layer-range + transform ──────────────────
+//
+// Universal storage is `[Block, HeadCount, Layer, Outer, Page, HeadSize]`,
+// so a layer subrange of a universal block is interleaved across heads
+// (per-head stride is `num_layers * outer * page * hd`, not a contiguous
+// slab). Phase 4b extended the permute kernels with `nl_full` + `nl_offset`
+// so per-layer scatter writes the correct slice without head-interleave
+// corruption. These tests pin that contract end-to-end through the
+// planner; the kernel-level head-interleave check lives in
+// `kvbm-kernels/tests/kernel_roundtrip.rs::layer_subrange_*`.
+
+/// Per-layer round-trip: N scatter calls (operational → universal,
+/// one layer each) then N gather calls (universal → operational, one
+/// layer each). Must reproduce src byte-for-byte. A stride-math bug
+/// in the universal-side kernel (per-head stride driven by `nl` instead
+/// of `nl_full`) would scribble heads into each other's slots; the
+/// reverse gather then reads the wrong data and the checksum diverges.
+async fn assert_layer_range_round_trip(operational: KvBlockLayout) -> Result<()> {
+    let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
+    // dtype-None matches production layout builders (vLLM connector +
+    // engine sites); the c6 effective_dtype derive picks BF16 at the
+    // catalog gate. Mismatched num_blocks (src=dst=4, mid=8) mirrors
+    // production G1↔G2 tier sizes, same as the c6 auto_promote
+    // reproducers above.
+    let src = build_fc_dtype_none(agent.clone(), operational, 4);
+    let mid = build_fc_dtype_none(agent.clone(), KvBlockLayout::Universal, 8);
+    let dst = build_fc_dtype_none(agent.clone(), operational, 4);
+
+    let src_blocks = vec![0, 1];
+    let mid_blocks = vec![2, 3];
+    let dst_blocks = vec![0, 1];
+
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None).unwrap();
+    let nl = src.layout().config().num_layers;
+
+    // Forward: operational → universal, one layer at a time.
+    for layer in 0..nl {
+        let options = TransferOptionsInternal::builder()
+            .layer_range(layer..layer + 1)
+            .build()?;
+        let forward =
+            execute_transfer(&src, &mid, &src_blocks, &mid_blocks, options, ctx.context())?;
+        forward.await?;
+    }
+
+    // Reverse: universal → operational, one layer at a time. Must
+    // reproduce the full src pattern on dst across all layers.
+    for layer in 0..nl {
+        let options = TransferOptionsInternal::builder()
+            .layer_range(layer..layer + 1)
+            .build()?;
+        let reverse =
+            execute_transfer(&mid, &dst, &mid_blocks, &dst_blocks, options, ctx.context())?;
+        reverse.await?;
+    }
+
+    verify_checksums_by_position(&src_checksums, &src_blocks, &dst, &dst_blocks)?;
+    Ok(())
+}
+
 #[tokio::test]
-async fn auto_promote_layer_range_plus_transform_rejects_loudly() -> Result<()> {
+async fn per_layer_round_trip_nhd_via_universal() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    assert_layer_range_round_trip(KvBlockLayout::OperationalNHD).await
+}
+
+#[tokio::test]
+async fn per_layer_round_trip_hnd_via_universal() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    assert_layer_range_round_trip(KvBlockLayout::OperationalHND).await
+}
+
+/// NHD ↔ HND transpose with `layer_range`. Both sides are operational
+/// so the kernel doesn't need `nl_full` / `nl_offset` — the chunk
+/// pointer table already encodes the layer slice — but the planner-
+/// level wiring still has to walk only the slice's chunks. This pins
+/// that contract on the op↔op path.
+async fn assert_nhd_hnd_layer_range_round_trip(src_layout: KvBlockLayout) -> Result<()> {
+    let other = match src_layout {
+        KvBlockLayout::OperationalNHD => KvBlockLayout::OperationalHND,
+        KvBlockLayout::OperationalHND => KvBlockLayout::OperationalNHD,
+        _ => panic!("transpose layer_range test: src must be NHD or HND, got {src_layout:?}"),
+    };
+    let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
+    let src = build_fc_with_block_layout(agent.clone(), src_layout, 4);
+    let mid = build_fc_with_block_layout(agent.clone(), other, 4);
+    let dst = build_fc_with_block_layout(agent.clone(), src_layout, 4);
+
+    let src_blocks = vec![0, 1];
+    let mid_blocks = vec![2, 3];
+    let dst_blocks = vec![0, 1];
+
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None).unwrap();
+    let nl = src.layout().config().num_layers;
+
+    for layer in 0..nl {
+        let options = TransferOptionsInternal::builder()
+            .layer_range(layer..layer + 1)
+            .use_planner(true)
+            .build()?;
+        let forward =
+            execute_transfer(&src, &mid, &src_blocks, &mid_blocks, options, ctx.context())?;
+        forward.await?;
+    }
+    for layer in 0..nl {
+        let options = TransferOptionsInternal::builder()
+            .layer_range(layer..layer + 1)
+            .use_planner(true)
+            .build()?;
+        let reverse =
+            execute_transfer(&mid, &dst, &mid_blocks, &dst_blocks, options, ctx.context())?;
+        reverse.await?;
+    }
+
+    verify_checksums_by_position(&src_checksums, &src_blocks, &dst, &dst_blocks)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn per_layer_round_trip_nhd_to_hnd() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    assert_nhd_hnd_layer_range_round_trip(KvBlockLayout::OperationalNHD).await
+}
+
+#[tokio::test]
+async fn per_layer_round_trip_hnd_to_nhd() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    assert_nhd_hnd_layer_range_round_trip(KvBlockLayout::OperationalHND).await
+}
+
+/// `layer_range` with `requires_transform = true` and `use_planner = false`
+/// must auto-promote to the planner path under default options. Pins the
+/// production call shape: `intra_pass_offload` sets `layer_range` and
+/// `cuda_stream` but not `use_planner`, and the executor must transparently
+/// route the call to the kernel catalog.
+#[tokio::test]
+async fn auto_promote_g1_nhd_to_g2_univ_with_layer_range() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
 
     let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
-    // Mismatched num_blocks (cross-tier shape) to confirm this test
-    // exercises the same production call shape as the round-trip
-    // tests above and isn't a degenerate same-shape case.
-    let src = build_fc_with_block_layout(agent.clone(), KvBlockLayout::OperationalNHD, 4);
-    let dst = build_fc_with_block_layout(agent.clone(), KvBlockLayout::Universal, 8);
+    let src = build_fc_dtype_none(agent.clone(), KvBlockLayout::OperationalNHD, 4);
+    let dst = build_fc_dtype_none(agent.clone(), KvBlockLayout::Universal, 8);
 
     let src_blocks = vec![0];
     let dst_blocks = vec![0];
 
     let ctx = create_transfer_context(agent, None).unwrap();
 
+    // Default options + layer_range = the exact intra-pass-offload call shape
+    // (use_planner stays false; auto-promote flips it inside execute_transfer).
     let options = TransferOptionsInternal::builder()
         .layer_range(0..1)
         .build()?;
-    let result = execute_transfer(&src, &dst, &src_blocks, &dst_blocks, options, ctx.context());
-    let err = match result {
-        Ok(_) => panic!("layer_range + requires_transform must reject, but call succeeded"),
-        Err(e) => e,
-    };
-    let msg = format!("{err:#}").to_lowercase();
     assert!(
-        msg.contains("layer_range") && msg.contains("transform"),
-        "error must name both 'layer_range' and 'transform'; got: {err:#}"
+        !options.use_planner,
+        "regression guard: builder must not pre-set use_planner — the executor's \
+         auto-promote on requires_transform is the load-bearing mechanism",
     );
+    let forward = execute_transfer(&src, &dst, &src_blocks, &dst_blocks, options, ctx.context())?;
+    forward.await?;
     Ok(())
 }

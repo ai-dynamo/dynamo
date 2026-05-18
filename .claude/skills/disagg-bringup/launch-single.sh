@@ -1,17 +1,18 @@
 #!/bin/bash
-# Launch the Prefill vLLM instance for the disagg-bringup smoke.
-# Mirrors .claude/skills/disagg-bringup/SKILL.md step 3.
+# Launch a single KVBM-enabled vLLM instance — aggregated (non-disagg) mode.
+# No hub, no prefill/decode CD coordination. The connector runs through
+# `ConnectorLeader::update_state_after_alloc` which honors `onboard.mode`,
+# so `KVBM_ONBOARD_MODE=intra` actually fires `execute_local_layerwise_onboard`
+# on warm-prefix requests. This is the bringup the intra-pass-onboard
+# smoke uses to exercise the Phase-4b kernel-catalog + `layer_range` path.
 #
-# Env vars (mirrors start-hub.sh's pattern):
+# Env vars (default-friendly so single-arg invocation works):
 #   KVBM_VENV          (default: /home/ryan/.venvs/dynamo-kvbm)
-#   KVBM_BLOCK_LAYOUT  (default: operational)  — injected into kv_connector_extra_config
-#                        so it survives vLLM's EngineCore subprocess spawn.
-#                        Valid values: operational | universal
-#   KVBM_ONBOARD_MODE  (default: inter)        — injected into kv_connector_extra_config
-#                        under "leader" so it survives the EngineCore spawn (env vars
-#                        are stripped). `intra` enables synchronous layer-wise G2→G1
-#                        onboard during the forward pass; `inter` keeps the default
-#                        async out-of-band Velo-based onboarding.
+#   KVBM_BLOCK_LAYOUT  (operational | universal ; default operational)
+#   KVBM_ONBOARD_MODE  (inter | intra            ; default inter)
+#   KVBM_SINGLE_PORT   (default: 8002)  — separate from 8000/8001 used by
+#                       the disagg prefill/decode pair, so single + disagg
+#                       smokes can coexist if needed.
 set -eu
 
 KVBM_VENV=${KVBM_VENV:-/home/ryan/.venvs/dynamo-kvbm}
@@ -25,6 +26,7 @@ case "$KVBM_ONBOARD_MODE" in
   inter|intra) ;;
   *) echo "KVBM_ONBOARD_MODE must be 'inter' or 'intra', got: '$KVBM_ONBOARD_MODE'" >&2; exit 1 ;;
 esac
+KVBM_SINGLE_PORT=${KVBM_SINGLE_PORT:-8002}
 
 export CUDA_VISIBLE_DEVICES=0
 export DYN_KVBM_CPU_CACHE_GB=2
@@ -33,10 +35,10 @@ exec "$KVBM_VENV/bin/python3" -m vllm.entrypoints.openai.api_server \
   --model Qwen/Qwen3-0.6B \
   --max-model-len 1024 \
   --max-num-seqs 8 \
-  --gpu-memory-utilization 0.15 \
+  --gpu-memory-utilization 0.30 \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
-  --port 8000 \
+  --port "$KVBM_SINGLE_PORT" \
   --kv-transfer-config '{
     "kv_connector": "DynamoConnector",
     "kv_role": "kv_both",
@@ -45,7 +47,6 @@ exec "$KVBM_VENV/bin/python3" -m vllm.entrypoints.openai.api_server \
     "kv_connector_extra_config": {
       "default": { "block_layout": "'"$KVBM_BLOCK_LAYOUT"'" },
       "leader": {
-        "disagg":  { "hub_url": "http://127.0.0.1:1337", "role": "prefill" },
         "cache":   { "host": { "cache_size_gb": 2.0 } },
         "tokio":   { "worker_threads": 2 },
         "control": { "metrics": true },

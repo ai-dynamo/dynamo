@@ -468,6 +468,7 @@ fn dispatch_benchmark_candidate(
                 src,
                 dst,
                 block_pairs,
+                None, // benchmark dispatches full-extent transfers
                 stream,
                 &prepared,
             )?;

@@ -412,7 +412,12 @@ impl PhysicalWorker {
         // Acquire a dedicated stream for all layer transfers
         let stream = self.manager.context().acquire_h2d_stream();
 
-        tracing::debug!(
+        // info!-level so smokes can assert on the trigger without enabling
+        // kvbm-engine debug. The G2 block layout is verified separately
+        // via the hub describe endpoint pre-bringup (see
+        // .claude/skills/disagg-bringup/verify-block-layout.sh), so we
+        // don't duplicate it here.
+        tracing::info!(
             num_layers,
             num_blocks = src_block_ids.len(),
             "Starting layer-wise onboard from G2 to G1"
@@ -438,7 +443,11 @@ impl PhysicalWorker {
             event.record(stream.as_ref())?;
         }
 
-        tracing::debug!(num_layers, "Layer-wise onboard complete - events recorded");
+        tracing::info!(
+            num_layers,
+            num_blocks = src_block_ids.len(),
+            "Layer-wise onboard complete - events recorded"
+        );
 
         if let Some(observability) = self.manager.context().observability() {
             observability

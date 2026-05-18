@@ -293,35 +293,22 @@ pub(crate) fn execute_transfer(
     // options call path (`TransferOptions::default()` → `use_planner =
     // false`) now needs this promotion.
     //
-    // `layer_range + requires_transform` stays unsupported (the planner
-    // builds whole-block transform invocations today; see roadmap
-    // phase 4b in c6 plan). Bail loudly so the caller learns the
-    // specific incompatibility, not a generic "Layout transformation
-    // not supported" from the legacy executor.
+    // c6 phase 4b: `layer_range + requires_transform` is now supported.
+    // The kernel takes `nl_full` + `nl_offset` so per-layer scatter
+    // into a universal block writes the slice without head-interleave
+    // corruption (see `kvbm_kernels_block_to_universal_kernel`).
     let mut options = options;
     let needs_transform = src
         .layout()
         .block_layout()
         .requires_transform(&dst.layout().block_layout());
-    if needs_transform {
-        if options.layer_range.is_some() {
-            anyhow::bail!(
-                "execute_transfer: layer_range is incompatible with requires_transform=true \
-                 (src={:?}, dst={:?}, layer_range={:?}); layer-restricted transforms are not \
-                 supported on the planner path today (c6 roadmap phase 4b)",
-                src.layout().block_layout(),
-                dst.layout().block_layout(),
-                options.layer_range,
-            );
-        }
-        if !options.use_planner {
-            tracing::debug!(
-                src = ?src.layout().block_layout(),
-                dst = ?dst.layout().block_layout(),
-                "executor: auto-promoting to use_planner=true for cross-layout transform"
-            );
-            options.use_planner = true;
-        }
+    if needs_transform && !options.use_planner {
+        tracing::debug!(
+            src = ?src.layout().block_layout(),
+            dst = ?dst.layout().block_layout(),
+            "executor: auto-promoting to use_planner=true for cross-layout transform"
+        );
+        options.use_planner = true;
     }
 
     // Select transfer plan based on locations and capabilities
@@ -419,10 +406,24 @@ fn execute_direct_transfer(
                 // Errors here are NOT silently fallen back to the
                 // legacy executor — the caller flipped the flag, so a
                 // failure is propagated as-is.
-                if layer_range.is_some() {
+                //
+                // c6 phase 4b: layer_range is honoured for the kernel-
+                // transform path (the universal/transpose kernels take
+                // `nl_full` + `nl_offset`). Same-layout direct copies
+                // still reject layer_range because plan_copy's Direct
+                // path doesn't slice on Layer — those stay on the
+                // legacy executor until plan_copy grows the support.
+                if layer_range.is_some()
+                    && !src
+                        .layout()
+                        .block_layout()
+                        .requires_transform(&dst.layout().block_layout())
+                {
                     return Err(anyhow::anyhow!(
-                        "use_planner=true currently incompatible with layer_range; \
-                         layer-restricted transfers stay on the legacy executor"
+                        "use_planner=true currently incompatible with layer_range for \
+                         same-layout direct copies; layer-restricted direct transfers stay \
+                         on the legacy executor (transform pairs now supported via the \
+                         kernel catalog)"
                     ));
                 }
                 return planner::execute_planner_cuda_transfer(
@@ -432,6 +433,7 @@ fn execute_direct_transfer(
                     dst_block_ids,
                     strategy,
                     cuda_stream,
+                    layer_range,
                     axis_slices,
                     plan_handles,
                     ctx,

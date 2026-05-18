@@ -167,6 +167,7 @@ pub(crate) fn execute_planner_cuda_transfer(
     dst_block_ids: &[BlockId],
     strategy: TransferStrategy,
     cuda_stream: Option<Arc<CudaStream>>,
+    layer_range: Option<std::ops::Range<usize>>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
     plan_handles: Option<(LayoutHandle, LayoutHandle)>,
     ctx: &TransferContext,
@@ -186,6 +187,7 @@ pub(crate) fn execute_planner_cuda_transfer(
         dst_block_ids,
         strategy,
         CopyPolicy::default(),
+        layer_range,
         axis_slices,
         plan_handles,
         "execute_planner_cuda_transfer",
@@ -233,8 +235,17 @@ pub(crate) fn execute_planner_cuda_transfer(
             invocation,
             block_pairs,
             prepared,
+            layer_range,
         } => {
-            dispatch_transform_kernel(&invocation, src, dst, &block_pairs, &stream, &prepared)?;
+            dispatch_transform_kernel(
+                &invocation,
+                src,
+                dst,
+                &block_pairs,
+                layer_range,
+                &stream,
+                &prepared,
+            )?;
         }
         PlanOutcome::SmallStridedCopy(ops) => {
             dispatch_small_strided_copy(&ops, &stream)?;
@@ -351,6 +362,7 @@ pub(crate) fn execute_planner_nixl_transfer(
         dst_block_ids,
         strategy,
         nixl_policy,
+        None, // layer_range: NIXL paths do not yet support layer-restricted transfers
         axis_slices,
         plan_handles,
         "execute_planner_nixl_transfer",
@@ -362,6 +374,7 @@ pub(crate) fn execute_planner_nixl_transfer(
             invocation,
             block_pairs,
             prepared: _,
+            layer_range: _, // NIXL transform path runs full-extent
         } => {
             // Staged NIXL transforms run the kernel on the local bounce
             // buffer side; the bounce-side direct copies don't go
@@ -530,6 +543,10 @@ enum PlanOutcome {
         invocation: crate::transfer::kernel_catalog::KernelInvocation,
         block_pairs: Vec<(BlockId, BlockId)>,
         prepared: std::sync::Arc<PreparedTransferPlan>,
+        /// Optional contiguous layer subrange the kernel must walk.
+        /// `None` = full extent (legacy behaviour); `Some(range)`
+        /// restricts emit + kernel invocation to that slice.
+        layer_range: Option<std::ops::Range<usize>>,
     },
     /// PR-7.3: threshold-fallback for same-layout copies whose inner
     /// contiguous tail is below `min_inner_bytes`. Each op has the same
@@ -614,6 +631,7 @@ fn planner_prelude(
     dst_block_ids: &[BlockId],
     strategy: TransferStrategy,
     policy: CopyPolicy,
+    layer_range: Option<std::ops::Range<usize>>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
     plan_handles: Option<(LayoutHandle, LayoutHandle)>,
     entry_label: &'static str,
@@ -632,6 +650,7 @@ fn planner_prelude(
         policy,
         benchmark_outcome,
         prepared_plan,
+        layer_range,
         axis_slices,
     )
 }
@@ -723,6 +742,7 @@ fn plan_and_lower(
     policy: CopyPolicy,
     benchmark_outcome: Option<BenchmarkOutcome>,
     prepared_plan: Option<std::sync::Arc<PreparedTransferPlan>>,
+    layer_range: Option<std::ops::Range<usize>>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
 ) -> Result<PlanOutcome> {
     if validate_planner_block_ids(src_block_ids, dst_block_ids)?.is_noop() {
@@ -775,11 +795,28 @@ fn plan_and_lower(
                     dst_kv,
                 )
             })?;
+            // Validate layer_range up front so the caller sees a precise
+            // error here rather than a generic kernel-launch failure deep
+            // in the FFI.
+            if let Some(ref r) = layer_range {
+                let nl_full = prepared.invocation.num_layers;
+                if r.end > nl_full || r.start > r.end {
+                    bail!(
+                        "plan_and_lower: layer_range {:?} out of bounds for \
+                         invocation.num_layers={} (src={:?}, dst={:?})",
+                        r,
+                        nl_full,
+                        src_kv,
+                        dst_kv,
+                    );
+                }
+            }
             let invocation = prepared.invocation;
             return Ok(PlanOutcome::Transform {
                 invocation,
                 block_pairs,
                 prepared,
+                layer_range,
             });
         }
     }
@@ -787,6 +824,13 @@ fn plan_and_lower(
     // Direct (same-layout / sliced) path: project AnnotatedLayouts
     // inline. The projection is microseconds — too cheap to cache
     // against the millisecond-scale DMA/RDMA the planner is feeding.
+    if layer_range.is_some() {
+        bail!(
+            "plan_and_lower: layer_range is currently only supported on the \
+             permute-kernel transform path; same-layout direct copies stay on \
+             the legacy executor for layer-restricted transfers."
+        );
+    }
     if prepared_plan.is_some() {
         bail!(
             "plan_and_lower: prepared plan supplied for a direct same-layout pair; \
@@ -1200,6 +1244,12 @@ pub(crate) fn validate_nixl_planner_entry(
 /// - [`KernelKind::NhdHndTranspose`] transposes between two
 ///   operational layouts; both sides are walked the same way.
 ///
+/// `layer_range` restricts the transfer to a contiguous layer slice:
+/// emit methods walk only those layers, and the FFI call passes
+/// `nl = range.len()`, `nl_full = invocation.num_layers`, `nl_offset =
+/// range.start` so the universal-side kernels use the full per-head
+/// stride. `None` means full-extent (legacy behaviour).
+///
 /// The shared scratch + upload + drain path is owned by
 /// [`with_transform_scratch_upload`]; this function only picks the
 /// per-kind emit method and FFI entrypoint.
@@ -1208,6 +1258,7 @@ pub(crate) fn dispatch_transform_kernel(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     block_pairs: &[(BlockId, BlockId)],
+    layer_range: Option<std::ops::Range<usize>>,
     stream: &Arc<CudaStream>,
     prepared: &PreparedTransferPlan,
 ) -> Result<()> {
@@ -1216,7 +1267,25 @@ pub(crate) fn dispatch_transform_kernel(
     use crate::transfer::kernel_catalog::KernelKind;
 
     let stream_raw = stream.cu_stream() as cudaStream_t;
-    let nl = invocation.num_layers;
+    let nl_full = invocation.num_layers;
+    if let Some(ref r) = layer_range {
+        if r.end > nl_full || r.start > r.end {
+            bail!(
+                "dispatch_transform_kernel: layer_range {:?} out of bounds for \
+                 invocation.num_layers={}",
+                r,
+                nl_full,
+            );
+        }
+        if r.is_empty() {
+            // Empty layer range — nothing to do.
+            return Ok(());
+        }
+    }
+    let (nl, nl_offset) = match &layer_range {
+        Some(r) => (r.len(), r.start),
+        None => (nl_full, 0),
+    };
     let no = invocation.outer_dim;
     let nt = invocation.page_size;
     let nh = invocation.num_heads;
@@ -1241,12 +1310,14 @@ pub(crate) fn dispatch_transform_kernel(
         })
         .collect();
 
+    let layer_range_ref = layer_range.as_ref();
     let (a_dev, b_dev) = with_transform_scratch_upload(stream, prepared, |a, b| {
         match invocation.kind {
             KernelKind::UniversalFromBlock => prepared.emit_universal_kind_pointers(
                 src, // operational side
                 &a_block_ids,
                 &b_block_ids,
+                layer_range_ref,
                 a,
                 b,
             ),
@@ -1254,12 +1325,19 @@ pub(crate) fn dispatch_transform_kernel(
                 dst, // operational side
                 &a_block_ids,
                 &b_block_ids,
+                layer_range_ref,
                 a,
                 b,
             ),
-            KernelKind::NhdHndTranspose => {
-                prepared.emit_oo_transpose_pointers(src, dst, &a_block_ids, &b_block_ids, a, b)
-            }
+            KernelKind::NhdHndTranspose => prepared.emit_oo_transpose_pointers(
+                src,
+                dst,
+                &a_block_ids,
+                &b_block_ids,
+                layer_range_ref,
+                a,
+                b,
+            ),
         }
     })?;
 
@@ -1295,6 +1373,8 @@ pub(crate) fn dispatch_transform_kernel(
                     no,
                     nt,
                     hd,
+                    nl_full,
+                    nl_offset,
                     invocation.dtype,
                     invocation.block_layout,
                     stream_raw,
@@ -1315,6 +1395,8 @@ pub(crate) fn dispatch_transform_kernel(
                     no,
                     nt,
                     hd,
+                    nl_full,
+                    nl_offset,
                     invocation.dtype,
                     invocation.block_layout,
                     stream_raw,
@@ -1322,7 +1404,10 @@ pub(crate) fn dispatch_transform_kernel(
             }
         }
         KernelKind::NhdHndTranspose => {
-            // a = src op, b = dst op.
+            // a = src op, b = dst op. The op↔op kernel doesn't need
+            // `nl_full` / `nl_offset` — both sides are operational so
+            // the chunk-pointer table already encodes the layer slice,
+            // and `nl` here is the slice length.
             unsafe {
                 kvbm_kernels::nhd_hnd_transpose(
                     a_ptr_raw as usize as *const *const c_void,
@@ -1484,6 +1569,7 @@ impl OwnedStagedContext {
             leg_policy,
             None,
             None,
+            None,       // layer_range: staged NIXL legs run full-extent
             Vec::new(), // axis_slices: staged NIXL legs run full-extent
         )?;
         let ops = match outcome {
@@ -1710,6 +1796,7 @@ fn dispatch_staged_nixl_transform(
                 src,
                 bounce_layout,
                 &kernel_pairs,
+                None, // staged NIXL transforms run full-extent
                 &staged.stream,
                 &stage1_prepared,
             )?;
@@ -1752,6 +1839,7 @@ fn dispatch_staged_nixl_transform(
                         &bounce_owned,
                         &dst_owned,
                         &kernel_pairs,
+                        None, // staged NIXL transforms run full-extent
                         &staged.stream,
                         &stage2_prepared,
                     )?;

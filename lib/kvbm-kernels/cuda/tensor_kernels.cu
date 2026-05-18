@@ -147,15 +147,23 @@ kvbm_kernels_po2_shift(size_t x)
 
 // Flatten the [nh, nl, no, nt, hd] coordinates into a linear index so a single
 // launch can cover many independent blocks in one pass.
+//
+// Layer-subrange semantics: `nl` is the number of layers in the slice being
+// transferred (== range.len()), `nl_full` is the universal-side layer count
+// for stride math, and `nl_offset` positions the slice within each universal
+// block. For full-extent calls, `nl_full == nl` and `nl_offset == 0` and the
+// universal-side offset reduces to the original flat residual.
 template <typename T, BlockLayout Layout>
 __global__ void
 kvbm_kernels_block_to_universal_kernel(
     const T* const* block_chunks, T* const* universal_blocks, size_t block_stride, size_t total_per_block,
-    size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd)
+    size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd, size_t nl_full, size_t nl_offset)
 {
   size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
   size_t stride = blockDim.x * gridDim.x;
   size_t total = total_per_block * num_blocks;
+  size_t univ_head_stride = nl_full * no * nt * hd;
+  size_t univ_layer_stride = no * nt * hd;
 
   while (thread_id < total) {
     size_t block_idx = thread_id / total_per_block;
@@ -181,22 +189,28 @@ kvbm_kernels_block_to_universal_kernel(
     size_t chunk_offset = block_inner_offset<Layout>(nt_idx, nh_idx, hd_idx, nt, nh, hd);
 
     T* universal_base = universal_blocks[block_idx];
-    universal_base[residual] = chunk_base[chunk_offset];
+    size_t univ_offset = nh_idx * univ_head_stride + (nl_offset + nl_idx) * univ_layer_stride + no_idx * (nt * hd) +
+                         nt_idx * hd + hd_idx;
+    universal_base[univ_offset] = chunk_base[chunk_offset];
     thread_id += stride;
   }
 }
 
 // The inverse of kvbm_kernels_block_to_universal_kernel: peel apart the same linear index
 // and scatter back into the layer/outer stacks.
+//
+// See above for `nl_full` / `nl_offset` semantics.
 template <typename T, BlockLayout Layout>
 __global__ void
 kvbm_kernels_universal_to_block_kernel(
     const T* const* universal_blocks, T* const* block_chunks, size_t block_stride, size_t total_per_block,
-    size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd)
+    size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd, size_t nl_full, size_t nl_offset)
 {
   size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
   size_t stride = blockDim.x * gridDim.x;
   size_t total = total_per_block * num_blocks;
+  size_t univ_head_stride = nl_full * no * nt * hd;
+  size_t univ_layer_stride = no * nt * hd;
 
   while (thread_id < total) {
     size_t block_idx = thread_id / total_per_block;
@@ -222,7 +236,9 @@ kvbm_kernels_universal_to_block_kernel(
     size_t chunk_offset = block_inner_offset<Layout>(nt_idx, nh_idx, hd_idx, nt, nh, hd);
 
     const T* universal_base = universal_blocks[block_idx];
-    chunk_base[chunk_offset] = universal_base[residual];
+    size_t univ_offset = nh_idx * univ_head_stride + (nl_offset + nl_idx) * univ_layer_stride + no_idx * (nt * hd) +
+                         nt_idx * hd + hd_idx;
+    chunk_base[chunk_offset] = universal_base[univ_offset];
     thread_id += stride;
   }
 }
@@ -231,7 +247,7 @@ template <typename T>
 cudaError_t
 kvbm_kernels_launch_block_to_universal_impl(
     void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
-    size_t nt, size_t hd, BlockLayout layout, cudaStream_t stream)
+    size_t nt, size_t hd, size_t nl_full, size_t nl_offset, BlockLayout layout, cudaStream_t stream)
 {
   size_t block_stride = nl * no;
   size_t total_per_block = nh * nl * no * nt * hd;
@@ -241,6 +257,9 @@ kvbm_kernels_launch_block_to_universal_impl(
   }
 
   if (!block_ptrs || !universal_ptrs) {
+    return cudaErrorInvalidValue;
+  }
+  if (nl_offset + nl > nl_full) {
     return cudaErrorInvalidValue;
   }
 
@@ -255,10 +274,10 @@ kvbm_kernels_launch_block_to_universal_impl(
 
   if (layout == BlockLayout::NHD) {
     kvbm_kernels_block_to_universal_kernel<T, BlockLayout::NHD><<<grid_dim, kBlockDim, 0, stream>>>(
-        chunks, universal_blocks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd);
+        chunks, universal_blocks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset);
   } else {
     kvbm_kernels_block_to_universal_kernel<T, BlockLayout::HND><<<grid_dim, kBlockDim, 0, stream>>>(
-        chunks, universal_blocks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd);
+        chunks, universal_blocks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset);
   }
 
   return cudaGetLastError();
@@ -268,7 +287,7 @@ template <typename T>
 cudaError_t
 kvbm_kernels_launch_block_from_universal_impl(
     const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
-    size_t nt, size_t hd, BlockLayout layout, cudaStream_t stream)
+    size_t nt, size_t hd, size_t nl_full, size_t nl_offset, BlockLayout layout, cudaStream_t stream)
 {
   size_t block_stride = nl * no;
   size_t total_per_block = nh * nl * no * nt * hd;
@@ -278,6 +297,9 @@ kvbm_kernels_launch_block_from_universal_impl(
   }
 
   if (!block_ptrs || !universal_ptrs) {
+    return cudaErrorInvalidValue;
+  }
+  if (nl_offset + nl > nl_full) {
     return cudaErrorInvalidValue;
   }
 
@@ -292,10 +314,10 @@ kvbm_kernels_launch_block_from_universal_impl(
 
   if (layout == BlockLayout::NHD) {
     kvbm_kernels_universal_to_block_kernel<T, BlockLayout::NHD><<<grid_dim, kBlockDim, 0, stream>>>(
-        universal_blocks, chunks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd);
+        universal_blocks, chunks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset);
   } else {
     kvbm_kernels_universal_to_block_kernel<T, BlockLayout::HND><<<grid_dim, kBlockDim, 0, stream>>>(
-        universal_blocks, chunks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd);
+        universal_blocks, chunks, block_stride, total_per_block, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset);
   }
 
   return cudaGetLastError();
@@ -303,10 +325,14 @@ kvbm_kernels_launch_block_from_universal_impl(
 
 }  // namespace
 
+// `nl` is the number of layers in the slice being transferred (a.k.a.
+// `range.len()`). For full-extent calls pass `nl_full == nl` and
+// `nl_offset == 0`; for layer-restricted calls pass the universal-side
+// full layer count as `nl_full` and the slice start as `nl_offset`.
 extern "C" cudaError_t
 kvbm_kernels_launch_universal_from_block(
     void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
-    size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
+    size_t nt, size_t hd, size_t nl_full, size_t nl_offset, int dtype_value, int layout_value, cudaStream_t stream)
 {
   auto dtype = static_cast<TensorDataType>(dtype_value);
   auto layout = static_cast<BlockLayout>(layout_value);
@@ -314,16 +340,16 @@ kvbm_kernels_launch_universal_from_block(
   switch (dtype) {
     case TensorDataType::F16:
       return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F16>::type>(
-          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, layout, stream);
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     case TensorDataType::BF16:
       return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
-          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, layout, stream);
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     case TensorDataType::F32:
       return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F32>::type>(
-          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, layout, stream);
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     case TensorDataType::F64:
       return kvbm_kernels_launch_block_to_universal_impl<typename DTypeTraits<TensorDataType::F64>::type>(
-          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, layout, stream);
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     default:
       return cudaErrorInvalidValue;
   }
@@ -332,7 +358,7 @@ kvbm_kernels_launch_universal_from_block(
 extern "C" cudaError_t
 kvbm_kernels_launch_block_from_universal(
     const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
-    size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
+    size_t nt, size_t hd, size_t nl_full, size_t nl_offset, int dtype_value, int layout_value, cudaStream_t stream)
 {
   auto dtype = static_cast<TensorDataType>(dtype_value);
   auto layout = static_cast<BlockLayout>(layout_value);
@@ -340,16 +366,16 @@ kvbm_kernels_launch_block_from_universal(
   switch (dtype) {
     case TensorDataType::F16:
       return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F16>::type>(
-          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, layout, stream);
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     case TensorDataType::BF16:
       return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
-          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, layout, stream);
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     case TensorDataType::F32:
       return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F32>::type>(
-          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, layout, stream);
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     case TensorDataType::F64:
       return kvbm_kernels_launch_block_from_universal_impl<typename DTypeTraits<TensorDataType::F64>::type>(
-          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, layout, stream);
+          universal_ptrs, block_ptrs, num_blocks, nh, nl, no, nt, hd, nl_full, nl_offset, layout, stream);
     default:
       return cudaErrorInvalidValue;
   }

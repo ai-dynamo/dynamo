@@ -62,6 +62,8 @@ unsafe extern "C" {
         no: usize,
         nt: usize,
         hd: usize,
+        nl_full: usize,
+        nl_offset: usize,
         dtype: i32,
         layout: i32,
         stream: cudaStream_t,
@@ -76,6 +78,8 @@ unsafe extern "C" {
         no: usize,
         nt: usize,
         hd: usize,
+        nl_full: usize,
+        nl_offset: usize,
         dtype: i32,
         layout: i32,
         stream: cudaStream_t,
@@ -198,8 +202,12 @@ pub unsafe fn memcpy_batch(
 ///
 /// * `universal_ptrs` – device-accessible pointer to `num_blocks` universal bases.
 /// * `block_ptrs` – device-accessible pointer to a flattened `[num_blocks][nl*no]`
-///   table of chunk pointers.
-/// * `nh, nl, no, nt, hd` – logical dimensions of each universal tensor.
+///   table of chunk pointers (for the slice; `nl == range.len()`).
+/// * `nh, nl, no, nt, hd` – logical dimensions of the slice being transferred.
+/// * `nl_full` – universal-side full layer count (per-head stride).
+///   For full-extent calls pass `nl_full == nl`.
+/// * `nl_offset` – starting layer index within each universal block.
+///   For full-extent calls pass `0`.
 /// * `stream` – CUDA stream used for the launch.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn universal_from_block(
@@ -211,6 +219,8 @@ pub unsafe fn universal_from_block(
     no: usize,
     nt: usize,
     hd: usize,
+    nl_full: usize,
+    nl_offset: usize,
     dtype: TensorDataType,
     layout: BlockLayout,
     stream: cudaStream_t,
@@ -225,6 +235,8 @@ pub unsafe fn universal_from_block(
             no,
             nt,
             hd,
+            nl_full,
+            nl_offset,
             dtype as i32,
             layout as i32,
             stream,
@@ -271,6 +283,9 @@ pub unsafe fn nhd_hnd_transpose(
 }
 
 /// Copy `num_blocks` universal tensors back into their block stacks.
+///
+/// `nl_full` / `nl_offset` carry layer-subrange semantics — see
+/// [`universal_from_block`] for the contract.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn block_from_universal(
     universal_ptrs: *const *const c_void,
@@ -281,6 +296,8 @@ pub unsafe fn block_from_universal(
     no: usize,
     nt: usize,
     hd: usize,
+    nl_full: usize,
+    nl_offset: usize,
     dtype: TensorDataType,
     layout: BlockLayout,
     stream: cudaStream_t,
@@ -295,6 +312,8 @@ pub unsafe fn block_from_universal(
             no,
             nt,
             hd,
+            nl_full,
+            nl_offset,
             dtype as i32,
             layout as i32,
             stream,
@@ -439,6 +458,8 @@ mod tests {
                     no,
                     nt,
                     hd,
+                    nl,
+                    0,
                     dtype,
                     layout,
                     stream_raw,
@@ -519,6 +540,8 @@ mod tests {
                     no,
                     nt,
                     hd,
+                    nl,
+                    0,
                     dtype,
                     layout,
                     stream_raw,

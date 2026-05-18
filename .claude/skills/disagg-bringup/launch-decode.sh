@@ -7,6 +7,7 @@
 #   KVBM_BLOCK_LAYOUT  (default: operational)  — injected into kv_connector_extra_config
 #                        so it survives vLLM's EngineCore subprocess spawn.
 #                        Valid values: operational | universal
+#   KVBM_ONBOARD_MODE  (default: inter)        — see launch-prefill.sh for semantics.
 set -eu
 
 KVBM_VENV=${KVBM_VENV:-/home/ryan/.venvs/dynamo-kvbm}
@@ -14,6 +15,11 @@ KVBM_BLOCK_LAYOUT=${KVBM_BLOCK_LAYOUT:-operational}
 case "$KVBM_BLOCK_LAYOUT" in
   operational|universal) ;;
   *) echo "KVBM_BLOCK_LAYOUT must be 'operational' or 'universal', got: '$KVBM_BLOCK_LAYOUT'" >&2; exit 1 ;;
+esac
+KVBM_ONBOARD_MODE=${KVBM_ONBOARD_MODE:-inter}
+case "$KVBM_ONBOARD_MODE" in
+  inter|intra) ;;
+  *) echo "KVBM_ONBOARD_MODE must be 'inter' or 'intra', got: '$KVBM_ONBOARD_MODE'" >&2; exit 1 ;;
 esac
 
 export CUDA_VISIBLE_DEVICES=0
@@ -38,7 +44,8 @@ exec "$KVBM_VENV/bin/python3" -m vllm.entrypoints.openai.api_server \
         "disagg":  { "hub_url": "http://127.0.0.1:1337", "role": "decode" },
         "cache":   { "host": { "cache_size_gb": 2.0 } },
         "tokio":   { "worker_threads": 2 },
-        "control": { "metrics": true }
+        "control": { "metrics": true },
+        "onboard": { "mode": "'"$KVBM_ONBOARD_MODE"'" }
       },
       "worker": {
         "nixl":  { "backends": { "UCX": {}, "POSIX": {} } },
