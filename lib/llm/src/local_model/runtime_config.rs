@@ -198,85 +198,80 @@ impl ModelRuntimeConfig {
 mod tests {
     use super::*;
 
-    /// Each test runs in its own thread, so flip both env vars to a known state to avoid
-    /// inheriting state from a previously-run test or the surrounding process.
-    fn clear_env() {
-        // SAFETY: tests in this module are not run concurrently for the same env vars;
-        // see `serialize_env_test` mutex.
-        unsafe {
-            std::env::remove_var("DYN_STABLE_ROUTING_ID");
-            std::env::remove_var("HOSTNAME");
-        }
-    }
-
-    fn set_env(key: &str, value: Option<&str>) {
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-
-    /// Tests in this module mutate process-wide env vars. Serialize them so they don't race
-    /// each other when `cargo test` uses multiple threads.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
+    // `#[serial_test::serial]` (serialize against every other env-touching test in the
+    // binary, not just this module). A module-local mutex would be insufficient because
+    // `std::env::{set_var, remove_var}` race against `getenv` in any other thread.
 
     #[test]
-    fn populates_from_hostname_when_unset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_env();
-        set_env("HOSTNAME", Some("worker-3"));
-
-        let mut cfg = ModelRuntimeConfig::default();
-        cfg.populate_stable_routing_id_from_env();
-        assert_eq!(cfg.stable_routing_id.as_deref(), Some("worker-3"));
-    }
-
-    #[test]
-    fn dyn_override_wins_over_hostname() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_env();
-        set_env("HOSTNAME", Some("worker-3"));
-        set_env("DYN_STABLE_ROUTING_ID", Some("router-shard-7"));
-
-        let mut cfg = ModelRuntimeConfig::default();
-        cfg.populate_stable_routing_id_from_env();
-        assert_eq!(cfg.stable_routing_id.as_deref(), Some("router-shard-7"));
+    #[serial_test::serial]
+    fn env_precedence() {
+        // HOSTNAME alone populates the field…
+        temp_env::with_vars(
+            [
+                ("DYN_STABLE_ROUTING_ID", None::<&str>),
+                ("HOSTNAME", Some("worker-3")),
+            ],
+            || {
+                let mut cfg = ModelRuntimeConfig::default();
+                cfg.populate_stable_routing_id_from_env();
+                assert_eq!(cfg.stable_routing_id.as_deref(), Some("worker-3"));
+            },
+        );
+        // …and the explicit DYN_ override wins when both are set.
+        temp_env::with_vars(
+            [
+                ("DYN_STABLE_ROUTING_ID", Some("router-shard-7")),
+                ("HOSTNAME", Some("worker-3")),
+            ],
+            || {
+                let mut cfg = ModelRuntimeConfig::default();
+                cfg.populate_stable_routing_id_from_env();
+                assert_eq!(cfg.stable_routing_id.as_deref(), Some("router-shard-7"));
+            },
+        );
     }
 
     #[test]
+    #[serial_test::serial]
     fn preserves_caller_supplied_value() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_env();
-        set_env("HOSTNAME", Some("worker-3"));
-
-        let mut cfg = ModelRuntimeConfig {
-            stable_routing_id: Some("explicit".to_string()),
-            ..Default::default()
-        };
-        cfg.populate_stable_routing_id_from_env();
-        assert_eq!(cfg.stable_routing_id.as_deref(), Some("explicit"));
+        temp_env::with_vars(
+            [
+                ("DYN_STABLE_ROUTING_ID", None::<&str>),
+                ("HOSTNAME", Some("worker-3")),
+            ],
+            || {
+                let mut cfg = ModelRuntimeConfig {
+                    stable_routing_id: Some("explicit".to_string()),
+                    ..Default::default()
+                };
+                cfg.populate_stable_routing_id_from_env();
+                assert_eq!(cfg.stable_routing_id.as_deref(), Some("explicit"));
+            },
+        );
     }
 
     #[test]
-    fn empty_value_treated_as_unset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_env();
-        set_env("HOSTNAME", Some("   "));
-
-        let mut cfg = ModelRuntimeConfig::default();
-        cfg.populate_stable_routing_id_from_env();
-        assert!(cfg.stable_routing_id.is_none());
-    }
-
-    #[test]
-    fn no_env_leaves_field_none() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        clear_env();
-        let mut cfg = ModelRuntimeConfig::default();
-        cfg.populate_stable_routing_id_from_env();
-        assert!(cfg.stable_routing_id.is_none());
+    #[serial_test::serial]
+    fn no_meaningful_env_leaves_field_none() {
+        // Whitespace-only HOSTNAME is rejected…
+        temp_env::with_vars(
+            [
+                ("DYN_STABLE_ROUTING_ID", None::<&str>),
+                ("HOSTNAME", Some("   ")),
+            ],
+            || {
+                let mut cfg = ModelRuntimeConfig::default();
+                cfg.populate_stable_routing_id_from_env();
+                assert!(cfg.stable_routing_id.is_none());
+            },
+        );
+        // …as is having neither var set at all.
+        temp_env::with_vars_unset(["DYN_STABLE_ROUTING_ID", "HOSTNAME"], || {
+            let mut cfg = ModelRuntimeConfig::default();
+            cfg.populate_stable_routing_id_from_env();
+            assert!(cfg.stable_routing_id.is_none());
+        });
     }
 
     #[test]
