@@ -4,14 +4,13 @@
 //! Rust-based native vLLM backend using the backend-common [`LLMEngine`] contract.
 
 use std::ffi::OsString;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
 use dynamo_backend_common::ModelInput;
 use dynamo_backend_common::{
-    AsyncEngineContext, CommonArgs, DynamoError, EngineConfig, LLMEngine, LLMEngineOutput,
+    CommonArgs, DynamoError, EngineConfig, GenerateContext, LLMEngine, LLMEngineOutput,
     LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, usage,
 };
 use futures::{StreamExt, stream::BoxStream};
@@ -139,9 +138,11 @@ impl VllmBackend {
             endpoint: args.common.endpoint,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
+            disaggregation_mode: args.common.disaggregation_mode,
             model_name: args.model,
             served_model_name: args.served_model_name,
             model_input: ModelInput::Tokens,
+            ..Default::default()
         };
         Ok((engine, config))
     }
@@ -149,7 +150,7 @@ impl VllmBackend {
 
 #[async_trait]
 impl LLMEngine for VllmBackend {
-    async fn start(&self) -> Result<EngineConfig, DynamoError> {
+    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         let mut inner = self.inner.write().await;
         if inner.is_some() {
             return Err(engine_shutdown("vLLM backend has already been started"));
@@ -178,6 +179,11 @@ impl LLMEngine for VllmBackend {
         let handshake_address = managed_config.handshake_address();
         let advertised_host = managed_config.handshake_host.clone();
         let engine_count = managed_config.data_parallel_size;
+        let data_parallel_size = u32::try_from(engine_count).map_err(|_| {
+            invalid_arg(format!(
+                "data_parallel_size must fit in u32; got {engine_count}"
+            ))
+        })?;
         let ready_timeout = Duration::from_secs(self.engine_ready_timeout_secs);
 
         info!(
@@ -239,14 +245,19 @@ impl LLMEngine for VllmBackend {
             total_kv_blocks,
             max_num_seqs: self.extra.max_num_seqs,
             max_num_batched_tokens: self.extra.max_num_batched_tokens,
+            data_parallel_size: Some(data_parallel_size),
+            data_parallel_start_rank: Some(0),
+            bootstrap_host: None,
+            bootstrap_port: None,
+            runtime_data: Default::default(),
         })
     }
 
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+        ctx: GenerateContext,
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let request_id = ctx.id().to_string();
         let prompt_tokens = request.token_ids.len() as u32;
 
@@ -271,15 +282,15 @@ impl LLMEngine for VllmBackend {
                 tokio::select! {
                     _ = ctx.stopped() => {
                         debug!(request_id = %ctx.id(), "vLLM backend request cancelled");
-                        yield LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_tokens, completion_tokens));
+                        yield Ok(LLMEngineOutput::cancelled()
+                            .with_usage(usage(prompt_tokens, completion_tokens)));
                         break;
                     }
                     next = output_stream.next() => {
                         let Some(next) = next else {
-                            yield LLMEngineOutput::error(
+                            yield Err(backend_unknown(
                                 "vLLM backend stream ended before a terminal output".to_string()
-                            );
+                            ));
                             break;
                         };
 
@@ -289,15 +300,15 @@ impl LLMEngine for VllmBackend {
                                     .saturating_add(output.token_ids.len() as u32);
                                 let finished = output.finished();
                                 let mapped = map_output(output, prompt_tokens, completion_tokens);
-                                yield mapped;
+                                yield Ok(mapped);
                                 if finished {
                                     break;
                                 }
                             }
                             Err(error) => {
-                                yield LLMEngineOutput::error(
+                                yield Err(backend_unknown(
                                     format!("vLLM backend stream failed: {error}")
-                                );
+                                ));
                                 break;
                             }
                         }
@@ -441,11 +452,15 @@ mod tests {
     async fn vllm_backend_passes_conformance() {
         let model = std::env::var("DYNAMO_VLLM_BACKEND_CONFORMANCE_MODEL")
             .expect("set DYNAMO_VLLM_BACKEND_CONFORMANCE_MODEL to run this test");
-        let (engine, _config) =
-            VllmBackend::from_args(Some(vec!["dynamo-vllm-backend".to_string(), model])).unwrap();
-
-        dynamo_backend_common::testing::run_conformance(engine)
-            .await
-            .expect("conformance");
+        dynamo_backend_common::testing::run_conformance(move || {
+            let (engine, _config) = VllmBackend::from_args(Some(vec![
+                "dynamo-vllm-backend".to_string(),
+                model.clone(),
+            ]))
+            .unwrap();
+            engine
+        })
+        .await
+        .expect("conformance");
     }
 }

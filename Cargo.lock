@@ -10249,7 +10249,6 @@ version = "0.1.0"
 source = "git+https://github.com/Inferact/vllm-frontend-rs.git?rev=e6f9e3877cf86b8698aee76cd2e866c029f1efe6#e6f9e3877cf86b8698aee76cd2e866c029f1efe6"
 dependencies = [
  "arc-swap",
- "bytemuck",
  "byteorder",
  "bytes",
  "enum-as-inner",

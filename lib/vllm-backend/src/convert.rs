@@ -308,6 +308,7 @@ mod tests {
                 None,
                 Some("ignored-backend".to_string()),
                 Some(r"\s*".to_string()),
+                None,
             )),
             ..Default::default()
         };
