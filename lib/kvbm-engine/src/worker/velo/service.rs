@@ -13,6 +13,7 @@ use crate::object::ObjectBlockOps;
 
 use bytes::Bytes;
 use derive_builder::Builder;
+use kvbm_config::profiling::{NvtxRange, ranges};
 
 use ::velo::{Handler, Messenger};
 
@@ -89,7 +90,10 @@ impl VeloWorkerService {
                 )?;
 
                 // Await the transfer completion
-                notification.await?;
+                {
+                    let _nvtx = NvtxRange::new(ranges::WORKER_LOCAL_TRANSFER_AWAIT);
+                    notification.await?;
+                }
 
                 // Return empty response to signal success
                 Ok(Some(Bytes::new()))
@@ -125,7 +129,10 @@ impl VeloWorkerService {
                     options,
                 )?;
 
-                notification.await?;
+                {
+                    let _nvtx = NvtxRange::new(ranges::WORKER_REMOTE_ONBOARD_AWAIT);
+                    notification.await?;
+                }
 
                 Ok(Some(Bytes::new()))
             }
@@ -160,7 +167,10 @@ impl VeloWorkerService {
                     options,
                 )?;
 
-                notification.await?;
+                {
+                    let _nvtx = NvtxRange::new(ranges::WORKER_REMOTE_OFFLOAD_AWAIT);
+                    notification.await?;
+                }
 
                 Ok(Some(Bytes::new()))
             }
@@ -252,7 +262,11 @@ impl VeloWorkerService {
                         options,
                     )?;
 
-                    notification.await?;
+                    {
+                        let _nvtx =
+                            NvtxRange::new(ranges::WORKER_REMOTE_ONBOARD_FOR_INSTANCE_AWAIT);
+                        notification.await?;
+                    }
                     Ok(Some(Bytes::new()))
                 }
             })
@@ -277,7 +291,10 @@ impl VeloWorkerService {
                 let message: ObjectHasBlocksMessage = serde_json::from_slice(&ctx.payload)?;
 
                 // Call DirectWorker's ObjectBlockOps implementation
-                let results = worker.has_blocks(message.keys).await;
+                let results = {
+                    let _nvtx = NvtxRange::new(ranges::WORKER_OBJECT_HAS_BLOCKS_AWAIT);
+                    worker.has_blocks(message.keys).await
+                };
 
                 let response = ObjectHasBlocksResponse { results };
                 Ok(Some(Bytes::from(serde_json::to_vec(&response)?)))
@@ -301,9 +318,12 @@ impl VeloWorkerService {
 
                 // Call DirectWorker's ObjectBlockOps implementation
                 // DirectWorker resolves logical handle to physical layout internally
-                let results = worker
-                    .put_blocks(message.keys, message.layout, message.block_ids)
-                    .await;
+                let results = {
+                    let _nvtx = NvtxRange::new(ranges::WORKER_OBJECT_PUT_BLOCKS_AWAIT);
+                    worker
+                        .put_blocks(message.keys, message.layout, message.block_ids)
+                        .await
+                };
 
                 let response = ObjectPutGetBlocksResponse::from_results(results);
                 Ok(Some(Bytes::from(serde_json::to_vec(&response)?)))
@@ -327,9 +347,12 @@ impl VeloWorkerService {
 
                 // Call DirectWorker's ObjectBlockOps implementation
                 // DirectWorker resolves logical handle to physical layout internally
-                let results = worker
-                    .get_blocks(message.keys, message.layout, message.block_ids)
-                    .await;
+                let results = {
+                    let _nvtx = NvtxRange::new(ranges::WORKER_OBJECT_GET_BLOCKS_AWAIT);
+                    worker
+                        .get_blocks(message.keys, message.layout, message.block_ids)
+                        .await
+                };
 
                 let response = ObjectPutGetBlocksResponse::from_results(results);
                 Ok(Some(Bytes::from(serde_json::to_vec(&response)?)))

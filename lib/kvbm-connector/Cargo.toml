@@ -68,3 +68,4 @@ nccl = ["kvbm-engine/nccl"]
 # Opt-in S3 object-storage integration tests against MinIO.
 # Forwards to kvbm-engine/s3 so the S3ObjectBlockClient surface is available.
 s3 = ["kvbm-engine/s3"]
+nvtx = ["kvbm-engine/nvtx", "kvbm-physical/nvtx"]

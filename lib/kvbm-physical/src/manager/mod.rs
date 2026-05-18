@@ -27,6 +27,7 @@ use dynamo_memory::StorageKind;
 use dynamo_memory::nixl::NixlAgent;
 use kvbm_common::KvbmTransferRoute;
 use kvbm_common::LogicalLayoutHandle;
+use kvbm_config::profiling::{NvtxRange, ranges};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
@@ -234,6 +235,8 @@ impl TransferManager {
         dst_blocks: &[BlockId],
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
+        let _nvtx = NvtxRange::new(ranges::TRANSFER_EXECUTE);
+
         // Clone layouts inside the lock, then drop lock before transfer
         let (src_layout, dst_layout) = {
             let registry = self.registry.read().unwrap();
