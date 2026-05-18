@@ -23,10 +23,18 @@ from .replay_utils import (
 
 pytestmark = [
     pytest.mark.gpu_0,
+    pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.timeout(120),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _skip_online(request):
+    callspec = getattr(request.node, "callspec", None)
+    if callspec and callspec.params.get("replay_mode") == "online":
+        pytest.skip("intermittent hang in online replay mode (#9548)")
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])

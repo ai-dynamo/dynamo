@@ -47,6 +47,22 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         "PROMETHEUS_ENDPOINT",
         "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
     )
+    # Optional bearer token sent as `Authorization: Bearer <token>` on every
+    # PromQL request. Useful for hardened monitoring stacks that require
+    # token auth (OpenShift thanos-querier, anything fronted by an OAuth
+    # proxy). When set, the token is read once at startup; for SA tokens
+    # that rotate, use a token_file knob instead (separate config field
+    # planned as follow-up).
+    metric_pulling_prometheus_token = os.environ.get("PROMETHEUS_TOKEN")
+    # Verify the upstream Prometheus TLS certificate. Default False preserves
+    # the previous PrometheusConnect(disable_ssl=True) behavior so existing
+    # deployments are unaffected. Set to True (or env PROMETHEUS_SSL_VERIFY=1)
+    # for hardened monitoring stacks where you want the request to fail
+    # closed on a bad cert. Pair with PROMETHEUS_CA_BUNDLE if the upstream
+    # uses a private CA.
+    metric_pulling_prometheus_ssl_verify = os.environ.get(
+        "PROMETHEUS_SSL_VERIFY", "false"
+    ).lower() in ("1", "true", "yes")
     profile_results_dir = "profiling_results"
 
     isl = 3000  # in number of tokens

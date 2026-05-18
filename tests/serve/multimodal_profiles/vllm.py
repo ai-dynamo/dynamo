@@ -307,9 +307,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
-                # TODO: re-enable GPU-parallel scheduling with
-                # profiled_vram_gib=12.0 once this has a bounded --kv-bytes profile.
                 timeout_s=300,
+                profiled_vram_gib=12.0,
+                requested_vllm_kv_cache_bytes=922_354_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },

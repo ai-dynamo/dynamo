@@ -30,6 +30,7 @@ Cell markers (per peer, vllm + sglang):
   V!/S! peer has `error: <substring>` (expected to crash)
   VS, V?S, VS!, etc. — combinations
   n/a   peer marked `unavailable`, or family/case doesn't apply
+  —     no fixture entry exists for this family/case yet
 
 Footnote markers `†` (no vLLM peer) and `§` (no SGLang peer) are auto-derived
 from `expected.<impl>.unavailable` across each family's cases.
@@ -292,11 +293,51 @@ TOP_N_FAMILIES = [
     "qwen3_coder",
 ]
 
+SUB_CASE_GROUPS = [
+    ("Core", ("1", "3", "9", "10", "13")),
+    ("Multi-call", ("2.a", "2.b", "2.c", "2.d", "12")),
+    (
+        "Malformed / recovery",
+        ("4.a", "4.b", "4.c", "4.d", "4.e", "5.a", "5.b", "5.c", "5.d", "5.e"),
+    ),
+    ("Args", ("6.a", "6.b", "6.c", "7.a", "7.b", "7.c", "7.d", "11")),
+    ("Text interleaving", ("8.a", "8.b", "8.c", "8.d")),
+]
 
-def _sub_sort_key(sub: str) -> tuple[int, str]:
+_SUB_CASE_DISPLAY_ORDER = {
+    sub: (group_idx, sub_idx)
+    for group_idx, (_label, subs) in enumerate(SUB_CASE_GROUPS)
+    for sub_idx, sub in enumerate(subs)
+}
+
+_SUB_CASE_GROUP_INDEX_BY_SUB = {
+    sub: group_idx
+    for group_idx, (_label, subs) in enumerate(SUB_CASE_GROUPS)
+    for sub in subs
+}
+
+_SUB_CASE_GROUP_BY_SUB = {sub: label for label, subs in SUB_CASE_GROUPS for sub in subs}
+
+
+def _natural_sub_sort_key(sub: str) -> tuple[int, str]:
     """`8.a` → (8, 'a'); `9` → (9, '')."""
     parts = sub.split(".")
     return (int(parts[0]), parts[1] if len(parts) > 1 else "")
+
+
+def _sub_sort_key(sub: str) -> tuple[int, int, int, str]:
+    """Sort known cases by semantic display group, future cases naturally last."""
+    display_order = _SUB_CASE_DISPLAY_ORDER.get(sub)
+    if display_order is not None:
+        group_idx, sub_idx = display_order
+        return (0, group_idx, sub_idx, "")
+    num, suffix = _natural_sub_sort_key(sub)
+    return (1, num, 0, suffix)
+
+
+def _subcase_band_class(sub: str) -> str:
+    group_idx = _SUB_CASE_GROUP_INDEX_BY_SUB.get(sub, len(SUB_CASE_GROUPS))
+    return f"case-band-{group_idx % 2}"
 
 
 def _discover_sub_cases(cases: dict) -> list[str]:
@@ -363,6 +404,7 @@ def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
             labels.setdefault(family, doc["model_label"])
         for cid, case in doc["cases"].items():
             sub = cid.replace("PARSER.batch.", "")
+            case["__family"] = family
             case["__fixture_path"] = rel
             case["__case_id"] = cid
             cases[(family, sub)] = case
@@ -431,7 +473,7 @@ def peer_status(case: dict, dyn: dict, impl: str) -> tuple[str, bool]:
 
 def cell_for(case: dict | None) -> str:
     if case is None:
-        return "n/a"
+        return "—"
     dyn = case.get("expected", {}).get("dynamo")
     if not isinstance(dyn, dict):
         return "n/a"
@@ -486,6 +528,7 @@ _LEGEND_MD = (
     "(`expected.dynamo.reason:` carries the explanation) · "
     "`!` expected-error suffix (e.g. V!, S! — engine crashes by design) · "
     "`n/a` not applicable · "
+    "`—` missing fixture coverage · "
     "`†` (parser column) = no vLLM peer parser for this family · "
     "`§` (parser column) = no SGLang peer parser for this family."
 )
@@ -516,7 +559,7 @@ def render_markdown(
 _IMPL_DISPLAY = {"dynamo": "Dynamo", "vllm": "vLLM", "sglang": "SGLang"}
 
 
-def _format_output_block_html(block) -> str:
+def _format_output_block_html(block, family: str | None = None) -> str:
     """HTML rendering of an `expected.<impl>` block for tooltips.
     Applies _colorize_xml to `normal_text` so raw model output the engine
     failed to parse shows the same tag coloring as the input."""
@@ -536,7 +579,7 @@ def _format_output_block_html(block) -> str:
         calls_line = html_lib.escape(f"calls=[{rendered}]")
     else:
         calls_line = "calls=[]"
-    nt_line = f"normal_text='{_colorize_xml(nt)}'"
+    nt_line = f"normal_text='{_colorize_markup(nt, family)}'"
     return f"{nt_line}\n{calls_line}"
 
 
@@ -586,6 +629,52 @@ _END_SUFFIXES = ("_end", "▁end")
 _HARMONY_TURN_OPEN = "start"
 _HARMONY_TURN_CLOSE = frozenset({"end", "return", "call"})
 _HARMONY_SECTION_MARKERS = frozenset({"channel", "constrain", "message"})
+_HARMONY_TOKEN_RE = re.compile(r"<\|([A-Za-z_]+)\|>")
+_HARMONY_SEGMENT_CLASS = {
+    "start": "tt-h-start",
+    "channel": "tt-h-channel",
+    "constrain": "tt-h-constrain",
+    "message": "tt-h-message",
+    "end": "tt-h-stop",
+    "return": "tt-h-stop",
+    "call": "tt-h-call",
+}
+
+
+def _colorize_harmony(text: str) -> str:
+    """Color Harmony's linear token segments as `<|token|>related-text`.
+
+    Harmony is not paired XML. Tokens such as `<|channel|>` and `<|message|>`
+    introduce the header/content span that follows, so each special token is
+    grouped with text up to the next Harmony token.
+    """
+    pieces: list[str] = []
+    last = 0
+    for m in _HARMONY_TOKEN_RE.finditer(text):
+        if m.start() > last:
+            pieces.append(html_lib.escape(text[last : m.start()]))
+        token_name = m.group(1)
+        if token_name in _HARMONY_TURN_CLOSE:
+            end = m.end()
+        else:
+            next_m = _HARMONY_TOKEN_RE.search(text, m.end())
+            end = next_m.start() if next_m else len(text)
+        cls = _HARMONY_SEGMENT_CLASS.get(token_name, "tt-h-other")
+        token = html_lib.escape(m.group(0))
+        related = html_lib.escape(text[m.end() : end])
+        pieces.append(
+            f'<span class="tt-h {cls}"><span class="tt-h-token">{token}</span>{related}</span>'
+        )
+        last = end
+    if last < len(text):
+        pieces.append(html_lib.escape(text[last:]))
+    return "".join(pieces)
+
+
+def _colorize_markup(text: str, family: str | None = None) -> str:
+    if family == "harmony" and _HARMONY_TOKEN_RE.search(text):
+        return _colorize_harmony(text)
+    return _colorize_xml(text)
 
 
 def _strip_suffix(s: str, suffixes: tuple[str, ...]) -> str | None:
@@ -714,11 +803,17 @@ def _build_tooltip_html(case: dict, dyn) -> str:
     if head:
         parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
 
+    ref = case.get("ref")
+    if isinstance(ref, str) and ref:
+        parts.append('<div class="ttip-section">Ref:</div>')
+        parts.append(f'<pre class="ttip-pre">{html_lib.escape(ref)}</pre>')
+
     model_text = case.get("model_text")
     if isinstance(model_text, str) and model_text:
+        family = case.get("__family")
         parts.append('<div class="ttip-section">Input:</div>')
         parts.append(
-            f"<pre class=\"ttip-pre\">input_text='{_colorize_xml(model_text)}'</pre>"
+            f"<pre class=\"ttip-pre\">input_text='{_colorize_markup(model_text, family)}'</pre>"
         )
 
     expected = case.get("expected") or {}
@@ -740,13 +835,15 @@ def _build_tooltip_html(case: dict, dyn) -> str:
 
     if all_parity:
         parts.append('<div class="ttip-section">All engines parity:</div>')
-        parts.append(f'<pre class="ttip-pre">{_format_output_block_html(dyn)}</pre>')
+        parts.append(
+            f'<pre class="ttip-pre">{_format_output_block_html(dyn, case.get("__family"))}</pre>'
+        )
     else:
         for impl in ("dynamo", "vllm", "sglang"):
             block = expected.get(impl)
             parts.append(f'<div class="ttip-section">{_IMPL_DISPLAY[impl]}:</div>')
             parts.append(
-                f'<pre class="ttip-pre">{_format_output_block_html(block)}</pre>'
+                f'<pre class="ttip-pre">{_format_output_block_html(block, case.get("__family"))}</pre>'
             )
 
     reasons = _tooltip_for(case, dyn) if isinstance(dyn, dict) else ""
@@ -806,6 +903,8 @@ def _tooltip_for(case: dict, dyn: dict) -> str:
 
 
 def _cell_class(text: str) -> str:
+    if text == "—":
+        return "missing"
     if text == "n/a":
         return "na"
     if "!" in text:
@@ -836,11 +935,36 @@ def _build_na_tooltip_html(case: dict) -> str:
     return "".join(parts)
 
 
-def render_cell_html(case: dict | None) -> str:
+def _build_missing_tooltip_html(family: str, sub: str) -> str:
+    """Tooltip for an absent fixture entry.
+
+    This is intentionally distinct from an explicit n/a stub. Missing means
+    the chart has no fixture data for this family/case; explicit n/a means a
+    fixture author recorded why the case does not apply.
+    """
+    case_id = f"PARSER.batch.{sub}"
+    parts = ['<div class="ttip">']
+    parts.append(
+        f'<div class="ttip-head">{html_lib.escape(case_id)} — '
+        f"{html_lib.escape(family)}</div>"
+    )
+    parts.append('<div class="ttip-section">Missing fixture:</div>')
+    parts.append(
+        '<pre class="ttip-pre">No fixture entry exists for this family/case. '
+        "If the case is intentionally not applicable, add an explicit n/a "
+        "stub with description: and reason: so the chart can explain it.</pre>"
+    )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def render_cell_html(case: dict | None, family: str, sub: str) -> str:
     text = cell_for(case)
     cls = _cell_class(text)
+    band_cls = _subcase_band_class(sub)
     if case is None:
-        return f'<td class="cell {cls}">{text}</td>'
+        ttip = _build_missing_tooltip_html(family, sub)
+        return f'<td class="cell {cls} {band_cls}">{text}{ttip}</td>'
 
     dyn = case.get("expected", {}).get("dynamo")
     if not isinstance(dyn, dict):
@@ -848,18 +972,20 @@ def render_cell_html(case: dict | None) -> str:
         fp = case.get("__fixture_path", "")
         ttip = _build_na_tooltip_html(case)
         if not fp:
-            return f'<td class="cell {cls}">{text}{ttip}</td>'
+            return f'<td class="cell {cls} {band_cls}">{text}{ttip}</td>'
         href = html_lib.escape(fp)
-        return f'<td class="cell {cls}"><a href="{href}">{text}</a>{ttip}</td>'
+        return (
+            f'<td class="cell {cls} {band_cls}"><a href="{href}">{text}</a>{ttip}</td>'
+        )
 
     fp = case.get("__fixture_path", "")
     # Case id + description live in the rich CSS tooltip head — don't also
     # set `title=` on the link, or browsers stack a native tooltip on top.
     ttip = _build_tooltip_html(case, dyn)
     if not fp:
-        return f'<td class="cell {cls}">{text}{ttip}</td>'
+        return f'<td class="cell {cls} {band_cls}">{text}{ttip}</td>'
     href = html_lib.escape(fp)
-    return f'<td class="cell {cls}"><a href="{href}">{text}</a>{ttip}</td>'
+    return f'<td class="cell {cls} {band_cls}"><a href="{href}">{text}</a>{ttip}</td>'
 
 
 def _parser_inheritance_tooltip_html(
@@ -1033,7 +1159,9 @@ def render_row_html(
     no_sglang: set[str],
     inheritance: dict[str, dict],
 ) -> str:
-    cells = "".join(render_cell_html(cases.get((family, sub))) for sub in sub_cases)
+    cells = "".join(
+        render_cell_html(cases.get((family, sub)), family, sub) for sub in sub_cases
+    )
     return (
         f'<tr><td class="model">{html_lib.escape(model)}</td>'
         f"{_parser_cell_html(family, refs, no_vllm, no_sglang, inheritance)}"
@@ -1086,7 +1214,36 @@ def _subcase_header_html(sub: str, descriptions: dict[str, str]) -> str:
     desc = descriptions.get(sub) or descriptions.get(sub.split(".")[0]) or ""
     href = "../../../lib/parsers/PARSER_CASES.md"
     title = html_lib.escape(desc) if desc else ""
-    return f'<th><a href="{href}" title="{title}">{html_lib.escape(sub)}</a></th>'
+    band_cls = _subcase_band_class(sub)
+    return (
+        f'<th class="case-sub {band_cls}">'
+        f'<a href="{href}" title="{title}">{html_lib.escape(sub)}</a></th>'
+    )
+
+
+def _subcase_group_label(sub: str) -> str:
+    return _SUB_CASE_GROUP_BY_SUB.get(sub, "Other")
+
+
+def _subcase_group_headers_html(sub_cases: list[str]) -> str:
+    """Build semantic group headers spanning the displayed sub-case columns."""
+    spans: list[str] = [
+        '<th rowspan="2">model</th>',
+        '<th rowspan="2">parser</th>',
+    ]
+    start = 0
+    while start < len(sub_cases):
+        label = _subcase_group_label(sub_cases[start])
+        end = start + 1
+        while end < len(sub_cases) and _subcase_group_label(sub_cases[end]) == label:
+            end += 1
+        band_cls = _subcase_band_class(sub_cases[start])
+        spans.append(
+            f'<th class="case-group {band_cls}" colspan="{end - start}">'
+            f"{html_lib.escape(label)}</th>"
+        )
+        start = end
+    return "".join(spans)
 
 
 def _glossary_html(descriptions: dict[str, str], sub_cases: list[str]) -> str:
@@ -1113,6 +1270,11 @@ body { font-family: -apple-system, system-ui, sans-serif; margin: 1.5em; }
 table { border-collapse: collapse; font-family: ui-monospace, monospace; font-size: 13px; }
 th, td { border: 1px solid #ccc; padding: 3px 4px; }
 th { background: #f5f5f5; }
+th.case-group { font-family: -apple-system, system-ui, sans-serif; font-size: 12px; }
+th.case-group.case-band-0 { background: #f1f3f5; }
+th.case-group.case-band-1 { background: #ffffff; }
+th.case-sub.case-band-0, td.cell.case-band-0 { background: #f8f9fa; }
+th.case-sub.case-band-1, td.cell.case-band-1 { background: #ffffff; }
 .parser-base   { color: #888;    font-size: 11px; margin-left: 4px; }
 .parser-suffix { color: #007acc; font-weight: bold; vertical-align: super; font-size: 0.75em; }
 th a { color: inherit; text-decoration: none; }
@@ -1126,6 +1288,7 @@ td.cell.documented { color: #555; }
 td.cell.research   { color: #c63;    font-weight: bold; }
 td.cell.err        { color: #b00;    font-weight: bold; }
 td.cell.na         { color: #aaa; }
+td.cell.missing    { color: #8a6d3b; }
 td.cell a { color: inherit; text-decoration: none; display: block; }
 td.cell a:hover { background: #ffd; }
 tr.section td { background: #eef; font-weight: bold; text-align: left; }
@@ -1184,6 +1347,15 @@ td.parser:hover .ttip {
 .tt-c6 { color: #22d3ee; }
 .tt-c7 { color: #f87171; }
 .tt-orphan { background: #7f1d1d; color: #fecaca; padding: 0 2px; border-radius: 2px; }
+.tt-h { padding: 0 1px; border-radius: 2px; }
+.tt-h-token { font-weight: 700; }
+.tt-h-start { color: #fbbf24; }
+.tt-h-channel { color: #60a5fa; }
+.tt-h-constrain { color: #a78bfa; }
+.tt-h-message { color: #34d399; }
+.tt-h-call { color: #fb923c; }
+.tt-h-stop { color: #f87171; }
+.tt-h-other { color: #22d3ee; }
 """
 
 # Clamps `.ttip` into the viewport on hover. Pure CSS can't know each
@@ -1253,6 +1425,7 @@ def _legend_html(versions: dict[str, str]) -> str:
         '<span style="color:#b00">!</span> expected-error suffix '
         "(e.g. V!, S! — engine crashes by design) · "
         '<span style="color:#aaa">n/a</span> not applicable · '
+        '<span style="color:#8a6d3b">—</span> missing fixture coverage · '
         '<span class="parser-suffix">†</span> = no vLLM peer parser for this family · '
         '<span class="parser-suffix">§</span> = no SGLang peer parser for this family.'
         "<br><br>"
@@ -1283,12 +1456,16 @@ def _compute_stats(
         "research": 0,
         "errors": 0,
         "na": 0,
+        "missing": 0,
     }
     for fam in families:
         for sub in sub_cases:
             case = cases.get((fam, sub))
             text = cell_for(case)
-            if case is None or text == "n/a":
+            if text == "—":
+                s["missing"] += 1
+                continue
+            if text == "n/a":
                 s["na"] += 1
                 continue
             s["real"] += 1
@@ -1307,7 +1484,7 @@ def _stats_html(s: dict[str, int]) -> str:
     return (
         '<p class="stats">'
         f"Stats: {s['families']} families × {s['sub_cases']} sub-cases "
-        f"= {s['slots']} grid slots ({s['na']} n/a). "
+        f"= {s['slots']} grid slots ({s['na']} n/a, {s['missing']} missing). "
         f"<strong>{s['real']}</strong> real cases: "
         f'<span style="color:#0a7d2c">{s["parity"]} full parity</span> · '
         f'<span style="color:#555">{s["documented"]} documented divergences</span> '
@@ -1326,27 +1503,29 @@ def render_html(
     no_sglang: set[str],
     top_n: list[tuple[str, str]],
     others: list[tuple[str, str]],
+    family_filter: str | None = None,
 ) -> str:
     descriptions = _parse_subcase_descriptions()
     refs = _build_family_to_rust_ref()
     inheritance = _build_family_inheritance(refs)
 
-    fixed_headers = "".join(
-        f"<th>{html_lib.escape(h)}</th>" for h in ("model", "parser")
-    )
+    group_headers = _subcase_group_headers_html(sub_cases)
     sub_headers = "".join(_subcase_header_html(sub, descriptions) for sub in sub_cases)
     n_cols = 2 + len(sub_cases)
 
-    body_rows: list[str] = [
-        f'<tr class="section"><td colspan="{n_cols}">Top-N models</td></tr>'
-    ]
+    body_rows: list[str] = []
+    if top_n:
+        body_rows.append(
+            f'<tr class="section"><td colspan="{n_cols}">Top-N models</td></tr>'
+        )
     for model, fam in top_n:
         body_rows.append(
             render_row_html(
                 model, fam, cases, sub_cases, refs, no_vllm, no_sglang, inheritance
             )
         )
-    body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
+    if others:
+        body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
     for model, fam in others:
         body_rows.append(
             render_row_html(
@@ -1359,13 +1538,23 @@ def render_html(
 
     table_html = (
         "<table>"
-        f"<thead><tr>{fixed_headers}{sub_headers}</tr></thead>"
+        f"<thead><tr>{group_headers}</tr><tr>{sub_headers}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table>"
     )
 
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
+    title = (
+        f"Dynamo {family_filter} parser parity chart"
+        if family_filter
+        else "Dynamo parser parity chart"
+    )
+    command = "python3 tests/parity/parser/generate_parity_chart.py --html"
+    output = "tests/parity/parser/PARITY.html"
+    if family_filter:
+        command += f" --family {family_filter}"
+        output = f"tests/parity/parser/PARITY.{family_filter}.html"
 
     sha = _commit_sha()
     if sha:
@@ -1379,13 +1568,14 @@ def render_html(
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
-        '<head><meta charset="utf-8"><title>Dynamo parser parity chart</title>'
+        f'<head><meta charset="utf-8"><title>{html_lib.escape(title)}</title>'
         f"<style>{_HTML_STYLE}</style></head>\n"
         "<body>\n"
-        "<h1>Dynamo parser parity chart</h1>\n"
-        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)}{sha_html}: '
-        f"<code>python3 tests/parity/parser/generate_parity_chart.py --html "
-        f"&gt; tests/parity/parser/PARITY.html</code></p>\n"
+        f"<h1>{html_lib.escape(title)}</h1>\n"
+        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)}{sha_html} '
+        f"from <code>tests/parity/parser/fixtures/**/PARSER.*.yaml</code>: "
+        f"<code>{html_lib.escape(command)} "
+        f"&gt; {html_lib.escape(output)}</code></p>\n"
         "<p>Parser column links to the family's Rust config / parser. "
         "Sub-case column headers link to "
         '<a href="../../../lib/parsers/PARSER_CASES.md">PARSER_CASES.md</a> '
@@ -1408,14 +1598,33 @@ def main():
         action="store_true",
         help="Emit HTML (clickable + tooltips) instead of Markdown.",
     )
+    p.add_argument(
+        "--family",
+        help="Render only one parser family, e.g. harmony.",
+    )
     args = p.parse_args()
 
     cases, labels = load_all_cases()
+    if args.family:
+        cases = {k: v for k, v in cases.items() if k[0] == args.family}
+        labels = {k: v for k, v in labels.items() if k == args.family}
+        if not cases:
+            raise SystemExit(f"no parser fixtures found for family={args.family!r}")
     sub_cases = _discover_sub_cases(cases)
     no_vllm, no_sglang = _derive_no_peer_sets(cases)
     top_n, others = _build_display_groups(cases, labels)
     if args.html:
-        print(render_html(cases, sub_cases, no_vllm, no_sglang, top_n, others))
+        print(
+            render_html(
+                cases,
+                sub_cases,
+                no_vllm,
+                no_sglang,
+                top_n,
+                others,
+                family_filter=args.family,
+            )
+        )
     else:
         print(render_markdown(cases, sub_cases, no_vllm, no_sglang, top_n, others))
 

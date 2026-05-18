@@ -67,6 +67,8 @@ def tester(llm_server_kvbm):  # noqa: F811
     ],
     indirect=True,
 )
+@pytest.mark.profiled_vram_gib(3.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
 @pytest.mark.timeout(170)  # 4x measured (~41s), rounded up
 def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
@@ -142,6 +144,8 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     ],
     indirect=True,
 )
+@pytest.mark.profiled_vram_gib(3.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
 @pytest.mark.timeout(170)  # 4x measured (~42s), rounded up
 def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     """
@@ -225,6 +229,8 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     ],
     indirect=True,
 )
+@pytest.mark.profiled_vram_gib(3.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
 @pytest.mark.timeout(160)  # 4x measured (~39s), rounded up
 def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     """
