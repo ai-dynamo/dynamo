@@ -491,13 +491,22 @@ mod tests {
 
         let client = endpoint.client().await.unwrap();
 
-        // Seed both avail and free with the same three instances.
+        // Seed both ArcSwaps directly. This bypasses both
+        // `register_endpoint_instance` (and the monitor-task race that
+        // would lazily refresh `instance_avail`) and `update_free_instances`
+        // (which derives `instance_free` from `instance_ids()` — empty
+        // when no endpoint is registered, which would clobber the test
+        // state). The routable function consumes only `instance_avail`
+        // and `instance_free`, so direct-store is the cleanest way to
+        // assert its intersection semantics.
         client.instance_avail.store(Arc::new(vec![1, 2, 3]));
         client.instance_free.store(Arc::new(vec![1, 2, 3]));
         assert_eq!(client.instance_ids_routable(), vec![1u64, 2, 3]);
 
-        // Mark instance 2 busy: routable drops 2 but keeps 1 and 3.
-        client.update_free_instances(&[2]);
+        // Mark instance 2 busy by directly storing the busy-filtered set
+        // (the production path runs `update_free_instances` against a real
+        // discovered set; that codepath is exercised elsewhere).
+        client.instance_free.store(Arc::new(vec![1, 3]));
         let routable = client.instance_ids_routable();
         assert!(routable.contains(&1), "busy filter should not drop 1");
         assert!(!routable.contains(&2), "busy worker 2 must not be routable");
