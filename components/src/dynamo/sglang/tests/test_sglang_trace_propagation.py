@@ -106,4 +106,5 @@ async def test_gates_off_when_enable_trace_false():
         _FakeContext(trace_id="a" * 32, span_id="b" * 16),
     )
 
-    assert captured["external_trace_header"] is None
+    # kwarg omitted (engine_trace_kwargs returns {} when enabled=False).
+    assert "external_trace_header" not in captured

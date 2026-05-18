@@ -90,7 +90,7 @@ async def test_forwards_trace_headers_when_context_has_trace(mock_build_sampling
 
 
 @patch("dynamo.vllm.llm_engine.build_sampling_params")
-async def test_forwards_none_when_no_trace_context(mock_build_sampling):
+async def test_omits_trace_headers_when_no_trace_context(mock_build_sampling):
     mock_build_sampling.return_value = SimpleNamespace()
     captured: dict = {}
 
@@ -103,4 +103,5 @@ async def test_forwards_none_when_no_trace_context(mock_build_sampling):
         _FakeContext(),
     )
 
-    assert captured["trace_headers"] is None
+    # kwarg omitted (engine_trace_kwargs returns {}).
+    assert "trace_headers" not in captured

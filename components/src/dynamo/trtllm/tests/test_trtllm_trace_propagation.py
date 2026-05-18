@@ -92,7 +92,7 @@ async def test_forwards_trace_headers_when_context_has_trace():
     assert captured["trace_headers"] == {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
 
-async def test_forwards_none_when_no_trace_context():
+async def test_omits_trace_headers_when_no_trace_context():
     captured: dict = {}
 
     def fake_generate_async(**kwargs):
@@ -101,4 +101,5 @@ async def test_forwards_none_when_no_trace_context():
 
     await _drain(_make_engine(fake_generate_async), _FakeContext())
 
-    assert captured["trace_headers"] is None
+    # kwarg omitted (engine_trace_kwargs returns {}).
+    assert "trace_headers" not in captured
