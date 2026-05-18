@@ -635,41 +635,47 @@ mod tests {
     }
 
     /// `instance_ids_routable` must exclude both reported-down and busy
-    /// instances. `instance_ids_avail` filters down; `instance_ids_free`
-    /// filters busy; routable is the intersection.
+    /// instances. `instance_ids_avail` filters down; `instance_busy`
+    /// tracks busy; routable is `avail` minus `busy`.
+    ///
+    /// Uses the direct-store pattern (same as `test_report_instance_down`)
+    /// rather than `register_endpoint_instance` + `wait_for_instances` so
+    /// that the assertion does not race against the `monitor_instance_source`
+    /// background task that lazily refreshes `instance_avail` from
+    /// `instance_source`.
     #[tokio::test]
     async fn test_instance_ids_routable_excludes_busy_and_down() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
-        let worker_id = drt.connection_id();
         let ns = drt.namespace("test_routable".to_string()).unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
         let endpoint = component.endpoint("test_endpoint".to_string());
 
-        let client = Client::new(endpoint.clone()).await.unwrap();
-        endpoint.register_endpoint_instance().await.unwrap();
-        let _ = client.wait_for_instances().await.unwrap();
+        let client = endpoint.client().await.unwrap();
 
-        // Baseline: not busy, not down → routable contains the worker.
-        assert_eq!(client.instance_ids_routable(), vec![worker_id]);
+        // Seed `instance_avail` directly with three test instances. This
+        // bypasses the monitor task entirely so the assertions are race-free.
+        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
 
-        // Busy → not routable.
-        client.set_busy_instances(&[worker_id]);
-        assert!(
-            client.instance_ids_routable().is_empty(),
-            "busy worker must not appear in routable set"
-        );
+        // Baseline: nothing busy, nothing down → routable is the full set.
+        assert_eq!(client.instance_ids_routable(), vec![1u64, 2, 3]);
 
-        // Clear busy, then report-down → still not routable.
-        client.set_busy_instances(&[]);
-        assert_eq!(client.instance_ids_routable(), vec![worker_id]);
-        client.report_instance_down(worker_id);
-        assert!(
-            client.instance_ids_routable().is_empty(),
-            "reported-down worker must not appear in routable set"
-        );
+        // Mark instance 2 busy: routable drops 2 but keeps 1 and 3.
+        client.set_busy_instances(&[2]);
+        let routable = client.instance_ids_routable();
+        assert!(routable.contains(&1), "busy filter should not drop 1");
+        assert!(!routable.contains(&2), "busy worker 2 must not be routable");
+        assert!(routable.contains(&3), "busy filter should not drop 3");
+
+        // Report instance 1 as down (while 2 is still busy): routable
+        // should now be only [3].
+        client.report_instance_down(1);
+        let routable = client.instance_ids_routable();
+        assert!(!routable.contains(&1), "down worker 1 must not be routable");
+        assert!(!routable.contains(&2), "busy worker 2 must not be routable");
+        assert!(routable.contains(&3), "only 3 is alive and not busy");
 
         rt.shutdown();
     }
