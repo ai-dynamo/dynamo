@@ -357,7 +357,7 @@ def test_router_decisions_sglang_multiple_workers(
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.gpu_2
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(3.7)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
