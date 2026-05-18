@@ -91,16 +91,16 @@ impl LoadThresholdConfig {
 
 /// Worker load monitoring state per dp_rank
 #[derive(Clone, Debug)]
-struct DecodeBusyLatchState {
-    latched_busy: bool,
+struct DecodeOverloadLatchState {
+    latched_overloaded: bool,
     kv_used_blocks_cleared: bool,
     active_decode_blocks_cleared: bool,
 }
 
-impl Default for DecodeBusyLatchState {
+impl Default for DecodeOverloadLatchState {
     fn default() -> Self {
         Self {
-            latched_busy: false,
+            latched_overloaded: false,
             kv_used_blocks_cleared: true,
             active_decode_blocks_cleared: true,
         }
@@ -115,11 +115,11 @@ pub struct WorkerLoadState {
     pub active_prefill_tokens: HashMap<u32, u64>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
     pub max_num_batched_tokens: HashMap<u32, u64>,
-    decode_busy_latches: HashMap<u32, DecodeBusyLatchState>,
+    decode_overload_latches: HashMap<u32, DecodeOverloadLatchState>,
 }
 
 impl WorkerLoadState {
-    fn is_decode_signal_busy(
+    fn is_decode_signal_overloaded(
         used_blocks: u64,
         total_blocks: u64,
         active_decode_blocks_threshold: f64,
@@ -128,7 +128,7 @@ impl WorkerLoadState {
             && (used_blocks as f64) > (active_decode_blocks_threshold * total_blocks as f64)
     }
 
-    fn current_decode_busy(&self, dp_rank: u32, active_decode_blocks_threshold: f64) -> bool {
+    fn current_decode_overloaded(&self, dp_rank: u32, active_decode_blocks_threshold: f64) -> bool {
         let Some(&total_blocks) = self.kv_total_blocks.get(&dp_rank) else {
             return false;
         };
@@ -136,7 +136,7 @@ impl WorkerLoadState {
         self.kv_used_blocks
             .get(&dp_rank)
             .is_some_and(|&used_blocks| {
-                Self::is_decode_signal_busy(
+                Self::is_decode_signal_overloaded(
                     used_blocks,
                     total_blocks,
                     active_decode_blocks_threshold,
@@ -146,7 +146,7 @@ impl WorkerLoadState {
                 .active_decode_blocks
                 .get(&dp_rank)
                 .is_some_and(|&active_blocks| {
-                    Self::is_decode_signal_busy(
+                    Self::is_decode_signal_overloaded(
                         active_blocks,
                         total_blocks,
                         active_decode_blocks_threshold,
@@ -154,7 +154,7 @@ impl WorkerLoadState {
                 })
     }
 
-    fn update_decode_busy_latch(
+    fn update_decode_overload_latch(
         &mut self,
         dp_rank: u32,
         active_decode_blocks: Option<u64>,
@@ -168,28 +168,36 @@ impl WorkerLoadState {
             return;
         }
 
-        let active_decode_busy = active_decode_blocks.is_some_and(|value| {
-            Self::is_decode_signal_busy(value, total_blocks, active_decode_blocks_threshold)
+        let active_decode_overloaded = active_decode_blocks.is_some_and(|value| {
+            Self::is_decode_signal_overloaded(value, total_blocks, active_decode_blocks_threshold)
         });
-        let kv_used_busy = kv_used_blocks.is_some_and(|value| {
-            Self::is_decode_signal_busy(value, total_blocks, active_decode_blocks_threshold)
+        let kv_used_overloaded = kv_used_blocks.is_some_and(|value| {
+            Self::is_decode_signal_overloaded(value, total_blocks, active_decode_blocks_threshold)
         });
 
-        let latch = self.decode_busy_latches.entry(dp_rank).or_default();
-        if active_decode_busy || kv_used_busy {
-            latch.latched_busy = true;
+        let latch = self.decode_overload_latches.entry(dp_rank).or_default();
+        if active_decode_overloaded || kv_used_overloaded {
+            latch.latched_overloaded = true;
         }
         if let Some(value) = active_decode_blocks {
-            latch.active_decode_blocks_cleared =
-                !Self::is_decode_signal_busy(value, total_blocks, active_decode_blocks_threshold);
+            latch.active_decode_blocks_cleared = !Self::is_decode_signal_overloaded(
+                value,
+                total_blocks,
+                active_decode_blocks_threshold,
+            );
         }
         if let Some(value) = kv_used_blocks {
-            latch.kv_used_blocks_cleared =
-                !Self::is_decode_signal_busy(value, total_blocks, active_decode_blocks_threshold);
+            latch.kv_used_blocks_cleared = !Self::is_decode_signal_overloaded(
+                value,
+                total_blocks,
+                active_decode_blocks_threshold,
+            );
         }
-        if latch.latched_busy && latch.kv_used_blocks_cleared && latch.active_decode_blocks_cleared
+        if latch.latched_overloaded
+            && latch.kv_used_blocks_cleared
+            && latch.active_decode_blocks_cleared
         {
-            latch.latched_busy = false;
+            latch.latched_overloaded = false;
         }
     }
 
@@ -209,7 +217,7 @@ impl WorkerLoadState {
             self.active_prefill_tokens.insert(dp_rank, active_tokens);
         }
         if let Some(threshold) = active_decode_blocks_threshold {
-            self.update_decode_busy_latch(
+            self.update_decode_overload_latch(
                 dp_rank,
                 active_load.active_decode_blocks,
                 active_load.kv_used_blocks,
@@ -227,7 +235,7 @@ impl WorkerLoadState {
     /// For each dp_rank, a dp_rank is overloaded if ANY of these conditions is met (OR logic):
     /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute, if set)
     /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fractional, if set)
-    /// 3. decode busy latch set by either `kv_used_blocks` or `active_decode_blocks` (if set)
+    /// 3. decode overload latch set by either `kv_used_blocks` or `active_decode_blocks` (if set)
     ///
     /// The worker is overloaded only if ALL dp_ranks are overloaded.
     pub fn is_overloaded(
@@ -249,7 +257,7 @@ impl WorkerLoadState {
             .active_decode_blocks
             .keys()
             .chain(self.kv_used_blocks.keys())
-            .chain(self.decode_busy_latches.keys())
+            .chain(self.decode_overload_latches.keys())
             .chain(self.active_prefill_tokens.keys())
             .copied()
             .collect();
@@ -283,13 +291,13 @@ impl WorkerLoadState {
                 }
             }
 
-            // Check 3: decode busy latch (OR-ed from kv_used_blocks and active_decode_blocks)
+            // Check 3: decode overload latch (OR-ed from kv_used_blocks and active_decode_blocks)
             if let Some(decode_threshold) = active_decode_blocks_threshold {
                 let is_overloaded = self
-                    .decode_busy_latches
+                    .decode_overload_latches
                     .get(&dp_rank)
-                    .map(|latch| latch.latched_busy)
-                    .unwrap_or_else(|| self.current_decode_busy(dp_rank, decode_threshold));
+                    .map(|latch| latch.latched_overloaded)
+                    .unwrap_or_else(|| self.current_decode_overloaded(dp_rank, decode_threshold));
                 if is_overloaded {
                     return true;
                 }
@@ -863,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_busy_latch_sets_busy_if_any_signal_is_overloaded() {
+    fn decode_overload_latch_sets_overloaded_if_any_signal_is_overloaded() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
         state.update_from_active_load(
@@ -881,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_busy_latch_only_clears_after_both_signals_report_nonbusy() {
+    fn decode_overload_latch_only_clears_after_both_signals_report_not_overloaded() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
 
@@ -923,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_busy_latch_clears_with_only_kv_used_blocks_signal() {
+    fn decode_overload_latch_clears_with_only_kv_used_blocks_signal() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
 
@@ -953,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_busy_latch_clears_with_only_active_decode_blocks_signal() {
+    fn decode_overload_latch_clears_with_only_active_decode_blocks_signal() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
 
@@ -983,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_busy_latch_clears_when_both_signals_are_nonbusy_in_same_event() {
+    fn decode_overload_latch_clears_when_both_signals_are_not_overloaded_in_same_event() {
         let mut state = WorkerLoadState::default();
         state.kv_total_blocks.insert(0, 100);
 
