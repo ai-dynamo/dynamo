@@ -45,7 +45,7 @@ class MockServer:
         Checks for context.is_stopped() / context.is_killed() before each yield and raises
         CancelledError if stopped / killed
         """
-        include_metadata = request == "_generate_until_context_cancelled_with_metadata"
+        include_metadata = request == "_generate_until_context_cancelled_with_metadata_baseten"
 
         for i in range(1000):
             print(f"Processing iteration {i}")
@@ -218,7 +218,7 @@ async def test_client_context_cancel_preserves_metadata_baseten(
     _, handler = server
     context = Context(metadata={"tenant": "alpha", "region": "us-west"})
     stream = await client.generate(
-        "_generate_until_context_cancelled_with_metadata", context=context
+        "_generate_until_context_cancelled_with_metadata_baseten", context=context
     )
 
     iteration_count = 0
