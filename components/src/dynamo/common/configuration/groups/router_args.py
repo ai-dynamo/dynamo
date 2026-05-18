@@ -37,10 +37,6 @@ _ROUTER_FIELDS: tuple[str, ...] = (
 #   --active-prefill-tokens-threshold-frac).
 # - "none": disable busy-worker admission checks entirely; router queueing
 #   remains controlled by --router-queue-threshold.
-#
-# The name is intentionally broader than "kv-capacity" / "blocks" so that
-# future admission schemes (encoder-cache, TPS budget, billing-based, ...)
-# can be added as additional enum values without renaming the flag.
 ADMISSION_CONTROL_CHOICES: tuple[str, ...] = ("token-capacity", "none")
 
 
