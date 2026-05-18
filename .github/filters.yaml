@@ -156,8 +156,6 @@ sglang:
   - '!**/*.rst'
 
 trtllm:
-  - 'container/deps/trtllm/**'
-  - 'container/build_trtllm_wheel.sh'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'
