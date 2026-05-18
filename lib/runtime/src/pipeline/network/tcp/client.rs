@@ -878,7 +878,15 @@ mod tests {
         );
     }
 
-    /// Reader panic must abort the writer; the function must not hang.
+    /// Reader-side panic must abort the writer and return promptly rather than
+    /// hanging on `tokio::join!`. Locks in the fix added with this function's
+    /// sequential-await + writer-abort behavior.
+    ///
+    /// Setup: spawn a reader task that panics immediately (so
+    /// `reader_task.await` yields `Err(JoinError::panic)`), and a writer task
+    /// that parks indefinitely waiting for application bytes (so without the
+    /// abort, `tokio::join!` on the previous implementation would never wake).
+    /// Expect: `wait_for_connection_tasks` returns Err within the timeout.
     #[tokio::test]
     async fn test_connection_monitor_aborts_writer_when_reader_panics() {
         // Reader task that panics immediately. The explicit JoinHandle type
