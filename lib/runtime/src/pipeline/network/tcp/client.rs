@@ -177,58 +177,56 @@ async fn wait_for_connection_tasks(
     peer_port: Option<u16>,
     subject: String,
 ) -> Result<()> {
-    let (reader, writer) = tokio::join!(reader_task, writer_task);
-
-    match (reader, writer) {
-        (Ok(reader), Ok(writer)) => {
-            let reader = reader.into_inner();
-
-            let writer = match writer {
-                Ok(writer) => writer.into_inner(),
-                Err(e) => {
-                    tracing::error!(
-                        subject = %subject,
-                        peer_port = ?peer_port,
-                        err = ?e,
-                        "writer task returned error"
-                    );
-                    return Err(e);
-                }
-            };
-
-            let stream = reader.unsplit(writer);
-            wait_for_server_shutdown(stream, context).await
-        }
-        (Err(reader_err), Ok(_)) => {
+    // Await the reader first. If it panics or returns Err, we abort the
+    // writer rather than waiting on `tokio::join!` to surface the failure
+    // — the writer parks in `bytes_rx.recv()` waiting for app data, and
+    // dropping the reader-side `alive_tx` does not unblock that recv.
+    // Without abort, a failed reader can leave the monitor stuck on the
+    // join indefinitely with no error logged and no cleanup.
+    let reader = match reader_task.await {
+        Ok(reader) => reader,
+        Err(reader_err) => {
+            writer_task.abort();
+            let _ = writer_task.await;
             tracing::error!(
                 subject = %subject,
                 peer_port = ?peer_port,
                 err = ?reader_err,
                 "reader task failed to join"
             );
-            Err(reader_err.into())
+            return Err(reader_err.into());
         }
-        (Ok(_), Err(writer_err)) => {
+    };
+
+    let writer = match writer_task.await {
+        Ok(writer) => writer,
+        Err(writer_err) => {
             tracing::error!(
                 subject = %subject,
                 peer_port = ?peer_port,
                 err = ?writer_err,
                 "writer task failed to join"
             );
-            Err(writer_err.into())
+            return Err(writer_err.into());
         }
-        (Err(reader_err), Err(writer_err)) => {
+    };
+
+    let reader = reader.into_inner();
+    let writer = match writer {
+        Ok(writer) => writer.into_inner(),
+        Err(e) => {
             tracing::error!(
                 subject = %subject,
                 peer_port = ?peer_port,
-                reader_err = ?reader_err,
-                writer_err = ?writer_err,
-                "both reader and writer tasks failed to join"
+                err = ?e,
+                "writer task returned error"
             );
-            // Surface the reader error; the writer error is captured above.
-            Err(reader_err.into())
+            return Err(e);
         }
-    }
+    };
+
+    let stream = reader.unsplit(writer);
+    wait_for_server_shutdown(stream, context).await
 }
 
 async fn wait_for_server_shutdown(
