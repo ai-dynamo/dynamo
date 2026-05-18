@@ -39,6 +39,8 @@ pub enum Format {
     TriggeredTags(TriggeredTagsFormat),
     /// `{"type": "tags_with_separator", "tags": [...], "separator": ..., ...}`
     TagsWithSeparator(TagsWithSeparatorFormat),
+    /// `{"type": "sequence", "elements": [...]}`
+    Sequence(SequenceFormat),
     /// `{"type": "json_schema", "json_schema": ..., "style": ...}`
     JsonSchema(JsonSchemaFormat),
     /// `{"type": "any_tokens", "exclude_tokens": [...]}`
@@ -85,6 +87,12 @@ pub struct TagsWithSeparatorFormat {
     pub separator: String,
     pub at_least_one: bool,
     pub stop_after_first: bool,
+}
+
+/// `sequence`: a fixed sequence of format nodes.
+#[derive(Debug, Clone, Serialize)]
+pub struct SequenceFormat {
+    pub elements: Vec<Format>,
 }
 
 /// Content style for `json_schema` format nodes.
@@ -159,6 +167,17 @@ mod tests {
         let value = serde_json::to_value(&format).unwrap();
         assert_eq!(value["type"], "any_text");
         assert_eq!(value["excludes"][0], "<tool_call>\n<function=");
+    }
+
+    #[test]
+    fn sequence_serializes_correctly() {
+        let format = Format::Sequence(SequenceFormat {
+            elements: vec![Format::AnyText(AnyTextFormat { excludes: vec![] })],
+        });
+
+        let value = serde_json::to_value(&format).unwrap();
+        assert_eq!(value["type"], "sequence");
+        assert_eq!(value["elements"][0]["type"], "any_text");
     }
 
     #[test]

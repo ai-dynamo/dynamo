@@ -88,11 +88,6 @@ based on the request's `tool_choice`:
 | `auto` | Always |
 | `none` | Exclusion tag only |
 
-## Reasoning Models
-
-For reasoning models, `required` and `named` tool-choice requests
-currently do not allow preliminary reasoning before the tool call. Disable
-reasoning at request time for these requests.
 
 ## Schema Modes
 

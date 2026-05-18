@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::dsml::{self, DsmlToolCallsConfig};
-use super::format::{AnyTokensFormat, Format, StructuralTag, TagFormat};
+use super::format::{
+    AnyTextFormat, AnyTokensFormat, Format, SequenceFormat, StructuralTag, TagFormat,
+};
 use super::triggered_tags::{self, TriggeredTagsConfig};
 
 /// Controls whether tools get their real parameter schema or an
@@ -35,6 +37,8 @@ pub struct ToolCallFormatBuildContext<'a> {
     pub parallel_tool_calls: Option<bool>,
     /// Schema strictness mode for tool arguments.
     pub schema_mode: StructuralTagSchemaMode,
+    /// Whether generation starts inside an already-opened reasoning block.
+    pub starts_in_reasoning: bool,
 }
 
 impl ToolCallFormatBuildContext<'_> {
@@ -121,8 +125,40 @@ impl StructuralTagBuilder {
         };
 
         structural_tag
+            .map(|tag| self.wrap_reasoning_prefix_if_needed(ctx, tag))
+            .transpose()?
             .map(|tag| serde_json::to_value(tag).map_err(Into::into))
             .transpose()
+    }
+
+    fn wrap_reasoning_prefix_if_needed(
+        &self,
+        ctx: &ToolCallFormatBuildContext<'_>,
+        suffix: StructuralTag,
+    ) -> anyhow::Result<StructuralTag> {
+        let should_wrap_with_reasoning_tag = ctx.starts_in_reasoning
+            && matches!(
+                ctx.tool_choice,
+                ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
+            );
+        if !should_wrap_with_reasoning_tag {
+            return Ok(suffix);
+        }
+
+        let reasoning_end = self.reasoning_end().ok_or_else(|| {
+            anyhow::anyhow!("reasoning end tag is not configured for structural tag")
+        })?;
+        let reasoning_prefix = Format::Tag(TagFormat {
+            begin: String::new(),
+            content: Box::new(Format::AnyText(AnyTextFormat { excludes: vec![] })),
+            end: reasoning_end.to_string(),
+        });
+
+        Ok(StructuralTag {
+            format: Format::Sequence(SequenceFormat {
+                elements: vec![reasoning_prefix, suffix.format],
+            }),
+        })
     }
 
     /// Build a structural tag that prevents tool-call generation for
@@ -155,6 +191,13 @@ impl StructuralTagBuilder {
         match self {
             Self::TriggeredTags(config) => &config.tool_call_ban_tokens,
             Self::DsmlToolCalls(config) => &config.tool_call_ban_tokens,
+        }
+    }
+
+    fn reasoning_end(&self) -> Option<&str> {
+        match self {
+            Self::TriggeredTags(config) => config.reasoning_end.as_deref(),
+            Self::DsmlToolCalls(config) => config.reasoning_end.as_deref(),
         }
     }
 }

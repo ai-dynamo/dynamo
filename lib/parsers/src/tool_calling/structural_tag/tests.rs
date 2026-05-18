@@ -20,6 +20,7 @@ fn sample_config() -> TriggeredTagsConfig {
         triggers: vec!["<function=".to_string()],
         content_style: JsonSchemaStyle::Json,
         tool_call_ban_tokens: vec!["<tool_call>".to_string()],
+        reasoning_end: Some("</think>".to_string()),
     }
 }
 
@@ -74,6 +75,20 @@ fn ctx<'a>(
         tools,
         parallel_tool_calls,
         schema_mode,
+        starts_in_reasoning: false,
+    }
+}
+
+fn ctx_starting_in_reasoning<'a>(
+    tool_choice: &'a ChatCompletionToolChoiceOption,
+    tools: &'a [ChatCompletionTool],
+) -> ToolCallFormatBuildContext<'a> {
+    ToolCallFormatBuildContext {
+        tool_choice,
+        tools,
+        parallel_tool_calls: None,
+        schema_mode: StructuralTagSchemaMode::Auto,
+        starts_in_reasoning: true,
     }
 }
 
@@ -327,6 +342,40 @@ fn tool_call_ban_empty_tokens_returns_none() {
     assert!(b.build_tool_call_ban().expect("should serialize").is_none());
 }
 
+#[test]
+fn required_starting_in_reasoning_wraps_tool_calls_in_sequence() {
+    let tools = sample_tools();
+    let c = ctx_starting_in_reasoning(&ChatCompletionToolChoiceOption::Required, &tools);
+
+    let parsed = builder()
+        .build_tool_call_format(&c)
+        .expect("build should not error")
+        .expect("build should return Some");
+
+    assert_eq!(parsed["format"]["type"], "sequence");
+    assert_eq!(parsed["format"]["elements"][0]["type"], "tag");
+    assert_eq!(parsed["format"]["elements"][0]["begin"], "");
+    assert_eq!(
+        parsed["format"]["elements"][0]["content"]["type"],
+        "any_text"
+    );
+    assert_eq!(parsed["format"]["elements"][0]["end"], "</think>");
+    assert_eq!(parsed["format"]["elements"][1]["type"], "triggered_tags");
+}
+
+#[test]
+fn auto_starting_in_reasoning_keeps_plain_tool_call_format() {
+    let tools = sample_tools();
+    let c = ctx_starting_in_reasoning(&ChatCompletionToolChoiceOption::Auto, &tools);
+
+    let parsed = builder()
+        .build_tool_call_format(&c)
+        .expect("build should not error")
+        .expect("build should return Some");
+
+    assert_eq!(parsed["format"]["type"], "triggered_tags");
+}
+
 // ---- DSML builder tests ----
 
 fn dsml_config() -> DsmlToolCallsConfig {
@@ -338,6 +387,7 @@ fn dsml_config() -> DsmlToolCallsConfig {
         invoke_end: "</｜DSML｜invoke>\n".to_string(),
         separator: "".to_string(),
         tool_call_ban_tokens: vec![],
+        reasoning_end: Some("</think>".to_string()),
     }
 }
 
@@ -480,6 +530,25 @@ fn dsml_none_returns_ok_none() {
         .build_tool_call_format(&c)
         .expect("should not error");
     assert!(result.is_none());
+}
+
+#[test]
+fn dsml_required_starting_in_reasoning_wraps_tool_calls_in_sequence() {
+    let tools = sample_tools();
+    let c = ctx_starting_in_reasoning(&ChatCompletionToolChoiceOption::Required, &tools);
+
+    let parsed = dsml_builder()
+        .build_tool_call_format(&c)
+        .expect("build should not error")
+        .expect("build should return Some");
+
+    assert_eq!(parsed["format"]["type"], "sequence");
+    assert_eq!(parsed["format"]["elements"][0]["end"], "</think>");
+    assert_eq!(parsed["format"]["elements"][1]["type"], "triggered_tags");
+    assert_eq!(
+        parsed["format"]["elements"][1]["triggers"][0],
+        "<｜DSML｜function_calls>"
+    );
 }
 
 #[test]

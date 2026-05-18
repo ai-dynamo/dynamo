@@ -5,6 +5,7 @@
 
 use crate::local_model::runtime_config::{StructuralTagMode, StructuralTagScope};
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
+use crate::protocols::common::GuidedDecodingOptions;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
 use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption};
@@ -24,6 +25,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &NvCreateChatCompletionRequest,
         common_request: &mut PreprocessedRequest,
+        prompt_injected_reasoning: bool,
     ) -> Result<StructuralTagApplyResult, DynamoError> {
         if self.runtime_config.structural_tag_mode == StructuralTagMode::Off {
             return Ok(StructuralTagApplyResult::None);
@@ -81,6 +83,7 @@ impl OpenAIPreprocessor {
             tools,
             parallel_tool_calls: request.inner.parallel_tool_calls,
             schema_mode: self.runtime_config.structural_tag_schema,
+            starts_in_reasoning: prompt_injected_reasoning,
         };
 
         if Self::apply_tool_call_format_structural_tag(parser_name, builder, &ctx, common_request)?
@@ -126,9 +129,7 @@ impl OpenAIPreprocessor {
                 .sampling_options
                 .guided_decoding
                 .get_or_insert_default();
-            // xgrammar accepts only one constraint at a time.
-            gd.json = None;
-            gd.structural_tag = Some(ban_tag);
+            Self::set_structural_tag_guidance(gd, ban_tag);
             Ok(true)
         } else {
             Ok(false)
@@ -166,10 +167,20 @@ impl OpenAIPreprocessor {
             .sampling_options
             .guided_decoding
             .get_or_insert_default();
-        // xgrammar accepts only one constraint at a time.
-        gd.json = None;
-        gd.structural_tag = Some(structural_tag);
+        Self::set_structural_tag_guidance(gd, structural_tag);
         Ok(true)
+    }
+
+    fn set_structural_tag_guidance(
+        gd: &mut GuidedDecodingOptions,
+        structural_tag: serde_json::Value,
+    ) {
+        gd.json = None;
+        gd.regex = None;
+        gd.choice = None;
+        gd.grammar = None;
+        gd.whitespace_pattern = None;
+        gd.structural_tag = Some(structural_tag);
     }
 
     /// Validate only structural-tag requests; other parser paths keep existing behavior.

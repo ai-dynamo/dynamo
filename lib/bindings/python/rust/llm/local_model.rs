@@ -228,7 +228,6 @@ impl ModelRuntimeConfig {
         self.inner.get_engine_specific(key).map_err(to_pyerr)
     }
 
-    #[setter]
     fn set_structural_tag_mode(&mut self, mode: &str) -> PyResult<()> {
         self.inner.structural_tag_mode = match mode {
             "off" => RsStructuralTagMode::Off,
@@ -243,7 +242,6 @@ impl ModelRuntimeConfig {
     }
 
     /// Set the structural tag scope ("auto" or "always").
-    #[setter]
     fn set_structural_tag_scope(&mut self, scope: &str) -> PyResult<()> {
         self.inner.structural_tag_scope = match scope {
             "auto" => RsStructuralTagScope::Auto,
@@ -258,7 +256,6 @@ impl ModelRuntimeConfig {
     }
 
     /// Set the structural tag schema mode ("auto" or "strict").
-    #[setter]
     fn set_structural_tag_schema(&mut self, schema: &str) -> PyResult<()> {
         self.inner.structural_tag_schema = match schema {
             "auto" => RsStructuralTagSchemaMode::Auto,

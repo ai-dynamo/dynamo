@@ -2585,7 +2585,11 @@ impl
             .await?;
 
         let uses_tool_call_structural_tag = matches!(
-            self.try_apply_structural_tag(&request, &mut common_request)?,
+            self.try_apply_structural_tag(
+                &request,
+                &mut common_request,
+                prompt_injected_reasoning,
+            )?,
             StructuralTagApplyResult::ToolCallFormat
         );
 

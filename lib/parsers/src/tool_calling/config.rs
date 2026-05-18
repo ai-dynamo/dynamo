@@ -357,6 +357,7 @@ impl ToolCallConfig {
                     triggers: vec!["<tool_call>".to_string()],
                     content_style: JsonSchemaStyle::Json,
                     tool_call_ban_tokens: vec!["<tool_call>".to_string()],
+                    reasoning_end: None,
                 },
             )),
         }
@@ -492,6 +493,7 @@ impl ToolCallConfig {
                     triggers: vec!["<tool_call>\n<function=".to_string()],
                     content_style: JsonSchemaStyle::QwenXml,
                     tool_call_ban_tokens: vec!["<tool_call>".to_string()],
+                    reasoning_end: Some("</think>".to_string()),
                 },
             )),
         }
@@ -531,6 +533,7 @@ impl ToolCallConfig {
             // The model may still begin a tool block and hurt plain-text quality; prefer omitting tools
             // from the prompt (default `--exclude-tools-when-tool-choice-none`) when that matters.
             tool_call_ban_tokens: vec!["｜DSML｜".to_string()],
+            reasoning_end: Some("</think>".to_string()),
         });
         Self {
             parser_config: ParserConfig::Dsml(dsml_config),

@@ -35,6 +35,10 @@ pub struct TriggeredTagsConfig {
     /// Tokens to ban when `tool_choice="none"`.
     #[serde(default)]
     pub tool_call_ban_tokens: Vec<String>,
+
+    /// Closing tag for prompt-injected reasoning, if this parser supports it.
+    #[serde(default)]
+    pub reasoning_end: Option<String>,
 }
 
 /// Build a `triggered_tags` structural tag from config and request context.
