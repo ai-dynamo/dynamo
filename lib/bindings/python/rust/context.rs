@@ -371,29 +371,62 @@ impl Context {
     /// callers should forward the value as-is — inference engines treat `None`
     /// as "no upstream trace."
     ///
+    /// Prefers the OTel context of the `engine.generate` auto-span when the
+    /// bridge is installed, so downstream engine internals (vLLM scheduler,
+    /// TRT-LLM forward, SGLang KV transfer) nest UNDER `engine.generate`.
+    /// Falls back to the inbound `DistributedTraceContext` for legacy
+    /// callers, Python-instantiated test contexts, and non-JSONL deployments
+    /// without the bridge — in those cases downstream spans attach to the
+    /// upstream parent, which is the same behavior as before this change.
+    ///
     /// Always emits `traceparent`. Also emits `tracestate`, `x-request-id`,
-    /// and `request-id` when the upstream propagated them. Trace-flags are
-    /// hard-coded to `01` (sampled) until we plumb the live span's flags.
+    /// and `request-id` when the upstream propagated them.
     fn trace_headers(&self) -> Option<HashMap<String, String>> {
+        let (trace_id, span_id, flags) = self.traceparent_ids()?;
+        let mut headers = HashMap::new();
+        headers.insert(
+            "traceparent".to_string(),
+            format!("00-{trace_id}-{span_id}-{flags}"),
+        );
+        if let Some(tc) = self.trace_context.as_ref() {
+            if let Some(ts) = &tc.tracestate {
+                headers.insert("tracestate".to_string(), ts.clone());
+            }
+            if let Some(id) = &tc.x_request_id {
+                headers.insert("x-request-id".to_string(), id.clone());
+            }
+            if let Some(id) = &tc.request_id {
+                headers.insert("request-id".to_string(), id.clone());
+            }
+        }
+        Some(headers)
+    }
+}
+
+impl Context {
+    /// Resolve the `(trace_id, span_id, flags)` triple for the `traceparent`
+    /// header. Prefers the engine.generate OTel span context when valid so
+    /// downstream engine spans nest under `engine.generate`; falls back to
+    /// the inbound `DistributedTraceContext`.
+    fn traceparent_ids(&self) -> Option<(String, String, &'static str)> {
+        if let Some(span) = &self.span {
+            let otel_ctx = span.context();
+            let otel_span = otel_ctx.span();
+            let sc = otel_span.span_context();
+            if sc.is_valid() {
+                let flags = if sc.trace_flags().is_sampled() {
+                    "01"
+                } else {
+                    "00"
+                };
+                return Some((sc.trace_id().to_string(), sc.span_id().to_string(), flags));
+            }
+        }
         let tc = self.trace_context.as_ref()?;
         if tc.trace_id.is_empty() || tc.span_id.is_empty() {
             return None;
         }
-        let mut headers = HashMap::new();
-        headers.insert(
-            "traceparent".to_string(),
-            format!("00-{}-{}-01", tc.trace_id, tc.span_id),
-        );
-        if let Some(ts) = &tc.tracestate {
-            headers.insert("tracestate".to_string(), ts.clone());
-        }
-        if let Some(id) = &tc.x_request_id {
-            headers.insert("x-request-id".to_string(), id.clone());
-        }
-        if let Some(id) = &tc.request_id {
-            headers.insert("request-id".to_string(), id.clone());
-        }
-        Some(headers)
+        Some((tc.trace_id.clone(), tc.span_id.clone(), "01"))
     }
 }
 
