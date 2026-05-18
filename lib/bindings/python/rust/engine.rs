@@ -167,6 +167,7 @@ where
         let event_loop = self.event_loop.clone();
         let ctx_python = ctx.clone();
         let has_context = self.has_context;
+        let metadata = context.metadata().clone();
 
         // Acquiring the GIL is similar to acquiring a standard lock/mutex
         // Performing this in an tokio async task could block the thread for an undefined amount of time
@@ -189,7 +190,7 @@ where
                         ctx_python.clone(),
                         current_trace_context,
                         None,
-                        context.metadata().clone(),
+                        metadata,
                     ),
                 )?;
 

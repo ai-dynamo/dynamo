@@ -91,7 +91,7 @@ impl ContextMetadata {
             .or(default)
     }
 
-    #[pyo3(signature = (key, default=None))]
+    #[pyo3(signature = (key, default = None::<Option<String>>))]
     fn pop(&self, key: &str, default: Option<Option<String>>) -> PyResult<Option<String>> {
         let mut guard = self.inner.lock().expect("metadata mutex poisoned");
         match guard.remove(key) {
