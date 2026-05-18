@@ -19,7 +19,7 @@ PIPECAT_SRC = os.environ.get("PIPECAT_SRC", "/home/nealv/dynamo/pipecat/src")
 if os.path.isdir(PIPECAT_SRC):
     sys.path.insert(0, PIPECAT_SRC)
 
-from asr_protocol import AsrRequest, AsrTranscript
+from asr_protocol import DynamoASRService
 from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
@@ -33,11 +33,6 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.settings import STTSettings
-from pipecat.services.stt_service import SegmentedSTTService
-from pipecat.utils.time import time_now_iso8601
-
-from dynamo.runtime import DistributedRuntime
 
 DEFAULT_CONNECT = "127.0.0.1:8081"
 DEFAULT_SAMPLE_RATE = 16000
@@ -223,104 +218,6 @@ class TranscriptCollector(FrameProcessor):
             await self._output_queue.put(PipelineFailure(frame.error))
 
         await self.push_frame(frame, direction)
-
-
-def runtime_from_env() -> DistributedRuntime:
-    return DistributedRuntime(
-        asyncio.get_running_loop(),
-        os.environ.get("DYN_DISCOVERY_BACKEND", "etcd"),
-        os.environ.get("DYN_REQUEST_PLANE", "tcp"),
-    )
-
-
-def parse_asr_transcript(chunk: Any) -> AsrTranscript:
-    raw = chunk.data() if hasattr(chunk, "data") else chunk
-    if isinstance(raw, AsrTranscript):
-        return raw
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
-    if isinstance(raw, str):
-        return AsrTranscript.model_validate_json(raw)
-    return AsrTranscript.model_validate(raw)
-
-
-class DynamoASRService(SegmentedSTTService):
-    """Segmented Pipecat STT service backed by a Dynamo ASR endpoint."""
-
-    def __init__(
-        self,
-        *,
-        endpoint_path: str,
-        sample_rate: int,
-        channels: int,
-        language: str,
-        model: str | None,
-    ):
-        super().__init__(
-            sample_rate=sample_rate,
-            audio_passthrough=False,
-            settings=STTSettings(model=model, language=language),
-            ttfs_p99_latency=1.0,
-        )
-        self._endpoint_path = endpoint_path
-        self._channels = channels
-        self._language = language
-        self._model = model
-        self._runtime: DistributedRuntime | None = None
-        self._client: Any | None = None
-
-    async def _ensure_client(self) -> Any:
-        if self._client is not None:
-            return self._client
-
-        self._runtime = runtime_from_env()
-        endpoint = self._runtime.endpoint(self._endpoint_path)
-        self._client = await endpoint.client()
-        await self._client.wait_for_instances()
-        return self._client
-
-    async def start(self, frame):
-        await super().start(frame)
-        await self._ensure_client()
-
-    async def run_stt(self, audio: bytes):
-        try:
-            client = await self._ensure_client()
-            request = AsrRequest(
-                audio_b64=base64.b64encode(audio).decode("ascii"),
-                encoding="wav",
-                sample_rate_hz=self._sample_rate,
-                channels=self._channels,
-                language=self._language,
-                model=self._model,
-            )
-            stream = await client.generate(request.model_dump_json())
-            async for chunk in stream:
-                transcript = parse_asr_transcript(chunk)
-                if not transcript.text:
-                    continue
-
-                result = transcript.model_dump()
-                if transcript.is_final:
-                    yield TranscriptionFrame(
-                        transcript.text,
-                        self._user_id,
-                        time_now_iso8601(),
-                        None,
-                        result,
-                    )
-                else:
-                    yield InterimTranscriptionFrame(
-                        transcript.text,
-                        self._user_id,
-                        time_now_iso8601(),
-                        None,
-                        result,
-                    )
-        except Exception as exc:
-            yield ErrorFrame(
-                error=f"Dynamo ASR endpoint {self._endpoint_path} failed: {exc}"
-            )
 
 
 class PipecatASRSession:
