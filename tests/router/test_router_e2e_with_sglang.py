@@ -7,6 +7,7 @@
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 import pytest
@@ -32,10 +33,8 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
-    pytest.mark.e2e,
     pytest.mark.router,
     pytest.mark.sglang,
-    pytest.mark.model(MODEL_NAME),
 ]
 PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
 
@@ -244,6 +243,65 @@ class SGLangProcess(ManagedEngineProcessMixin):
     cleanup_name = "SGLang worker resources"
 
 
+class _FakeRequest:
+    node = SimpleNamespace(
+        name="test_sglang_dp_workers_use_contiguous_kv_event_port_blocks"
+    )
+
+    def __init__(self):
+        self.finalizers = []
+
+    def addfinalizer(self, finalizer):
+        self.finalizers.append(finalizer)
+
+
+def _kv_events_config(command: list[str]) -> str:
+    return command[command.index("--kv-events-config") + 1]
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_sglang_dp_workers_use_contiguous_kv_event_port_blocks(monkeypatch):
+    def fake_allocate_ports(count: int, start_port: int) -> list[int]:
+        assert (count, start_port) == (2, DefaultPort.SYSTEM1.value)
+        return [10000, 10010]
+
+    contiguous_calls = []
+
+    def fake_allocate_contiguous_ports(
+        count: int, block_size: int, start_port: int
+    ) -> list[int]:
+        contiguous_calls.append((count, block_size, start_port))
+        return [11000, 11001, 11010, 11011]
+
+    monkeypatch.setitem(
+        SGLangProcess.__init__.__globals__, "allocate_ports", fake_allocate_ports
+    )
+    monkeypatch.setitem(
+        SGLangProcess.__init__.__globals__,
+        "allocate_contiguous_ports",
+        fake_allocate_contiguous_ports,
+    )
+
+    process = SGLangProcess(
+        _FakeRequest(),
+        sglang_args=SGLANG_ARGS,
+        num_workers=2,
+        data_parallel_size=2,
+    )
+
+    assert contiguous_calls == [(2, 2, DefaultPort.SYSTEM1.value)]
+    assert '"endpoint":"tcp://*:11000"' in _kv_events_config(
+        process.worker_processes[0].command
+    )
+    assert '"endpoint":"tcp://*:11010"' in _kv_events_config(
+        process.worker_processes[1].command
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -268,6 +326,8 @@ def test_sglang_kv_router_basic(
     )
 
 
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.timeout(300)
@@ -294,6 +354,8 @@ def test_router_decisions_sglang_multiple_workers(
     )
 
 
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(3.7)
@@ -331,6 +393,8 @@ def test_router_decisions_sglang_dp(
 
 
 @pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
@@ -371,6 +435,8 @@ def test_router_decisions_sglang_disagg(
 # Passes reliably in pre_merge/post_merge runs, so scope the skip to the
 # nightly pipeline via skip_in_nightly, which nightly-ci.yml excludes from
 # its sglang single-GPU marker filter. Remove once DYN-2784 lands a real fix.
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip_in_nightly
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
