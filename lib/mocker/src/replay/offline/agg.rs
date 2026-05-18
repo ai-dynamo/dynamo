@@ -700,6 +700,13 @@ impl AggRuntime {
     pub(in crate::replay::offline) fn run(
         mut self,
     ) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
+        if let Some(cap_ms) = self.max_sim_time_ms
+            && (!cap_ms.is_finite() || cap_ms < 0.0)
+        {
+            bail!(
+                "max_sim_time_ms must be a finite, non-negative value; got {cap_ms}"
+            );
+        }
         self.drain_current_timestamp()?;
 
         while !self.is_done() {
