@@ -6,8 +6,8 @@ mode: batch
 cases:
   PARSER.batch.6.a:
     description: Canonical empty {} message body
-    ref: dynamo
-    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}
+    ref: "OpenAI Harmony tool calls terminate with '<|call|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
+    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}<|call|>
     tools:
     - &id001
       name: get_time
@@ -15,44 +15,45 @@ cases:
         type: object
         properties: {}
     expected:
-      dynamo:
+      dynamo: &d_6_a
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      vllm: *d_6_a
       sglang:
         calls: []
-        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}
+        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}<|call|>
+        reason: "Less spec-correct parsing: SGLang leaks raw Harmony markup instead of extracting a valid '<|call|>'-terminated commentary tool call."
   PARSER.batch.6.b:
     description: Whitespace inside empty {}
-    ref: dynamo
-    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }
+    ref: "OpenAI Harmony tool calls terminate with '<|call|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
+    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }<|call|>
     tools:
     - *id001
     expected:
-      dynamo:
+      dynamo: &d_6_b
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      vllm: *d_6_b
       sglang:
         calls: []
-        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }
+        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }<|call|>
+        reason: "Less spec-correct parsing: SGLang leaks raw Harmony markup instead of extracting a valid '<|call|>'-terminated commentary tool call."
   PARSER.batch.6.c:
     description: No <|message|> body
-    ref: dynamo
+    ref: "OpenAI Harmony tool-call message header/body format: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.get_time <|constrain|>json
     tools:
     - *id001
     expected:
-      dynamo: &id002
-        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|constrain|> harmony token in normal_text on minimal/no-body case"
+      dynamo: &d_6_c
+        calls: []
+        normal_text: ''
+      vllm: *d_6_c
+      sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang: *id002
+        reason: "Dynamo/vLLM are more spec-correct: a commentary header without '<|message|>' is malformed protocol, not user-visible text; SGLang preserves raw markup"

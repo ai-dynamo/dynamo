@@ -1874,7 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_harmony_parser() {
-        // Harmony format with analysis text and a tool call encoded in special tags
+        // Harmony format with hidden analysis text and a tool call encoded in special tags
         let chunks = vec![
             create_mock_response_chunk(
                 "<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>"
@@ -1899,10 +1899,10 @@ mod tests {
         let jail = JailedStream::builder().tool_call_parser("harmony").build();
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have at least one output containing both analysis text and parsed tool call
+        // Should have at least one output containing the parsed tool call.
         assert!(!results.is_empty());
 
-        // Verify the analysis text appears as content in one of the outputs
+        // Verify hidden analysis text is not emitted as user-visible content.
         let has_analysis_text = results.iter().any(|r| {
             r.data
                 .as_ref()
@@ -1914,7 +1914,10 @@ mod tests {
                 })
                 .unwrap_or(false)
         });
-        assert!(has_analysis_text, "Should contain extracted analysis text");
+        assert!(
+            !has_analysis_text,
+            "Should not expose Harmony analysis text as content"
+        );
 
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results

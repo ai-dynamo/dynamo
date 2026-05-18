@@ -804,7 +804,7 @@ impl ModelWatcher {
             // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
             //
             // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that busy-state updates (via update_free_instances) are visible to the
+            // so that busy-state updates (via set_busy_instances) are visible to the
             // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
             // Using a different Client instance would cause the PushRouter to never see
             // busy workers, since each Client::new() creates independent ArcSwap state.
