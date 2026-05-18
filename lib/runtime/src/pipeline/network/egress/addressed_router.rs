@@ -38,6 +38,21 @@ use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
+const CONTROL_MESSAGE_MAX_BYTES: usize = 128 * 1024;
+
+fn serialize_control_message(control_message: &RequestControlMessage) -> Result<Vec<u8>, Error> {
+    let ctrl = serde_json::to_vec(control_message)?;
+    if ctrl.len() > CONTROL_MESSAGE_MAX_BYTES {
+        return Err(PipelineError::Generic(format!(
+            "request control message too large: {} bytes exceeds limit {}",
+            ctrl.len(),
+            CONTROL_MESSAGE_MAX_BYTES
+        ))
+        .into());
+    }
+    Ok(ctrl)
+}
+
 /// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
 /// Protects against gauge leaks when `?` operators cause early returns between
 /// the increment and `InflightDecStream` construction.
@@ -257,7 +272,7 @@ where
         // next build the two part message where we package the connection info and the request into
         // a single Vec<u8> that can be sent over the wire.
         // --- package this up in the WorkQueuePublisher ---
-        let ctrl = match serde_json::to_vec(&control_message) {
+        let ctrl = match serialize_control_message(&control_message) {
             Ok(v) => v,
             Err(e) => {
                 if let Some(subject) = &recv_subject {
@@ -447,5 +462,50 @@ where
         inflight_guard.disarm();
         let stream = InflightDecStream { inner: stream };
         Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestType,
+        ResponseType, serialize_control_message,
+    };
+    use std::collections::BTreeMap;
+
+    fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
+        RequestControlMessage {
+            id: "request-123".to_string(),
+            request_type: RequestType::SingleIn,
+            response_type: ResponseType::ManyOut,
+            connection_info: ConnectionInfo {
+                transport: "tcp".to_string(),
+                info: "{}".to_string(),
+            },
+            metadata,
+            frontend_send_ts_ns: None,
+        }
+    }
+
+    #[test]
+    fn serialize_control_message_succeeds_under_limit() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("x-tiny-blob".to_string(), "alpha".to_string());
+
+        let ctrl = serialize_control_message(&base_control_message(metadata))
+            .expect("control message should serialize under the limit");
+        assert!(ctrl.len() <= CONTROL_MESSAGE_MAX_BYTES);
+    }
+
+    #[test]
+    fn serialize_control_message_errors_over_limit() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("x-large-blob".to_string(), "x".repeat(CONTROL_MESSAGE_MAX_BYTES));
+
+        let err = serialize_control_message(&base_control_message(metadata))
+            .expect_err("oversized control message should fail")
+            .to_string();
+        assert!(err.contains("request control message too large"));
+        assert!(err.contains(&CONTROL_MESSAGE_MAX_BYTES.to_string()));
     }
 }
