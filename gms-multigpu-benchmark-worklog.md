@@ -482,14 +482,17 @@ Workspace state:
 
 - Worktree: `/private/tmp/dynamo-gms-transfer-mainbase`
 - Git state: detached `HEAD`
-- `HEAD`: `ab81d22485e25c5135e714939490fc5b58886103`
+- Refactor code commit: `ab81d22485e25c5135e714939490fc5b58886103`
+- The current PR branch head includes this handoff section; use
+  `git rev-parse HEAD` in this worktree or `gh pr view 9635` for the exact
+  latest pushed SHA.
 - Corresponding PR: `ai-dynamo/dynamo#9635`
   (`https://github.com/ai-dynamo/dynamo/pull/9635`)
 - PR branch: `schwinns/gms-transfer-backends-draft`
 - PR base: `main`
 - Main repo checkout remains separate at `/Users/schwinns/dynamo` on `main`.
-- The transfer worktree was clean immediately after pushing
-  `ab81d22485e25c5135e714939490fc5b58886103`.
+- The transfer worktree was clean immediately after the handoff update was
+  pushed.
 
 Tracked files changed by the pushed refactor commit:
 
