@@ -162,6 +162,44 @@ pub trait InnerLeaderShim: Send + Sync {
     fn local_instance_id(&self) -> InstanceId;
     fn apply_block_assignments(&self, request_id: &str, block_ids: Vec<BlockId>) -> Result<()>;
     fn take_local_match_g2_blocks(&self, request_id: &str) -> Result<Vec<ImmutableBlock<G2>>>;
+    /// Search G2 for the prefix range `sequence_hashes[0 .. num_prefix_blocks]`
+    /// — the blocks vLLM reports as already in G1 but which the inner search
+    /// at `process_match` did not cover (it starts at
+    /// `num_computed_tokens / block_size`).
+    ///
+    /// CD sessions ideally want every block in `[0, total)` reachable by the
+    /// prefill peer via decode's G2/G3. With vLLM prefix-caching disabled
+    /// `num_computed_tokens` is always 0 and this method is a no-op (returns
+    /// empty); with PC enabled the prefix range gets searched here.
+    ///
+    /// # Returns — all-or-nothing
+    ///
+    /// Either the full `num_prefix_blocks` G2 blocks (every prefix block
+    /// was G2-resident) or an empty Vec (any G2 miss → drop the partial
+    /// hits, advertise no prefix). Partial publication would tell prefill
+    /// "decode has prefix `[0..M)` but not `[M..P)`" while vLLM's G1
+    /// actually holds the full prefix — an inconsistent advertisement.
+    /// The intended recovery for misses is a G1→G2 copy in
+    /// `update_state_after_alloc`, **not yet wired**; the panic stub for
+    /// that arm belongs in USAA, not here.
+    ///
+    /// # Errors
+    ///
+    /// `Err` only on infrastructure failures (slot missing, leader not
+    /// initialized). G2-miss cases return `Ok(Vec::new())` per the
+    /// all-or-nothing contract above. The production impl uses
+    /// `g2_manager.match_blocks` directly (no `find_matches_with_options`
+    /// / no G3 fallback / no AsyncSession allocation) — G3-tier prefix
+    /// blocks are not pursued at GNMT time and don't change this contract.
+    ///
+    /// Reachable from `decode_gnmt` (the vLLM `get_num_new_matched_tokens`
+    /// PyO3 entrypoint), so failures must be `Err` (request-scoped abort) and
+    /// never `panic!` (would poison the worker across all in-flight requests).
+    fn find_prefix_g2_blocks(
+        &self,
+        request_id: &str,
+        num_prefix_blocks: usize,
+    ) -> Result<Vec<ImmutableBlock<G2>>>;
     fn token_blocks_for_range(
         &self,
         request_id: &str,
@@ -293,6 +331,15 @@ impl InnerLeaderShim for ConnectorLeaderShim {
 
     fn take_local_match_g2_blocks(&self, request_id: &str) -> Result<Vec<ImmutableBlock<G2>>> {
         self.inner.take_local_match_g2_blocks(request_id)
+    }
+
+    fn find_prefix_g2_blocks(
+        &self,
+        request_id: &str,
+        num_prefix_blocks: usize,
+    ) -> Result<Vec<ImmutableBlock<G2>>> {
+        self.inner
+            .find_prefix_g2_blocks(request_id, num_prefix_blocks)
     }
 
     fn token_blocks_for_range(

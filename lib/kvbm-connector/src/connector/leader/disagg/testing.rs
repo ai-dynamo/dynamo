@@ -419,6 +419,25 @@ impl InnerLeaderShim for MockInnerLeaderShim {
             .ok_or_else(|| anyhow!("local_match_g2 already taken for {}", request_id))
     }
 
+    fn find_prefix_g2_blocks(
+        &self,
+        _request_id: &str,
+        _num_prefix_blocks: usize,
+    ) -> Result<Vec<ImmutableBlock<G2>>> {
+        // Tests today exercise the prefix-caching-disabled code path
+        // (num_computed_tokens = 0 → num_prefix_blocks = 0). When the
+        // PC-enabled path is exercised, extend `MockSlot` with a
+        // `prefix_match_g2: Mutex<Option<Vec<ImmutableBlock<G2>>>>`
+        // field — production semantics are all-or-nothing, so the
+        // fixture should store either the full prefix Vec or None
+        // (representing the incomplete-backing case logged in
+        // production as `prefix_g2_incomplete_skip`).
+        //
+        // Returning empty here matches the "incomplete backing" arm:
+        // tests run cleanly until someone wires the per-slot fixture.
+        Ok(Vec::new())
+    }
+
     fn token_blocks_for_range(
         &self,
         request_id: &str,

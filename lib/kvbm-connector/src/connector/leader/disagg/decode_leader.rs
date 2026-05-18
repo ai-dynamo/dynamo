@@ -519,14 +519,105 @@ impl DecodeDisaggLeader {
                 local_g2.len()
             );
         }
+
+        // Prefix-range G2 backfill.
+        //
+        // The inner search at `process_match` covers
+        // `[num_computed_tokens / bs, total / bs)` — vLLM is implicitly
+        // trusted to "have the prefix in G1." The CD session contract
+        // requires every block in `[0, total)` to be reachable by the
+        // prefill peer via decode's G2/G3, so the prefix range needs to
+        // be backfilled here so decode can publish it on the session.
+        //
+        // With vLLM prefix-caching disabled (current default)
+        // `num_computed_tokens == 0` and `num_prefix_blocks == 0` — this
+        // is a no-op. With PC enabled the prefix range is non-empty.
+        //
+        // Two outcomes (all-or-nothing):
+        //   1. Full G2 hit — every prefix block was in G2; pin them
+        //      (the session's `available_pins` owns the pin for the
+        //      session's lifetime once we hand it to
+        //      `begin_remote_prefill`).
+        //   2. Any miss — vLLM has the full prefix in G1, but G2 doesn't
+        //      back all of it. `find_prefix_g2_blocks` drops any partial
+        //      hits and returns empty; we advertise no prefix to prefill.
+        //      Publishing a partial set would tell prefill "decode has
+        //      prefix `[0..M)` available, not `[M..P)`" while decode's
+        //      G1 actually holds the full `[0..P)` — an inconsistent
+        //      advertisement.
+        //
+        // Recovery for the miss case is a G1→G2 copy in
+        // `update_state_after_alloc`. **That arm is not yet wired.**
+        // Until it is, "advertise none on any miss" = pre-merge
+        // functional parity: no prefix in session, prefill computes the
+        // whole prefix itself. The panic stub for the unimplemented
+        // G1→G2 backfill belongs in USAA when that code path is added,
+        // not at GNMT — bailing here would regress every PC-enabled CD
+        // request whose prefix isn't already in G2 (most of them on a
+        // fresh worker).
+        //
+        // Why prefix and local-match are passed to `begin_remote_prefill`
+        // as SEPARATE Vecs (not concatenated) — two invariants:
+        //
+        // 1. CD USAA-1 local-match contract: `local_match_g2_pins` /
+        //    `local_match_g2_block_ids` must contain exactly
+        //    `split.local_match_blocks` entries, paired 1:1 with the
+        //    G1 destinations sliced by `split.local_match_range()` for
+        //    the local-kick `transport.local_g2_to_g1` call. We hand
+        //    `local_g2` (the original N) into `local_match_g2_pins`
+        //    and do NOT mix prefix blocks in.
+        //
+        // 2. `RemotePrefillRequest` positional contract: prefill places
+        //    `params.sequence_hashes[i]` at absolute block index
+        //    `decode_offset_blocks + i` (see `ensure_started`'s
+        //    `expected_hashes[i] lands at D/BS + i` comment). The
+        //    request must therefore include ONLY local-match hashes;
+        //    prefix hashes cover `[0, num_computed_tokens / bs)` and
+        //    would mis-place by P positions if folded in.
+        //
+        // The coordinator (`begin_remote_prefill`) routes them
+        // accordingly: prefix + local → `session.commit` /
+        // `session.make_available`; local-match only →
+        // `RemotePrefillRequest.sequence_hashes`. See the doc-comment
+        // on `begin_remote_prefill` for the publish-without-consumer
+        // discussion (prefix hashes are pullable by the prefill peer
+        // but no current prefill code path queries them; they drop on
+        // session close).
+        let block_size = self.inner.block_size();
+        let num_prefix_blocks = inputs.num_computed_tokens / block_size;
+        let prefix_g2 = self
+            .inner
+            .find_prefix_g2_blocks(request_id, num_prefix_blocks)?;
+        if !prefix_g2.is_empty() {
+            tracing::info!(
+                prefix_g2_len = prefix_g2.len(),
+                num_prefix_blocks,
+                "commit_gnmt_remote: backfilled prefix G2 blocks (session-only)"
+            );
+            crate::audit!(
+                "prefix_g2_backfill",
+                role = "decode",
+                request_id,
+                prefix_g2_len = prefix_g2.len(),
+                num_prefix_blocks
+            );
+        }
+
         let num_local_match_hashes = local_g2.len();
         let local_match_g2_block_ids: Vec<BlockId> =
             local_g2.iter().map(|b| b.block_id()).collect();
-        // Independent pin set: the wrapper holds its own clones to
-        // keep the local-match G2 entries pinned for the local-kick.
-        // `session.make_available` will get its own clones inside
-        // `coordinator.begin_remote_prefill`.
+        // Independent pin set for the SESSION (not the wrapper). The wrapper's
+        // separate `local_match_g2_pins` (filled below from `local_g2`) keeps
+        // the local-match subset pinned for the local-kick. Prefix blocks have
+        // no wrapper-side pin — `session.make_available` moves them into
+        // `available_pins` and the session owns the pin for its lifetime.
+        //
+        // `session_local_g2` here carries ONLY local-match; the coordinator
+        // composes prefix + local-match internally for session.commit +
+        // session.make_available, but builds RemotePrefillRequest.sequence_hashes
+        // from local-match only.
         let session_local_g2: Vec<ImmutableBlock<G2>> = local_g2.to_vec();
+        let session_prefix_g2: Vec<ImmutableBlock<G2>> = prefix_g2;
 
         let all_token_ids = self.inner.slot_token_ids(request_id)?;
         // Slice tokens to the prefill window: only the full-block
@@ -603,6 +694,7 @@ impl DecodeDisaggLeader {
             request_id,
             inputs,
             initiator,
+            session_prefix_g2,
             session_local_g2,
             prefill_token_ids,
             install_payload,

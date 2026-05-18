@@ -956,11 +956,93 @@ impl ConditionalDisaggCoordinator {
     /// the wrapper holding a payload referencing a state that had
     /// already been cleaned up. With the install in-line, by the time
     /// the spawned task can run, the payload is already on the slot.
+    ///
+    /// # `prefix_g2` vs. `local_match_g2`
+    ///
+    /// Two G2 sets feed the holder side. They route differently:
+    ///
+    /// * `local_match_g2` — the inner-search hits for the prefill window
+    ///   `[num_computed_tokens / bs, num_computed_tokens / bs + matched)`.
+    ///   Hashes ride into BOTH `session.commit + make_available` AND
+    ///   `RemotePrefillRequest.sequence_hashes`. The prefill peer pulls
+    ///   them via `pull_and_register_*`, placing each at absolute block
+    ///   index `decode_offset_blocks + i` (see `ensure_started` —
+    ///   `expected_hashes[i] lands at D/BS + i`).
+    ///
+    /// * `prefix_g2` — the prefix-range backfill hits for
+    ///   `[0, num_computed_tokens / bs)`. Hashes go ONLY into
+    ///   `session.commit + make_available`; they are **deliberately
+    ///   excluded** from `RemotePrefillRequest.sequence_hashes` because
+    ///   the request's positional contract would mis-place them
+    ///   (prefix_0 covers absolute block 0, not block `D/BS`).
+    ///
+    /// # Prefix is published but currently has no prefill consumer
+    ///
+    /// The current prefill code path pulls only `expected_hashes` (=
+    /// `params.sequence_hashes` = local-match only). Prefix hashes
+    /// pinned via `make_available` sit in decode's `available_pins`
+    /// for the session's lifetime and drop when the session closes
+    /// (i.e., on request completion).
+    ///
+    /// This is **intentional**, not a leak:
+    ///
+    /// * The session model is asymmetric: decode publishes everything
+    ///   that's pullable; prefill pulls what it needs. Prefix follows
+    ///   the same publisher contract as local-match — only the consumer
+    ///   side hasn't been wired yet.
+    /// * Future consumers (speculative prefill prefetch, recompute
+    ///   fallback, multi-turn cache fill) get prefix-pullable-by-hash
+    ///   for free once they exist.
+    ///
+    /// # Cost — be honest about the upper bound
+    ///
+    /// Per CD-remote request, the prefix pin holds
+    /// `num_computed_blocks × bytes_per_block` of G2 host RAM for the
+    /// session's lifetime (decode side). `num_computed_blocks` scales
+    /// with the prefix length reported by vLLM, which can grow to
+    /// nearly the slot's full context (PC enabled, long multi-turn). It
+    /// is **NOT** bounded by the CD inflight token budget — that budget
+    /// caps `full_block_external_tokens` (the remote-prefill window), a
+    /// different quantity.
+    ///
+    /// Aggregate ceiling across all concurrent CD-remote sessions:
+    ///
+    /// ```text
+    ///     concurrent_cd_sessions × max_prefix_blocks × bytes_per_block
+    /// ```
+    ///
+    /// where `concurrent_cd_sessions ≤ inflight_cap` (in concurrent
+    /// requests, not tokens) and `max_prefix_blocks ≈ slot_context_len /
+    /// block_size`. At typical KV sizes (tens of KB per block) and
+    /// long-context configs this can reach GBs of pinned host RAM —
+    /// non-trivial, monitor at scale.
+    ///
+    /// Pin lifetime is the full request: from `begin_remote_prefill`
+    /// through prefill completion + decode's reverse-direction
+    /// generation streaming back through the session. Bandwidth cost is
+    /// negligible (one extra `Frame::Commit + Frame::Available` per
+    /// request carrying P hash + (hash, peer_block_id) pairs ≈ 32B per
+    /// hash).
+    ///
+    /// If memory pressure becomes observable, a `Frame::DropAvailable`
+    /// signal from prefill (or time-based GC of unconsumed entries in
+    /// `available_pins`) is the natural release path — it applies
+    /// symmetrically to prefix and local-match. The asymmetric session
+    /// lifetime (decode keeps pulling prefill's generated outputs after
+    /// prefill is "done" pulling decode's prefix) makes a drop-signal
+    /// preferable to bilateral session close.
+    ///
+    /// Today `prefix_g2` is empty unless vLLM prefix-caching is enabled
+    /// (and the decode wrapper's `find_prefix_g2_blocks` returns a
+    /// non-empty result). With PC disabled (current default)
+    /// `num_computed_tokens == 0` and this is a no-op — the cost
+    /// discussion above only applies once PC is turned on.
     pub fn begin_remote_prefill<F>(
         &self,
         request_id: &str,
         inputs: &PolicyInputs,
         initiator_instance_id: InstanceId,
+        prefix_g2: Vec<ImmutableBlock<G2>>,
         local_match_g2: Vec<ImmutableBlock<G2>>,
         prefill_token_ids: Vec<u32>,
         install_payload: F,
@@ -981,15 +1063,41 @@ impl ConditionalDisaggCoordinator {
             .expect("begin_remote_prefill: ConditionalDisaggCoordinator not wired for decode role")
             .clone();
 
+        // Local-match hashes ride into BOTH the session and the
+        // RemotePrefillRequest. The prefill side uses
+        // `RemotePrefillRequest.sequence_hashes[i]` to place blocks at
+        // absolute index `decode_offset_blocks + i` (see
+        // `ensure_started`'s `expected_hashes[i] lands at D/BS + i`
+        // comment), so the request must contain ONLY the local-match
+        // range — `[num_computed_tokens / bs, num_computed_tokens / bs +
+        // local_match_blocks)`.
         let local_match_hashes: Vec<SequenceHash> =
             local_match_g2.iter().map(|b| b.sequence_hash()).collect();
+
+        // Session-side hashes/blocks include the prefix range
+        // `[0, num_computed_tokens / bs)` ahead of the local-match range.
+        // The session's commit + make_available expose the full
+        // `[0, num_computed_tokens + matched)` window so the prefill peer
+        // can pull any block (including prefix) by hash. Prefix blocks
+        // are NOT positionally indexed by the prefill side — they're
+        // located via hash lookup against the session's available_pins.
+        let prefix_hashes: Vec<SequenceHash> =
+            prefix_g2.iter().map(|b| b.sequence_hash()).collect();
+        let mut session_hashes: Vec<SequenceHash> =
+            Vec::with_capacity(prefix_hashes.len() + local_match_hashes.len());
+        session_hashes.extend_from_slice(&prefix_hashes);
+        session_hashes.extend_from_slice(&local_match_hashes);
+        let session_g2: Vec<ImmutableBlock<G2>> = prefix_g2
+            .into_iter()
+            .chain(local_match_g2.into_iter())
+            .collect();
 
         let session_id = uuid::Uuid::new_v4();
         let session = self.session_factory.open(session_id)?;
 
         // Holder side: publish commit + availability, then close terminators.
-        session.commit(local_match_hashes.clone())?;
-        session.make_available(local_match_g2)?;
+        session.commit(session_hashes)?;
+        session.make_available(session_g2)?;
         session.finish_commits()?;
         session.finish_availability()?;
 

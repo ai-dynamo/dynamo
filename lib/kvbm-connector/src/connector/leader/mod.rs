@@ -369,6 +369,155 @@ impl ConnectorLeader {
         .with_context(|| format!("slot {} G2 collection failed", request_id))
     }
 
+    /// Search the connector's G2 cache for `sequence_hashes[0 .. num_prefix_blocks]`
+    /// — the prefix range vLLM reports as already in G1 but which the inner
+    /// search at `process_match` did NOT cover (it starts at
+    /// `num_computed_tokens / block_size`).
+    ///
+    /// CD sessions ideally want every block in `[0, total)` to be reachable
+    /// by the prefill peer via decode's G2/G3. The inner search only covers
+    /// `[num_computed_tokens / bs, total / bs)`; this method backfills the
+    /// prefix from the connector-tracked G2.
+    ///
+    /// # Implementation: direct `g2_manager.match_blocks`, no session
+    ///
+    /// Uses `InstanceLeader::g2_manager().match_blocks(prefix_hashes)`
+    /// rather than `find_matches_with_options`. The higher-level API:
+    ///
+    /// * Falls back to G3 on G2 miss → wraps the result in `AsyncSession`
+    ///   for G3→G2 staging. We don't want to stage G3 prefix at GNMT —
+    ///   that's synchronous-PyO3-blocking work and the wrong tier
+    ///   promotion for "prefix vLLM has in G1." If G3 hits exist they're
+    ///   dropped here (G3 prefix backfill is future work alongside the
+    ///   G1→G2 path).
+    /// * Allocates `SessionState` keyed by a new `session_id` and stores
+    ///   matched_g2_blocks + matched_g3_blocks under it. Without an
+    ///   explicit `release_session` those blocks leak until session
+    ///   timeout — and on `release_session` we'd also drop the valid G2
+    ///   hits stored alongside the G3 hits in the same `SessionState`.
+    ///
+    /// `g2_manager.match_blocks` returns the G2 hits directly with no
+    /// session bookkeeping and no G3 fallback — perfect fit for "what's
+    /// already in G2 and pinable by RAII right now."
+    ///
+    /// # Return value — all-or-nothing
+    ///
+    /// * **Full hit** (`g2_manager.match_blocks(prefix_hashes).len() ==
+    ///   num_prefix_blocks`) — every prefix block was in G2; returns the
+    ///   full Vec and the wrapper publishes them all on the session.
+    /// * **Any miss** (returned len `< num_prefix_blocks`, including 0) —
+    ///   drops the partial G2 hits (RAII-release returns them to G2's
+    ///   inactive pool) and returns an empty Vec. The wrapper advertises
+    ///   no prefix blocks to prefill in this case.
+    ///
+    /// Why all-or-nothing rather than partial-publish: G2's first-hole
+    /// policy returns the leading-contiguous G2-resident prefix. If
+    /// blocks `[0..M)` are in G2 but `[M..P)` aren't, publishing `[0..M)`
+    /// to the session tells prefill "decode has prefix blocks `[0..M)`
+    /// available, not the rest." But on the decode side vLLM holds G1
+    /// for the FULL prefix `[0..P)` — the "missing" `[M..P)` is a hole
+    /// only in G2, not in the conversation state. Advertising the partial
+    /// set creates an inconsistent view: prefill would believe positions
+    /// `[M..P)` are unavailable and either treat them as cache misses or
+    /// fail contiguity checks, when in reality decode could serve them
+    /// once the G1→G2 backfill is wired.
+    ///
+    /// The intended recovery for any miss is a G1→G2 copy in
+    /// `update_state_after_alloc` (vLLM has the blocks in G1, decode just
+    /// hasn't materialized them in G2 yet). **That arm is not yet wired.**
+    /// Until it is, returning empty matches pre-prefix-backfill behavior:
+    /// no prefix in session, prefill computes the whole prefix itself.
+    ///
+    /// Per Ryan's directive: the panic stub for the unimplemented G1→G2
+    /// backfill arm belongs in `update_state_after_alloc`, not here.
+    /// Failing GNMT on a G2 miss would regress every PC-enabled CD request
+    /// whose prefix isn't already in G2 (typically most of them on a fresh
+    /// worker).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` only for true infrastructure failures (slot missing,
+    /// `InstanceLeader` not initialized). All G2-miss cases — full miss
+    /// and incomplete-prefix miss — return `Ok(Vec::new())` per the
+    /// all-or-nothing contract above.
+    ///
+    /// Reachable from `decode_gnmt` (the vLLM `get_num_new_matched_tokens`
+    /// PyO3 entrypoint), so failures are `Err` (request-scoped abort) and
+    /// never `panic!` (would poison the worker across all in-flight
+    /// requests).
+    #[allow(dead_code)]
+    pub(crate) fn find_prefix_g2_blocks(
+        &self,
+        request_id: &str,
+        num_prefix_blocks: usize,
+    ) -> Result<Vec<ImmutableBlock<G2>>> {
+        if num_prefix_blocks == 0 {
+            return Ok(Vec::new());
+        }
+
+        let prefix_hashes: Vec<crate::SequenceHash> = {
+            let slot = self.get_slot(request_id)?;
+            let slot = slot.lock();
+            let all = slot.all_sequence_hashes();
+            if num_prefix_blocks > all.len() {
+                bail!(
+                    "find_prefix_g2_blocks ({}): num_prefix_blocks {} exceeds slot's total \
+                     sequence_hashes {}",
+                    request_id,
+                    num_prefix_blocks,
+                    all.len(),
+                );
+            }
+            all[..num_prefix_blocks].to_vec()
+        };
+
+        let leader = self
+            .instance_leader
+            .get()
+            .ok_or_else(|| anyhow!("InstanceLeader not set; called before initialized"))?;
+
+        // Direct G2 lookup. No session, no G3 fallback, no staging side
+        // effects. The returned ImmutableBlock<G2> entries are
+        // RAII-pinned for the caller's lifetime (and after `make_available`,
+        // for the session's lifetime).
+        let g2 = leader.g2_manager().match_blocks(&prefix_hashes);
+
+        if g2.len() != num_prefix_blocks {
+            // Any miss → advertise none (all-or-nothing). Publishing the
+            // partial leading-contiguous G2 hits would tell prefill
+            // "decode has [0..M) of the prefix" while vLLM's G1 actually
+            // holds the full [0..P) — an inconsistent advertisement that
+            // makes the holes look like real cache misses to prefill.
+            //
+            // Drop the partial G2 hits (RAII returns them to the inactive
+            // pool intact, available for future requests). The G1→G2
+            // backfill that would close the gap belongs in USAA; until
+            // it's wired, "no prefix advertised" = pre-merge behavior.
+            let hits = g2.len();
+            let misses = num_prefix_blocks - hits;
+            drop(g2);
+            tracing::debug!(
+                request_id,
+                num_prefix_blocks,
+                hits,
+                misses,
+                "find_prefix_g2_blocks: incomplete G2 backing; advertising no prefix \
+                 (G1→G2 backfill unimplemented)"
+            );
+            crate::audit!(
+                "prefix_g2_incomplete_skip",
+                role = "decode",
+                request_id,
+                num_prefix_blocks,
+                hits,
+                misses
+            );
+            return Ok(Vec::new());
+        }
+
+        Ok(g2)
+    }
+
     /// Clone a contiguous slice of the slot's `TokenBlock`s.
     ///
     /// Used by the wrapper to feed `MutableBlock<G2>::complete(token_block)`
