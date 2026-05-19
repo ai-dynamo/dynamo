@@ -41,50 +41,28 @@ def select_main_attention_block_size(
     return fallback_block_size
 
 
-def _engine_core_has_kv_group_api() -> bool:
-    """Return True if this vLLM version's EngineCoreProc supports get_kv_cache_group_metadata.
-
-    Calling call_utility_async with an unregistered name in older vLLM versions (≤ 0.20.1)
-    raises AttributeError inside EngineCoreProc, which vLLM converts to EngineDeadError —
-    killing the engine. Guard the call by inspecting the class before sending the IPC message.
-    """
-    try:
-        from vllm.v1.engine.core import EngineCoreProc
-
-        return hasattr(EngineCoreProc, "get_kv_cache_group_metadata")
-    except Exception:
-        return False
-
-
 async def configure_kv_event_block_size(
     engine: AsyncLLM,
     vllm_config: VllmConfig,
 ) -> int:
     """Fetch engine cache-group metadata and cache the KV event block size on vLLM config."""
     fallback_block_size = vllm_config.cache_config.block_size
-    if not _engine_core_has_kv_group_api():
-        logger.debug(
-            "vLLM EngineCoreProc.get_kv_cache_group_metadata not available; "
-            "using cache_config.block_size as KV event block size"
+    try:
+        group_metadata = await engine.engine_core.call_utility_async(
+            "get_kv_cache_group_metadata"
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch KV cache group metadata; falling back to "
+            "vLLM cache_config.block_size: %s",
+            e,
         )
         kv_event_block_size = fallback_block_size
     else:
-        try:
-            group_metadata = await engine.engine_core.call_utility_async(
-                "get_kv_cache_group_metadata"
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to fetch KV cache group metadata; falling back to "
-                "vLLM cache_config.block_size: %s",
-                e,
-            )
-            kv_event_block_size = fallback_block_size
-        else:
-            kv_event_block_size = select_main_attention_block_size(
-                group_metadata,
-                fallback_block_size,
-            )
+        kv_event_block_size = select_main_attention_block_size(
+            group_metadata,
+            fallback_block_size,
+        )
 
     if vllm_config.additional_config is None:
         vllm_config.additional_config = {}
