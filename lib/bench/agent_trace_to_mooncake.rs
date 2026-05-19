@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use dynamo_bench::coding::common::expand_user_path;
-use dynamo_bench::coding::mooncake::{MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper};
+use dynamo_data_gen::{MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper};
 use flate2::read::MultiGzDecoder;
 use serde::Deserialize;
 use serde_json::Value;
@@ -225,11 +225,12 @@ fn build_mooncake_rows(mut requests: Vec<RequestEntry>) -> Result<(usize, Vec<Mo
         })?;
         rows.push(MooncakeRow {
             session_id: None,
-            input_length: request.replay.input_length,
-            output_length: usize::try_from(output_length)
-                .context("output length does not fit in usize")?,
-            hash_ids,
-            timestamp: Some(request.start_ms - global_start_ms),
+            input_length: Some(request.replay.input_length),
+            output_length: Some(
+                usize::try_from(output_length).context("output length does not fit in usize")?,
+            ),
+            hash_ids: Some(hash_ids),
+            timestamp: Some((request.start_ms - global_start_ms) as f64),
             delay: None,
         });
     }
@@ -279,13 +280,16 @@ mod tests {
         let (_, entries) = build_mooncake_rows(requests).unwrap();
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].timestamp, Some(0));
+        assert_eq!(entries[0].timestamp, Some(0.0));
         assert_eq!(entries[0].delay, None);
-        assert_eq!(entries[1].timestamp, Some(500));
+        assert_eq!(entries[1].timestamp, Some(500.0));
         assert_eq!(entries[1].delay, None);
         assert_eq!(entries[0].session_id, None);
         assert_eq!(entries[1].session_id, None);
-        assert_eq!(entries[0].hash_ids[0], entries[1].hash_ids[0]);
+        assert_eq!(
+            entries[0].hash_ids.as_ref().unwrap()[0],
+            entries[1].hash_ids.as_ref().unwrap()[0]
+        );
     }
 
     #[test]
@@ -298,8 +302,8 @@ mod tests {
         let (_, entries) = build_mooncake_rows(requests).unwrap();
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].timestamp, Some(0));
-        assert_eq!(entries[1].timestamp, Some(0));
+        assert_eq!(entries[0].timestamp, Some(0.0));
+        assert_eq!(entries[1].timestamp, Some(0.0));
         assert_eq!(entries[0].delay, None);
         assert_eq!(entries[1].delay, None);
         assert_eq!(entries[0].session_id, None);

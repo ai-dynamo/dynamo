@@ -142,6 +142,7 @@ def cached_tokens_chat_payload(
 def router_selection_chat_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
     max_tokens: int = 1000,
     temperature: float = 0.0,
     stream: bool = False,
@@ -149,6 +150,7 @@ def router_selection_chat_payload_default(
     return chat_payload_default(
         repeat_count=repeat_count,
         expected_response=expected_response,
+        expected_log=expected_log,
         max_tokens=max_tokens,
         temperature=temperature,
         stream=stream,
