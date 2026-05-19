@@ -14,6 +14,8 @@ use super::{EngineEffects, EnginePassMode, ScheduledWorkerCompletion};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::replay::TraceCollector;
 use crate::scheduler::RouterEventVisibility;
+#[cfg(feature = "kvbm-offload")]
+use dynamo_kv_router::protocols::RouterEvent;
 
 pub(in crate::replay::offline) struct EngineComponent {
     stage: SimulationWorkerStage,
@@ -246,7 +248,9 @@ impl EngineComponent {
             };
 
             if executed.end_ms == now_ms {
-                effects.immediate_completions.push(payload);
+                if payload.has_completion_effects() {
+                    effects.immediate_completions.push(payload);
+                }
                 return Ok(effects);
             }
 
@@ -304,6 +308,25 @@ impl EngineComponent {
 
     pub(in crate::replay::offline) fn worker_count(&self) -> usize {
         self.workers.len()
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(in crate::replay::offline) fn earliest_offload_deadline(&self) -> Option<f64> {
+        self.workers
+            .values()
+            .filter_map(OfflineWorkerState::earliest_offload_deadline)
+            .reduce(f64::min)
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(in crate::replay::offline) fn tick_offload_engines(
+        &mut self,
+        now_ms: f64,
+    ) -> Vec<RouterEvent> {
+        self.workers
+            .values_mut()
+            .flat_map(|worker| worker.tick_offload_only(now_ms))
+            .collect()
     }
 
     #[cfg(test)]

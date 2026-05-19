@@ -84,7 +84,7 @@ class DistributedRuntime:
         Args:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
-            request_plane: Request plane transport ("tcp", "http", or "nats")
+            request_plane: Request plane transport ("tcp" or "nats")
         """
         ...
 
@@ -1516,6 +1516,13 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
+        num_g2_blocks: Optional[int] = None,
+        num_g3_blocks: Optional[int] = None,
+        offload_batch_size: Optional[int] = None,
+        bandwidth_g1_to_g2_gbps: Optional[float] = None,
+        bandwidth_g2_to_g1_gbps: Optional[float] = None,
+        bandwidth_g2_to_g3_gbps: Optional[float] = None,
+        bandwidth_g3_to_g2_gbps: Optional[float] = None,
     ) -> None:
         ...
 
@@ -1554,6 +1561,27 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def num_g2_blocks(self) -> Optional[int]: ...
+
+    @property
+    def num_g3_blocks(self) -> Optional[int]: ...
+
+    @property
+    def offload_batch_size(self) -> Optional[int]: ...
+
+    @property
+    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
@@ -1765,6 +1793,7 @@ def run_mocker_trace_replay(
     trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
+    max_sim_time_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
     ...

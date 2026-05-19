@@ -74,16 +74,13 @@ pub use endpoint::build_transport_type;
 pub enum TransportType {
     #[serde(rename = "nats_tcp")]
     Nats(String),
-    Http(String),
     Tcp(String),
 }
 
 impl TransportType {
     pub fn address(&self) -> &str {
         match self {
-            TransportType::Nats(address)
-            | TransportType::Http(address)
-            | TransportType::Tcp(address) => address,
+            TransportType::Nats(address) | TransportType::Tcp(address) => address,
         }
     }
 }
