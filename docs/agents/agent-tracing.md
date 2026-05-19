@@ -201,23 +201,28 @@ uv run --no-project python benchmarks/agent_trace/convert_to_perfetto.py \
 
 Open in [Perfetto UI](https://ui.perfetto.dev/). Flags: `--include-markers`, `--no-stages`, `--separate-stage-tracks`.
 
-## [Experimental] Replaying agent traces using Mocker and Mooncake replay
+## [Experimental] Replaying agent traces using agentic Mooncake replay
 
-You can use our offline engine mocker and replay fuctionality when you want to replay collected agent traces. Each trace saves hash-ids that can be used to simulate routing and KV cache behavior. Replay here means **synthesizing Mooncake-style request streams** for `python -m dynamo.replay`: only **`request_end`** events are converted. Being able to simulate tool loops and agent policies is a work in progress.
+You can convert a collected agent trace into an **agentic Mooncake** trace and replay it with
+`python -m dynamo.replay`. The converter uses Dynamo `request_end` rows for request timing, token
+lengths, worker placement, and replay hashes. It also uses terminal harness tool rows
+(`tool_end` / `tool_error`) to preserve tool-wait time between dependent LLM requests.
 
 ```bash
-# convert agent trace to mooncake
 cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
+  --agentic \
   --input-path "${DYN_AGENT_TRACE_OUTPUT_PATH}".*.jsonl.gz \
-  --output-file /tmp/dynamo-agent-trace.mooncake.jsonl
+  --output-file /tmp/dynamo-agent-trace.agentic-mooncake.jsonl
 ```
 
-The binary prints **`trace_block_size`** — use that exact value for replay so hash segmentation matches what was recorded. Align mock engine block size with the same number (below: `TRACE_BLOCK_SIZE` in both `--trace-block-size` and `--extra-engine-args`). For more flags (online replay, reports), see [Mocker trace replay](../benchmarks/mocker-trace-replay.md).
+The binary prints **`trace_block_size`**. Use that exact value for replay so hash segmentation
+matches what Dynamo recorded. Align the mock engine block size with the same number in
+`--extra-engine-args`.
 
 ```bash
 TRACE_BLOCK_SIZE=128
-uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.mooncake.jsonl \
-  --trace-format mooncake \
+uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.agentic-mooncake.jsonl \
+  --trace-format agentic_mooncake \
   --trace-block-size "${TRACE_BLOCK_SIZE}" \
   --replay-mode offline \
   --router-mode kv_router \
@@ -226,9 +231,23 @@ uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.mooncake.jsonl 
   --report-json /tmp/dynamo-agent-trace.replay-report.json
 ```
 
-`kv_router` needs **at least two** mock workers; for a single-worker smoke test use `--router-mode round_robin --num-workers 1`.
+`kv_router` needs **at least two** mock workers; for a single-worker smoke test use
+`--router-mode round_robin --num-workers 1`.
 
-Converted rows use **per-request timestamps** as wall-clock arrivals; Mooncake `session_id` is left unset so overlapping LLM calls from the same trajectory replay in parallel. Mocker **simulates** KV behavior from engine/router settings.
+Agentic Mooncake rows preserve:
+
+- `request_id`: the LLM request row identity.
+- `session_id`: the Dynamo `trajectory_id`.
+- `wait_for`: request ids that must complete before this row becomes eligible.
+- `branches`: child request ids spawned from this row.
+- `prefix_reset`: first request in a trajectory.
+- `delay`: non-tool delay after dependencies finish.
+- `tool_wait_ms`: tool time after dependencies finish.
+- `hash_ids`, `input_length`, and `output_length`: prompt-prefix and length data for mocker replay.
+
+Rows with no `wait_for` use their `timestamp` as the replay start time. Rows with dependencies wait
+for all listed requests to complete, then wait `delay + tool_wait_ms` before dispatch. For more
+flags and engine settings, see [Mocker trace replay](../benchmarks/mocker-trace-replay.md).
 
 <details>
 <summary>ATIF alignment</summary>
