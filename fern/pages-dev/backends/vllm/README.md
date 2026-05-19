@@ -71,7 +71,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 Start infrastructure services for local development:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 Launch an aggregated serving deployment:
@@ -84,7 +84,7 @@ bash launch/agg.sh
 > **Running launch scripts standalone.** The `launch/*.sh` scripts expect etcd and NATS to be reachable on localhost. Bring them up first (run from the repo root, or use the absolute path shown):
 >
 > ```bash
-> docker compose -f "$DYNAMO_HOME/deploy/docker-compose.yml" up -d
+> docker compose -f "$DYNAMO_HOME/dev/docker-compose.yml" up -d
 > ```
 >
 > Then run the launch script. Without these, workers register but the frontend cannot discover them and requests hang.

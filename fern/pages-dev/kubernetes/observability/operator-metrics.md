@@ -178,7 +178,7 @@ A pre-built Grafana dashboard is available for visualizing operator metrics.
 ### Deploying the Dashboard
 
 ```bash
-kubectl apply -f deploy/observability/k8s/grafana-operator-dashboard-configmap.yaml
+kubectl apply -f deploy/observability/grafana-operator-dashboard-configmap.yaml
 ```
 
 The dashboard will automatically appear in Grafana (assuming you have the Grafana dashboard sidecar configured, which is included in kube-prometheus-stack).

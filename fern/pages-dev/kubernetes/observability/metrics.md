@@ -149,7 +149,7 @@ spec:
 
 Apply the Dynamo dashboard configuration to populate Grafana with the Dynamo dashboard:
 ```bash
-kubectl apply -n monitoring -f deploy/observability/k8s/grafana-dynamo-dashboard-configmap.yaml
+kubectl apply -n monitoring -f deploy/observability/grafana-dynamo-dashboard-configmap.yaml
 ```
 
 The dashboard is embedded in the ConfigMap. Since it is labeled with `grafana_dashboard: "1"`, the Grafana will discover and populate it to its list of available dashboards. The dashboard includes panels for:
