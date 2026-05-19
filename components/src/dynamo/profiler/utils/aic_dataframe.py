@@ -51,11 +51,16 @@ def build_prefill_row(
     moe_ep: int,
     backend: str = "",
     system: str = "",
+    power_w: float = 0.0,
 ) -> dict:
     """Build a single prefill row dict with the minimal columns needed by AIC picking.
 
     Only columns actually accessed by ``pick_autoscale`` and
     ``_build_disagg_summary_dict`` are populated.
+
+    ``power_w`` is the measured GPU power (watts per GPU) at this operating
+    point.  Pass the value from NVML / power monitors during THOROUGH-mode
+    benchmarks; leave at 0.0 when not measured.
     """
     num_gpus = tp * pp * dp
     seq_s = 1000.0 / ttft * dp if ttft > 0 else 0.0
@@ -85,7 +90,7 @@ def build_prefill_row(
         "backend": backend,
         "version": "",
         "system": system,
-        "power_w": 0.0,
+        "power_w": power_w,
     }
 
 
@@ -103,11 +108,16 @@ def build_decode_row(
     moe_ep: int,
     backend: str = "",
     system: str = "",
+    power_w: float = 0.0,
 ) -> dict:
     """Build a single decode row dict with the minimal columns needed by AIC picking.
 
     Only columns actually accessed by ``pick_autoscale`` and
     ``_build_disagg_summary_dict`` are populated.
+
+    ``power_w`` is the measured GPU power (watts per GPU) at this operating
+    point.  Pass the value from NVML / power monitors during THOROUGH-mode
+    benchmarks; leave at 0.0 when not measured.
     """
     seq_s = thpt_per_gpu * num_gpus / osl if osl > 0 else 0.0
 
@@ -134,7 +144,7 @@ def build_decode_row(
         "backend": backend,
         "version": "",
         "system": system,
-        "power_w": 0.0,
+        "power_w": power_w,
     }
 
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from prometheus_client import Enum, Gauge
+from prometheus_client import Counter, Enum, Gauge
 
 PREFIX = "dynamo_planner"
 
@@ -166,4 +166,95 @@ class PlannerPrometheusMetrics:
         self.power_budget_utilization = Gauge(
             f"{PREFIX}_power_budget_utilization",
             "Ratio of projected power to total budget (0.0–1.0+).",
+        )
+
+        # -- AIC closed-loop optimizer (Phase 3) --------------------------
+        self.aic_c_ttft = Gauge(
+            f"{PREFIX}_aic_c_ttft",
+            "EMA-smoothed AIC TTFT correction coefficient (c_ttft).",
+        )
+        self.aic_c_itl = Gauge(
+            f"{PREFIX}_aic_c_itl",
+            "EMA-smoothed AIC ITL correction coefficient (c_itl).",
+        )
+        # Single labeled gauge for per-component power coefficients so queries
+        # can filter by component={"prefill","decode","agg"} uniformly.
+        self.aic_c_power = Gauge(
+            f"{PREFIX}_aic_c_power",
+            "EMA-smoothed AIC power correction coefficient per component.",
+            labelnames=("component",),
+        )
+        # Counts how many times a coefficient saturated at its [0.5, 2.0] clamp.
+        # A sustained increment is a CRITICAL calibration signal (§8 row 6).
+        self.aic_correction_pegged_total = Counter(
+            "dynamo_aic_correction_pegged_total",
+            "Times an AIC correction coefficient pegged at its [0.5, 2.0] clamp.",
+            labelnames=("coefficient",),
+        )
+        self.aic_consecutive_failures = Gauge(
+            "dynamo_aic_consecutive_failures",
+            "Current count of consecutive AIC sweep failures before auto-disable.",
+        )
+        self.aic_optimizer_exceptions_total = Counter(
+            "dynamo_aic_optimizer_exceptions_total",
+            "Total AIC sweep exceptions caught at runtime.",
+        )
+        # Info-style gauge: 1 when the optimizer is auto-disabled, 0 otherwise.
+        # Label carries the reason (infeasible_at_startup | startup_exception).
+        self.aic_optimizer_disabled_reason = Gauge(
+            "dynamo_aic_optimizer_disabled_reason",
+            "1 when the AIC optimizer is auto-disabled; reason in label.",
+            labelnames=("reason",),
+        )
+        self.aic_throughput_regression_total = Counter(
+            "dynamo_aic_throughput_regression_total",
+            "Times re-optimization produced a lower predicted throughput than the "
+            "previous config (informational — config is still applied).",
+        )
+        # AIC's per-op power interpolator can extrapolate non-physical values at
+        # high batch sizes / sparse data-grid corners (observed on H200 vLLM
+        # generation_attention at batch>=256). The optimizer clamps the raw
+        # power_w to nameplate TDP before deriving per-GPU caps; this counter
+        # tracks how often that defensive clamp engaged, labelled by side.
+        # A sustained increment means AIC offline data needs a backfill at the
+        # batch sizes the planner is exercising.
+        self.aic_power_w_clamped_total = Counter(
+            "dynamo_aic_power_w_clamped_total",
+            "Times AIC's reported power_w exceeded nameplate TDP and was "
+            "clamped before being used to derive per-GPU power caps.",
+            labelnames=("side",),
+        )
+
+        # -- Admission control / busy_threshold coupling (Phase 3) --------
+        # Implied thresholds derived from the AIC operating point (always
+        # updated in inherit + autoset modes).
+        self.admission_implied_theta_decode = Gauge(
+            f"{PREFIX}_admission_implied_theta_decode",
+            "Implied decode KV utilization threshold for the current AIC config.",
+        )
+        self.admission_implied_theta_prefill_frac = Gauge(
+            f"{PREFIX}_admission_implied_theta_prefill_frac",
+            "Implied prefill fractional utilization threshold for the current AIC config.",
+        )
+        # Values actually POSTed to frontends (autoset mode only).
+        self.admission_set_theta_decode = Gauge(
+            f"{PREFIX}_admission_set_theta_decode",
+            "Decode KV threshold value POSTed to frontend in autoset mode.",
+        )
+        self.admission_set_theta_prefill_frac = Gauge(
+            f"{PREFIX}_admission_set_theta_prefill_frac",
+            "Prefill fractional threshold value POSTed to frontend in autoset mode.",
+        )
+        self.admission_set_theta_prefill_abs = Gauge(
+            f"{PREFIX}_admission_set_theta_prefill_abs",
+            "Absolute prefill admission threshold (tokens) POSTed to the frontend.",
+        )
+        self.admission_max_batched_tokens_unavailable_total = Counter(
+            f"{PREFIX}_admission_max_batched_tokens_unavailable_total",
+            "Times the planner could not derive an absolute prefill threshold "
+            "because no prefill worker reported max_num_batched_tokens via MDC.",
+        )
+        self.admission_partial_success_total = Counter(
+            f"{PREFIX}_admission_partial_success_total",
+            "Cumulative count of frontend POST failures across all fanout attempts.",
         )
