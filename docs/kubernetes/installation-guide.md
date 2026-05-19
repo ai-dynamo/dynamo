@@ -6,6 +6,19 @@ title: Installation Guide
 
 This guide walks you through installing everything needed to deploy models with Dynamo on Kubernetes. Follow the steps in order — each builds on the previous one.
 
+## Important Terminology
+
+**Kubernetes Namespace**: The K8s namespace where your DynamoGraphDeployment resource is created.
+- Used for: Resource isolation, RBAC, organizing deployments
+- Example: `dynamo-system`, `team-a-namespace`
+
+**Dynamo Namespace**: The logical namespace used by Dynamo components for [service discovery](service-discovery.md).
+- Used for: Runtime component communication, service discovery
+- Specified in: `.spec.services.<ServiceName>.dynamoNamespace` field
+- Example: `my-llm`, `production-model`, `dynamo-dev`
+
+These are independent. A single Kubernetes namespace can host multiple Dynamo namespaces, and vice versa.
+
 ## Prerequisites
 
 Before you begin, make sure you have:
