@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal Qwen3-0.6B DGD used by all the planner dev-environment repro steps
+# documented in docs/components/planner/dpp-dev-env.md.
+#
+# Apply to your namespace:
+#     kubectl apply -f deploy/planner/dev/qwen3-quickstart-dgd.yaml -n <your-namespace>
+#
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-quickstart
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:e637f35dc03b916d95cabfac7ebdc6fab56d078a-dynamo-frontend
+    VllmWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            ephemeral-storage: "5Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B

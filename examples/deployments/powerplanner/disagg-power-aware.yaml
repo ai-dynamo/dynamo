@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Power-aware disaggregated deployment (Phase 1 + 2).
+#
+# Enables power-aware replica scaling and pod annotation.
+# The planner writes dynamo.nvidia.com/gpu-power-limit annotations on worker
+# pods; the Power Agent DaemonSet reads them and calls NVML SetPowerManagementLimit.
+#
+# REQUIRED before deploying:
+#   1. Deploy the Power Agent via Helm chart:
+#        helm install power-agent ./deploy/helm/charts/power-agent \
+#          --namespace dynamo-system --create-namespace \
+#          --set image.tag=<release-tag> \
+#          --set agent.safeDefaultWatts=500
+#      (chart at deploy/helm/charts/power-agent/ — see its README for SKU-specific values)
+#   2. Set total_gpu_power_limit: (rack_capacity_W × headroom_factor) − non_gpu_overhead
+#      Example: 8-GPU H200 SXM rack: (32 × 700 × 0.85) − 1000 ≈ 18920 W → round down to 18000 W
+#   3. Set power_agent_safe_default_watts: ~70% of SKU TDP
+#      Example: H200 SXM → 500 W; H100 SXM → 490 W
+#   4. Set prefill_engine_gpu_power_limit / decode_engine_gpu_power_limit for your workload.
+#      These are the per-GPU caps enforced by NVML. Hand-tune for Phase 1+2;
+#      AIC optimizer sets them automatically in Phase 3+.
+#
+# The planner config below targets a 4-GPU rack scenario with 4 prefill + 4 decode
+# GPUs at 250 W each (total: 2000 W, well under the 3000 W example budget).
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: planner-profile-data-power
+data:
+  prefill_raw_data.json: |
+    {
+      "prefill_isl":          [128, 256, 512, 1024, 2048],
+      "prefill_ttft":         [12,  18,  30,  55,   105],
+      "prefill_thpt_per_gpu": [9800, 8500, 6200, 3800, 2000]
+    }
+  decode_raw_data.json: |
+    {
+      "x_kv_usage":       [0.1, 0.1, 0.3, 0.3, 0.5, 0.5, 0.7, 0.7, 0.9, 0.9],
+      "y_context_length": [128, 1024, 128, 1024, 128, 1024, 128, 1024, 128, 1024],
+      "z_itl":            [5, 7, 6, 8, 7, 10, 8, 12, 10, 15],
+      "z_thpt_per_gpu":   [4500, 3500, 4200, 3200, 3800, 2800, 3400, 2400, 2800, 1900],
+      "max_kv_tokens": 32768
+    }
+
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-power-aware
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - |
+              {
+                "environment": "kubernetes",
+                "backend": "vllm",
+                "mode": "disagg",
+                "throughput_adjustment_interval": 60,
+                "profile_results_dir": "/workspace/profiling_results",
+                "enable_power_awareness": true,
+                "total_gpu_power_limit": 3000,
+                "prefill_engine_gpu_power_limit": 250,
+                "decode_engine_gpu_power_limit": 250,
+                "power_agent_safe_default_watts": 500,
+                "metric_reporting_prometheus_port": 9090
+              }
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              name: planner-profile-data-power
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

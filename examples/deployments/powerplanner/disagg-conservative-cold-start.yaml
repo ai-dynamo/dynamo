@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Conservative cold-start recipe (Phase 3+).
+#
+# Adds Phase 3 AIC optimizer with conservative cold-start coefficients for
+# H200 dense models. Use this for first production deployment of a new
+# model/SKU combination to ensure zero throttling during the first few minutes
+# before live calibration converges.
+#
+# Conservative H200 dense model values from §5.3:
+#   aic_initial_c_power_prefill = 1.05   (compute-bound, small bias)
+#   aic_initial_c_power_decode  = 1.15   (memory-bound, larger bias from KV-cache traffic)
+#   aic_initial_c_ttft          = 1.15   (prefill scheduling overhead)
+#   aic_initial_c_itl           = 1.15   (decode batching effects)
+#
+# NOTE: These recommended cold-start values are to be validated in Phase 5
+# hardware testing. Before that they remain conservative guesses.
+# Once c_power_p, c_power_d, c_ttft, c_itl settle (~2-3 reoptimize intervals =
+# 10-15 min), values can be reset to 1.0 on next deploy.
+#
+# Phase 3 requires: aiconfigurator >= 0.8.0 and enable_aic_optimizer=true.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-power-conservative
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            - |
+              {
+                "environment": "kubernetes",
+                "backend": "vllm",
+                "mode": "disagg",
+                "throughput_adjustment_interval": 60,
+                "profile_results_dir": "/workspace/profiling_results",
+
+                "enable_power_awareness": true,
+                "total_gpu_power_limit": 18000,
+                "prefill_engine_gpu_power_limit": 500,
+                "decode_engine_gpu_power_limit": 425,
+                "power_agent_safe_default_watts": 500,
+
+                "enable_aic_optimizer": true,
+                "aic_reoptimize_interval": 300,
+                "aic_drift_relative_threshold": 0.15,
+                "aic_drift_consecutive_ticks": 3,
+
+                "aic_initial_c_power_prefill": 1.05,
+                "aic_initial_c_power_decode": 1.15,
+                "aic_initial_c_ttft": 1.15,
+                "aic_initial_c_itl": 1.15,
+
+                "metric_reporting_prometheus_port": 9090
+              }
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - meta-llama/Llama-3-8B-Instruct
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.vllm
+            - --model
+            - meta-llama/Llama-3-8B-Instruct
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
