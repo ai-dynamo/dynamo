@@ -247,12 +247,6 @@ def update_engine_config_with_dynamo(
         "disable_log_stats": False,
     }
 
-    # vLLM 0.13+ renamed 'task' to 'runner'.  Dynamo intentionally does NOT
-    # override the user-supplied (or vLLM-default) runner: vLLM's "auto" mode
-    # detects generation vs pooling vs draft from the model config, and the
-    # previous unconditional `runner = "generate"` override broke embedding /
-    # pooling models that need `--runner pooling` and would also clobber a
-    # user-explicit `--runner auto`.
     if hasattr(engine_config, "runner"):
         logger.debug(f"Using runner={engine_config.runner} from engine args")
 
