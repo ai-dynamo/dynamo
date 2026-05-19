@@ -278,7 +278,7 @@ where
                 if let Some(subject) = &recv_subject {
                     self.resp_transport.cancel_recv_stream(subject).await;
                 }
-                return Err(e.into());
+                return Err(e);
             }
         };
         let data = match serde_json::to_vec(&request) {
