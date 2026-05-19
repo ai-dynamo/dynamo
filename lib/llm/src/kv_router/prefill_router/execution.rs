@@ -81,13 +81,13 @@ impl PrefillRouter {
                 Ok(PrefillQueryOutcome::Routed { worker_id, dp_rank }) => (worker_id, dp_rank),
                 Ok(PrefillQueryOutcome::Backpressure {
                     reason,
-                    queue_depth,
-                    max_queue_depth,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
                 }) => {
                     return PrefillResolveDecision::Backpressure {
                         reason,
-                        queue_depth,
-                        max_queue_depth,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
                     };
                 }
                 Err(_) => return PrefillResolveDecision::Unavailable,
@@ -327,12 +327,12 @@ impl PrefillRouter {
                     }
                     crate::kv_router::FindBestMatchOutcome::Backpressure {
                         reason,
-                        queue_depth,
-                        max_queue_depth,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
                     } => Ok(PrefillQueryOutcome::Backpressure {
                         reason,
-                        queue_depth,
-                        max_queue_depth,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
                     }),
                 }
             }

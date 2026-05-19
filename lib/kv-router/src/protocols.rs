@@ -423,9 +423,9 @@ pub enum RouterResponse {
     },
     Backpressure {
         reason: RouterBackpressureReason,
-        queue_depth: usize,
+        queued_isl_tokens: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_queue_depth: Option<usize>,
+        max_queued_isl_tokens: Option<usize>,
     },
     PrefillMarked {
         success: bool,

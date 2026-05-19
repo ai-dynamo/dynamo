@@ -45,8 +45,8 @@ pub(super) enum PrefillResolveDecision {
     NoBootstrapEndpoint,
     Backpressure {
         reason: RouterBackpressureReason,
-        queue_depth: usize,
-        max_queue_depth: Option<usize>,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
     },
 }
 
@@ -63,8 +63,8 @@ pub enum PrefillQueryOutcome {
     },
     Backpressure {
         reason: RouterBackpressureReason,
-        queue_depth: usize,
-        max_queue_depth: Option<usize>,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
     },
 }
 

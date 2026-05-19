@@ -340,8 +340,8 @@ impl KvPushRouter {
                     ),
                     crate::kv_router::FindBestMatchOutcome::Backpressure {
                         reason,
-                        queue_depth,
-                        max_queue_depth,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
                     } => {
                         // TODO(DEP-8189 / ai-dynamo#8189): classify queue-depth
                         // saturation distinctly from generic resource exhaustion
@@ -350,7 +350,7 @@ impl KvPushRouter {
                         return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::ResourceExhausted)
                         .message(format!(
-                            "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+                            "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
                         ))
                         .build()
                         .into());
@@ -422,15 +422,15 @@ impl KvPushRouter {
                     ),
                     crate::kv_router::FindBestMatchOutcome::Backpressure {
                         reason,
-                        queue_depth,
-                        max_queue_depth,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
                     } => {
                         // TODO(DEP-8189 / ai-dynamo#8189): same classification
                         // refinement applies on the pinned-worker path.
                         return Err(DynamoError::builder()
                         .error_type(DynamoErrorType::ResourceExhausted)
                         .message(format!(
-                            "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+                            "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
                         ))
                         .build()
                         .into());

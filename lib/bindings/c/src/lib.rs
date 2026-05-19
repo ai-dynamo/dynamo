@@ -486,13 +486,13 @@ impl RouterHandles {
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
             PrefillQueryOutcome::Backpressure {
                 reason,
-                queue_depth,
-                max_queue_depth,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
             } => {
                 tracing::warn!(
                     reason = ?reason,
-                    queue_depth,
-                    max_queue_depth = ?max_queue_depth,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens = ?max_queued_isl_tokens,
                     "Prefill query rejected due to router backpressure"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
@@ -568,13 +568,13 @@ impl RouterHandles {
             } => Ok((worker, overlap_blocks)),
             dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
                 reason,
-                queue_depth,
-                max_queue_depth,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
             } => {
                 tracing::warn!(
                     reason = ?reason,
-                    queue_depth,
-                    max_queue_depth = ?max_queue_depth,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens = ?max_queued_isl_tokens,
                     "Decode query rejected due to router backpressure"
                 );
                 Err(QueryRouterResult::ErrBackpressure)

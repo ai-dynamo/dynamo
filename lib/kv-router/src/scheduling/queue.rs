@@ -209,13 +209,15 @@ impl<
 
         if self.all_workers_prefill_busy(threshold, request.eligibility(), decay_now) {
             let pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
+            // This is a rejection threshold on current queued ISL, not a hard
+            // post-admission bound on `pending + incoming`.
             if let Some(max_isl_tokens) = self.tier_cap_for_request(&request)
                 && pending_isl_tokens >= max_isl_tokens
             {
                 request.respond(Err(KvSchedulerError::Backpressure {
                     reason: RouterBackpressureReason::MaxQueueDepthExceeded,
-                    queue_depth: pending_isl_tokens,
-                    max_queue_depth: Some(max_isl_tokens),
+                    queued_isl_tokens: pending_isl_tokens,
+                    max_queued_isl_tokens: Some(max_isl_tokens),
                 }));
                 return;
             }
@@ -1010,8 +1012,8 @@ mod tests {
                 resp3,
                 Err(KvSchedulerError::Backpressure {
                     reason: RouterBackpressureReason::MaxQueueDepthExceeded,
-                    queue_depth: 512,
-                    max_queue_depth: Some(512),
+                    queued_isl_tokens: 512,
+                    max_queued_isl_tokens: Some(512),
                 })
             ),
             "expected backpressure when queue is full, got {resp3:?}"
@@ -1063,8 +1065,8 @@ mod tests {
                 resp3,
                 Err(KvSchedulerError::Backpressure {
                     reason: RouterBackpressureReason::MaxQueueDepthExceeded,
-                    queue_depth: 512,
-                    max_queue_depth: Some(512),
+                    queued_isl_tokens: 512,
+                    max_queued_isl_tokens: Some(512),
                 })
             ),
             "expensive-tier request should backpressure at depth 1, got {resp3:?}"

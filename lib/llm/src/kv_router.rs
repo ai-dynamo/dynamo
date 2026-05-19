@@ -78,8 +78,8 @@ pub enum FindBestMatchOutcome {
     },
     Backpressure {
         reason: RouterBackpressureReason,
-        queue_depth: usize,
-        max_queue_depth: Option<usize>,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
     },
 }
 
@@ -680,13 +680,13 @@ where
             Ok(response) => response,
             Err(KvSchedulerError::Backpressure {
                 reason,
-                queue_depth,
-                max_queue_depth,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
             }) => {
                 return Ok(FindBestMatchOutcome::Backpressure {
                     reason,
-                    queue_depth,
-                    max_queue_depth,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
                 });
             }
             Err(error) => return Err(map_scheduler_error(error)),
@@ -774,10 +774,10 @@ where
             } => Ok((worker, overlap_blocks)),
             FindBestMatchOutcome::Backpressure {
                 reason,
-                queue_depth,
-                max_queue_depth,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
             } => Err(anyhow::anyhow!(
-                "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+                "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
             )),
         }
     }
@@ -1169,12 +1169,12 @@ where
                     },
                     Ok(FindBestMatchOutcome::Backpressure {
                         reason,
-                        queue_depth,
-                        max_queue_depth,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
                     }) => RouterResponse::Backpressure {
                         reason,
-                        queue_depth,
-                        max_queue_depth,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
                     },
                     Err(error) => return Err(error),
                 }

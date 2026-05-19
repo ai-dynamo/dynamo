@@ -42,12 +42,12 @@ pub enum KvSchedulerError {
     NoEndpoints,
 
     #[error(
-        "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+        "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
     )]
     Backpressure {
         reason: RouterBackpressureReason,
-        queue_depth: usize,
-        max_queue_depth: Option<usize>,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
     },
 
     #[error("all eligible workers are overloaded")]
