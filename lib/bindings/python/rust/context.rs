@@ -4,10 +4,14 @@
 // Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 
 use dynamo_runtime::logging::DistributedTraceContext;
+use dynamo_runtime::pipeline::network::ConnectionInfo;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::watch;
 
 // Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
@@ -21,6 +25,8 @@ pub struct Context {
     /// First-token signal for decode-mode disagg. `None` on aggregated /
     /// prefill requests.
     first_token: Option<watch::Sender<bool>>,
+    connection_info: Option<ConnectionInfo>,
+    response_delegated: Option<Arc<AtomicBool>>,
 }
 
 impl Context {
@@ -29,10 +35,37 @@ impl Context {
         trace_context: Option<DistributedTraceContext>,
         first_token: Option<watch::Sender<bool>>,
     ) -> Self {
+        Self::new_with_connection_info(inner, trace_context, first_token, None)
+    }
+
+    pub fn new_with_connection_info(
+        inner: Arc<dyn AsyncEngineContext>,
+        trace_context: Option<DistributedTraceContext>,
+        first_token: Option<watch::Sender<bool>>,
+        connection_info: Option<ConnectionInfo>,
+    ) -> Self {
+        Self::new_with_response_controls(
+            inner,
+            trace_context,
+            first_token,
+            connection_info,
+            None,
+        )
+    }
+
+    pub fn new_with_response_controls(
+        inner: Arc<dyn AsyncEngineContext>,
+        trace_context: Option<DistributedTraceContext>,
+        first_token: Option<watch::Sender<bool>>,
+        connection_info: Option<ConnectionInfo>,
+        response_delegated: Option<Arc<AtomicBool>>,
+    ) -> Self {
         Self {
             inner,
             trace_context,
             first_token,
+            connection_info,
+            response_delegated,
         }
     }
 
@@ -43,6 +76,12 @@ impl Context {
 
     pub fn inner(&self) -> Arc<dyn AsyncEngineContext> {
         self.inner.clone()
+    }
+
+    pub fn set_response_delegated(&self) {
+        if let Some(response_delegated) = &self.response_delegated {
+            response_delegated.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -59,6 +98,8 @@ impl Context {
             inner: Arc::new(controller),
             trace_context: None,
             first_token: None,
+            connection_info: None,
+            response_delegated: None,
         }
     }
 
@@ -104,6 +145,23 @@ impl Context {
         if let Some(tx) = &self.first_token {
             let _ = tx.send(true);
         }
+    }
+
+    /// Response stream connection information supplied by the upstream caller.
+    /// Python routers can pass this to `Client.forward(...)` to delegate response
+    /// ownership to a downstream router or worker.
+    fn connection_info(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        match &self.connection_info {
+            Some(connection_info) => {
+                let py_obj: PyObject = pythonize::pythonize(py, connection_info)?.into();
+                Ok(Some(py_obj))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn mark_response_delegated(&self) {
+        self.set_response_delegated();
     }
 
     // Expose trace information to Python for debugging

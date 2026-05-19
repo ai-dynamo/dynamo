@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::AtomicBool,
+};
 
 use anyhow::{Error, Result};
 use pyo3::prelude::*;
@@ -16,6 +19,9 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
+use dynamo_runtime::pipeline::network::{
+    ConnectionInfo, RESPONSE_CONNECTION_INFO_CONTEXT_KEY, RESPONSE_DELEGATED_CONTEXT_KEY,
+};
 pub use dynamo_runtime::{
     pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
     protocols::{annotated::Annotated, maybe_error::MaybeError},
@@ -151,6 +157,12 @@ where
         // Create a context
         let (request, context) = request.transfer(());
         let ctx = context.context();
+        let connection_info = context
+            .clone_unique::<ConnectionInfo>(RESPONSE_CONNECTION_INFO_CONTEXT_KEY)
+            .ok();
+        let response_delegated = context
+            .clone_unique::<Arc<AtomicBool>>(RESPONSE_DELEGATED_CONTEXT_KEY)
+            .ok();
 
         let id = context.id().to_string();
         tracing::trace!("processing request: {}", id);
@@ -185,7 +197,13 @@ where
                 // Create context with trace information
                 let py_ctx = Py::new(
                     py,
-                    Context::new(ctx_python.clone(), current_trace_context, None),
+                    Context::new_with_response_controls(
+                        ctx_python.clone(),
+                        current_trace_context,
+                        None,
+                        connection_info,
+                        response_delegated,
+                    ),
                 )?;
 
                 let gen_result = if has_context {

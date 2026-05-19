@@ -13,6 +13,7 @@ Supports two modes:
 Both modes support priority-based pool overrides from agent hints.
 """
 
+import json
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -21,6 +22,13 @@ from dynamo.runtime import Client, DistributedRuntime
 from .pool_selection import get_priority_retry_order, load_config
 
 logger = logging.getLogger(__name__)
+
+
+def _connection_subject(connection_info: Dict[str, Any]) -> Optional[str]:
+    try:
+        return json.loads(connection_info.get("info", "{}")).get("subject")
+    except (TypeError, json.JSONDecodeError):
+        return None
 
 
 class GlobalRouterHandler:
@@ -79,6 +87,8 @@ class GlobalRouterHandler:
         namespaces: List[str],
         clients: Dict[str, Client],
         pool_priorities: List[int],
+        response_connection_info: Optional[Dict[str, Any]] = None,
+        context: Optional[Any] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Forward a request to the selected pool and retry faster pools on failure.
@@ -98,6 +108,29 @@ class GlobalRouterHandler:
             yielded_output = False
 
             try:
+                if response_connection_info is not None:
+                    request_id = context.id() if context is not None else None
+                    logger.info(
+                        f"Delegating {request_type} response stream directly to downstream "
+                        f"router: request_id={request_id}, namespace={namespace}, "
+                        f"transport={response_connection_info.get('transport')}, "
+                        f"response_subject={_connection_subject(response_connection_info)}"
+                    )
+                    await client.forward(
+                        request,
+                        response_connection_info,
+                        context=context,
+                    )
+                    logger.info(
+                        f"Delegated {request_type} request to {namespace}; global router "
+                        f"will not publish response stream: request_id={request_id}"
+                    )
+                    return
+
+                logger.info(
+                    f"Relaying {request_type} response stream through global router: "
+                    f"namespace={namespace}"
+                )
                 stream = await client.generate(request)
                 async for output in stream:
                     yielded_output = True
@@ -206,7 +239,7 @@ class GlobalRouterHandler:
         logger.info(f"Global Router initialized (agg): {len(self.agg_clients)} pools")
 
     async def handle_prefill(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context: Optional[Any] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle prefill requests from the frontend (disagg mode).
@@ -256,11 +289,15 @@ class GlobalRouterHandler:
             namespaces=self.config.prefill_pool_dynamo_namespaces,
             clients=self.prefill_clients,
             pool_priorities=self.config.prefill_pool_priorities,
+            response_connection_info=(
+                context.connection_info() if context is not None else None
+            ),
+            context=context,
         ):
             yield data
 
     async def handle_decode(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context: Optional[Any] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle decode requests from the frontend (disagg mode).
@@ -314,11 +351,15 @@ class GlobalRouterHandler:
             namespaces=self.config.decode_pool_dynamo_namespaces,
             clients=self.decode_clients,
             pool_priorities=self.config.decode_pool_priorities,
+            response_connection_info=(
+                context.connection_info() if context is not None else None
+            ),
+            context=context,
         ):
             yield data
 
     async def handle_generate(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context: Optional[Any] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle generate requests (agg mode).
@@ -372,6 +413,10 @@ class GlobalRouterHandler:
             namespaces=self.config.agg_pool_dynamo_namespaces,
             clients=self.agg_clients,
             pool_priorities=self.config.agg_pool_priorities,
+            response_connection_info=(
+                context.connection_info() if context is not None else None
+            ),
+            context=context,
         ):
             yield data
 
