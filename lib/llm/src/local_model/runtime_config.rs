@@ -66,6 +66,22 @@ pub struct ModelRuntimeConfig {
 
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub taints: HashSet<String>,
+
+    /// Stable routing identity, set via the `DYN_STABLE_ROUTING_ID` env var. Used as
+    /// the rendezvous-hash key so cache assignments survive a new ephemeral
+    /// `worker_id`. `None` if unset.
+    ///
+    /// Recommended k8s wire-up (downward API on a StatefulSet pod):
+    ///
+    /// ```yaml
+    /// env:
+    ///   - name: DYN_STABLE_ROUTING_ID
+    ///     valueFrom:
+    ///       fieldRef:
+    ///         fieldPath: metadata.name
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_routing_id: Option<String>,
 }
 
 const fn default_data_parallel_start_rank() -> u32 {
@@ -105,6 +121,7 @@ impl Default for ModelRuntimeConfig {
             disaggregated_endpoint: None,
             enable_eagle: false,
             taints: HashSet::new(),
+            stable_routing_id: None,
         }
     }
 }
@@ -129,6 +146,10 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
     fn taints(&self) -> &HashSet<String> {
         &self.taints
     }
+
+    fn stable_routing_id(&self) -> Option<&str> {
+        self.stable_routing_id.as_deref()
+    }
 }
 
 impl ModelRuntimeConfig {
@@ -148,5 +169,97 @@ impl ModelRuntimeConfig {
         } else {
             Ok(None)
         }
+    }
+
+    /// Populate `stable_routing_id` from the `DYN_STABLE_ROUTING_ID` environment variable.
+    ///
+    /// Sets the field only if it is currently unset; returns `&mut self` for chaining. If
+    /// `DYN_STABLE_ROUTING_ID` is unset or empty/whitespace-only, the field is left
+    /// as `None`.
+    ///
+    /// See the doc on [`ModelRuntimeConfig::stable_routing_id`] for the recommended k8s
+    /// downward-API recipe.
+    pub fn populate_stable_routing_id_from_env(&mut self) -> &mut Self {
+        if self.stable_routing_id.is_some() {
+            return self;
+        }
+        let candidate = std::env::var("DYN_STABLE_ROUTING_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(value) = candidate {
+            tracing::info!(stable_routing_id = %value, "populated stable_routing_id from DYN_STABLE_ROUTING_ID");
+            self.stable_routing_id = Some(value);
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
+    // `#[serial_test::serial]` (serialize against every other env-touching test in the
+    // binary, not just this module). A module-local mutex would be insufficient because
+    // `std::env::{set_var, remove_var}` race against `getenv` in any other thread.
+
+    #[test]
+    #[serial_test::serial]
+    fn populates_from_dyn_env() {
+        temp_env::with_vars([("DYN_STABLE_ROUTING_ID", Some("worker-3"))], || {
+            let mut cfg = ModelRuntimeConfig::default();
+            cfg.populate_stable_routing_id_from_env();
+            assert_eq!(cfg.stable_routing_id.as_deref(), Some("worker-3"));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn preserves_caller_supplied_value() {
+        temp_env::with_vars([("DYN_STABLE_ROUTING_ID", Some("from-env"))], || {
+            let mut cfg = ModelRuntimeConfig {
+                stable_routing_id: Some("explicit".to_string()),
+                ..Default::default()
+            };
+            cfg.populate_stable_routing_id_from_env();
+            assert_eq!(cfg.stable_routing_id.as_deref(), Some("explicit"));
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn no_meaningful_env_leaves_field_none() {
+        // Whitespace-only is rejected…
+        temp_env::with_vars([("DYN_STABLE_ROUTING_ID", Some("   "))], || {
+            let mut cfg = ModelRuntimeConfig::default();
+            cfg.populate_stable_routing_id_from_env();
+            assert!(cfg.stable_routing_id.is_none());
+        });
+        // …as is having the var unset.
+        temp_env::with_vars_unset(["DYN_STABLE_ROUTING_ID"], || {
+            let mut cfg = ModelRuntimeConfig::default();
+            cfg.populate_stable_routing_id_from_env();
+            assert!(cfg.stable_routing_id.is_none());
+        });
+    }
+
+    #[test]
+    fn roundtrips_through_serde_json() {
+        let cfg = ModelRuntimeConfig {
+            stable_routing_id: Some("worker-7".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"stable_routing_id\":\"worker-7\""));
+        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.stable_routing_id.as_deref(), Some("worker-7"));
+    }
+
+    #[test]
+    fn serde_skips_when_none() {
+        let cfg = ModelRuntimeConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(!json.contains("stable_routing_id"));
     }
 }

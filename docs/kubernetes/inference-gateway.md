@@ -115,13 +115,17 @@ Note that when deploying Dynamo with the Inference Gateway Extension each worker
 
 We provide an example for the Qwen vLLM below.
 You have to deploy the Dynamo Graph and the `HTTPRoute`.
-For the `HTTPRoute`, make sure `parentRefs.namespace` matches the namespace where your `Gateway` is deployed as shown below.
-```bash
+The example `http-route.yaml` resolves the `Gateway` in the same namespace as
+the `HTTPRoute`, so the simplest path is to apply the route in the same
+namespace where you installed the `Gateway` (i.e. `${NAMESPACE}`). If your
+`Gateway` lives in a different namespace, add `parentRefs[].namespace` to point
+at it explicitly:
+```yaml
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: inference-gateway
-      namespace: my-model # the namespace where your gateway is deployed.
+      namespace: my-model # only needed if the Gateway is in a different namespace
 ```
 
 ```bash
@@ -155,7 +159,8 @@ Use the proper folder in commands below.
 
 # agg
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
-# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point to the namespace where your Gateway is deployed.
+# Deploy the GAIE http-route CR. The route resolves the Gateway in the same namespace by default;
+# if your Gateway is elsewhere, add parentRefs[].namespace before applying.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 
 # or disagg
@@ -191,8 +196,9 @@ extraPodSpec:
 ```
 
 **Gateway Namespace**
-Note that this assumes your `Gateway` is installed into `NAMESPACE=my-model`. If you installed it into a
-different namespace, update your `http-route.yaml`.
+The example `http-route.yaml` resolves the `Gateway` in the same namespace as
+the route. If you install the `Gateway` in one namespace and apply the route in
+another, add `parentRefs[].namespace: <gateway-namespace>` to `http-route.yaml`.
 
 #### 5.b. Deploy as a standalone pod
 

@@ -771,6 +771,11 @@ class ManagedDeployment:
     _deployment_name: str = field(default="")
     _apps_v1: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
+    # Per ``pod_name/container_name`` -> highest restart count for which we
+    # have already dumped the previous-instance log inline during the wait
+    # loop. Used by ``_dump_in_flight_restart_logs`` to avoid re-spamming
+    # the same crash log every poll while CrashLoopBackOff is still active.
+    _logged_restart_counts: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
@@ -940,6 +945,22 @@ class ManagedDeployment:
                     )
                     return True
                 else:
+                    # Surface the previous-instance log tail for any DGD
+                    # container that restarted while we are still waiting
+                    # for Ready. Dedup'd per (pod, container, restart_count)
+                    # so we emit each crash exactly once. Runs every poll
+                    # (not just on log_interval) so we catch the first
+                    # CrashLoopBackOff event as soon as kubelet reports it,
+                    # without waiting up to 60s to learn that prefill is
+                    # cycling.
+                    in_flight = await self._dump_in_flight_restart_logs()
+                    if in_flight:
+                        self._logger.warning(
+                            "Detected in-flight container restarts (deployment not yet Ready):"
+                        )
+                        for line in in_flight:
+                            self._logger.warning(f"  {line}")
+
                     if attempt % log_interval == 0:
                         self._logger.info(f"Current deployment state: {current_state}")
                         self._logger.info(f"Current conditions: {conditions}")
@@ -1052,6 +1073,130 @@ class ManagedDeployment:
         except exceptions.ApiException as e:
             self._logger.debug(f"Failed to collect pod status details: {e}")
             return []
+
+    async def _dump_in_flight_restart_logs(
+        self, prev_log_tail_lines: int = 80
+    ) -> List[str]:
+        """Surface the previous-instance log tail for any DGD container that
+        has restarted *while we are still waiting for Ready*.
+
+        This is the diagnostic that converts a "deployment timed out, no idea
+        why" CI failure into a self-diagnosing one when a worker is in
+        CrashLoopBackOff during startup.
+        Each container is reported at most once per restart_count value via
+        ``_logged_restart_counts``: the next time the same container restarts
+        (count increments), we dump the new previous-instance log. Restarts
+        that have already been reported are skipped, so the wait loop does
+        not re-spam the same crash log on every poll.
+
+        Returns the list of human-readable warnings (one entry per newly
+        observed restart) so callers can log them with proper formatting.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            label = f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}"
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label
+            )
+            warnings: List[str] = []
+            for pod in pods.items:
+                pod_name = pod.metadata.name if pod.metadata else "?"
+                statuses = (pod.status.container_statuses if pod.status else None) or []
+                for cs in statuses:
+                    after = cs.restart_count or 0
+                    if after <= 0:
+                        continue
+                    key = f"{pod_name}/{cs.name}"
+                    already = self._logged_restart_counts.get(key, 0)
+                    if after <= already:
+                        # We've already dumped the previous-instance log
+                        # for this exact restart count; nothing new.
+                        continue
+
+                    last_reason = ""
+                    last_exit: Optional[int] = None
+                    if cs.last_state and cs.last_state.terminated:
+                        last_reason = cs.last_state.terminated.reason or ""
+                        last_exit = cs.last_state.terminated.exit_code
+
+                    warning = (
+                        f"{key}: in-flight restart count {after} "
+                        f"(last seen {already}) while waiting for Ready"
+                    )
+                    if last_reason:
+                        warning += f" lastReason={last_reason}"
+                    if last_exit is not None:
+                        warning += f" lastExitCode={last_exit}"
+
+                    prev_log = await self._fetch_previous_container_log(
+                        pod_name, cs.name, tail_lines=prev_log_tail_lines
+                    )
+                    if prev_log:
+                        warning += (
+                            f"\n      --- last {prev_log_tail_lines} lines of "
+                            f"previous {cs.name} log ({pod_name}) ---\n"
+                        )
+                        for line in prev_log.splitlines():
+                            warning += f"      {line}\n"
+                        warning += f"      --- end of previous {cs.name} log ---"
+                    else:
+                        warning += (
+                            f"\n      (previous log unavailable for "
+                            f"{cs.name} on {pod_name})"
+                        )
+                    warnings.append(warning)
+                    # Mark this restart_count as reported so we don't re-emit
+                    # the same log on the next poll. We update only after we
+                    # have produced the warning so a transient API failure
+                    # does not silently consume the event.
+                    self._logged_restart_counts[key] = after
+            return warnings
+        except exceptions.ApiException as e:
+            # API access can fail mid-poll (vCluster syncer hiccup, transient
+            # connection reset). Best-effort diagnostic: skip this round and
+            # let the next poll retry. Bugs in our own field access (e.g.
+            # ``cs.last_state.terminated`` on an unexpected status shape)
+            # propagate to the wait loop's "Unexpected exception" handler so
+            # they don't get silently swallowed.
+            self._logger.debug(f"Failed to check in-flight restart counts: {e}")
+            return []
+
+    async def _fetch_previous_container_log(
+        self,
+        pod_name: str,
+        container: str,
+        tail_lines: int = 100,
+    ) -> Optional[str]:
+        """Fetch the previous (pre-restart) instance log for a container.
+
+        Returns the tail of the log as a single string, or None if no previous
+        instance exists or the API call fails. This is the artifact that
+        normally lives in ``<pod>.<container>.previous.log`` on disk; we
+        surface it inline so failed CI runs are self-diagnosing without
+        needing an artifact download.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            log = await self._core_api.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=self.namespace,
+                container=container,
+                previous=True,
+                tail_lines=tail_lines,
+            )
+            return log if isinstance(log, str) else str(log)
+        except exceptions.ApiException as e:
+            # 400 "previous terminated container … not found" is the common
+            # case when restart_count > 0 but the previous instance log was
+            # rotated. 404 means the pod is gone (cleanup race). Anything
+            # else (e.g. an AttributeError in our own formatting) is a real
+            # bug -- let it bubble to the wait loop's outer handler instead
+            # of silently returning None.
+            self._logger.debug(
+                f"No previous log for {pod_name}/{container} "
+                f"(status={e.status}, reason={e.reason})"
+            )
+            return None
 
     async def _get_pod_events(self) -> List[str]:
         """Fetch warning events for pods in this deployment's namespace."""
@@ -1237,19 +1382,62 @@ class ManagedDeployment:
                 f.write(pod.to_yaml())
         except Exception as e:
             self._logger.error(e)
+
+        # Resolve the container list from the pod manifest. Multi-container pods
+        # (e.g. workers with a frontendSidecar, or pods running under vCluster
+        # with the rewrite-hosts init container) reject ``pod.logs()`` calls
+        # that omit ``container=`` with a "container name must be specified"
+        # so we have to be more detailed here. Iterate every container and write one
+        # log file per container.
+        container_names: List[str] = []
         try:
-            with open(os.path.join(directory, f"{pod.name}{suffix}.log"), "w") as f:
-                f.write("\n".join(pod.logs()))
+            spec = pod.raw.get("spec", {}) if hasattr(pod, "raw") else {}
+            for c in spec.get("initContainers", []) or []:
+                if c.get("name"):
+                    container_names.append(c["name"])
+            for c in spec.get("containers", []) or []:
+                if c.get("name"):
+                    container_names.append(c["name"])
         except Exception as e:
-            self._logger.error(e)
-        try:
-            previous_logs = pod.logs(previous=True)
-            with open(
-                os.path.join(directory, f"{pod.name}{suffix}.previous.log"), "w"
-            ) as f:
-                f.write("\n".join(previous_logs))
-        except Exception as e:
-            self._logger.debug(e)
+            self._logger.debug(f"Failed to resolve containers for {pod.name}: {e}")
+
+        if not container_names:
+            container_names = [""]
+
+        for container in container_names:
+            file_suffix = f".{container}" if container else ""
+            try:
+                logs = pod.logs(container=container) if container else pod.logs()
+                with open(
+                    os.path.join(directory, f"{pod.name}{file_suffix}{suffix}.log"),
+                    "w",
+                ) as f:
+                    f.write("\n".join(logs))
+            except Exception as e:
+                self._logger.error(
+                    f"Failed to fetch logs for {pod.name} container={container or '<default>'}: {e}"
+                )
+            try:
+                previous_logs = (
+                    pod.logs(container=container, previous=True)
+                    if container
+                    else pod.logs(previous=True)
+                )
+                with open(
+                    os.path.join(
+                        directory,
+                        f"{pod.name}{file_suffix}{suffix}.previous.log",
+                    ),
+                    "w",
+                ) as f:
+                    f.write("\n".join(previous_logs))
+            except Exception as e:
+                # Previous-instance logs are absent unless the container has
+                # restarted. Common case is "no previous terminated container"
+                # -- log at debug so we don't spam the test output.
+                self._logger.debug(
+                    f"No previous logs for {pod.name} container={container or '<default>'}: {e}"
+                )
 
         self._get_pod_metrics(pod, service_name, suffix)
 
