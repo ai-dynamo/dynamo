@@ -135,9 +135,7 @@ impl<
         }
         if !queue_depth_tiers.is_unbounded() {
             tracing::info!(
-                tier_count = queue_depth_tiers.as_slice().len(),
-                "Router queue depth tiered by cache-miss: {} tier(s) configured",
-                queue_depth_tiers.as_slice().len()
+                "Router queue depth tiered by cache-miss: tiered ISL token caps configured"
             );
         }
         Self {

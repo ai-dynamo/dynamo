@@ -186,8 +186,10 @@ pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
 
 impl RouterQueueDepthTiers {
     /// Default tiers for ISL token caps per worker.
+    ///
     /// - Cheap requests (0-2047 cache miss): 2M ISL tokens per worker
     /// - Expensive requests (2048+ cache miss): 256K ISL tokens per worker
+    ///
     /// See [`DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS`].
     pub fn default_per_worker() -> Self {
         Self(
@@ -222,11 +224,6 @@ impl RouterQueueDepthTiers {
             .rev()
             .find(|tier| cache_miss_tokens >= tier.missing_cache_tokens_floor)
             .map(|tier| tier.max_queue_depth.saturating_mul(worker_count))
-    }
-
-    /// Get the inner tiers slice.
-    pub fn as_slice(&self) -> &[RouterQueueDepthByMissingIslTier] {
-        &self.0
     }
 
     /// Create from tuples `[(floor, cap), ...]`.
