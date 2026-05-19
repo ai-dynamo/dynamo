@@ -116,19 +116,19 @@ fn rewrite_midchain_dotted_integer_lookup(template: &str) -> String {
             continue;
         }
 
-        if rest.starts_with("{%") {
-            if let Some(tag_end) = find_jinja_tag_end(template, i + 2, "%}") {
-                let tag_inner = &template[i + 2..tag_end - 2];
-                if is_basic_block_tag(tag_inner, "raw") {
-                    if let Some(raw_end) = find_raw_block_end(template, tag_end) {
-                        out.push_str(&template[i..raw_end]);
-                        i = raw_end;
-                    } else {
-                        out.push_str(rest);
-                        break;
-                    }
-                    continue;
+        if rest.starts_with("{%")
+            && let Some(tag_end) = find_jinja_tag_end(template, i + 2, "%}")
+        {
+            let tag_inner = &template[i + 2..tag_end - 2];
+            if is_basic_block_tag(tag_inner, "raw") {
+                if let Some(raw_end) = find_raw_block_end(template, tag_end) {
+                    out.push_str(&template[i..raw_end]);
+                    i = raw_end;
+                } else {
+                    out.push_str(rest);
+                    break;
                 }
+                continue;
             }
         }
 
