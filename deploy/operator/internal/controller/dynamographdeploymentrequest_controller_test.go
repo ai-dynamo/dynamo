@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -840,6 +842,172 @@ spec:
 			Expect(outputCM.OwnerReferences).Should(HaveLen(1))
 			Expect(outputCM.OwnerReferences[0].Kind).Should(Equal("DynamoGraphDeploymentRequest"))
 			Expect(outputCM.OwnerReferences[0].Name).Should(Equal(dgdrName))
+		})
+
+		It("Should apply DGD overrides to generated deployment specs", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-dgd-overrides"
+			namespace := defaultNamespace
+			dgdName := dgdrName + "-dgd"
+			overrideImage := "nvcr.io/nvstaging/ai-dynamo/tensorrtllm-runtime:1.2.0rc0-cuda13"
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+					Annotations: map[string]string{
+						"nvidia.com/generated-dgd-spec": `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgdr-dgd-overrides-dgd
+  labels:
+    generated: keep
+spec:
+  services:
+    TRTLLMWorker:
+      replicas: 2
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvstaging/ai-dynamo/tensorrtllm-runtime:1.2.0rc0
+          args:
+          - --generated-arg
+    Frontend:
+      replicas: 1`,
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "trtllm",
+					Image:   "test-profiler:latest",
+					Overrides: &nvidiacomv1beta1.OverridesSpec{
+						DGD: &runtime.RawExtension{Raw: []byte(`{
+								"apiVersion": "nvidia.com/v1alpha1",
+								"kind": "DynamoGraphDeployment",
+								"metadata": {
+									"labels": {
+										"override": "applied",
+										"nvidia.com/managed-by": "user"
+									}
+								},
+								"spec": {
+									"services": {
+										"TRTLLMWorker": {
+											"extraPodSpec": {
+												"mainContainer": {
+													"image": "nvcr.io/nvstaging/ai-dynamo/tensorrtllm-runtime:1.2.0rc0-cuda13"
+												}
+											}
+										}
+									}
+								}
+							}`)},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			_, err := reconciler.createDGD(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+
+			dgd := &dgdv1alpha1.DynamoGraphDeployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: namespace}, dgd)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
+
+			Expect(dgd.Labels).Should(HaveKeyWithValue("generated", "keep"))
+			Expect(dgd.Labels).Should(HaveKeyWithValue("override", "applied"))
+			Expect(dgd.Labels).Should(HaveKeyWithValue(nvidiacomv1beta1.LabelManagedBy, nvidiacomv1beta1.LabelValueDynamoOperator))
+
+			worker := dgd.Spec.Services["TRTLLMWorker"]
+			Expect(worker).NotTo(BeNil())
+			Expect(worker.Replicas).NotTo(BeNil())
+			Expect(*worker.Replicas).Should(Equal(int32(2)))
+			Expect(worker.ExtraPodSpec).NotTo(BeNil())
+			Expect(worker.ExtraPodSpec.MainContainer).NotTo(BeNil())
+			Expect(worker.ExtraPodSpec.MainContainer.Image).Should(Equal(overrideImage))
+			Expect(worker.ExtraPodSpec.MainContainer.Args).Should(Equal([]string{"--generated-arg"}))
+
+			frontend := dgd.Spec.Services["Frontend"]
+			Expect(frontend).NotTo(BeNil())
+			Expect(frontend.Replicas).NotTo(BeNil())
+			Expect(*frontend.Replicas).Should(Equal(int32(1)))
+		})
+
+		It("Should apply DGD overrides to generated selected config", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-generated-dgd-overrides"
+			namespace := defaultNamespace
+			overrideImage := "nvcr.io/nvstaging/ai-dynamo/tensorrtllm-runtime:1.2.0rc0-cuda13"
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "trtllm",
+					Image:   "test-profiler:latest",
+					Overrides: &nvidiacomv1beta1.OverridesSpec{
+						DGD: &runtime.RawExtension{Raw: []byte(`{
+							"apiVersion": "nvidia.com/v1alpha1",
+							"kind": "DynamoGraphDeployment",
+							"spec": {
+								"services": {
+									"TRTLLMWorker": {
+										"extraPodSpec": {
+											"mainContainer": {
+												"image": "nvcr.io/nvstaging/ai-dynamo/tensorrtllm-runtime:1.2.0rc0-cuda13"
+											}
+										}
+									}
+								}
+							}
+						}`)},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			outputCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      getOutputConfigMapName(dgdr),
+					Namespace: namespace,
+				},
+				Data: map[string]string{
+					ProfilingOutputFile: `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-generated
+spec:
+  services:
+    TRTLLMWorker:
+      replicas: 2
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvstaging/ai-dynamo/tensorrtllm-runtime:1.2.0rc0
+          args:
+          - --generated-arg`,
+				},
+			}
+			Expect(k8sClient.Create(ctx, outputCM)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, outputCM) }()
+
+			profilingResults, dgdName, err := reconciler.generateDGDSpec(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgdName).Should(Equal(dgdrName + "-dgd"))
+			Expect(profilingResults.SelectedConfig).NotTo(BeNil())
+
+			var selected dgdv1alpha1.DynamoGraphDeployment
+			Expect(json.Unmarshal(profilingResults.SelectedConfig.Raw, &selected)).Should(Succeed())
+			Expect(selected.Spec.Services["TRTLLMWorker"].ExtraPodSpec.MainContainer.Image).Should(Equal(overrideImage))
+
+			updated := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, updated)).Should(Succeed())
+			generatedYAML := updated.Annotations["nvidia.com/generated-dgd-spec"]
+			Expect(generatedYAML).Should(ContainSubstring(overrideImage))
+			Expect(generatedYAML).Should(ContainSubstring("--generated-arg"))
 		})
 
 		It("Should adopt additional ConfigMaps when DGD already exists", func() {

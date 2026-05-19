@@ -947,6 +947,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err := yaml.Unmarshal([]byte(dgdSpecYAML), generatedDGD); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
 	}
+	if dgdr.Spec.Overrides != nil {
+		if err := applyDGDOverrides(generatedDGD, dgdr.Spec.Overrides.DGD); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to apply DGD overrides: %w", err)
+		}
+	}
 
 	// Determine DGD name and namespace from generated deployment
 	dgdName := generatedDGD.Name
@@ -1958,6 +1963,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	// collides when multiple DGDRs share identical specs. Derive the name from
 	// DGDR identity instead, respecting an explicit override if the user set one.
 	dgd.Name = computeDGDName(dgdr)
+	if dgdr.Spec.Overrides != nil {
+		if err := applyDGDOverrides(dgd, dgdr.Spec.Overrides.DGD); err != nil {
+			return nil, "", fmt.Errorf("failed to apply DGD overrides: %w", err)
+		}
+	}
 
 	logger.Info("Parsed profiling output", "profilerDGDName", dgd.Name, "additionalResources", len(additionalResources))
 
