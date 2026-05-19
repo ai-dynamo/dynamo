@@ -246,7 +246,7 @@ expression: redacted_events(&text)
             "reasoning_tokens": 0
           },
           "total_tokens": 7
-,
+        },
         "billing": null,
         "conversation": null,
         "error": null,
