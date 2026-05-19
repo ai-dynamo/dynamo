@@ -4,10 +4,6 @@
 # aiperf benchmark job for the EFA disagg recipe.
 # Workload shape (ISL=1k, OSL=8k, concurrency=512) is the same as the non-EFA
 # recipe's perf.yaml so EFA vs non-EFA numbers can be compared directly.
-# Pod shape follows the working pattern used by other benchmarked recipes
-# (deepseek-r1/gb200, llama-3-70b, deepseek-v32-fp4): python:3.12-slim image,
-# privileged container so apt-get and pip install work, model-cache PVC for
-# tokenizer + artifact output.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -30,7 +26,8 @@ spec:
         image: python:3.12-slim
         imagePullPolicy: IfNotPresent
         securityContext:
-          privileged: true
+          privileged: false
+          allowPrivilegeEscalation: false
         env:
         - name: TARGET_MODEL
           value: nvidia/GLM-5-NVFP4
@@ -87,7 +84,12 @@ spec:
           "
 
           echo "Waiting for model '$TARGET_MODEL' at http://$ENDPOINT/v1/models..."
+          deadline=$((SECONDS + 1800))
           while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "Timed out after 30m waiting for model '$TARGET_MODEL' at http://$ENDPOINT/v1/models"
+              exit 1
+            fi
             echo "[$(date '+%H:%M:%S')] not ready, retrying in 10s..."
             sleep 10
           done

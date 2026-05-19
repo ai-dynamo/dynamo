@@ -137,7 +137,7 @@ Workload shape is identical to the non-EFA `../perf.yaml`: ISL=1000, OSL=8192, c
 
 ## Performance (ISL=1k, OSL=8k, concurrency=512)
 
-Measured on `dynamo-aws-dev-01` — 5 × p6e-gb200.36xlarge, EFA driver 3.0.0g, kernel 6.14.0-1018-aws-64k. Benchmark workload identical to the non-EFA recipe's `perf.yaml` (1,536 requests at concurrency 512 = 32 req/GPU × 16 decode GPUs).
+Measured on 5 × p6e-gb200.36xlarge, EFA driver 3.0.0g, kernel 6.14.0-1018-aws-64k. Benchmark workload identical to the non-EFA recipe's `perf.yaml` (1,536 requests at concurrency 512 = 32 req/GPU × 16 decode GPUs).
 
 
 | Metric                     | EFA (this recipe) | Non-EFA (UCX/RoCE) baseline |
@@ -152,7 +152,7 @@ Measured on `dynamo-aws-dev-01` — 5 × p6e-gb200.36xlarge, EFA driver 3.0.0g, 
 | Benchmark duration         | 657 s             | —                           |
 
 
-Baseline numbers reproduced from [../README.md](../../../README.md). EFA achieves parity on all four published metrics. TTFT p50 is lower (better) on EFA, though TTFT avg is higher with a long tail (p99 ≈ 12.5 s) — consistent with the Branch 3 single-NIC-pinning effect documented in SGLang DIS-1892, which this recipe does not work around.
+Baseline numbers reproduced from [../README.md](../../../README.md). EFA achieves parity on all four published metrics. TTFT p50 is lower (better) on EFA, though TTFT avg is higher with a long tail (p99 ≈ 12.5 s).
 
 
 ## References

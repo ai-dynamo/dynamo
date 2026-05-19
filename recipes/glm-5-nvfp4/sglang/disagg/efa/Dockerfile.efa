@@ -114,7 +114,7 @@ RUN set -eux; \
 #
 #    Critical: use aws/libfabric (NOT ofiwg/libfabric upstream). The AWS fork
 #    carries downstream EFA tuning that yields ~40% better TTFT on disagg
-#    workloads. Verified DIS-1892, 2026-05.
+#    workloads.
 RUN set -eux; \
     git clone --depth 1 --branch ${LIBFABRIC_BRANCH} \
       https://github.com/aws/libfabric.git /tmp/libfabric; \
