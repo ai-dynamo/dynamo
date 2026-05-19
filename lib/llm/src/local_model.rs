@@ -569,9 +569,7 @@ impl LocalModel {
 
         // Advertise non-typed siblings (preprocessor_config.json,
         // special_tokens_map.json, …) so external preprocessors that load
-        // via `from_pretrained(slug_dir)` see a complete model dir. Skip
-        // weight files (mx's deny-list) and dotfiles/README. Already-typed
-        // filenames are excluded so we don't double-advertise.
+        // via `from_pretrained(slug_dir)` see a complete model dir.
         let typed_filenames: HashSet<String> = self
             .card
             .iter_metadata_files()

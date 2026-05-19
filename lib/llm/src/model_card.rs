@@ -846,12 +846,10 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(gen_config.checksum().as_bytes());
                 }
 
-                // extra_files: hash each file's checksum in sorted order
-                // so two workers harvesting the same siblings produce
-                // identical mdcsums regardless of filesystem read_dir
-                // order. Without this, different siblings would collide
-                // under the same mdcsum and the frontend cache would
-                // serve stale metadata.
+                // extra_files: hash sorted checksums so two workers with
+                // identical siblings produce the same mdcsum regardless
+                // of `read_dir` order. Without this, the frontend cache
+                // could serve stale metadata.
                 let mut extra_hashes: Vec<&str> = self
                     .extra_files
                     .iter()
