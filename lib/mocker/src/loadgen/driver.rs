@@ -4,7 +4,10 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use dynamo_kv_router::protocols::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -17,10 +20,17 @@ enum DriverMode {
     Concurrency,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptMode {
+    Full,
+    DeltaCumulative,
+}
+
 #[derive(Debug)]
 struct SessionRuntime {
     session_id: String,
     turns: Vec<TurnRuntime>,
+    cumulative_tokens: Vec<u32>,
     next_turn_index: usize,
     next_ready_at_ms: Option<f64>,
     in_flight: Option<Uuid>,
@@ -31,7 +41,7 @@ struct TurnRuntime {
     tokens: Vec<u32>,
     max_output_tokens: usize,
     delay_after_previous_ms: f64,
-    replay_hashes: ReplayRequestHashes,
+    replay_hashes: Option<ReplayRequestHashes>,
 }
 
 #[derive(Debug)]
@@ -76,21 +86,79 @@ impl PartialOrd for ReadySession {
 #[derive(Debug)]
 pub struct WorkloadDriver {
     mode: DriverMode,
+    prompt_mode: PromptMode,
+    engine_block_size: u32,
     sessions: Vec<SessionRuntime>,
     in_flight: FxHashMap<Uuid, InFlightTurn>,
     ready_sessions: BinaryHeap<ReadySession>,
+    max_in_flight: Option<usize>,
+}
+
+fn replay_hashes_from_tokens(tokens: &[u32], engine_block_size: u32) -> ReplayRequestHashes {
+    let local_block_hashes =
+        compute_block_hash_for_seq(tokens, engine_block_size, BlockHashOptions::default());
+    let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
+
+    ReplayRequestHashes {
+        local_block_hashes,
+        sequence_hashes,
+    }
 }
 
 impl WorkloadDriver {
     pub(crate) fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
-        Self::new(trace, engine_block_size, DriverMode::Trace)
+        Self::new(
+            trace,
+            engine_block_size,
+            DriverMode::Trace,
+            PromptMode::Full,
+        )
+    }
+
+    pub(crate) fn new_trace_accumulating_deltas(
+        trace: Trace,
+        engine_block_size: usize,
+    ) -> Result<Self> {
+        Self::new(
+            trace,
+            engine_block_size,
+            DriverMode::Trace,
+            PromptMode::DeltaCumulative,
+        )
     }
 
     pub(crate) fn new_concurrency(trace: Trace, engine_block_size: usize) -> Result<Self> {
-        Self::new(trace, engine_block_size, DriverMode::Concurrency)
+        Self::new(
+            trace,
+            engine_block_size,
+            DriverMode::Concurrency,
+            PromptMode::Full,
+        )
     }
 
-    fn new(trace: Trace, engine_block_size: usize, mode: DriverMode) -> Result<Self> {
+    pub(crate) fn new_concurrency_accumulating_deltas(
+        trace: Trace,
+        engine_block_size: usize,
+    ) -> Result<Self> {
+        Self::new(
+            trace,
+            engine_block_size,
+            DriverMode::Concurrency,
+            PromptMode::DeltaCumulative,
+        )
+    }
+
+    fn new(
+        trace: Trace,
+        engine_block_size: usize,
+        mode: DriverMode,
+        prompt_mode: PromptMode,
+    ) -> Result<Self> {
+        if engine_block_size == 0 {
+            bail!("engine_block_size must be greater than 0");
+        }
+        let engine_block_size_u32 =
+            u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
         let trace_block_size = trace.block_size;
         let sessions: Vec<SessionRuntime> = trace
             .sessions
@@ -104,18 +172,28 @@ impl WorkloadDriver {
                     .turns
                     .into_iter()
                     .map(|turn| -> Result<TurnRuntime> {
+                        let replay_hashes = if prompt_mode == PromptMode::Full {
+                            Some(turn.to_replay_hashes(trace_block_size, engine_block_size)?)
+                        } else {
+                            None
+                        };
                         Ok(TurnRuntime {
                             tokens: turn.synthesize_tokens(trace_block_size)?,
                             max_output_tokens: turn.max_output_tokens,
                             delay_after_previous_ms: turn.delay_after_previous_ms,
-                            replay_hashes: turn
-                                .to_replay_hashes(trace_block_size, engine_block_size)?,
+                            replay_hashes,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let cumulative_capacity = if prompt_mode == PromptMode::DeltaCumulative {
+                    turns.iter().map(|turn| turn.tokens.len()).sum()
+                } else {
+                    0
+                };
                 Ok(SessionRuntime {
                     session_id: session.session_id,
                     turns,
+                    cumulative_tokens: Vec::with_capacity(cumulative_capacity),
                     next_turn_index: 0,
                     next_ready_at_ms,
                     in_flight: None,
@@ -137,19 +215,57 @@ impl WorkloadDriver {
 
         Ok(Self {
             mode,
+            prompt_mode,
+            engine_block_size: engine_block_size_u32,
             sessions,
             in_flight: FxHashMap::default(),
             ready_sessions,
+            max_in_flight: None,
         })
     }
 
+    /// Set a global in-flight cap. `pop_ready` will clamp by the remaining cap,
+    /// and `next_ready_time_ms` returns `None` while at cap.
+    pub fn set_max_in_flight(&mut self, cap: usize) {
+        debug_assert!(
+            self.in_flight.is_empty(),
+            "set_max_in_flight called on a driver with pending work"
+        );
+        self.max_in_flight = Some(cap);
+    }
+
+    /// Failure-path companion: release a cap slot and terminate the owning session.
+    /// No-op if `on_complete` already ran. Used when a request task is cancelled
+    /// or panics before reaching `on_complete`.
+    ///
+    /// Terminating the session (marking it exhausted) prevents `run_workload` from
+    /// deadlocking: `pop_ready` skips sessions with `in_flight.is_some()`, so a
+    /// leaked session would leave `is_drained` stuck at `false` forever.
+    pub fn release_cap_slot(&mut self, request_uuid: Uuid) {
+        let Some(in_flight) = self.in_flight.remove(&request_uuid) else {
+            return;
+        };
+        let Some(session) = self.sessions.get_mut(in_flight.session_index) else {
+            return;
+        };
+        if session.in_flight == Some(request_uuid) {
+            session.in_flight = None;
+            session.next_turn_index = session.turns.len();
+            session.next_ready_at_ms = None;
+        }
+    }
+
     pub fn pop_ready(&mut self, now_ms: f64, limit: usize) -> Vec<ReadyTurn> {
-        if limit == 0 {
+        let effective_limit = match self.max_in_flight {
+            Some(cap) => limit.min(cap.saturating_sub(self.in_flight.len())),
+            None => limit,
+        };
+        if effective_limit == 0 {
             return Vec::new();
         }
 
         let mut emitted = Vec::new();
-        while emitted.len() < limit {
+        while emitted.len() < effective_limit {
             let Some(ready_session) = self.ready_sessions.pop() else {
                 break;
             };
@@ -176,8 +292,24 @@ impl WorkloadDriver {
                 DriverMode::Trace => Some(scheduled_ready_at_ms),
                 DriverMode::Concurrency => None,
             };
+            let (request_tokens, replay_hashes) = match self.prompt_mode {
+                PromptMode::Full => (
+                    turn.tokens.clone(),
+                    turn.replay_hashes
+                        .as_ref()
+                        .expect("full-prompt workload turns precompute replay hashes")
+                        .clone(),
+                ),
+                PromptMode::DeltaCumulative => {
+                    session.cumulative_tokens.extend_from_slice(&turn.tokens);
+                    let request_tokens = session.cumulative_tokens.clone();
+                    let replay_hashes =
+                        replay_hashes_from_tokens(&request_tokens, self.engine_block_size);
+                    (request_tokens, replay_hashes)
+                }
+            };
             let request = DirectRequest {
-                tokens: turn.tokens.clone(),
+                tokens: request_tokens,
                 max_output_tokens: turn.max_output_tokens,
                 uuid: Some(request_uuid),
                 dp_rank: 0,
@@ -197,7 +329,7 @@ impl WorkloadDriver {
                 session_id: session.session_id.clone(),
                 turn_index,
                 scheduled_ready_at_ms,
-                replay_hashes: Some(turn.replay_hashes.clone()),
+                replay_hashes: Some(replay_hashes),
                 request,
             });
         }
@@ -240,6 +372,11 @@ impl WorkloadDriver {
     }
 
     pub fn next_ready_time_ms(&mut self) -> Option<f64> {
+        if let Some(cap) = self.max_in_flight
+            && self.in_flight.len() >= cap
+        {
+            return None;
+        }
         loop {
             let ready_session = *self.ready_sessions.peek()?;
             let session = &self.sessions[ready_session.session_index];
@@ -267,5 +404,202 @@ impl WorkloadDriver {
             .iter()
             .map(|session| session.turns.len())
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loadgen::{SessionTrace, Trace, TurnTrace};
+
+    fn two_session_trace() -> Trace {
+        Trace {
+            block_size: 1,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "a".into(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 2,
+                            max_output_tokens: 1,
+                            hash_ids: vec![1, 2],
+                            delay_after_previous_ms: 0.0,
+                        },
+                        TurnTrace {
+                            input_length: 2,
+                            max_output_tokens: 1,
+                            hash_ids: vec![3, 4],
+                            delay_after_previous_ms: 5.0,
+                        },
+                    ],
+                },
+                SessionTrace {
+                    session_id: "b".into(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![TurnTrace {
+                        input_length: 2,
+                        max_output_tokens: 1,
+                        hash_ids: vec![5, 6],
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn cap_clamps_pop_ready_when_limit_is_unbounded() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(first.len(), 1);
+        let second = driver.pop_ready(0.0, usize::MAX);
+        assert!(
+            second.is_empty(),
+            "cap should block dispatch while slot is held"
+        );
+    }
+
+    #[test]
+    fn pop_ready_admits_next_turn_after_on_complete() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+        let uuid = admitted[0].request_uuid;
+        driver.on_complete(uuid, 10.0).unwrap();
+
+        let next = driver.pop_ready(10.0, usize::MAX);
+        assert_eq!(next.len(), 1);
+        assert_ne!(next[0].request_uuid, uuid);
+    }
+
+    #[test]
+    fn next_ready_time_ms_returns_none_at_cap() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+
+        assert!(
+            driver.next_ready_time_ms().is_none(),
+            "expected None while at cap even with ready sessions queued"
+        );
+
+        driver.on_complete(admitted[0].request_uuid, 10.0).unwrap();
+        assert!(
+            driver.next_ready_time_ms().is_some(),
+            "expected readiness after a slot is freed"
+        );
+    }
+
+    #[test]
+    fn no_cap_preserves_caller_limit_behavior() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+
+        let admitted = driver.pop_ready(0.0, 5);
+        assert_eq!(admitted.len(), 2, "both sessions should admit with no cap");
+        assert!(driver.next_ready_time_ms().is_none());
+    }
+
+    #[test]
+    fn release_cap_slot_is_noop_after_on_complete() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        let uuid = admitted[0].request_uuid;
+        driver.on_complete(uuid, 5.0).unwrap();
+
+        driver.release_cap_slot(uuid);
+
+        let next = driver.pop_ready(5.0, usize::MAX);
+        assert_eq!(next.len(), 1);
+        assert_ne!(next[0].request_uuid, uuid);
+    }
+
+    #[test]
+    fn release_cap_slot_recovers_cap_when_on_complete_was_skipped() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+
+        driver.release_cap_slot(admitted[0].request_uuid);
+
+        let next = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(
+            next.len(),
+            1,
+            "cap slot should be available after release_cap_slot"
+        );
+    }
+
+    #[test]
+    fn release_cap_slot_terminates_session_so_is_drained_completes() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+        let stuck_uuid = admitted[0].request_uuid;
+
+        driver.release_cap_slot(stuck_uuid);
+
+        let neighbor = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(
+            neighbor.len(),
+            1,
+            "other session must still be admissible after its neighbor was terminated"
+        );
+        driver.on_complete(neighbor[0].request_uuid, 1.0).unwrap();
+
+        assert!(
+            driver.is_drained(),
+            "is_drained must become true so run_workload can exit"
+        );
+    }
+
+    #[test]
+    fn accumulating_delta_mode_emits_cumulative_input_tokens() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "a".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 6,
+                        max_output_tokens: 1,
+                        hash_ids: vec![10, 11],
+                        delay_after_previous_ms: 0.0,
+                    },
+                    TurnTrace {
+                        input_length: 3,
+                        max_output_tokens: 1,
+                        hash_ids: vec![12],
+                        delay_after_previous_ms: 5.0,
+                    },
+                ],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 4).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].request.tokens, vec![10, 10, 10, 10, 11, 11]);
+        driver.on_complete(first[0].request_uuid, 10.0).unwrap();
+
+        let second = driver.pop_ready(15.0, usize::MAX);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].request.tokens,
+            vec![10, 10, 10, 10, 11, 11, 12, 12, 12]
+        );
     }
 }

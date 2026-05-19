@@ -17,11 +17,36 @@
 # in a single namespace. Install this chart in each namespace where you want
 # to enable checkpoint/restore functionality for DynamoGraphDeployments.
 
+# Container runtime backend. Leave socketPath empty to use the conventional
+# path for the chosen type.
+runtime:
+  type: containerd  # containerd | crio
+  socketPath: ""
+
+# Gates the OCP RBAC template and the DS required-scc annotation. Keep false
+# on vanilla Kubernetes (it references an OCP-only built-in SCC).
+openshift:
+  enabled: false
+
 # Storage configuration for checkpoints
 storage:
   # Storage type stays snapshot-owned for future backend expansion.
   # Only pvc is implemented today.
   type: pvc
+
+  # How snapshot-agent accesses checkpoint storage:
+  # - agentMount: snapshot-agent mounts the PVC directly. This is the legacy
+  #   namespace-local mode and requires installing the chart in every workload
+  #   namespace that needs checkpoints. On multi-node clusters this generally
+  #   requires ReadWriteMany storage because DaemonSet pods on multiple nodes
+  #   mount the same PVC.
+  # - podMount: workload checkpoint/restore pods mount their namespace-local
+  #   PVC, and a cluster-level snapshot-agent reaches it through
+  #   /host/proc/<pid>/root. Use this when installing one snapshot-agent
+  #   DaemonSet in an infrastructure namespace. Because the DaemonSet no longer
+  #   mounts the PVC from every GPU node, suitable ReadWriteOnce storage
+  #   classes can be used for sequential checkpoint/restore workflows.
+  accessMode: agentMount
 
   # PVC configuration (when type=pvc)
   pvc:
@@ -33,10 +58,13 @@ storage:
     size: 1Ti
     # Storage class (leave empty for default)
     storageClass: ""
-    # Access mode - ReadWriteMany required for multi-pod access
+    # Access mode. ReadWriteMany is safest for concurrent multi-node access;
+    # podMount can use ReadWriteOnce for sequential checkpoint/restore when
+    # the storage backend can attach the volume to the active workload node.
     accessMode: ReadWriteMany
-    # PVC mount path inside the snapshot-agent pod.
-    # Restore targets derive checkpoint paths from this mount.
+    # PVC mount path. In agentMount mode this is mounted inside the
+    # snapshot-agent pod. In podMount mode the operator must mount the PVC
+    # into checkpoint/restore workload pods at the same path.
     basePath: /checkpoints
 
   # Reserved for future snapshot-owned backends. Unsupported today.
@@ -99,8 +127,12 @@ daemonset:
     image: busybox:latest
 
 # Seccomp profile configuration
+# CRIU can't checkpoint io_uring; this gates the block-iouring ConfigMap and
+# the initContainer that writes the profile. Set to false on RHCOS 9.6+, which
+# already blocks io_uring at the kernel.
 seccomp:
-  # Deploy seccomp profile for blocking io_uring (required for CRIU)
+  # Deploy seccomp profile for blocking io_uring (required for CRIU).
+  # Use seccomp.deploy; seccomp.enabled is not a chart value.
   deploy: true
 
 # Service account configuration

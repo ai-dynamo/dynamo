@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+
+[package]
+name = "dynamo-kv-hashing"
+description = "Universal Request → PositionalLineageHash contract for KV cache identity across Dynamo (router, consolidator, kvbm, frameworks)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dynamo-tokens = { workspace = true }
+derive_builder = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rmp-serde = "1.3"

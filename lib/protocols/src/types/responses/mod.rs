@@ -35,6 +35,13 @@ use serde::{Deserialize, Serialize};
 // shadow their upstream counterparts where no dual-side conflict exists.
 pub use async_openai::types::responses::*;
 
+// Re-export upstream's pre-shadow `InputContent` under an explicit alias.
+// Needed because `FunctionCallOutput::Content` and `EasyInputContent::ContentList`
+// are non-owned upstream types that carry upstream's original `InputContent`
+// inline, so downstream consumers occasionally need to name it alongside the
+// Dynamo-owned shadow defined further down this module.
+pub use async_openai::types::responses::InputContent as UpstreamInputContent;
+
 // Re-export from parent module for backward compat.
 pub use crate::types::ImageDetail;
 pub use crate::types::ReasoningEffort;
@@ -51,6 +58,40 @@ pub type ResponseStream = std::pin::Pin<
     Box<dyn futures::Stream<Item = Result<ResponseStreamEvent, crate::error::OpenAIError>> + Send>,
 >;
 
+/// Fields on upstream `Response` that the OpenResponses spec requires as
+/// `T | null` but async-openai declares as `Option<T>` with
+/// `skip_serializing_if = Option::is_none` — meaning `None` disappears from
+/// the wire shape, where the spec wants an explicit `null`.
+///
+/// Colocated here (next to the upstream `Response` re-export) rather than in
+/// `lib/llm/src/protocols/openai/responses/mod.rs` so that when upstream's
+/// `Response` gains a new nullable-required field, the reviewer editing this
+/// module is looking directly at the authoritative list. Keep sorted
+/// alphabetically; entries must match serde field names on `Response` exactly.
+///
+/// Any field we unconditionally populate ourselves during response
+/// construction (e.g. `metadata`, `parallel_tool_calls`, `temperature`,
+/// `text`, `tool_choice`, `tools`, `top_p`, `top_logprobs`, `truncation`,
+/// `service_tier`, `background`) is deliberately absent — it's always
+/// present on the wire, so listing it here would be noise.
+pub const SPEC_NULLABLE_REQUIRED_RESPONSE_FIELDS: &[&str] = &[
+    "billing",
+    "completed_at",
+    "conversation",
+    "error",
+    "incomplete_details",
+    "instructions",
+    "max_output_tokens",
+    "max_tool_calls",
+    "previous_response_id",
+    "prompt",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "reasoning",
+    "safety_identifier",
+    "usage",
+];
+
 // ---------------------------------------------------------------------------
 // Input-side assistant message (relaxed vs upstream OutputMessage)
 // ---------------------------------------------------------------------------
@@ -66,6 +107,19 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+/// Deserialize `null` or a missing field as `T::default()`. Scalar counterpart
+/// to `deserialize_null_as_empty_vec` — plain `#[serde(default)]` rejects
+/// explicit `null` because serde tries to deserialize the null into `T` and
+/// fails. Real clients emit `null` for unset enum-ish fields (e.g. OpenAI
+/// Agents SDK sending `"detail": null` on `input_image` parts).
+fn deserialize_null_as_default<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Deserialize<'de> + Default,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 /// Relaxed counterpart to upstream `OutputTextContent` for input-side content.
@@ -105,6 +159,88 @@ pub struct InputOutputMessage {
     pub phase: Option<MessagePhase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<OutputStatus>,
+}
+
+// ---------------------------------------------------------------------------
+// Input-side image / content / message (shadow upstream, relaxed shapes)
+// ---------------------------------------------------------------------------
+
+/// Relaxed counterpart to upstream `InputImageContent`. `detail` defaults to
+/// `ImageDetail::Auto` when the client omits it — OpenAI's hosted API and the
+/// OpenResponses spec both accept this shape, but upstream's struct marks
+/// `detail` as required.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct InputImageContent {
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
+    pub detail: ImageDetail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+}
+
+/// Parts of an input message: text, image, or file. Mirrors upstream
+/// `InputContent` but routes `InputImage` through the Dynamo-owned relaxed
+/// `InputImageContent` above.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputContent {
+    InputText(InputTextContent),
+    InputImage(InputImageContent),
+    InputFile(InputFileContent),
+}
+
+/// User / system / developer input message. Shadows upstream `InputMessage`
+/// so we can route through the Dynamo-owned `InputContent` chain.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct InputMessage {
+    pub content: Vec<InputContent>,
+    pub role: InputRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<OutputStatus>,
+}
+
+/// Content for `EasyInputMessage`. Shadows upstream's same-named enum so the
+/// `ContentList` arm carries Dynamo's relaxed `InputContent` (with optional
+/// `detail` on `InputImageContent`) instead of upstream's strict variant.
+///
+/// Without this shadow, the `InputItem::EasyMessage` fallback in the untagged
+/// `InputItem` enum is the only path that still routes through upstream's
+/// strict types — so any spec-compliant client that omits `type: "message"`
+/// on a multimodal message (the documented default) fails with
+/// "data did not match any variant of untagged enum InputItem". See issue
+/// #9468.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum EasyInputContent {
+    /// Plain-text content. Tried first so `"content": "hi"` short-circuits.
+    Text(String),
+    /// Structured content list (text/image/file parts).
+    ContentList(Vec<InputContent>),
+}
+
+impl Default for EasyInputContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+/// A simplified message input — the spec-default shape when a client omits the
+/// `type` discriminator. Shadows upstream `EasyInputMessage` so the `content`
+/// field routes through Dynamo's relaxed `EasyInputContent` (and transitively
+/// the relaxed `InputContent` / `InputImageContent`). Field set is identical to
+/// upstream for drop-in compatibility with construction sites in lib/llm.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct EasyInputMessage {
+    /// Type discriminator. Optional with default `MessageType::Message` —
+    /// matches the OpenAI Responses spec and `openai-python`'s
+    /// `EasyInputMessageParam` (`type: Literal["message"]`, non-Required).
+    #[serde(default)]
+    pub r#type: MessageType,
+    pub role: Role,
+    pub content: EasyInputContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<MessagePhase>,
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +404,33 @@ mod tests {
                 assert!(out.status.is_none());
             }
             other => panic!("expected Item::Message(Output), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_image_without_detail_defaults_to_auto() {
+        let json = serde_json::json!({
+            "type": "input_image",
+            "image_url": "https://example.com/cat.jpg"
+        });
+        let content: InputContent = serde_json::from_value(json).unwrap();
+        match content {
+            InputContent::InputImage(img) => assert_eq!(img.detail, ImageDetail::Auto),
+            other => panic!("expected InputImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_image_with_explicit_null_detail_defaults_to_auto() {
+        let json = serde_json::json!({
+            "type": "input_image",
+            "image_url": "https://example.com/cat.jpg",
+            "detail": null
+        });
+        let content: InputContent = serde_json::from_value(json).unwrap();
+        match content {
+            InputContent::InputImage(img) => assert_eq!(img.detail, ImageDetail::Auto),
+            other => panic!("expected InputImage, got {other:?}"),
         }
     }
 
@@ -455,5 +618,163 @@ mod tests {
             items[2],
             InputItem::Item(Item::Message(MessageItem::Output(_)))
         ));
+    }
+
+    // ---- EasyInputMessage / multimodal-without-`type` regression coverage ----
+    // See issue #9468. Before the EasyInputMessage/EasyInputContent shadow
+    // landed, the `InputItem::EasyMessage` fallback still routed through
+    // upstream's strict `InputImageContent` (required `detail`), so any
+    // multimodal message that omitted the spec-default `type: "message"` would
+    // fail with "data did not match any variant of untagged enum InputItem".
+
+    #[test]
+    fn easy_message_multimodal_without_type_routes_to_easymessage() {
+        // AIPerf's pre-PR-931 payload shape: no top-level `type`, content is a
+        // list containing an `input_image` part with no `detail`.
+        let json = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+            ]
+        });
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::EasyMessage(easy) => {
+                assert_eq!(easy.role, Role::User);
+                assert_eq!(easy.r#type, MessageType::Message);
+                match easy.content {
+                    EasyInputContent::ContentList(parts) => {
+                        assert_eq!(parts.len(), 1);
+                        match &parts[0] {
+                            InputContent::InputImage(img) => {
+                                assert_eq!(img.detail, ImageDetail::Auto);
+                                assert_eq!(
+                                    img.image_url.as_deref(),
+                                    Some("data:image/png;base64,abc")
+                                );
+                            }
+                            other => panic!("expected InputImage, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected ContentList, got {other:?}"),
+                }
+            }
+            other => panic!("expected EasyMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn easy_message_multimodal_with_explicit_null_detail() {
+        // Same shape as above but with `detail: null` — exercises the
+        // null-as-default path on the relaxed `InputImageContent` reached via
+        // the EasyMessage variant.
+        let json = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64,abc", "detail": null}
+            ]
+        });
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        assert!(matches!(item, InputItem::EasyMessage(_)));
+    }
+
+    #[test]
+    fn easy_message_assistant_multimodal_without_type() {
+        // Mixed-turn shape AIPerf emits when the prior assistant turn carried
+        // structured (non-string) content: role=assistant, content list, no
+        // top-level `type`.
+        let json = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "input_text", "text": "ok"}
+            ]
+        });
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::EasyMessage(easy) => {
+                assert_eq!(easy.role, Role::Assistant);
+            }
+            other => panic!("expected EasyMessage(assistant), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn easy_message_text_only_without_type_unchanged() {
+        // Regression guard: the pre-existing text-only path was already
+        // working (no multimodal content -> never hit upstream's strict
+        // `InputImageContent`). Pin it so a future glob-shadow change can't
+        // break it.
+        let json = serde_json::json!({"role": "user", "content": "Hello"});
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::EasyMessage(easy) => {
+                assert_eq!(easy.role, Role::User);
+                assert!(matches!(easy.content, EasyInputContent::Text(ref s) if s == "Hello"));
+            }
+            other => panic!("expected EasyMessage(Text), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn easy_message_with_explicit_type_still_routes_to_item_message() {
+        // AIPerf's post-PR-931 payload (with `type: "message"`) should still
+        // hit the structured `Item::Message` path first — proving the existing
+        // strict path didn't regress when EasyMessage was shadowed.
+        let json = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+            ]
+        });
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::Item(Item::Message(MessageItem::Input(msg))) => {
+                assert_eq!(msg.role, InputRole::User);
+                assert_eq!(msg.content.len(), 1);
+            }
+            other => panic!("expected Item::Message(Input), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_response_roundtrip_aiperf_pre_pr931_payload() {
+        // End-to-end shape: the exact request body AIPerf was emitting before
+        // PR-931 for a multi-turn multimodal conversation. Mirrors what the
+        // HTTP frontend receives. Must deserialize without error and preserve
+        // turn ordering.
+        let body = serde_json::json!({
+            "model": "Qwen/Qwen2-VL-2B-Instruct",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "input_text", "text": "ok"}]
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Now describe a different one."}]
+                }
+            ]
+        });
+        let req: CreateResponse = serde_json::from_value(body).unwrap();
+        let items = match &req.input {
+            InputParam::Items(items) => items,
+            _ => panic!("expected Items"),
+        };
+        assert_eq!(items.len(), 3);
+        // All three turns must land as EasyMessage (no top-level `type`).
+        for (idx, item) in items.iter().enumerate() {
+            assert!(
+                matches!(item, InputItem::EasyMessage(_)),
+                "turn {idx} did not route to EasyMessage: {item:?}",
+            );
+        }
     }
 }

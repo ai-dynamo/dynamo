@@ -18,7 +18,7 @@ use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use dynamo_mocker::common::bootstrap::{BootstrapServer, connect_to_prefill};
 use dynamo_mocker::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal, RawKvEvent,
@@ -58,6 +58,16 @@ impl KvCacheEventSink for KvEventSinkAdapter {
             .publish(event)
             .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
     }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.0
+            .publish_with_storage_tier(event, storage_tier)
+            .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -72,9 +82,15 @@ enum ZmqRawKvEvent {
         parent_block_hash: Option<u64>,
         token_ids: Vec<u32>,
         block_size: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<&'static str>,
+        group_idx: u32,
     },
     BlockRemoved {
         block_hashes: Vec<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        medium: Option<&'static str>,
+        group_idx: u32,
     },
 }
 
@@ -158,6 +174,31 @@ impl ZmqKvEventSink {
 
                         tracing::debug!(dp_rank, start_seq, buffer_len = ring_buffer.len(), "Replay request received");
 
+                        let buffer_first = ring_buffer.front().map(|(seq, _)| *seq);
+                        let buffer_last = ring_buffer.back().map(|(seq, _)| *seq);
+                        let outside_buffer = match (buffer_first, buffer_last) {
+                            (Some(first), Some(last)) => start_seq < first || start_seq > last,
+                            _ => true,
+                        };
+                        if outside_buffer {
+                            let buffer_first_display = buffer_first
+                                .map(|seq| seq.to_string())
+                                .unwrap_or_else(|| "empty".to_string());
+                            let buffer_last_display = buffer_last
+                                .map(|seq| seq.to_string())
+                                .unwrap_or_else(|| "empty".to_string());
+                            tracing::warn!(
+                                dp_rank,
+                                start_seq,
+                                buffer_first = ?buffer_first,
+                                buffer_last = ?buffer_last,
+                                buffer_len = ring_buffer.len(),
+                                "Replay request outside buffer: start_seq={start_seq}, buffer=[{},{}]",
+                                buffer_first_display,
+                                buffer_last_display,
+                            );
+                        }
+
                         // Compute start index directly — sequences are monotonic.
                         let start_idx = ring_buffer.front()
                             .map(|(first_seq, _)| start_seq.saturating_sub(*first_seq) as usize)
@@ -194,6 +235,7 @@ impl ZmqKvEventSink {
                             &msg.event,
                             msg.block_token_ids.as_deref(),
                             block_size,
+                            msg.storage_tier,
                         );
                         if events.is_empty() {
                             continue;
@@ -254,7 +296,9 @@ fn convert_to_zmq_events(
     event: &KvCacheEvent,
     block_token_ids: Option<&[Vec<u32>]>,
     block_size: u32,
+    storage_tier: StorageTier,
 ) -> Vec<ZmqRawKvEvent> {
+    let medium = storage_tier.to_kv_medium();
     match &event.data {
         KvCacheEventData::Stored(store_data) => {
             let block_hashes: Vec<u64> = store_data.blocks.iter().map(|b| b.block_hash.0).collect();
@@ -277,11 +321,17 @@ fn convert_to_zmq_events(
                 parent_block_hash,
                 token_ids,
                 block_size,
+                medium,
+                group_idx: 0,
             }]
         }
         KvCacheEventData::Removed(remove_data) => {
             let block_hashes: Vec<u64> = remove_data.block_hashes.iter().map(|h| h.0).collect();
-            vec![ZmqRawKvEvent::BlockRemoved { block_hashes }]
+            vec![ZmqRawKvEvent::BlockRemoved {
+                block_hashes,
+                medium,
+                group_idx: 0,
+            }]
         }
         KvCacheEventData::Cleared => vec![],
     }
@@ -399,17 +449,20 @@ impl MockEngine {
 
     /// Send a request to the appropriate scheduler, waiting for initialization if needed.
     pub async fn direct(&self, request: DirectRequest, dp_rank: usize) {
+        let sender = self.request_sender(dp_rank).await;
+        let _ = sender.send(request);
+    }
+
+    async fn request_sender(&self, dp_rank: usize) -> mpsc::UnboundedSender<DirectRequest> {
         if let Some(senders) = self.request_senders.get() {
-            let _ = senders[dp_rank].send(request);
-            return;
+            return senders[dp_rank].clone();
         }
 
         // Register the waiter *before* re-checking to avoid a TOCTOU race
         // where `start_schedulers` sets + notifies between our check and subscribe.
         let notified = self.senders_ready.notified();
         if let Some(senders) = self.request_senders.get() {
-            let _ = senders[dp_rank].send(request);
-            return;
+            return senders[dp_rank].clone();
         }
         notified.await;
 
@@ -417,7 +470,7 @@ impl MockEngine {
             .request_senders
             .get()
             .expect("must be set after notify");
-        let _ = senders[dp_rank].send(request);
+        senders[dp_rank].clone()
     }
 
     /// Create schedulers and spawn their background tasks for distributing token notifications.
@@ -597,7 +650,13 @@ impl MockEngine {
                             ) {
                                 tracing::warn!("Failed to publish metrics for DP rank {}: {e}", metrics.dp_rank);
                             } else {
-                                tracing::trace!("Published metrics for DP rank {}", metrics.dp_rank);
+                                tracing::debug!(
+                                    dp_rank = metrics.dp_rank,
+                                    active_decode_blocks = metrics.active_decode_blocks,
+                                    total_blocks = metrics.total_blocks,
+                                    gpu_cache_usage_perc = metrics.gpu_cache_usage_perc,
+                                    "published mocker load metrics"
+                                );
                             }
                         }
                         _ = cancel_token.cancelled() => {
@@ -632,8 +691,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         }
 
         // Bootstrap rendezvous for disaggregated serving
-        // - Decode: connect to prefill's server, block until prefill completes
-        // - Prefill: complete_room() is called after first token (see below)
+        // - Decode: send receiver metadata to prefill, then wait for prefill completion
+        // - Prefill: wait for decode metadata before emitting output, then complete_room()
         let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
         if let Some(bootstrap_info) = &request.bootstrap_info
             && self.engine_args.is_decode()
@@ -672,19 +731,51 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
         self.active_requests.insert(request_uuid, request_tx);
 
-        // Send the request to the appropriate scheduler based on dp_rank
-        self.direct(direct_request, dp_rank as usize).await;
+        let bootstrap_server = self.bootstrap_server.clone();
+        let delayed_prefill_submission = if is_prefill {
+            match (bootstrap_server.get().cloned(), bootstrap_room) {
+                (Some(server), Some(room_id)) => {
+                    let sender = self.request_sender(dp_rank as usize).await;
+                    Some((server, room_id, sender, direct_request))
+                }
+                _ => {
+                    self.direct(direct_request, dp_rank as usize).await;
+                    None
+                }
+            }
+        } else {
+            self.direct(direct_request, dp_rank as usize).await;
+            None
+        };
 
         // Create a simple channel for the stream
         let (stream_tx, stream_rx) = mpsc::unbounded_channel::<LLMEngineOutput>();
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
-        let bootstrap_server = self.bootstrap_server.clone();
         let reasoning = self.engine_args.reasoning.clone();
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
+            if let Some((server, room_id, sender, direct_request)) = delayed_prefill_submission {
+                if let Err(e) = server.wait_for_decode_ready(room_id).await {
+                    let _ = stream_tx.send(LLMEngineOutput::error(format!(
+                        "Bootstrap wait for decode metadata failed: {e}"
+                    )));
+                    active_requests.remove(&request_uuid);
+                    return;
+                }
+
+                if sender.send(direct_request).is_err() {
+                    let _ = stream_tx.send(LLMEngineOutput::error(
+                        "Scheduler input channel closed before bootstrap prefill submission"
+                            .to_string(),
+                    ));
+                    active_requests.remove(&request_uuid);
+                    return;
+                }
+            }
+
             let mut token_count = 0;
             let think_len = reasoning
                 .as_ref()
@@ -840,4 +931,59 @@ pub async fn make_mocker_engine(
         AnnotatedMockEngine::new(MockEngine::new(args), distributed_runtime, endpoint_id);
 
     Ok(Arc::new(annotated_engine))
+}
+
+#[cfg(test)]
+mod tests {
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
+    };
+
+    use super::*;
+
+    fn stored_event() -> KvCacheEvent {
+        KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(10),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }
+    }
+
+    #[test]
+    fn host_pinned_zmq_stored_event_carries_medium() {
+        let events = convert_to_zmq_events(
+            &stored_event(),
+            Some(&[vec![1, 2, 3, 4]]),
+            4,
+            StorageTier::HostPinned,
+        );
+
+        let [ZmqRawKvEvent::BlockStored { medium, .. }] = events.as_slice() else {
+            panic!("expected one BlockStored event");
+        };
+        assert_eq!(*medium, Some("CPU_PINNED"));
+    }
+
+    #[test]
+    fn device_zmq_stored_event_omits_medium() {
+        let events = convert_to_zmq_events(
+            &stored_event(),
+            Some(&[vec![1, 2, 3, 4]]),
+            4,
+            StorageTier::Device,
+        );
+
+        let [ZmqRawKvEvent::BlockStored { medium, .. }] = events.as_slice() else {
+            panic!("expected one BlockStored event");
+        };
+        assert_eq!(*medium, None);
+    }
 }

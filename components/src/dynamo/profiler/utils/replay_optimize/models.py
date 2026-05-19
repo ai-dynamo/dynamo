@@ -1,32 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Optimizer-internal dataclasses for replay_optimize search states.
+
+User-facing configuration lives in `specs.py`. This module carries only the
+hot-path state types (used as dict keys in the search cache, instantiated
+once per visited candidate) and the result bundle returned from the
+public API.
+"""
+
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
-
-
-@dataclass(frozen=True)
-class SyntheticReplayWorkload:
-    isl: int
-    osl: int
-    request_count: int
-    replay_concurrency: int
-    arrival_interval_ms: float = 0.0
-    turns_per_session: int = 1
-    shared_prefix_ratio: float = 0.0
-    num_prefix_groups: int = 0
-    inter_turn_delay_ms: float = 0.0
-
-
-@dataclass(frozen=True)
-class TraceReplayWorkload:
-    trace_file: str | os.PathLike[str]
-    arrival_speedup_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -35,8 +23,9 @@ class DenseReplayState:
     decode_tp: int
     prefill_workers: int
     decode_workers: int
-    overlap_score_weight: float
+    overlap_score_credit: float
     router_mode: str = "kv_router"
+    prefill_load_scale: float = 1.0
 
     @property
     def total_gpus_used(self) -> int:
@@ -45,17 +34,35 @@ class DenseReplayState:
             + self.decode_tp * self.decode_workers
         )
 
+    def format_summary(self) -> str:
+        return (
+            f"prefill_tp={self.prefill_tp} decode_tp={self.decode_tp} "
+            f"prefill_workers={self.prefill_workers} decode_workers={self.decode_workers} "
+            f"router_mode={self.router_mode} overlap_score_credit={self.overlap_score_credit} "
+            f"prefill_load_scale={self.prefill_load_scale} "
+            f"total_gpus={self.total_gpus_used}"
+        )
+
 
 @dataclass(frozen=True)
 class DenseAggReplayState:
     tp: int
     workers: int
     router_mode: str
-    overlap_score_weight: float
+    overlap_score_credit: float
+    prefill_load_scale: float = 1.0
 
     @property
     def total_gpus_used(self) -> int:
         return self.tp * self.workers
+
+    def format_summary(self) -> str:
+        return (
+            f"tp={self.tp} workers={self.workers} "
+            f"router_mode={self.router_mode} overlap_score_credit={self.overlap_score_credit} "
+            f"prefill_load_scale={self.prefill_load_scale} "
+            f"total_gpus={self.total_gpus_used}"
+        )
 
 
 @dataclass(frozen=True)

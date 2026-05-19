@@ -1,10 +1,10 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Mocker
+title: Simulation with Mocker
 ---
 
-The Mocker is a lightweight, high-fidelity simulation of an LLM inference engine, implemented entirely in Rust. It replicates the core scheduling, memory management, and timing behaviors of production engines without requiring a GPU, making it invaluable for testing Dynamo's routing, KV cache events, disaggregated serving, and planner components.
+Mocker is Dynamo's lightweight, high-fidelity simulation of an LLM inference engine, implemented entirely in Rust. It replicates the core scheduling, memory management, and timing behaviors of production engines without requiring a GPU, making it invaluable for testing Dynamo's routing, KV cache events, disaggregated serving, and planner components.
 
 ## Overview
 
@@ -90,7 +90,7 @@ python -m dynamo.mocker \
 | `--num-workers` | 1 | Workers per process |
 | `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
 | `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
-| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy override |
+| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy: `fifo`/`fcfs` (default) or `lpm` (longest prefix match) |
 | `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens. Also becomes the effective block size when `--engine-type sglang` and `--block-size` is omitted |
 | `--sglang-max-prefill-tokens` | 16384 | SGLang max prefill-token budget per batch |
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
@@ -100,6 +100,9 @@ python -m dynamo.mocker \
 | `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
 | `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
 | `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
+| `--aic-moe-tp-size` | None | MoE tensor parallel size for AIC latency prediction. Required by some MoE models |
+| `--aic-moe-ep-size` | None | MoE expert parallel size for AIC latency prediction. Required by some MoE models |
+| `--aic-attention-dp-size` | None | Attention data parallel size for AIC latency prediction. Required by some MoE models |
 | `--extra-engine-args` | None | Path to a JSON file with mocker configuration; overrides individual CLI arguments |
 | `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
 | `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
@@ -319,6 +322,10 @@ python -m dynamo.replay /path/to/trace.jsonl \
     --aic-tp-size 1
 ```
 
+For MoE models that require AIC MoE parallelism, pass the same fields on the router-side AIC surface.
+For Kimi-style TP-only MoE replay, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
+`--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
+
 For offline disagg replay, the same top-level `--aic-*` flags drive the prefill-stage router only;
 the decode-stage router keeps prompt tracking disabled.
 
@@ -366,7 +373,7 @@ kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
 
 ## Architecture
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines.
+The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the replay harness on top of multiple engine cores; see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md) for the component-level diagram and for offline replay internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
 
 ### Scheduler
 
@@ -388,43 +395,46 @@ When resources become constrained, the mocker simulates the engine's real recove
 
 ### KV Block Manager
 
-The block manager tracks KV cache blocks using reference counting and an LRU eviction policy. Blocks exist in one of two pools:
+The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-logical), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
 
-- **Active Pool** - Blocks currently in use by one or more sequences, tracked with reference counts
-- **Inactive Pool** - Blocks no longer actively referenced but kept for potential reuse (prefix caching)
+Blocks still conceptually live in one of two pools:
 
-When a sequence needs blocks, the manager first checks if they already exist (cache hit). If not, it allocates new blocks, potentially evicting the least-recently-used inactive blocks to make room. When a sequence completes or is preempted, its blocks are either moved to the inactive pool (for potential reuse) or freed entirely.
+- **Active** — blocks currently held by at least one sequence. Partial (still-filling) blocks are held as `MutableBlock<G1>`; full blocks are held as `ImmutableBlock<G1>` clones (the clone vec length is the mocker's refcount, one per `Use`).
+- **Inactive** — blocks no longer referenced by any sequence but kept for prefix-cache reuse. Handled entirely by kvbm-logical's inactive pool; the mocker never tracks them manually.
 
-The following diagram illustrates the block lifecycle, based on vLLM's block manager design:
+The lifecycle is RAII: dropping the last `ImmutableBlock` clone transitions the block from active to inactive (kvbm-logical's `reset` pool), with no explicit `deref`/`evict` bookkeeping on the mocker side. When a sequence completes or is preempted, the mocker simply drops its handles; kvbm-logical recovers the capacity.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Active : alloc
-    Active --> Inactive : deref
-    Inactive --> Active : cache hit (reuse)
-    Inactive --> Freed : evict
-    Active --> Freed : destroy (preemption)
+    [*] --> Active : allocate + stage + register
+    Active --> Inactive : last handle dropped (RAII)
+    Inactive --> Active : match_blocks(PLH) reuse
+    Inactive --> Freed : evicted by backend
+    Active --> Freed : explicit Removed (Destroy)
     Freed --> [*]
 
     state Active {
-        [*] --> Tracked : ref_count tracked
-    }
-    state Inactive {
-        [*] --> Ordered : LRU order
+        [*] --> Partial : MutableBlock<G1>
+        Partial --> Full : promote (PLH / SequenceHash)
+        [*] --> Full : ImmutableBlock<G1> clones
     }
 ```
 
-### Evictor
+Three `Use` outcomes are tracked for KV-event emission: `ActiveHit` (bump refcount on an already-pinned block), `InactiveHit` (reactivate via `match_blocks(plh)`), and `NewStore` (fresh allocation). Only `NewStore` emits a `Stored` KV event — the router radix tree already knows about the other two and only forgets on explicit `Removed`.
 
-The LRU evictor maintains blocks ordered by a monotonic counter, enabling O(log n) eviction of the lowest-priority block. Each `insert` assigns the next counter value, so blocks inserted later have higher counters and survive longer.
+### Eviction Backends
 
-This produces a **depth-aware eviction policy**: when a sequence completes, `free_signal` releases its blocks in reverse order (tail first). Deeper suffix blocks therefore receive lower counters and are evicted before shallower prefix blocks. This keeps shared prefixes cached longer, improving cache hit rates across requests with common prefixes.
+The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](../../lib/mocker/src/common/protocols.rs):
 
-The evictor also supports front-insertion (negative counters) for marking blocks for immediate eviction, though this is not currently used in the scheduler.
+- **`Lineage`** (default) — parent-chain aware: evicts leaf blocks first, preserving shared prefix chains. Subsumes the preemption-priority behavior the old hand-rolled `LRUEvictor::push_front` used to provide.
+- **`Lru`** — plain recency-based LRU.
+- **`MultiLru`** — 4-tier frequency-aware LRU built on a TinyLFU tracker.
+
+All three give the same "suffix blocks evicted before shared prefixes" outcome that the old evictor was designed to produce; `Lineage` does it structurally (via the block parent chain) rather than via monotonic counters.
 
 ### Sequence Tracking
 
-Each active request is tracked as a sequence, managing its token blocks and generation state. As tokens are generated, the sequence tracks which blocks are partial (still being filled) versus full (complete and hashable for prefix caching). When a partial block fills up, it gets "promoted" to a full block with a content-based hash, enabling future cache hits from requests with matching prefixes.
+Each active request is tracked as a sequence, managing its token blocks and generation state. As tokens are generated, the sequence tracks which blocks are partial (`MutableBlock<G1>`, still being filled) versus full (`ImmutableBlock<G1>`, complete and hashable for prefix caching). When a partial block fills up, it gets "promoted" to a full block with a content-based `SequenceHash` (or collapses onto an existing registered handle if the PLH is already present), enabling future cache hits from requests with matching prefixes.
 
 ### Performance Model
 

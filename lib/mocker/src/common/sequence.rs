@@ -4,35 +4,41 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{TokenBlockSequence, Tokens};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
-/// Create unique blocks and block hashes from a TokenBlockSequence.
+/// Create unique blocks, block hashes, and positional-lineage hashes from a
+/// [`TokenBlockSequence`].
 fn create_sequence_cache(
     tokens: &TokenBlockSequence,
     block_size: usize,
     enable_prefix_caching: bool,
-) -> (Vec<UniqueBlock>, Vec<u64>) {
+) -> (Vec<UniqueBlock>, Vec<BlockHash>, Vec<PositionalLineageHash>) {
     let mut unique_blocks = Vec::with_capacity(tokens.blocks().len() + 1);
-    let mut block_hashes = Vec::with_capacity(tokens.blocks().len());
+    let mut block_hashes: Vec<BlockHash> = Vec::with_capacity(tokens.blocks().len());
+    let mut plhs = Vec::with_capacity(tokens.blocks().len());
 
-    for block in tokens.blocks() {
+    for (pos, block) in tokens.blocks().iter().enumerate() {
         block_hashes.push(block.block_hash());
-        unique_blocks.push({
-            if enable_prefix_caching {
-                UniqueBlock::FullBlock(block.sequence_hash())
-            } else {
-                UniqueBlock::FullBlock(random::<u64>())
-            }
-        });
+        if enable_prefix_caching {
+            unique_blocks.push(UniqueBlock::FullBlock(block.sequence_hash()));
+            plhs.push(block.positional_lineage_hash());
+        } else {
+            unique_blocks.push(UniqueBlock::FullBlock(random::<u64>()));
+            plhs.push(PositionalLineageHash::new(
+                random::<u64>(),
+                None,
+                pos as u64,
+            ));
+        }
     }
 
     // Only push the partial block if tokens count isn't a multiple of block_size
     if !tokens.total_tokens().is_multiple_of(block_size) {
         unique_blocks.push(UniqueBlock::default());
     }
-    (unique_blocks, block_hashes)
+    (unique_blocks, block_hashes, plhs)
 }
 
 /// A sequence that is actively being built, with the ability to add tokens and commit to hashes
@@ -40,7 +46,8 @@ fn create_sequence_cache(
 #[derive(Debug, Getters, Validate)]
 pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
-    block_hashes: Vec<u64>,
+    block_hashes: Vec<BlockHash>,
+    plhs: Vec<PositionalLineageHash>,
 
     tokens: TokenBlockSequence,
 
@@ -80,12 +87,13 @@ impl ActiveSequence {
         let num_input_tokens = tokens.len();
 
         let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337));
-        let (unique_blocks, block_hashes) =
+        let (unique_blocks, block_hashes, plhs) =
             create_sequence_cache(&tokens, block_size, enable_prefix_caching);
 
         let seq = Self {
             unique_blocks,
             block_hashes,
+            plhs,
             tokens,
             block_size,
             max_output_tokens,
@@ -132,6 +140,8 @@ impl ActiveSequence {
         let hash_start = prev_blocks.min(self.block_hashes.len());
         let hash_end = target_blocks.min(self.block_hashes.len());
         let hashes = self.block_hashes[hash_start..hash_end].to_vec();
+        // Cached per-sequence PLHs (stable across calls).
+        let plhs = self.plhs[hash_start..hash_end].to_vec();
 
         let token_ids = if self.emit_token_ids && hash_start < hash_end {
             Some(
@@ -149,7 +159,21 @@ impl ActiveSequence {
         } else {
             None
         };
-        Some(MoveBlock::Use(blocks, hashes, token_ids, parent))
+        Some(MoveBlock::Use(blocks, hashes, plhs, token_ids, parent))
+    }
+
+    /// Positional lineage hashes for all fully-tokenised blocks in the sequence.
+    /// Mirrors `block_hashes()` but returns the PLH identity used by kvbm-logical.
+    pub fn positional_lineage_hashes(&self) -> &[PositionalLineageHash] {
+        &self.plhs
+    }
+
+    pub fn block_token_ids(&self) -> Vec<Vec<u32>> {
+        self.tokens
+            .blocks()
+            .iter()
+            .map(|block| block.tokens().to_vec())
+            .collect()
     }
 
     /// Commit a successful allocation by advancing `num_allocated_tokens`.
@@ -188,6 +212,7 @@ impl ActiveSequence {
     }
 
     /// Push a token to the sequence
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn push(&mut self, token: u32) -> Option<Vec<MoveBlock>> {
         self.tokens.append(token).expect("Token push failed.");
         self.generated_tokens += 1;
@@ -209,12 +234,22 @@ impl ActiveSequence {
                 random::<u64>()
             };
             let last_block_hash = last_complete.block_hash();
+            // Same randomization story as `last_seq_hash`: with prefix caching off,
+            // two identical prompts must not share blocks, so the PLH we promote
+            // with must also be unique — otherwise `process_promote`'s
+            // `match_blocks(&[plh])` lookup would reuse another request's block.
+            let last_plh = if self.enable_prefix_caching {
+                last_complete.positional_lineage_hash()
+            } else {
+                PositionalLineageHash::new(random::<u64>(), None, self.block_hashes.len() as u64)
+            };
             let promote_token_ids = if self.emit_token_ids {
                 Some(last_complete.tokens().to_vec())
             } else {
                 None
             };
             self.block_hashes.push(last_block_hash);
+            self.plhs.push(last_plh);
             self.unique_blocks.pop();
 
             // After pop, the last element is the parent block
@@ -230,13 +265,20 @@ impl ActiveSequence {
                 last_seq_hash,
                 second_to_last_hash,
                 last_block_hash,
+                last_plh,
                 promote_token_ids,
             ));
         }
 
         let new_partial_block = UniqueBlock::default();
         self.unique_blocks.push(new_partial_block.clone());
-        signals.push(MoveBlock::Use(vec![new_partial_block], vec![], None, None));
+        signals.push(MoveBlock::Use(
+            vec![new_partial_block],
+            vec![],
+            vec![],
+            None,
+            None,
+        ));
         Some(signals)
     }
 
@@ -251,6 +293,7 @@ impl ActiveSequence {
     ///
     /// Calling this function when max_output_tokens has already been reached will cause a panic.
     /// Always check `generated_tokens < max_output_tokens` before calling this method.
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn generate(&mut self) -> Vec<MoveBlock> {
         // Assert that we haven't reached the maximum output tokens
         assert!(
@@ -288,7 +331,7 @@ impl ActiveSequence {
             .rev()
             .map(|block| match block {
                 UniqueBlock::PartialBlock(uuid) => {
-                    MoveBlock::Destroy(vec![UniqueBlock::PartialBlock(*uuid)])
+                    MoveBlock::Deref(vec![UniqueBlock::PartialBlock(*uuid)])
                 }
                 UniqueBlock::FullBlock(hash) => {
                     MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
@@ -333,7 +376,7 @@ impl ActiveSequence {
 mod tests {
     use super::*;
 
-    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<u64> {
+    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<BlockHash> {
         seq.tokens
             .blocks()
             .iter()
@@ -357,7 +400,7 @@ mod tests {
     fn assert_use_signal(
         signal: &MoveBlock,
         expected_blocks: &[UniqueBlock],
-        expected_hashes: &[u64],
+        expected_hashes: &[BlockHash],
     ) {
         match signal {
             MoveBlock::Use(blocks, hashes, ..) => {
@@ -388,13 +431,13 @@ mod tests {
         }
     }
 
-    fn assert_destroy_partial(signal: &MoveBlock) {
+    fn assert_deref_partial(signal: &MoveBlock) {
         match signal {
-            MoveBlock::Destroy(blocks) => {
+            MoveBlock::Deref(blocks) => {
                 assert_eq!(blocks.len(), 1);
                 assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
             }
-            _ => panic!("Expected MoveBlock::Destroy for partial block"),
+            _ => panic!("Expected MoveBlock::Deref for partial block"),
         }
     }
 
@@ -550,12 +593,12 @@ mod tests {
         let signals_third = seq.generate();
         assert_eq!(signals_third.len(), 0);
 
-        // Generate last token - we reach max_output_tokens, should trigger Destroy and Deref signals
+        // Generate last token - we reach max_output_tokens, should trigger Deref signals
         let signals_last = seq.generate();
         assert_eq!(signals_last.len(), 2);
 
-        // First signal should be Destroy for the partial block
-        assert_destroy_partial(&signals_last[0]);
+        // First signal should be Deref for the partial block
+        assert_deref_partial(&signals_last[0]);
 
         // Second signal should be Deref for the full block
         assert_deref_full(&signals_last[1]);

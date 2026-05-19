@@ -28,7 +28,10 @@ from dynamo.planner.config.backend_components import (
     MockerComponentName,
     VllmComponentName,
 )
-from dynamo.planner.config.parallelization import PickedParallelConfig
+from dynamo.planner.config.parallelization import (
+    PickedParallelConfig,
+    picked_to_aic_model_config_kwargs,
+)
 from dynamo.planner.config.planner_config import (
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
@@ -87,7 +90,11 @@ def assemble_final_config(
        planner config so the planner runs AIC interpolation at bootstrap
        if the endpoint is unavailable.
     4. **Profile data** — attach interpolation-data ConfigMap when mocker
-       or planner-thorough is enabled.
+       or planner-thorough is enabled. The ConfigMap is only emitted when
+       the picked config is disaggregated AND the interpolation NPZ files
+       were produced on disk; rapid-mode deployments never emit it (the
+       planner uses AIC in-process or ``get_perf_metrics`` instead), and
+       agg picks skip interpolation entirely.
     """
     if not dgd_config:
         return dgd_config
@@ -107,7 +114,7 @@ def assemble_final_config(
     # Step 1: choose base config
     if mocker:
         logger.info("Mocker enabled — using mocker DGD as base.")
-        base = generate_mocker_config(dgdr)
+        base = generate_mocker_config(dgdr, aic_spec=aic_spec)
     else:
         base = dgd_config
 
@@ -121,6 +128,9 @@ def assemble_final_config(
     config_maps: list[dict] = []
 
     if planner:
+        planner_cfg = dgdr.features.planner if dgdr.features else None
+        if planner_cfg is not None:
+            enable_planner_worker_scaling_adapters(base, planner_cfg)
         planner_cm = add_planner_to_config(
             dgdr,
             base,
@@ -189,8 +199,15 @@ def enable_vllm_benchmark_mode(config_dict: dict) -> None:
         )
 
 
-def generate_mocker_config(dgdr) -> dict:
+def generate_mocker_config(
+    dgdr, aic_spec: Optional[AICInterpolationSpec] = None
+) -> dict:
     """Load the mocker DGD template and apply DGDR images and model paths.
+
+    When ``aic_spec`` is provided (planner-rapid with an AIC-supported backend),
+    inject ``--aic-perf-model`` plus related flags onto the prefill/decode
+    workers so each mocker pod pulls its latency model directly from the
+    AIConfigurator SDK at runtime — no NPZ round-trip through the profiler.
 
     Returns:
         The mocker DGD config dict (no planner, no ConfigMaps).
@@ -212,6 +229,7 @@ def generate_mocker_config(dgdr) -> dict:
                 service_config["extraPodSpec"]["mainContainer"]["image"] = image
 
     model = dgdr.model
+    aic_workers = _mocker_aic_worker_picks(aic_spec)
     for worker_name in _mocker_worker_names():
         service_config = (
             mocker_config.get("spec", {}).get("services", {}).get(worker_name)
@@ -223,9 +241,142 @@ def generate_mocker_config(dgdr) -> dict:
             args_list = main_container.get("args", [])
             args_list = set_argument_value(args_list, "--model-path", model)
             args_list = set_argument_value(args_list, "--model-name", model)
+            pick = aic_workers.get(worker_name) if aic_workers else None
+            if pick is not None and aic_spec is not None:
+                args_list = _inject_mocker_aic_args(args_list, aic_spec, pick)
             main_container["args"] = args_list
 
     return mocker_config
+
+
+def enable_planner_worker_scaling_adapters(
+    config_dict: dict, planner_config: PlannerConfig
+) -> None:
+    """Opt worker services into DGDSA when non-advisory Planner manages replicas."""
+    if planner_config.advisory:
+        return
+
+    services = config_dict.get("spec", {}).get("services", {})
+    if not isinstance(services, dict):
+        return
+
+    target_subcomponents = _planner_scaling_subcomponents(planner_config.mode)
+    untyped_worker_count = sum(
+        1
+        for service_name, service_config in services.items()
+        if isinstance(service_config, dict)
+        and service_config.get("componentType") == "worker"
+        and not service_config.get("subComponentType")
+        and _infer_subcomponent_from_service_name(service_name) is None
+    )
+
+    for service_name, service_config in services.items():
+        if not isinstance(service_config, dict):
+            continue
+        if not _is_planner_scalable_worker_service(
+            service_name,
+            service_config,
+            target_subcomponents,
+            planner_config.mode,
+            untyped_worker_count,
+        ):
+            continue
+        scaling_adapter = service_config.setdefault("scalingAdapter", {})
+        if not isinstance(scaling_adapter, dict):
+            service_config["scalingAdapter"] = {"enabled": True}
+            continue
+        scaling_adapter["enabled"] = True
+
+
+def _is_planner_scalable_worker_service(
+    service_name: str,
+    service_config: dict,
+    target_subcomponents: set[str],
+    planner_mode: str,
+    untyped_worker_count: int,
+) -> bool:
+    if service_config.get("componentType") != "worker":
+        return False
+
+    sub_component_type = service_config.get("subComponentType")
+    if sub_component_type:
+        return sub_component_type in target_subcomponents
+
+    inferred_type = _infer_subcomponent_from_service_name(service_name)
+    if inferred_type is not None:
+        if inferred_type in target_subcomponents:
+            service_config["subComponentType"] = inferred_type
+            return True
+        return False
+
+    # Some agg templates have one generic worker name and no subComponentType.
+    # Mark it as decode so the Kubernetes planner can rediscover the target.
+    if planner_mode == "agg" and untyped_worker_count == 1:
+        service_config["subComponentType"] = "decode"
+        return True
+
+    return False
+
+
+def _planner_scaling_subcomponents(planner_mode: str) -> set[str]:
+    if planner_mode == "prefill":
+        return {"prefill"}
+    if planner_mode in {"decode", "agg"}:
+        return {"decode"}
+    if planner_mode == "disagg":
+        return {"prefill", "decode"}
+    return set()
+
+
+def _infer_subcomponent_from_service_name(service_name: str) -> Optional[str]:
+    normalized = service_name.lower()
+    if "prefill" in normalized:
+        return "prefill"
+    if "decode" in normalized:
+        return "decode"
+    return None
+
+
+def _mocker_aic_worker_picks(
+    aic_spec: Optional[AICInterpolationSpec],
+) -> Optional[dict[str, PickedParallelConfig]]:
+    if aic_spec is None:
+        return None
+    return {
+        MockerComponentName.prefill_worker_k8s_name: aic_spec.prefill_pick,
+        MockerComponentName.decode_worker_k8s_name: aic_spec.decode_pick,
+    }
+
+
+def _inject_mocker_aic_args(
+    args_list: list,
+    aic_spec: AICInterpolationSpec,
+    pick: PickedParallelConfig,
+) -> list:
+    """Inject ``--aic-*`` flags onto a single mocker worker's args list.
+
+    The mocker simulates vllm/sglang scheduling; for trtllm AIC data we keep
+    the default ``--engine-type`` and only override ``--aic-backend`` so the
+    perf-model lookups point at the correct database.
+    """
+    kwargs = picked_to_aic_model_config_kwargs(pick)
+    if "--aic-perf-model" not in args_list:
+        args_list.append("--aic-perf-model")
+    args_list = set_argument_value(args_list, "--aic-backend", aic_spec.backend)
+    args_list = set_argument_value(args_list, "--aic-system", aic_spec.system)
+    args_list = set_argument_value(args_list, "--aic-tp-size", str(kwargs["tp_size"]))
+    args_list = set_argument_value(
+        args_list, "--aic-moe-tp-size", str(kwargs["moe_tp_size"])
+    )
+    args_list = set_argument_value(
+        args_list, "--aic-moe-ep-size", str(kwargs["moe_ep_size"])
+    )
+    args_list = set_argument_value(
+        args_list, "--aic-attention-dp-size", str(kwargs["attention_dp_size"])
+    )
+    if aic_spec.backend in ("vllm", "sglang"):
+        args_list = set_argument_value(args_list, "--engine-type", aic_spec.backend)
+    return args_list
 
 
 def add_planner_to_config(
@@ -452,28 +603,50 @@ def build_aic_interpolation_spec(
     prefill_interpolation_granularity: int,
     decode_interpolation_granularity: int,
 ) -> Optional[AICInterpolationSpec]:
-    """Build an ``AICInterpolationSpec`` for the planner in rapid mode.
+    """Build an ``AICInterpolationSpec`` for rapid-mode AIC consumers.
 
-    Returns ``None`` (the planner falls through to the file-based loader) when
-    any of the following hold:
+    Consumed by both the planner (to bootstrap perf models in-process) and
+    the mocker (via ``--aic-perf-model`` flags injected into worker args).
+    Returns ``None`` when any of the following hold:
 
-    * planner is not enabled
+    * no AIC consumer needs it — planner is disabled or has
+      ``enable_throughput_scaling=False``, **and** mocker is disabled
     * ``pre_deployment_sweeping_mode`` is not ``Rapid``
-    * ``throughput_scaling`` is disabled (no pre-deployment data needed)
     * picks are missing
-    * ``resolved_backend`` is not one AIC supports as a planner bootstrap source
+    * ``resolved_backend`` is not one AIC supports
+
+    .. note::
+        The spec only carries ``prefill_pick`` + ``decode_pick``, so the
+        caller in ``profile_sla.py`` gates this on a disaggregated pick
+        (``is_disagg_config``). When rapid AIC picks an aggregated config
+        and the override to disagg fails, ``aic_spec`` is ``None`` and the
+        planner has no AIC fallback — it relies solely on the
+        ``get_perf_metrics`` endpoint (``DYN_BENCHMARK_MODE``).
+
+        TODO: extend ``AICInterpolationSpec`` with an ``agg_pick`` so
+        throughput-scaling on an aggregated deployment has a matching
+        AIC bootstrap path (planner + mocker + thorough NPZ). Tracking
+        via the wider agg+throughput-scaling rework.
     """
-    if not is_planner_enabled(dgdr):
+    planner = (
+        dgdr.features.planner  # type: ignore[union-attr]
+        if dgdr.features is not None and dgdr.features.planner is not None
+        else None
+    )
+    mocker_enabled = is_mocker_enabled(dgdr)
+    planner_needs_aic = (
+        is_planner_enabled(dgdr)
+        and planner is not None
+        and planner.enable_throughput_scaling
+    )
+    if not planner_needs_aic and not mocker_enabled:
         return None
-    planner = dgdr.features.planner  # type: ignore[union-attr]
-    if not planner.enable_throughput_scaling:
-        return None
-    if planner.pre_deployment_sweeping_mode != PlannerPreDeploymentSweepMode.Rapid:
+    sweep_mode = planner.pre_deployment_sweeping_mode if planner is not None else None
+    if sweep_mode != PlannerPreDeploymentSweepMode.Rapid:
         return None
     if best_prefill_pick is None or best_decode_pick is None:
         logger.info(
-            "Rapid mode but picks are missing; skipping aic_interpolation spec. "
-            "Planner will fall back to the file-based loader."
+            "Rapid mode but picks are missing; skipping aic_interpolation spec."
         )
         return None
     if resolved_backend not in ("trtllm", "vllm", "sglang"):

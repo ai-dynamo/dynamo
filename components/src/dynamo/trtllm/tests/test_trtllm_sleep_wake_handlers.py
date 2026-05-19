@@ -53,10 +53,17 @@ def _make_handler() -> _ConcreteHandler:
     handler._no_inflight_requests = asyncio.Event()
     handler._no_inflight_requests.set()
     handler._reject_new_requests = False
-    # Mock the quiesce controller that release/resume delegate to
+    # Mock the quiesce controller that release/resume delegate to.
+    # quiesce side_effect mirrors the real implementation;
+    # tests don't need to manually update state after a release call.
     handler._quiesce_controller = MagicMock()
     handler._quiesce_controller.is_quiesced = False
-    handler._quiesce_controller.quiesce = AsyncMock(return_value=True)
+
+    async def _quiesce(tags=None):
+        handler._quiesce_controller.is_quiesced = True
+        return True
+
+    handler._quiesce_controller.quiesce = AsyncMock(side_effect=_quiesce)
     handler._quiesce_controller.resume = AsyncMock(return_value=True)
     handler._quiesce_controller.mark_resumed = MagicMock()
     return handler
@@ -164,9 +171,6 @@ async def test_release_and_resume_round_trip():
     handler = _make_handler()
     release = await handler.release_memory_occupation({})
     assert release["status"] == "ok"
-
-    # After release, controller reports quiesced
-    handler._quiesce_controller.is_quiesced = True
 
     resume = await handler.resume_memory_occupation({})
     assert resume["status"] == "ok"

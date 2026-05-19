@@ -9,9 +9,10 @@ use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
     InputOutputMessageContent, InputParam, InputRole, InputTokenDetails, Instructions, Item,
     MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage,
-    Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
-    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, Response,
+    ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status, SummaryPart,
+    SummaryTextContent, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
+    Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -63,7 +64,7 @@ pub struct NvCreateResponse {
     pub nvext: Option<NvExt>,
 }
 
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
     /// Flattened Response fields (includes upstream + extended spec fields).
     #[serde(flatten)]
@@ -73,6 +74,78 @@ pub struct NvResponse {
     /// NVIDIA extension field for response metadata (worker IDs, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+
+    /// OpenResponses spec requires these as non-null scalars on every response,
+    /// but async-openai's `Response` doesn't model them. Populated from the
+    /// originating request. Surfaced during serialization (see `Serialize`
+    /// impl below); not persisted as top-level fields on the inner struct.
+    #[serde(default)]
+    pub presence_penalty: f32,
+    #[serde(default)]
+    pub frequency_penalty: f32,
+    #[serde(default)]
+    pub store: bool,
+}
+
+/// Patch an already-serialized `Response` JSON object to match the
+/// OpenResponses spec. Applied both to one-shot `NvResponse` serialization
+/// and to every `Response` embedded inside a streaming event payload.
+///
+/// Reconciles two spec gaps between upstream async-openai's `Response` and
+/// the OpenResponses spec:
+///
+///  1. Fields the spec requires as `T | null` that upstream marks
+///     `Option<T>` with `skip_serializing_if = Option::is_none`. These are
+///     silently dropped when None; the spec wants them present as null.
+///  2. Fields the spec requires (`presence_penalty`, `frequency_penalty`,
+///     `store`) that are absent from upstream `Response` entirely.
+///
+/// Rather than fork the upstream output chain (which would cascade into
+/// `OutputItem`, streaming events, and a long tail of sub-types, per
+/// `lib/protocols/CLAUDE.md`), we patch the serialized JSON. Adds a
+/// single `serde_json::to_value` round-trip per response, which is
+/// negligible next to tokenization/inference cost.
+pub(crate) fn patch_response_for_spec(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    store: bool,
+) {
+    for key in dynamo_protocols::types::responses::SPEC_NULLABLE_REQUIRED_RESPONSE_FIELDS {
+        obj.entry(*key).or_insert(serde_json::Value::Null);
+    }
+
+    obj.insert(
+        "presence_penalty".into(),
+        serde_json::json!(presence_penalty),
+    );
+    obj.insert(
+        "frequency_penalty".into(),
+        serde_json::json!(frequency_penalty),
+    );
+    obj.insert("store".into(), serde_json::json!(store));
+}
+
+impl Serialize for NvResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = serde_json::to_value(&self.inner).map_err(serde::ser::Error::custom)?;
+        let serde_json::Value::Object(obj) = &mut value else {
+            return value.serialize(serializer);
+        };
+
+        patch_response_for_spec(
+            obj,
+            self.presence_penalty,
+            self.frequency_penalty,
+            self.store,
+        );
+
+        if let Some(nvext) = &self.nvext {
+            obj.insert("nvext".into(), nvext.clone());
+        }
+
+        value.serialize(serializer)
+    }
 }
 
 /// Implements `NvExtProvider` for `NvCreateResponse`,
@@ -244,6 +317,25 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .join("")
 }
 
+/// Counterpart to `convert_input_content_to_text` for upstream's
+/// `InputContent`. Reachable only via `FunctionCallOutput::Content`, which is
+/// not Dynamo-owned and therefore carries upstream variants. The sibling
+/// `EasyInputContent::ContentList` is Dynamo-owned and routed through
+/// `convert_input_content_to_text` / `convert_input_content_to_user_content`.
+fn convert_upstream_input_content_to_text(
+    content: &[dynamo_protocols::types::responses::UpstreamInputContent],
+) -> String {
+    use dynamo_protocols::types::responses::UpstreamInputContent;
+    content
+        .iter()
+        .filter_map(|p| match p {
+            UpstreamInputContent::InputText(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// Accumulator for consecutive assistant-side items (OutputMessage, FunctionCall,
 /// Reasoning, assistant EasyMessage). Chat Completions represents an assistant
 /// turn as a single message carrying `content`, `tool_calls`, and
@@ -406,7 +498,9 @@ fn convert_input_items_to_messages(
                     std::mem::take(&mut pending).flush_into(&mut messages);
                     let output_text = match &fco.output {
                         FunctionCallOutput::Text(text) => text.clone(),
-                        FunctionCallOutput::Content(parts) => convert_input_content_to_text(parts),
+                        FunctionCallOutput::Content(parts) => {
+                            convert_upstream_input_content_to_text(parts)
+                        }
                     };
                     messages.push(ChatCompletionRequestMessage::Tool(
                         ChatCompletionRequestToolMessage {
@@ -439,39 +533,62 @@ fn convert_input_items_to_messages(
                 }
             },
             InputItem::EasyMessage(easy) => {
-                let content_text = match &easy.content {
-                    dynamo_protocols::types::responses::EasyInputContent::Text(text) => {
-                        text.clone()
-                    }
-                    dynamo_protocols::types::responses::EasyInputContent::ContentList(parts) => {
-                        convert_input_content_to_text(parts)
-                    }
-                };
+                use dynamo_protocols::types::responses::EasyInputContent;
                 match easy.role {
+                    // Chat-completions system / developer messages only accept
+                    // a plain string content; collapse any structured content
+                    // to text (drops images/files — matching the strict
+                    // `Item::Message(Input)` system/developer path above).
                     ResponseRole::System | ResponseRole::Developer => {
+                        let text = match &easy.content {
+                            EasyInputContent::Text(t) => t.clone(),
+                            EasyInputContent::ContentList(parts) => {
+                                convert_input_content_to_text(parts)
+                            }
+                        };
                         std::mem::take(&mut pending).flush_into(&mut messages);
                         messages.push(ChatCompletionRequestMessage::System(
                             ChatCompletionRequestSystemMessage {
-                                content: ChatCompletionRequestSystemMessageContent::Text(
-                                    content_text,
-                                ),
+                                content: ChatCompletionRequestSystemMessageContent::Text(text),
                                 name: None,
                             },
                         ));
                     }
+                    // User messages can carry multimodal content. Route a
+                    // `ContentList` through `convert_input_content_to_user_content`
+                    // so `input_image` / `input_text` parts survive into the
+                    // chat-completions message instead of being silently
+                    // dropped (mirrors the strict `Item::Message(Input::User)`
+                    // path). Issue #9468.
                     ResponseRole::User => {
+                        let content = match &easy.content {
+                            EasyInputContent::Text(t) => {
+                                ChatCompletionRequestUserMessageContent::Text(t.clone())
+                            }
+                            EasyInputContent::ContentList(parts) => {
+                                convert_input_content_to_user_content(parts)?
+                            }
+                        };
                         std::mem::take(&mut pending).flush_into(&mut messages);
                         messages.push(ChatCompletionRequestMessage::User(
                             ChatCompletionRequestUserMessage {
-                                content: ChatCompletionRequestUserMessageContent::Text(
-                                    content_text,
-                                ),
+                                content,
                                 name: None,
                             },
                         ));
                     }
+                    // Prior assistant turn echoed back as input. Chat
+                    // completions has no multimodal assistant slot, so collapse
+                    // any structured content to text — same as the strict
+                    // `MessageItem::Output` path.
                     ResponseRole::Assistant => {
-                        pending.push_text(&content_text);
+                        let text = match &easy.content {
+                            EasyInputContent::Text(t) => t.clone(),
+                            EasyInputContent::ContentList(parts) => {
+                                convert_input_content_to_text(parts)
+                            }
+                        };
+                        pending.push_text(&text);
                     }
                 }
             }
@@ -638,6 +755,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             nvext: resp.nvext,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -740,6 +858,22 @@ pub struct ResponseParams {
     pub service_tier: Option<ServiceTier>,
     pub include: Option<Vec<IncludeEnum>>,
     pub truncation: Option<Truncation>,
+    /// OpenResponses spec requires these fields on the response body. Upstream
+    /// `CreateResponse` doesn't model them on the request yet, so for now they
+    /// pass through as `None`; the response serializer defaults to 0.0 (the
+    /// effective sglang default). Wired through `ResponseParams` anyway so
+    /// that when upstream relaxes or we shadow `CreateResponse`, threading a
+    /// real value becomes a one-line change at the request-extraction site.
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    /// Pass-through metadata fields. Codex and other clients send these as
+    /// hints for OpenAI's caching/moderation backends; Dynamo doesn't act on
+    /// them, but the spec includes them on the response body so we echo back
+    /// what the caller sent rather than silently dropping. Echoing makes
+    /// receipt observable to the client without needing a real backend.
+    pub prompt_cache_key: Option<String>,
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    pub safety_identifier: Option<String>,
 }
 
 /// Normalize tools so that `FunctionTool.strict` is always set.
@@ -880,13 +1014,13 @@ pub fn chat_completion_to_response(
         .include
         .as_ref()
         .is_some_and(|inc| inc.contains(&IncludeEnum::MessageOutputTextLogprobs));
-    if !keep_logprobs {
-        for item in &mut output {
-            if let OutputItem::Message(msg) = item {
-                for content in &mut msg.content {
-                    if let OutputMessageContent::OutputText(text) = content {
-                        text.logprobs = None;
-                    }
+    for item in &mut output {
+        if let OutputItem::Message(msg) = item {
+            for content in &mut msg.content {
+                if let OutputMessageContent::OutputText(text) = content
+                    && (!keep_logprobs || text.logprobs.is_none())
+                {
+                    text.logprobs = Some(Vec::new());
                 }
             }
         }
@@ -936,10 +1070,10 @@ pub fn chat_completion_to_response(
         max_output_tokens: params.max_output_tokens,
         previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
         prompt: None,
-        prompt_cache_key: None,
-        prompt_cache_retention: None,
+        prompt_cache_key: params.prompt_cache_key.clone(),
+        prompt_cache_retention: params.prompt_cache_retention,
         reasoning: params.reasoning.clone(),
-        safety_identifier: None,
+        safety_identifier: params.safety_identifier.clone(),
         service_tier: Some(params.service_tier.unwrap_or(ServiceTier::Auto)),
         top_logprobs: Some(0),
         usage: chat_resp.usage.map(|u| ResponseUsage {
@@ -964,16 +1098,20 @@ pub fn chat_completion_to_response(
     Ok(NvResponse {
         inner: response,
         nvext,
+        presence_penalty: params.presence_penalty.unwrap_or(0.0),
+        frequency_penalty: params.frequency_penalty.unwrap_or(0.0),
+        store: params.store.unwrap_or(false),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use dynamo_protocols::types::responses::{
-        CreateResponse, FunctionCallOutput, FunctionCallOutputItemParam, FunctionTool,
-        FunctionToolCall, InputContent, InputImageContent, InputItem, InputMessage,
-        InputOutputMessage, InputOutputMessageContent, InputOutputTextContent, InputParam,
-        InputRole, InputTextContent, Item, MessageItem, Tool,
+        CreateResponse, EasyInputContent, EasyInputMessage, FunctionCallOutput,
+        FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent,
+        InputImageContent, InputItem, InputMessage, InputOutputMessage, InputOutputMessageContent,
+        InputOutputTextContent, InputParam, InputRole, InputTextContent, Item, MessageItem,
+        Role as ResponseRole, Tool,
     };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
@@ -1189,6 +1327,165 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    /// EasyMessage path (no `type: "message"`) with user role + multimodal
+    /// content must preserve image parts all the way to the chat request.
+    /// Regression for issue #9468 review feedback: previously the EasyMessage
+    /// handler text-flattened the ContentList before dispatching on role, so
+    /// `input_image` parts were silently dropped on a no-type user payload.
+    #[test]
+    fn test_easy_message_user_multimodal_preserves_images() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![InputItem::EasyMessage(EasyInputMessage {
+                    role: ResponseRole::User,
+                    content: EasyInputContent::ContentList(vec![
+                        InputContent::InputText(InputTextContent {
+                            text: "What is in this image?".into(),
+                        }),
+                        InputContent::InputImage(InputImageContent {
+                            detail: Default::default(),
+                            file_id: None,
+                            image_url: Some("https://example.com/cat.jpg".into()),
+                        }),
+                    ]),
+                    ..Default::default()
+                })]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            ChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    assert_eq!(parts.len(), 2, "expected text + image parts to survive");
+                    let has_text = parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart::Text(_)
+                        )
+                    });
+                    let has_image = parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                        )
+                    });
+                    assert!(has_text, "text part missing");
+                    assert!(has_image, "image part dropped — regression of #9468 review");
+                }
+                ChatCompletionRequestUserMessageContent::Text(t) => panic!(
+                    "expected Array content with image preserved, got Text({t:?}) — images were dropped",
+                ),
+            },
+            _ => panic!("expected user message"),
+        }
+    }
+
+    /// EasyMessage path text-only user payload still produces a plain-text
+    /// content (single-text-part short-circuit in
+    /// `convert_input_content_to_user_content`).
+    #[test]
+    fn test_easy_message_user_text_only_stays_text() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![InputItem::EasyMessage(EasyInputMessage {
+                    role: ResponseRole::User,
+                    content: EasyInputContent::Text("hello".into()),
+                    ..Default::default()
+                })]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match &chat_req.inner.messages[0] {
+            ChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Text(t) => assert_eq!(t, "hello"),
+                other => panic!("expected Text user content, got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    /// EasyMessage with role=system carrying a `ContentList` text part still
+    /// produces a `System` chat message — chat-completions has no multimodal
+    /// system slot, so collapsing to text is the right thing.
+    #[test]
+    fn test_easy_message_system_contentlist_collapses_to_text() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::System,
+                        content: EasyInputContent::ContentList(vec![InputContent::InputText(
+                            InputTextContent {
+                                text: "You are helpful.".into(),
+                            },
+                        )]),
+                        ..Default::default()
+                    }),
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::User,
+                        content: EasyInputContent::Text("hi".into()),
+                        ..Default::default()
+                    }),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert!(matches!(
+            chat_req.inner.messages[0],
+            ChatCompletionRequestMessage::System(_)
+        ));
+    }
+
+    /// EasyMessage prior-assistant turn with a `ContentList` (text part) still
+    /// coalesces into the pending assistant accumulator and emits an
+    /// assistant chat message, preserving the turn boundary.
+    #[test]
+    fn test_easy_message_assistant_contentlist_collapses_to_text() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::Assistant,
+                        content: EasyInputContent::ContentList(vec![InputContent::InputText(
+                            InputTextContent { text: "ok".into() },
+                        )]),
+                        ..Default::default()
+                    }),
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::User,
+                        content: EasyInputContent::Text("next".into()),
+                        ..Default::default()
+                    }),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let msgs = &chat_req.inner.messages;
+        assert!(matches!(
+            msgs[0],
+            ChatCompletionRequestMessage::Assistant(_)
+        ));
+        assert!(matches!(msgs[1], ChatCompletionRequestMessage::User(_)));
     }
 
     #[test]
@@ -1990,7 +2287,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: now,
@@ -2051,7 +2347,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: now,
@@ -2459,7 +2754,6 @@ thinking
                         audio: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: 0,
@@ -2475,7 +2769,10 @@ thinking
     }
 
     #[test]
-    fn test_include_logprobs_stripped_by_default() {
+    fn test_include_logprobs_empty_by_default() {
+        // OpenResponses schema requires `logprobs` to be an array. When the
+        // caller did not request them via `include`, emit an empty array
+        // rather than null.
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
@@ -2484,9 +2781,10 @@ thinking
             if let OutputItem::Message(msg) = item {
                 for content in &msg.content {
                     if let OutputMessageContent::OutputText(t) = content {
-                        assert!(
-                            t.logprobs.is_none(),
-                            "logprobs should be stripped by default"
+                        assert_eq!(
+                            t.logprobs.as_deref(),
+                            Some(&[][..]),
+                            "logprobs should be an empty array by default"
                         );
                     }
                 }
@@ -2543,11 +2841,35 @@ thinking
         assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
     }
 
-    /// Validate the JSON wire shape of NvResponse.
-    ///
-    /// The migration to upstream async-openai v0.34 removed fields that were
-    /// incorrectly present on our old local Response type (they belong on the
-    /// request, not the response, per the OpenAI Responses API spec).
+    /// Pass-through metadata fields the OpenResponses spec includes on the
+    /// response body. Codex sends `prompt_cache_key` on every request; we
+    /// echo it back so the caller can confirm receipt without enforcing any
+    /// caching semantics. Same pattern for `prompt_cache_retention` and
+    /// `safety_identifier`.
+    #[test]
+    fn test_response_echoes_passthrough_metadata() {
+        let chat_resp = make_chat_resp_with_text("hello");
+        let params = ResponseParams {
+            prompt_cache_key: Some("cache-key-codex-1".into()),
+            prompt_cache_retention: Some(PromptCacheRetention::InMemory),
+            safety_identifier: Some("user-abc".into()),
+            ..Default::default()
+        };
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        assert_eq!(
+            resp.inner.prompt_cache_key.as_deref(),
+            Some("cache-key-codex-1")
+        );
+        assert_eq!(
+            resp.inner.prompt_cache_retention,
+            Some(PromptCacheRetention::InMemory)
+        );
+        assert_eq!(resp.inner.safety_identifier.as_deref(), Some("user-abc"));
+    }
+
+    /// Validate the JSON wire shape of NvResponse matches the OpenResponses
+    /// spec: required scalars always present, nullable-required fields
+    /// emitted as `null` when None.
     #[test]
     fn test_response_wire_format_shape() {
         let chat_resp = make_chat_resp_with_text("hello");
@@ -2555,14 +2877,14 @@ thinking
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let json = serde_json::to_value(&resp).unwrap();
 
-        // Fields that were on our old local type but are NOT in the OpenAI
-        // Responses API spec -- they are request-level, not response-level.
-        assert!(json.get("frequency_penalty").is_none());
-        assert!(json.get("presence_penalty").is_none());
-        assert!(json.get("store").is_none());
-        assert!(json.get("max_tool_calls").is_none());
+        // Required scalars the spec mandates on every response. Upstream
+        // async-openai's Response struct doesn't model these; NvResponse's
+        // custom serializer injects them.
+        assert_eq!(json["frequency_penalty"], 0.0);
+        assert_eq!(json["presence_penalty"], 0.0);
+        assert_eq!(json["store"], false);
 
-        // Fields that should be present with expected values
+        // Other required fields with expected values
         assert_eq!(json["object"], "response");
         assert_eq!(json["status"], "completed");
         assert_eq!(json["metadata"], serde_json::json!({}));
@@ -2570,12 +2892,25 @@ thinking
         assert!(json["output"][0].get("id").is_some());
         assert!(json["output"][0].get("status").is_some());
 
-        // Optional fields with None should be omitted (upstream uses skip_serializing_if)
-        assert!(json.get("error").is_none());
-        assert!(json.get("incomplete_details").is_none());
-        assert!(json.get("billing").is_none());
-        assert!(json.get("conversation").is_none());
-        assert!(json.get("safety_identifier").is_none());
+        // Nullable-required fields must be present as null (not missing).
+        for key in [
+            "error",
+            "incomplete_details",
+            "billing",
+            "conversation",
+            "safety_identifier",
+            "max_tool_calls",
+            "instructions",
+            "previous_response_id",
+            "prompt_cache_key",
+            "reasoning",
+        ] {
+            assert_eq!(
+                json.get(key),
+                Some(&serde_json::Value::Null),
+                "expected {key} to be present as null"
+            );
+        }
 
         // nvext should be omitted when None
         assert!(json.get("nvext").is_none());

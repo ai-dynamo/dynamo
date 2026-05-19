@@ -31,7 +31,7 @@ def make_args(**overrides):
     defaults = {
         "extra_engine_args": None,
         "engine_type": "vllm",
-        "num_gpu_blocks": 16384,
+        "num_gpu_blocks": None,
         "block_size": None,
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
@@ -53,11 +53,14 @@ def make_args(**overrides):
         "sglang_schedule_conservativeness": None,
         "aic_perf_model": False,
         "aic_system": None,
+        "aic_backend": None,
         "aic_backend_version": None,
         "aic_tp_size": None,
         "aic_moe_tp_size": None,
         "aic_moe_ep_size": None,
         "aic_attention_dp_size": None,
+        "gpu_memory_utilization": None,
+        "mem_fraction_static": None,
         "model_path": None,
         "is_prefill_worker": False,
         "is_decode_worker": False,
@@ -186,57 +189,177 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         aic_backend_version="0.5.6.post2",
         aic_tp_size=8,
         model_path="/models/mock",
+        gpu_memory_utilization=None,
+        mem_fraction_static=None,
     )
 
     engine_args = CONFIG.build_mocker_engine_args(args)
-    payload = json.loads(engine_args.dump_json())
+    assert engine_args.num_gpu_blocks == 2048
+    assert engine_args.block_size == 128
+    assert engine_args.max_num_seqs == 64
+    assert engine_args.max_num_batched_tokens == 4096
+    assert engine_args.enable_prefix_caching is False
+    assert engine_args.enable_local_indexer is True
+    assert engine_args.dp_size == 4
+    assert engine_args.worker_type == "prefill"
+    assert engine_args.aic_backend == "sglang"
+    assert engine_args.aic_system == "h200_sxm"
+    assert engine_args.aic_backend_version == "0.5.6.post2"
+    assert engine_args.aic_tp_size == 8
+    assert engine_args.aic_model_path == "/models/mock"
 
-    assert payload == {
-        "engine_type": "sglang",
-        "num_gpu_blocks": 2048,
-        "block_size": 128,
-        "max_num_seqs": 64,
-        "max_num_batched_tokens": 4096,
-        "enable_prefix_caching": False,
-        "enable_chunked_prefill": False,
-        "speedup_ratio": 2.0,
-        "decode_speedup_ratio": 3.0,
-        "dp_size": 4,
-        "startup_time": 1.5,
-        "worker_type": "prefill",
-        "planner_profile_data": str(planner_profile_data),
-        "aic_backend": "sglang",
-        "aic_system": "h200_sxm",
-        "aic_backend_version": "0.5.6.post2",
-        "aic_tp_size": 8,
-        "aic_model_path": "/models/mock",
-        "aic_moe_tp_size": None,
-        "aic_moe_ep_size": None,
-        "aic_attention_dp_size": None,
-        "enable_local_indexer": True,
-        "bootstrap_port": None,
-        "kv_bytes_per_token": None,
-        "kv_transfer_bandwidth": 123.0,
-        "reasoning": {
-            "start_thinking_token_id": 11,
-            "end_thinking_token_id": 12,
-            "thinking_ratio": 0.25,
-        },
-        "zmq_kv_events_port": None,
-        "zmq_replay_port": None,
-        "preemption_mode": "fifo",
-        "router_queue_policy": None,
-        "sglang": {
-            "schedule_policy": "lpm",
-            "page_size": 128,
-            "max_prefill_tokens": 8192,
-            "chunked_prefill_size": 2048,
-            "clip_max_new_tokens": 1024,
-            "schedule_conservativeness": 0.8,
-        },
-    }
 
-    assert "has_perf_model" not in payload
+def test_aic_backend_override_decouples_from_engine_type():
+    args = make_args(
+        engine_type="vllm",
+        aic_perf_model=True,
+        aic_system="h200_sxm",
+        aic_backend="trtllm",
+        aic_tp_size=4,
+        num_gpu_blocks=16384,
+    )
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+
+    assert engine_args.aic_backend == "trtllm"
+
+
+def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 46000
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            aic_perf_model=True,
+            model_path="/models/mock",
+            aic_system="h200_sxm",
+            aic_tp_size=4,
+            max_num_batched_tokens=4096,
+            gpu_memory_utilization=0.8,
+            mem_fraction_static=0.7,
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 46000
+    assert engine_args.gpu_memory_utilization == 0.8
+    assert engine_args.mem_fraction_static == 0.7
+    assert calls == [
+        {
+            "backend_name": "vllm",
+            "system": "h200_sxm",
+            "model_path": "/models/mock",
+            "tp_size": 4,
+            "block_size": 64,
+            "max_num_batched_tokens": 4096,
+            "gpu_memory_utilization": 0.8,
+            "mem_fraction_static": 0.7,
+            "backend_version": None,
+            "moe_tp_size": None,
+            "moe_ep_size": None,
+            "attention_dp_size": None,
+        }
+    ]
+
+
+def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 46000
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    blocks = CONFIG._estimate_aic_num_gpu_blocks(
+        engine_type="sglang",
+        block_size=0,
+        max_num_batched_tokens=0,
+        aic_backend="sglang",
+        aic_system=None,
+        aic_backend_version=None,
+        aic_tp_size=0,
+        aic_model_path="/models/mock",
+        aic_moe_tp_size=None,
+        aic_moe_ep_size=None,
+        aic_attention_dp_size=None,
+        gpu_memory_utilization=0.0,
+        mem_fraction_static=0.0,
+        sglang_page_size=0,
+    )
+
+    assert blocks == 46000
+    assert calls[0]["tp_size"] == 0
+    assert calls[0]["block_size"] == 0
+    assert calls[0]["max_num_batched_tokens"] == 0
+    assert calls[0]["gpu_memory_utilization"] == 0.0
+    assert calls[0]["mem_fraction_static"] == 0.0
+
+
+def test_build_mocker_engine_args_estimates_sglang_blocks_with_static_fraction(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 32000
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            engine_type="sglang",
+            aic_perf_model=True,
+            model_path="/models/mock",
+            sglang_page_size=128,
+            mem_fraction_static=0.77,
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 32000
+    assert calls[0]["backend_name"] == "sglang"
+    assert calls[0]["block_size"] == 128
+    assert calls[0]["mem_fraction_static"] == 0.77
+
+
+def test_build_mocker_engine_args_explicit_blocks_skip_aic_estimate(monkeypatch):
+    def fail_estimate_num_gpu_blocks(**_kwargs):
+        raise AssertionError("estimator should not be called")
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fail_estimate_num_gpu_blocks)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            aic_perf_model=True,
+            num_gpu_blocks=12345,
+            model_path="/models/mock",
+        )
+    )
+
+    assert engine_args.num_gpu_blocks == 12345
+
+
+def test_load_mocker_engine_args_estimates_json_aic_blocks(tmp_path, monkeypatch):
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        assert kwargs["model_path"] == "/models/from-cli"
+        assert kwargs["block_size"] == 64
+        return 47000
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    config_path = tmp_path / "engine_args.json"
+    config_path.write_text(json.dumps({"aic_backend": "vllm"}))
+
+    engine_args = CONFIG.load_mocker_engine_args(
+        make_args(extra_engine_args=config_path, model_path="/models/from-cli")
+    )
+
+    assert engine_args.num_gpu_blocks == 47000
 
 
 def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():

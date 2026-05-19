@@ -19,6 +19,52 @@ Use this when you want to:
 - compare timing and cache behavior across mocker configurations
 - validate replay logic in CI without bringing up a distributed stack
 
+## Harness Overview
+
+The replay harness wires a load driver (trace file or synthetic workload generator) into one or more mocker engine simulations and tees request/token timing into a trace collector.
+
+```mermaid
+flowchart LR
+    LD[Load Driver] --> H[Replay Harness]
+
+    H --> SES[Single Engine Simulation]
+    H --> MES[Multi Engine Simulation]
+
+    SES --> H
+    MES --> H
+
+    H --> TC[Trace Collector]
+```
+
+The load driver is either a Mooncake-style JSONL trace (timestamps, ISL/OSL, `hash_ids`) or a synthetic generator parameterized by `isl`/`osl`/`concurrency`. Single-engine simulation (`SES`) is the fast path for `num_workers == 1` with the vLLM engine; multi-engine simulation (`MES`) covers aggregated multi-worker replay, disaggregated prefill/decode replay, and KV-router replay. The trace collector produces the AIPerf-style summary table, the JSON report, and the per-request timing fields consumed by downstream analysis.
+
+Each simulation composes a different set of components. SES drives the engine core directly (scheduler + forward-pass modeling). MES composes multiple engine cores with KV transfer/offloading, KV routing, and planner simulation layered on top:
+
+```mermaid
+flowchart TD
+    subgraph SEC[Single Engine Core]
+        subgraph SCH[Scheduler Modeling]
+            F[Fwd Pass Modeling]
+        end
+    end
+
+    KV[KV Transfer + Offloading Simulation]
+    KR[KV Router Simulation]
+    P[Planner Simulation]
+
+    SES[Single Engine Simulation]
+    MES[Multi Engine Simulation]
+
+    SES --> SEC
+
+    MES --> SEC
+    MES --> KV
+    MES --> KR
+    MES --> P
+```
+
+See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [`docs/mocker/mocker.md`](../mocker/mocker.md) for engine-core details (scheduler, KV block manager).
+
 ## Quick Start
 
 Run offline replay through the dedicated replay CLI:
@@ -82,23 +128,28 @@ Example:
 
 ```json
 {"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3]}
+{"timestamp": 0, "input_length": 4096, "output_length": 128, "hash_ids": [9, 10, 11, 12]}
 ```
 
-Replay also supports multi-turn sessions. Use the same `session_id` on all turns in a session. The
-first turn uses `timestamp` or `created_time`; later turns may use either:
+Rows without `session_id` are independent timestamped requests. Use this shape for wall-clock
+request traces, including agent-converted traces where parallel LLM calls should remain parallel.
 
-- `delay` or `delay_ms` directly
-- or an absolute later `timestamp`, in which case replay infers the inter-turn delay from the
-  previous turn timestamp
+Replay also supports multi-turn sessions. Use the same `session_id` on all turns in a session.
+Multi-turn sessions are closed-loop: turn `n+1` waits until turn `n` completes plus either the
+explicit `delay` / `delay_ms` or the timestamp delta inferred from consecutive rows in the same
+session.
 
 Example:
 
 ```json
 {"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
-{"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
+{"session_id":"session-a","delay_ms":50,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
 {"session_id":"session-b","timestamp":1010,"input_length":1024,"output_length":64,"hash_ids":[9,10]}
-{"session_id":"session-b","delay_ms":50,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
+{"session_id":"session-b","timestamp":1060,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
 ```
+
+The second `session-a` row waits for the first turn to complete plus 50 ms. The second `session-b`
+row also waits for the first turn to complete plus the inferred 50 ms timestamp delta.
 
 Replay uses two different block-size concepts for trace files:
 
@@ -141,6 +192,9 @@ The dedicated replay CLI exposes:
 - `--aic-backend-version`
 - `--aic-tp-size`
 - `--aic-model-path`
+- `--aic-moe-tp-size`
+- `--aic-moe-ep-size`
+- `--aic-attention-dp-size`
 - `--report-json`
 
 Defaults:
@@ -186,6 +240,10 @@ Replay has two independent AIC surfaces:
 - engine timing AIC via `--extra-engine-args` / staged engine JSON
 - router-side prompt-load AIC via top-level `--aic-*` flags together with
   `router_prefill_load_model: "aic"` in `--router-config`
+
+Both surfaces accept MoE parallelism fields. For Kimi-style TP-only MoE configs, keep them aligned by
+setting `aic_moe_tp_size` to the same value as `aic_tp_size`, with `aic_moe_ep_size=1` and
+`aic_attention_dp_size=1`.
 
 Offline disagg replay uses staged engine args instead of `--extra-engine-args`:
 
@@ -247,7 +305,10 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --extra-engine-args '{"block_size":64}'
 ```
 
-This is the right mode when you want deterministic replay of the original arrival pattern.
+This is the right mode when you want deterministic replay of the original request-arrival pattern.
+For wall-clock request traces, omit `session_id` so each row is scheduled independently by timestamp.
+Rows that share a `session_id` are replayed as a closed-loop session, where each later turn waits for
+the previous turn to complete.
 
 ### Closed-Loop Concurrency Replay
 
@@ -360,6 +421,16 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
 
 For offline disagg replay, the same top-level `--aic-*` flags are supported, but the estimator is
 applied only to the prefill-stage router.
+
+For MoE models that require AIC MoE parallelism, add the matching top-level router AIC flags, for
+example:
+
+```bash
+    --aic-tp-size 2 \
+    --aic-moe-tp-size 2 \
+    --aic-moe-ep-size 1 \
+    --aic-attention-dp-size 1
+```
 
 ## Output
 

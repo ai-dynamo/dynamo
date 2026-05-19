@@ -30,11 +30,14 @@ rules:
   - delete
   - get
   - list
+  - watch
 - apiGroups:
   - ""
   resources:
   - pods
   verbs:
+  - delete
+  - deletecollection
   - get
   - list
   - watch
@@ -184,6 +187,7 @@ rules:
 - apiGroups:
   - networking.istio.io
   resources:
+  - destinationrules
   - virtualservices
   verbs:
   - create

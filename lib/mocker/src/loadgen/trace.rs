@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use dynamo_data_gen::MooncakeRow;
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_block_hash_for_seq,
@@ -26,23 +27,13 @@ use super::types::{
 use crate::common::protocols::DirectRequest;
 
 #[derive(Debug, Deserialize)]
-struct RawMooncakeRecord {
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    timestamp: Option<f64>,
-    #[serde(default)]
-    created_time: Option<f64>,
-    #[serde(default, alias = "input_tokens")]
-    input_length: Option<usize>,
-    #[serde(default, alias = "output_tokens")]
-    output_length: Option<usize>,
-    #[serde(default)]
-    hash_ids: Option<Vec<u64>>,
-    #[serde(default)]
-    delay: Option<f64>,
-    #[serde(default)]
-    delay_ms: Option<f64>,
+struct RawAppliedComputeAgenticRecord {
+    num_turns: usize,
+    input_prompt_length: usize,
+    assistant_response_length: Vec<usize>,
+    tool_call_output_length: Vec<usize>,
+    tool_call_latency: Vec<f64>,
+    final_assistant_response_length: usize,
 }
 
 impl TurnTrace {
@@ -60,7 +51,7 @@ impl TurnTrace {
         Ok(())
     }
 
-    pub(crate) fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
+    pub fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
         self.validate_block_size_and_capacity(trace_block_size)?;
 
         let mut tokens = Vec::with_capacity(self.input_length);
@@ -148,7 +139,7 @@ impl Trace {
                 continue;
             }
 
-            let raw: RawMooncakeRecord = serde_json::from_str(&line).with_context(|| {
+            let raw: MooncakeRow = serde_json::from_str(&line).with_context(|| {
                 format!(
                     "failed to parse line {} from {} as JSON",
                     line_idx + 1,
@@ -162,14 +153,25 @@ impl Trace {
             let hash_ids = raw
                 .hash_ids
                 .ok_or_else(|| anyhow!("trace line {} is missing hash_ids", line_idx + 1))?;
+            // Clamp input_length to the synthesizable capacity: in the mooncake
+            // trace format, input_length is the full prompt token count which may
+            // exceed hash_ids.len() * block_size (cached portion only).
+            let synthesizable_capacity =
+                hash_ids
+                    .len()
+                    .checked_mul(trace_block_size)
+                    .ok_or_else(|| {
+                        anyhow!("trace line {} synthesized capacity overflow", line_idx + 1)
+                    })?;
             let input_length = raw
                 .input_length
-                .unwrap_or(hash_ids.len() * trace_block_size);
+                .unwrap_or(synthesizable_capacity)
+                .min(synthesizable_capacity);
             let output_length = raw
                 .output_length
                 .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
-            let timestamp_ms = raw.timestamp.or(raw.created_time);
-            let explicit_delay_ms = raw.delay.or(raw.delay_ms);
+            let timestamp_ms = raw.timestamp;
+            let explicit_delay_ms = raw.delay;
 
             let session_index = *session_indices
                 .entry(session_id.clone())
@@ -239,6 +241,157 @@ impl Trace {
             if let Some(timestamp_ms) = timestamp_ms {
                 last_timestamps[session_index] = Some(timestamp_ms);
             }
+        }
+
+        if sessions.is_empty() {
+            bail!("trace file {} did not contain any requests", path.display());
+        }
+
+        Ok(Self {
+            block_size: trace_block_size,
+            sessions,
+        })
+    }
+
+    pub fn from_applied_compute_agentic(
+        path: &Path,
+        trace_block_size: usize,
+        shared_prefix_ratio: f64,
+        num_prefix_groups: usize,
+    ) -> Result<Self> {
+        if trace_block_size == 0 {
+            bail!("trace_block_size must be greater than 0");
+        }
+        if !(0.0..=1.0).contains(&shared_prefix_ratio) {
+            bail!(
+                "shared_prefix_ratio must be between 0.0 and 1.0, got {}",
+                shared_prefix_ratio
+            );
+        }
+
+        let file = File::open(path)
+            .with_context(|| format!("failed to open trace file {}", path.display()))?;
+        let reader = BufReader::new(file);
+        let mut sessions = Vec::new();
+        let mut next_unique_hash = 1_u64;
+
+        for (line_idx, line) in reader.lines().enumerate() {
+            let line = line.with_context(|| {
+                format!(
+                    "failed to read line {} from {}",
+                    line_idx + 1,
+                    path.display()
+                )
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let raw: RawAppliedComputeAgenticRecord =
+                serde_json::from_str(&line).with_context(|| {
+                    format!(
+                        "failed to parse line {} from {} as JSON",
+                        line_idx + 1,
+                        path.display()
+                    )
+                })?;
+
+            for (name, values) in [
+                (
+                    "assistant_response_length",
+                    raw.assistant_response_length.len(),
+                ),
+                ("tool_call_output_length", raw.tool_call_output_length.len()),
+                ("tool_call_latency", raw.tool_call_latency.len()),
+            ] {
+                if values != raw.num_turns {
+                    bail!(
+                        "trace line {} field {} length {} does not match num_turns {}",
+                        line_idx + 1,
+                        name,
+                        values,
+                        raw.num_turns
+                    );
+                }
+            }
+
+            if raw.input_prompt_length == 0 {
+                bail!(
+                    "trace line {} input_prompt_length must be positive",
+                    line_idx + 1
+                );
+            }
+
+            let group_id = if shared_prefix_ratio > 0.0 && num_prefix_groups > 0 {
+                Some(line_idx % num_prefix_groups)
+            } else {
+                None
+            };
+            let mut current_input_length = raw.input_prompt_length;
+            let mut hash_ids = Vec::new();
+            let shared_initial_blocks = ((current_input_length.div_ceil(trace_block_size) as f64)
+                * shared_prefix_ratio)
+                .round() as usize;
+            extend_applied_compute_agentic_hash_ids(
+                &mut hash_ids,
+                current_input_length,
+                trace_block_size,
+                shared_initial_blocks,
+                group_id,
+                &mut next_unique_hash,
+            )?;
+
+            let mut turns = Vec::with_capacity(raw.num_turns + 1);
+            let mut next_turn_delay_ms = 0.0;
+            for turn_idx in 0..raw.num_turns {
+                let tool_call_latency = raw.tool_call_latency[turn_idx];
+                if !tool_call_latency.is_finite() || tool_call_latency < 0.0 {
+                    bail!(
+                        "trace line {} tool_call_latency[{}] must be a finite non-negative number",
+                        line_idx + 1,
+                        turn_idx
+                    );
+                }
+
+                turns.push(TurnTrace {
+                    input_length: current_input_length,
+                    max_output_tokens: raw.assistant_response_length[turn_idx],
+                    hash_ids: hash_ids.clone(),
+                    delay_after_previous_ms: next_turn_delay_ms,
+                });
+
+                current_input_length = current_input_length
+                    .checked_add(raw.assistant_response_length[turn_idx])
+                    .and_then(|value| value.checked_add(raw.tool_call_output_length[turn_idx]))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "trace line {} cumulative input length overflow",
+                            line_idx + 1
+                        )
+                    })?;
+                extend_applied_compute_agentic_hash_ids(
+                    &mut hash_ids,
+                    current_input_length,
+                    trace_block_size,
+                    shared_initial_blocks,
+                    group_id,
+                    &mut next_unique_hash,
+                )?;
+                next_turn_delay_ms = tool_call_latency * 1000.0;
+            }
+
+            turns.push(TurnTrace {
+                input_length: current_input_length,
+                max_output_tokens: raw.final_assistant_response_length,
+                hash_ids,
+                delay_after_previous_ms: next_turn_delay_ms,
+            });
+
+            sessions.push(SessionTrace {
+                session_id: format!("applied_compute_agentic_session_{}", line_idx + 1),
+                first_arrival_timestamp_ms: None,
+                turns,
+            });
         }
 
         if sessions.is_empty() {
@@ -570,6 +723,10 @@ impl Trace {
         Ok(requests)
     }
 
+    pub fn is_single_turn(&self) -> bool {
+        self.sessions.iter().all(|session| session.turns.len() == 1)
+    }
+
     pub fn to_router_sequences(
         &self,
         worker_id: WorkerId,
@@ -623,12 +780,28 @@ impl Trace {
         WorkloadDriver::new_trace(self, engine_block_size)
     }
 
+    pub fn into_delta_accumulating_trace_driver_with_block_size(
+        self,
+        engine_block_size: usize,
+    ) -> Result<WorkloadDriver> {
+        self.validate_for_trace_mode()?;
+        WorkloadDriver::new_trace_accumulating_deltas(self, engine_block_size)
+    }
+
     pub fn into_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
         WorkloadDriver::new_concurrency(self, engine_block_size)
+    }
+
+    pub fn into_delta_accumulating_concurrency_driver_with_block_size(
+        self,
+        engine_block_size: usize,
+    ) -> Result<WorkloadDriver> {
+        self.validate_for_concurrency_mode()?;
+        WorkloadDriver::new_concurrency_accumulating_deltas(self, engine_block_size)
     }
 
     fn validate(&self, allow_missing_first_timestamp: bool) -> Result<()> {
@@ -713,6 +886,31 @@ impl Trace {
 
         Ok(())
     }
+}
+
+fn extend_applied_compute_agentic_hash_ids(
+    hash_ids: &mut Vec<u64>,
+    input_length: usize,
+    trace_block_size: usize,
+    shared_initial_blocks: usize,
+    group_id: Option<usize>,
+    next_unique_hash: &mut u64,
+) -> Result<()> {
+    let target_blocks = input_length.div_ceil(trace_block_size);
+    while hash_ids.len() < target_blocks {
+        let block_idx = hash_ids.len();
+        if block_idx < shared_initial_blocks
+            && let Some(group_id) = group_id
+        {
+            hash_ids.push(0xA63E_0000_0000_0000 | ((group_id as u64) << 32) | block_idx as u64);
+            continue;
+        }
+        hash_ids.push(*next_unique_hash);
+        *next_unique_hash = next_unique_hash
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("synthetic hash id overflow"))?;
+    }
+    Ok(())
 }
 
 fn arrival_spec_mean_gap_ms(spec: &ArrivalSpec) -> Result<f64> {

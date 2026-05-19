@@ -13,18 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import json
 import logging
 import math
 import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.prometheus import sum_metric_samples
+from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,12 @@ class BasePayload:
     body: Dict[str, Any]
     expected_response: List[Any]  # Can be List[str] or List[List[str]] for alternatives
     expected_log: List[str]
+    # Number of times to send this exact request in sequence. Each call must
+    # pass validation independently. Use >1 for cache/repeatability tests
+    # (e.g., CachedTokensChatPayload asserts a cache hit on the 2nd+ call).
+    # Independent of max_attempts: repeat_count=N means "N independent
+    # successes required"; max_attempts=N means "at least one success out of
+    # N tries".
     repeat_count: int = 1
     timeout: int = 60
 
@@ -49,6 +60,12 @@ class BasePayload:
     system_ports: list[int] = field(default_factory=list)
     # When True, the HTTP request is made with stream=True (for SSE responses).
     http_stream: bool = False
+    # Maximum number of attempts for validation inside run_serve_deployment.
+    # ``1`` (default) means no retry — first validation failure surfaces
+    # immediately. Set >1 only when the test target is non-deterministic and
+    # you've confirmed via tests/README.md "Flaky Tests" that retry is the
+    # right mitigation; the underlying flakiness still needs a tracking ticket.
+    max_attempts: int = 1
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
@@ -112,6 +129,7 @@ class ChatPayload(BasePayload):
     """Payload for chat completions endpoint."""
 
     endpoint: str = "/v1/chat/completions"
+    expected_num_choices: Optional[int] = None
 
     @staticmethod
     def extract_content(response):
@@ -154,7 +172,7 @@ class ChatPayload(BasePayload):
             if field_content:
                 return field_content
 
-        raise ValueError(
+        raise AssertionError(
             "All possible content fields are empty in message. "
             f"Checked: content={repr(content)}, reasoning_content={repr(reasoning_content)}, "
             f"refusal={repr(refusal)}, tool_calls={tool_calls}"
@@ -162,6 +180,41 @@ class ChatPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return ChatPayload.extract_content(response)
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+
+        if self.expected_num_choices is None:
+            return
+
+        result = response.json()
+        choices = result.get("choices")
+        assert isinstance(choices, list), f"Missing choices list: {result}"
+        assert len(choices) == self.expected_num_choices, (
+            f"Expected {self.expected_num_choices} choices, "
+            f"got {len(choices)}: {result}"
+        )
+
+
+class RouterNvextChatPayload(ChatPayload):
+    """Chat payload that validates structured router metadata in nvext."""
+
+    def __init__(
+        self,
+        *args,
+        router_nvext_expectation: RouterNvextExpectation | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.router_nvext_expectation = router_nvext_expectation
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        validate_router_nvext(
+            response.json(),
+            self.router_nvext_expectation,
+            context=type(self).__name__,
+        )
 
 
 @dataclass
@@ -300,6 +353,37 @@ class ToolCallingChatPayload(ChatPayload):
 
 
 @dataclass
+class GuidedDecodingChatPayload(ChatPayload):
+    """ChatPayload that validates a json_schema response_format produces valid JSON."""
+
+    def __init__(self, *args, required_keys: Optional[List[str]] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.required_keys = required_keys or []
+
+    def validate(self, response, content: str) -> None:
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise AssertionError(
+                "Guided decoding response is not valid JSON — grammar backend "
+                f"likely disabled. Content: {content!r}"
+            ) from e
+
+        assert isinstance(parsed, dict), (
+            "Guided decoding response should be a JSON object, "
+            f"got {type(parsed).__name__}: {content!r}"
+        )
+
+        for key in self.required_keys:
+            assert key in parsed, (
+                f"Guided decoding response missing required key {key!r}. "
+                f"Parsed: {parsed}"
+            )
+
+        logger.info(f"Guided decoding validation passed: {parsed}")
+
+
+@dataclass
 class CachedTokensChatPayload(ChatPayload):
     """
     Chat payload that validates cached tokens are populated in repeated requests.
@@ -319,6 +403,7 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        router_nvext_expectation: RouterNvextExpectation | None = None,
     ):
         super().__init__(
             body=body,
@@ -330,6 +415,7 @@ class CachedTokensChatPayload(ChatPayload):
         self.min_cached_tokens = min_cached_tokens
         self._request_count = 0
         self._cached_tokens_found = False
+        self.router_nvext_expectation = router_nvext_expectation
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -338,6 +424,11 @@ class CachedTokensChatPayload(ChatPayload):
 
         self._request_count += 1
         result = response.json()
+        validate_router_nvext(
+            result,
+            self.router_nvext_expectation,
+            context=f"{type(self).__name__} request {self._request_count}",
+        )
 
         # Check usage field for cached tokens
         # Expected structure: usage.prompt_tokens_details.cached_tokens
@@ -861,6 +952,76 @@ class MetricCheck:
 
 
 @dataclass
+class KvEventMetricsPayload(BasePayload):
+    """Validate structured KV event counters instead of grepping event logs."""
+
+    endpoint: str = "/metrics"
+    method: str = "GET"
+    port: int = DefaultPort.SYSTEM1.value
+    event_type: str = "stored"
+    min_received: int = 1
+    min_accepted: int = 1
+    settle_seconds: float = 0.5
+
+    def with_model(self, model):
+        return self
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        if self.settle_seconds > 0:
+            time.sleep(self.settle_seconds)
+
+        contents = []
+        seen_ports: set[int] = set()
+
+        for port in [self.port, *self.system_ports]:
+            if port in seen_ports:
+                continue
+            seen_ports.add(port)
+            metrics_response = requests.get(
+                f"http://{self.host}:{port}/{self.endpoint.lstrip('/')}",
+                timeout=self.timeout,
+            )
+            metrics_response.raise_for_status()
+            contents.append(metrics_response.text)
+
+        return "\n".join(contents)
+
+    def validate(self, response: Any, content: str) -> None:
+        metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ZMQ_EVENTS_TOTAL}"
+        )
+        received = sum_metric_samples(
+            content,
+            metric_name,
+            {"stage": "received", "event_type": self.event_type},
+        )
+        accepted = sum_metric_samples(
+            content,
+            metric_name,
+            {"stage": "accepted", "event_type": self.event_type},
+        )
+
+        assert received >= self.min_received, (
+            f"Expected at least {self.min_received} received KV events with "
+            f"event_type={self.event_type!r}, got {received:g}"
+        )
+        assert accepted >= self.min_accepted, (
+            f"Expected at least {self.min_accepted} accepted KV events with "
+            f"event_type={self.event_type!r}, got {accepted:g}"
+        )
+
+        logger.info(
+            "SUCCESS: KV event metrics found for event_type=%s: "
+            "received=%s accepted=%s",
+            self.event_type,
+            received,
+            accepted,
+        )
+
+
+@dataclass
 class MetricsPayload(BasePayload):
     """Base class for Prometheus metrics validation payloads.
 
@@ -1317,3 +1478,105 @@ def completions_response_handler(response):
 
 def chat_completions_response_handler(response):
     return ChatPayload.extract_content(response)
+
+
+@dataclass
+class ImageGenerationPayload(BasePayload):
+    """Payload for /v1/images/generations endpoint (diffusion image generation)."""
+
+    endpoint: str = "/v1/images/generations"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in image response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Image response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Image response b64_json is empty"
+        return "b64_image_returned"
+
+
+@dataclass
+class VideoGenerationPayload(BasePayload):
+    """Payload for /v1/videos endpoint (diffusion video generation)."""
+
+    endpoint: str = "/v1/videos"
+    timeout: int = 600
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert result.get("status") == "completed", (
+            f"Video generation not completed. Status: {result.get('status')}, "
+            f"Error: {result.get('error', 'none')}"
+        )
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in video response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Video response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Video response b64_json is empty"
+        return "b64_video_returned"
+
+    def validate(self, response: Any, content: str) -> None:
+        assert content, "Video response content is empty"
+        if self.expected_response and not any(
+            expected.lower() in content.lower() for expected in self.expected_response
+        ):
+            raise AssertionError(
+                f"Expected at least one of {self.expected_response} in {content!r}"
+            )
+
+
+@dataclass
+class I2VPayload(VideoGenerationPayload):
+    """Payload for image-to-video via /v1/videos with input_reference."""
+
+    def __post_init__(self):
+        from PIL import Image
+
+        image_buffer = BytesIO()
+        Image.new("RGB", (64, 64), color="red").save(image_buffer, format="PNG")
+        image_b64 = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        self.body["input_reference"] = f"data:image/png;base64,{image_b64}"
+
+
+@dataclass
+class AudioSpeechPayload(BasePayload):
+    """Payload for /v1/audio/speech endpoint."""
+
+    endpoint: str = "/v1/audio/speech"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        if "audio" in content_type:
+            audio_bytes = response.content
+            assert len(audio_bytes) > 100, (
+                f"Audio response too small ({len(audio_bytes)} bytes), "
+                f"likely not valid audio"
+            )
+            return f"binary_audio_{len(audio_bytes)}_bytes"
+        result = response.json()
+        assert (
+            result.get("status") != "failed"
+        ), f"Audio generation failed: {result.get('error', 'unknown')}"
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in audio response"
+        entry = result["data"][0]
+        if "url" in entry and entry["url"]:
+            return entry["url"]
+        assert entry.get("b64_json"), "Audio response b64_json is empty"
+        return "b64_audio_returned"

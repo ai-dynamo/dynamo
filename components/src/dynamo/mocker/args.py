@@ -180,8 +180,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--num-gpu-blocks-override",
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
-        default=16384,
-        help="Number of GPU blocks for KV cache (default: 16384)",
+        default=None,
+        help="Explicit number of GPU blocks for KV cache. When unset, AIC-backed "
+        "mocker estimates the value; non-AIC mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",
@@ -280,16 +281,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Requires aiconfigurator SDK installed.",
     )
     parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="GPU memory fraction for AIC KV capacity estimation with vLLM "
+        "(default: 0.9).",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help="Static memory fraction for AIC KV capacity estimation with SGLang "
+        "(default: 0.88).",
+    )
+    parser.add_argument(
         "--aic-system",
         type=str,
         default=None,
         help="AIC system name (e.g., 'h200_sxm'). Used with --aic-perf-model.",
     )
     parser.add_argument(
+        "--aic-backend",
+        type=str,
+        default=None,
+        choices=["vllm", "sglang", "trtllm"],
+        help="AIC backend name used for perf database lookups. When unset, "
+        "falls back to --engine-type. Set this to decouple the AIC perf model "
+        "from the simulated engine type (e.g. simulate with vllm while using "
+        "trtllm AIC data).",
+    )
+    parser.add_argument(
         "--aic-backend-version",
         type=str,
         default=None,
-        help="AIC backend engine version (e.g., '0.12.0' for vLLM, '0.5.6.post2' for SGLang). "
+        help="AIC backend engine version (e.g., '0.14.0' for vLLM, '0.5.6.post2' for SGLang). "
         "If not set, uses the default version for the backend.",
     )
     parser.add_argument(
@@ -513,8 +538,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--event-plane",
         type=str,
         choices=["nats", "zmq"],
-        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
-        help="Determines how events are published [nats|zmq]",
+        default=os.environ.get("DYN_EVENT_PLANE"),
+        help="Determines how events are published [nats|zmq]. If unset, "
+        "auto-detected from --discovery-backend (zmq for file/mem, nats "
+        "for etcd/kubernetes).",
     )
 
     args = parser.parse_args(argv)

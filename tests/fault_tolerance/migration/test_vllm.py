@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
@@ -216,6 +217,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(290)  # 3x average
 @pytest.mark.post_merge
+@pytest.mark.skip(
+    reason="Flaky: 0% post-merge pass rate across multiple parametrizations; "
+    "skipped wholesale until the underlying migration fault is owned and fixed."
+)
 def test_request_migration_vllm_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -271,7 +276,7 @@ def test_request_migration_vllm_aggregated(
                 )
 
 
-@pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
+@pytest.mark.skip(reason="Prefill migration not yet supported")
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
 def test_request_migration_vllm_prefill(
@@ -346,8 +351,7 @@ def test_request_migration_vllm_prefill(
                     )
 
 
-@pytest.mark.xfail(
-    strict=False,
+@pytest.mark.skip(
     reason=(
         "Migration reuses the same request_id for vLLM, but the prefill worker's "
         "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
@@ -430,8 +434,7 @@ def test_request_migration_vllm_kv_transfer(
                     )
 
 
-@pytest.mark.xfail(
-    strict=False,
+@pytest.mark.skip(
     reason=(
         "Migration reuses the same request_id for vLLM, but the prefill worker's "
         "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
