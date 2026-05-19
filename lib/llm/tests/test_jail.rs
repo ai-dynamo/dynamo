@@ -1924,6 +1924,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_jailed_stream_harmony_analysis_only_emits_stripped_content() {
+        let chunks = vec![create_mock_response_chunk(
+            "<|channel|>analysis<|message|>Need to inspect the request.<|end|>".to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "Need to inspect the request.");
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_truncated_call_keeps_analysis_without_marker_leak() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "Need current weather.");
+        assert!(!content.contains("<|channel|>"));
+        assert!(!content.contains("Hidden City"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_drops_directed_non_function_commentary() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|start|>assistant<|channel|>commentary to=browser.search <|constrain|>json<|message|>{"query":"secret weather"}<|call|>"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("secret weather"));
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
     async fn test_deepseek_v3_1() {
         // DeepSeek v3.1 format with two tool calls encoded in special tags
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_current_weather<｜tool▁sep｜>{"location": "Berlin", "units": "metric"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_weather_forecast<｜tool▁sep｜>{"location": "Berlin", "days": 7, "units": "imperial"}<｜tool▁call▁end｜><｜tool▁call▁begin｜>get_air_quality<｜tool▁sep｜>{"location": "Berlin", "radius": 50}<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>"#;

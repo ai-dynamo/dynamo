@@ -327,39 +327,42 @@ pub async fn parse_tool_calls_harmony_complete(
         let channel = message.channel.as_deref();
         let recipient = message.recipient.as_deref().unwrap_or_default();
 
-        // Handle commentary channel
-        if channel == Some("commentary") && recipient.starts_with("functions.") {
-            if !has_tool_call_stop {
-                continue;
+        if channel == Some("commentary") {
+            if recipient.starts_with("functions.") {
+                if !has_tool_call_stop {
+                    continue;
+                }
+
+                let Some(fname) = message
+                    .recipient
+                    .as_ref()
+                    .and_then(|r| r.split('.').nth(1))
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                else {
+                    continue;
+                };
+
+                let Some(args_json) = message.content.first().and_then(|content| match content {
+                    Content::Text(text) => Some(serialize_harmony_arguments(&text.text)),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+
+                call_idx += 1;
+                res.push(ToolCallResponse {
+                    id: format!("call-{}", call_idx),
+                    tp: ToolCallType::Function,
+                    function: CalledFunction {
+                        name: fname.to_string(),
+                        arguments: args_json,
+                    },
+                });
+            } else if recipient.is_empty() {
+                push_harmony_text(&mut normal_text, &message.content);
             }
-
-            let Some(fname) = message
-                .recipient
-                .as_ref()
-                .and_then(|r| r.split('.').nth(1))
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-            else {
-                continue;
-            };
-
-            let Some(args_json) = message.content.first().and_then(|content| match content {
-                Content::Text(text) => Some(serialize_harmony_arguments(&text.text)),
-                _ => None,
-            }) else {
-                continue;
-            };
-
-            call_idx += 1;
-            res.push(ToolCallResponse {
-                id: format!("call-{}", call_idx),
-                tp: ToolCallType::Function,
-                function: CalledFunction {
-                    name: fname.to_string(),
-                    arguments: args_json,
-                },
-            });
-        } else if matches!(channel, Some("analysis" | "final" | "commentary")) {
+        } else if matches!(channel, Some("analysis" | "final")) {
             push_harmony_text(&mut normal_text, &message.content);
         }
     }
@@ -554,6 +557,22 @@ mod tests {
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "NYC");
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_drops_directed_non_function_commentary() {
+        let text = r#"<|start|>assistant<|channel|>commentary to=browser.search <|constrain|>json<|message|>{"query":"secret weather"}<|call|><|start|>assistant<|channel|>final<|message|>Done.<|return|>"#;
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+
+        assert!(tool_calls.is_empty());
+        let normal = normal_content.unwrap_or_default();
+        assert_eq!(normal, "Done.");
+        assert!(!normal.contains("secret weather"));
+        assert!(!normal.contains("browser.search"));
+        assert!(!normal.contains("<|channel|>"));
     }
 
     // Harmony's strict tokenizer rejects two back-to-back commentary
