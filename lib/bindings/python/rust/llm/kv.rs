@@ -37,6 +37,27 @@ fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Blo
     depythonize(obj).map_err(to_pyerr)
 }
 
+/// Create a BackpressureError from Python side.
+/// This is defined in Python (not Rust) so it can be shared across packages.
+fn create_backpressure_error(
+    py: Python<'_>,
+    message: String,
+    reason: Option<String>,
+    queue_depth: Option<usize>,
+    max_queue_depth: Option<usize>,
+) -> PyResult<PyErr> {
+    let exc_module = py.import("dynamo.llm.exceptions")?;
+    let exc_class = exc_module.getattr("BackpressureError")?;
+    let args = (
+        message,
+        reason,
+        queue_depth,
+        max_queue_depth,
+    );
+    let instance = exc_class.call1(args)?;
+    Ok(PyErr::from_value(instance))
+}
+
 #[cfg(feature = "kv-indexer")]
 #[derive(Parser)]
 #[command(
@@ -1147,20 +1168,18 @@ impl KvRouter {
                     queue_depth,
                     max_queue_depth,
                 } => {
-                    // TODO(DEP-8189 / ai-dynamo#8189): to_pyerr() currently
-                    // collapses every DynamoError into a generic PyException,
-                    // so Python callers cannot distinguish backpressure from
-                    // an ordinary routing failure for retry/backoff. Once the
-                    // shared rejection layer lands, surface a dedicated
-                    // exception subclass (e.g. DynamoBackpressureError).
-                    return Err(to_pyerr(
-                        DynamoError::builder()
-                            .error_type(DynamoErrorType::ResourceExhausted)
-                            .message(format!(
-                                "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
-                            ))
-                            .build(),
-                    ));
+                    // Raise BackpressureError from dynamo.llm.exceptions
+                    let msg = format!(
+                        "router backpressure: {:?} (queue_depth={}, max_queue_depth={:?})",
+                        reason, queue_depth, max_queue_depth
+                    );
+                    return Err(create_backpressure_error(
+                        py,
+                        msg,
+                        Some(format!("{:?}", reason)),
+                        Some(queue_depth),
+                        max_queue_depth,
+                    )?);
                 }
             };
 
