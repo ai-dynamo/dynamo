@@ -454,6 +454,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_gpt_oss_tool_parser_only_preserves_analysis_as_content_vllm() {
+        // Parent-ticket acceptance: if only tool parsing is configured, the
+        // Harmony analysis channel is not handled by a reasoning parser and
+        // should be surfaced as normal content while tool calls are parsed.
+        let file_path = format!(
+            "{}/vllm/gpt-oss-20b/chat_completion_stream_f0c86d72-tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        let input_stream = stream::iter(test_data.stream_chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("harmony".to_string()), None)
+                .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+        assert_eq!(
+            aggregated.reasoning_content, "",
+            "Reasoning content should stay empty when no reasoning parser is configured"
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_reasoning_content,
+            "Tool-only parsing should preserve Harmony analysis as normal content"
+        );
+        assert!(
+            !aggregated.normal_content.contains("<|channel|>"),
+            "Normal content should not leak Harmony protocol tokens"
+        );
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool-only parsing case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gpt_oss_no_parsing_preserves_raw_content_vllm() {
+        // Parent-ticket acceptance: if parsing is not configured, the parser
+        // layer should not reinterpret Harmony output; all streamed text stays
+        // in content and no tool/reasoning fields are synthesized.
+        let file_path = format!(
+            "{}/vllm/gpt-oss-20b/chat_completion_stream_f0c86d72-tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+        let expected_raw_content = aggregate_content_from_chunks(&test_data.stream_chunks);
+
+        let input_stream = stream::iter(test_data.stream_chunks);
+        let output_chunks = parse_response_stream(input_stream, false, false, None, None).await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+        assert_eq!(
+            aggregated.normal_content, expected_raw_content.normal_content,
+            "No-parser mode should preserve the raw streamed content"
+        );
+        assert!(
+            aggregated.normal_content.contains("<|channel|>"),
+            "No-parser mode should leave Harmony protocol tokens in content"
+        );
+        assert_eq!(
+            aggregated.reasoning_content, "",
+            "No-parser mode should not synthesize reasoning content"
+        );
+        assert!(
+            !aggregated.has_tool_calls,
+            "No-parser mode should not synthesize tool calls"
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for no-parser case"
+        );
+    }
+
+    #[tokio::test]
     async fn test_qwen_e2e_with_no_tools_vllm() {
         // E2E Parsing test for Qwen with no tools.
 

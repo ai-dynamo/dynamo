@@ -4,7 +4,7 @@
 use super::super::ToolDefinition;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
-use openai_harmony::chat::{Content::Text, Role};
+use openai_harmony::chat::{Content, Role};
 use openai_harmony::{HarmonyEncoding, HarmonyEncodingName, load_harmony_encoding};
 use regex::{Captures, Regex};
 use serde_json::Value;
@@ -14,6 +14,7 @@ static COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_HEADER_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static ANALYSIS_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
+static FINAL_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static MESSAGE_CALL_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static SPECIAL_TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
 
@@ -55,6 +56,13 @@ fn analysis_block_cleanup_regex() -> &'static Regex {
     ANALYSIS_BLOCK_CLEANUP_REGEX.get_or_init(|| {
         Regex::new(r"(?s)(?:<\|start\|>assistant)?<\|channel\|>analysis<\|message\|>(?P<body>.*?)(?:<\|end\|>|\z)")
             .expect("analysis block cleanup regex")
+    })
+}
+
+fn final_block_cleanup_regex() -> &'static Regex {
+    FINAL_BLOCK_CLEANUP_REGEX.get_or_init(|| {
+        Regex::new(r"(?s)(?:<\|start\|>assistant)?<\|channel\|>final<\|message\|>(?P<body>.*?)(?:<\|return\|>|<\|end\|>|\z)")
+            .expect("final block cleanup regex")
     })
 }
 
@@ -114,7 +122,21 @@ fn strip_harmony_protocol_from_normal_text(text: &str, reason: &'static str) -> 
         .replace_all(&cleaned, |caps: &Captures<'_>| {
             record_special_tokens(&caps[0], &mut stripped);
             push_unique(&mut stripped, "analysis_envelope".to_string());
-            ""
+            caps.name("body")
+                .map(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string()
+        })
+        .into_owned();
+
+    let cleaned = final_block_cleanup_regex()
+        .replace_all(&cleaned, |caps: &Captures<'_>| {
+            record_special_tokens(&caps[0], &mut stripped);
+            push_unique(&mut stripped, "final_envelope".to_string());
+            caps.name("body")
+                .map(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string()
         })
         .into_owned();
 
@@ -171,6 +193,14 @@ fn serialize_harmony_arguments(raw_args: &str) -> String {
     match serde_json::from_str::<Value>(trimmed) {
         Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_string()),
         Err(_) => trimmed.to_string(),
+    }
+}
+
+fn push_harmony_text(out: &mut String, content: &[Content]) {
+    for item in content {
+        if let Content::Text(text) = item {
+            out.push_str(&text.text);
+        }
     }
 }
 
@@ -286,8 +316,7 @@ pub async fn parse_tool_calls_harmony_complete(
 
     let mut res = Vec::with_capacity(messages.len());
     let mut call_idx = 0; // Index of the tool call
-    let mut final_text: Option<String> = None;
-    let mut commentary_text: Option<String> = None;
+    let mut normal_text = String::new();
     let has_tool_call_stop = text.contains("<|call|>");
 
     for message in messages.iter() {
@@ -315,7 +344,7 @@ pub async fn parse_tool_calls_harmony_complete(
             };
 
             let Some(args_json) = message.content.first().and_then(|content| match content {
-                Text(text) => Some(serialize_harmony_arguments(&text.text)),
+                Content::Text(text) => Some(serialize_harmony_arguments(&text.text)),
                 _ => None,
             }) else {
                 continue;
@@ -330,21 +359,10 @@ pub async fn parse_tool_calls_harmony_complete(
                     arguments: args_json,
                 },
             });
-        } else if channel == Some("final") {
-            if let Some(Text(text)) = message.content.first() {
-                final_text = Some(text.text.clone());
-            }
-        } else if channel == Some("commentary")
-            && recipient.is_empty()
-            && let Some(Text(text)) = message.content.first()
-        {
-            commentary_text = Some(text.text.clone());
+        } else if matches!(channel, Some("analysis" | "final" | "commentary")) {
+            push_harmony_text(&mut normal_text, &message.content);
         }
     }
-    let normal_text = final_text
-        .filter(|text| !text.is_empty())
-        .or_else(|| commentary_text.filter(|text| !text.is_empty()))
-        .unwrap_or_default();
     Ok((res, Some(normal_text)))
 }
 
@@ -452,7 +470,10 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(normal_content, Some("".to_string()));
+        assert_eq!(
+            normal_content,
+            Some("Need to use function get_current_weather.".to_string())
+        );
         assert_eq!(tool_calls.len(), 0);
     }
 
@@ -464,7 +485,10 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(normal_content, Some("".to_string()));
+        assert_eq!(
+            normal_content,
+            Some("Need to use function get_current_weather.".to_string())
+        );
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -480,7 +504,10 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(normal_content, Some("".to_string()));
+        assert_eq!(
+            normal_content,
+            Some("Need to use function get_current_weather.".to_string())
+        );
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -510,6 +537,23 @@ mod tests {
             normal_content,
             Some("Hello, how can I help you today?".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_tool_only_keeps_analysis_and_final_as_normal_text() {
+        let text = r#"<|channel|>analysis<|message|>Need to check weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>final<|message|>I checked the weather.<|return|>"#;
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            normal_content,
+            Some("Need to check weather.I checked the weather.".to_string())
+        );
+        let (name, args) = extract_name_and_args(tool_calls[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "NYC");
     }
 
     // Harmony's strict tokenizer rejects two back-to-back commentary
@@ -586,10 +630,10 @@ mod tests {
     }
 
     // The regex fallback must preserve any non-tool spans (prose before
-    // the call, suffix after `<|call|>`) as `normal_text`, not zero them.
+    // the call, analysis, suffix after `<|call|>`) as `normal_text`, not zero them.
     #[tokio::test]
     async fn test_parse_harmony_regex_fallback_preserves_residual_text() {
-        let text = r#"PREFIX <|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
+        let text = r#"PREFIX <|channel|>analysis<|message|>Need a tool.<|end|><|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
         let (tool_calls, normal) = parse_tool_calls_harmony_complete(
             text,
             &JsonParserConfig {
@@ -609,6 +653,10 @@ mod tests {
         assert!(
             normal.contains("SUFFIX"),
             "normal must keep suffix: {normal:?}"
+        );
+        assert!(
+            normal.contains("Need a tool."),
+            "normal must keep analysis when only tool parsing is active: {normal:?}"
         );
         assert!(
             !normal.contains("<|start|>"),
@@ -648,6 +696,22 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_parse_harmony_parse_failure_preserves_analysis_body() {
+        let text = r#"Before <|channel|>analysis<|message|>Need to call get_weather.<|end|><|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"<|call|> After"#;
+        let (tool_calls, normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+        assert!(tool_calls.is_empty());
+        let normal = normal.unwrap_or_default();
+        assert_eq!(normal, "Before Need to call get_weather. After");
+        assert!(
+            !normal.contains("<|channel|>"),
+            "normal_text must not leak Harmony protocol tokens: {normal:?}"
+        );
+    }
+
     // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a, PARSER.batch.8.a in tests/parity/parser/fixtures/harmony/PARSER.batch.5.yaml, tests/parity/parser/fixtures/harmony/PARSER.batch.8.yaml.
     #[tokio::test] // PARSER.batch.4, PARSER.batch.5, PARSER.harmony.2
     async fn test_parse_tool_calls_harmony_without_call_token() {
@@ -656,7 +720,13 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(normal_content, Some("".to_string()));
+        assert_eq!(
+            normal_content,
+            Some(
+                r#"We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function."#
+                    .to_string()
+            )
+        );
         assert!(tool_calls.is_empty());
     }
 

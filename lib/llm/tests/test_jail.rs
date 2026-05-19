@@ -1874,7 +1874,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_harmony_parser() {
-        // Harmony format with hidden analysis text and a tool call encoded in special tags
+        // With only the Harmony tool parser configured, analysis is unhandled by
+        // a reasoning parser and must be preserved as normal content.
         let chunks = vec![
             create_mock_response_chunk(
                 "<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>"
@@ -1902,21 +1903,12 @@ mod tests {
         // Should have at least one output containing the parsed tool call.
         assert!(!results.is_empty());
 
-        // Verify hidden analysis text is not emitted as user-visible content.
-        let has_analysis_text = results.iter().any(|r| {
-            r.data
-                .as_ref()
-                .and_then(|d| d.inner.choices.first())
-                .and_then(|c| c.delta.content.as_ref())
-                .map(|content| {
-                    test_utils::extract_text(content)
-                        .contains("Need to use function get_current_weather.")
-                })
-                .unwrap_or(false)
-        });
+        // Verify analysis text is preserved as content when no reasoning parser
+        // is configured.
+        let content = test_utils::reconstruct_content(&results);
         assert!(
-            !has_analysis_text,
-            "Should not expose Harmony analysis text as content"
+            content.contains("Need to use function get_current_weather."),
+            "Should preserve Harmony analysis text as content: {content:?}"
         );
 
         // Verify a tool call was parsed with expected name and args
