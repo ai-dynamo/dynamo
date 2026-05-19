@@ -24,6 +24,16 @@ on:
         required: false
         type: boolean
         default: false
+      slack_thread_ts:
+        description: 'Slack thread ts to reply into. Empty skips thread replies.'
+        required: false
+        type: string
+        default: ''
+      slack_channel_id:
+        description: 'Slack channel ID. Required when slack_thread_ts is set.'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       commit_sha:
@@ -40,6 +50,14 @@ on:
         required: false
         type: boolean
         default: false
+      slack_thread_ts:
+        required: false
+        type: string
+        default: ''
+      slack_channel_id:
+        required: false
+        type: string
+        default: ''
 
 # Note: workflow_dispatch can only be triggered from release/* branches (or main when nightly=true)
 # This is enforced in the prepare-release job via branch validation. workflow_call paths
@@ -620,6 +638,90 @@ jobs:
             rm -f "${BODY_FILE}"
           done
 
+  # Combined NGC + Artifactory staging reply on the nightly thread.
+  notify-slack-staging:
+    name: Notify Slack — staging complete
+    runs-on: prod-default-small-v2
+    needs: [prepare-release, release-publish, stage-wheels-artifactory]
+    if: ${{ always() && inputs.slack_thread_ts != '' && inputs.slack_channel_id != '' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Post staging reply
+        continue-on-error: true
+        env:
+          SLACK_BOT_TOKEN:  ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          SLACK_THREAD_TS:  ${{ inputs.slack_thread_ts }}
+          NGC_RESULT:       ${{ needs.release-publish.result }}
+          ART_RESULT:       ${{ needs.stage-wheels-artifactory.result }}
+          NGC_VERSION_TAG:  ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          WHEEL_VERSION:    ${{ needs.prepare-release.outputs.wheel_version }}
+          RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          emoji_for() {
+            case "$1" in
+              success)   echo ":white_check_mark:" ;;
+              failure)   echo ":x:" ;;
+              skipped)   echo ":fast_forward:" ;;
+              cancelled) echo ":no_entry_sign:" ;;
+              *)         echo ":grey_question:" ;;
+            esac
+          }
+          NGC_EMOJI=$(emoji_for "${NGC_RESULT}")
+          ART_EMOJI=$(emoji_for "${ART_RESULT}")
+
+          if [ "${NGC_RESULT}" = "success" ] && [ "${ART_RESULT}" = "success" ]; then
+            HEADER=":package: Staging complete"
+          else
+            HEADER=":warning: Staging finished with issues"
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg channel    "${SLACK_CHANNEL_ID}" \
+            --arg thread_ts  "${SLACK_THREAD_TS}" \
+            --arg header     "${HEADER}" \
+            --arg ngc_emoji  "${NGC_EMOJI}" \
+            --arg ngc_result "${NGC_RESULT}" \
+            --arg art_emoji  "${ART_EMOJI}" \
+            --arg art_result "${ART_RESULT}" \
+            --arg ngc_tag    "${NGC_VERSION_TAG}" \
+            --arg wheel      "${WHEEL_VERSION}" \
+            --arg run_url    "${RUN_URL}" \
+            '{
+              channel: $channel,
+              thread_ts: $thread_ts,
+              text: $header,
+              blocks: [
+                { type: "section",
+                  text: { type: "mrkdwn", text: ("*" + $header + "*") } },
+                { type: "section",
+                  fields: [
+                    { type: "mrkdwn",
+                      text: ($ngc_emoji + " *NGC publish:* " + $ngc_result + "\n`" + $ngc_tag + "`") },
+                    { type: "mrkdwn",
+                      text: ($art_emoji + " *Artifactory wheels:* " + $art_result + "\n`" + $wheel + "`") }
+                  ] },
+                { type: "context",
+                  elements: [ { type: "mrkdwn", text: ("<" + $run_url + "|GitHub Actions run>") } ] }
+              ]
+            }')
+
+          RESPONSE=$(curl -fsSL -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "${PAYLOAD}")
+
+          OK=$(echo "${RESPONSE}" | jq -r '.ok')
+          if [ "${OK}" != "true" ]; then
+            echo "::error::Slack chat.postMessage failed: ${RESPONSE}"
+            exit 1
+          fi
+          echo "Posted staging reply on thread ${SLACK_THREAD_TS}"
+
   # ============================================================================
   # GITLAB RELEASE AUTOMATION TRIGGER
   # Fires the GitLab release-automation pipeline once images and wheels are
@@ -635,8 +737,12 @@ jobs:
     runs-on:
       group: gitlab_ci_runners
     environment: automated-release
+    outputs:
+      pipeline_id:  ${{ steps.trigger.outputs.pipeline_id }}
+      pipeline_url: ${{ steps.trigger.outputs.pipeline_url }}
     steps:
       - name: Trigger GitLab pipeline
+        id: trigger
         env:
           # Both come from the automated-release environment. Storing the URL
           # as a secret (not hardcoded) keeps it masked in logs and lets it be
@@ -649,6 +755,9 @@ jobs:
           COMMIT_SHA:           ${{ needs.prepare-release.outputs.commit_sha }}
           NIGHTLY:              ${{ needs.prepare-release.outputs.nightly }}
           RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
+          # Forwarded so the GitLab pipeline can reply on the same thread.
+          SLACK_THREAD_TS:      ${{ inputs.slack_thread_ts }}
+          SLACK_CHANNEL_ID:     ${{ inputs.slack_channel_id }}
         run: |
           set -euo pipefail
 
@@ -700,6 +809,8 @@ jobs:
             --form "variables[ENABLE_SONARQUBE]=true" \
             --form "variables[SONAR_BRANCH]=main" \
             --form "variables[NSPECT_REGISTERED]=false" \
+            --form "variables[SLACK_THREAD_TS]=${SLACK_THREAD_TS}" \
+            --form "variables[SLACK_CHANNEL_ID]=${SLACK_CHANNEL_ID}" \
             "${GITLAB_TRIGGER_URL}")
 
           PIPELINE_ID=$(echo "${RESPONSE}" | jq -r '.id // empty')
@@ -710,6 +821,8 @@ jobs:
             exit 1
           fi
 
+          echo "pipeline_id=${PIPELINE_ID}"   >> "${GITHUB_OUTPUT}"
+          echo "pipeline_url=${PIPELINE_URL}" >> "${GITHUB_OUTPUT}"
           echo "GitLab release pipeline triggered: pipeline ID ${PIPELINE_ID}"
 
           {
@@ -726,3 +839,49 @@ jobs:
             echo "| Commit | ${COMMIT_SHA} |"
             echo "| Artifacts | ${ARTIFACTS} |"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Post GitLab trigger reply on Slack thread
+        if: ${{ inputs.slack_thread_ts != '' && inputs.slack_channel_id != '' }}
+        continue-on-error: true
+        env:
+          SLACK_BOT_TOKEN:  ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          SLACK_THREAD_TS:  ${{ inputs.slack_thread_ts }}
+          PIPELINE_ID:      ${{ steps.trigger.outputs.pipeline_id }}
+          PIPELINE_URL:     ${{ steps.trigger.outputs.pipeline_url }}
+          NGC_VERSION_TAG:  ${{ needs.prepare-release.outputs.ngc_version_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PAYLOAD=$(jq -n \
+            --arg channel   "${SLACK_CHANNEL_ID}" \
+            --arg thread_ts "${SLACK_THREAD_TS}" \
+            --arg pid       "${PIPELINE_ID}" \
+            --arg purl      "${PIPELINE_URL}" \
+            --arg ngc_tag   "${NGC_VERSION_TAG}" \
+            '{
+              channel: $channel,
+              thread_ts: $thread_ts,
+              text: ("GitLab release pipeline triggered: " + $pid),
+              blocks: [
+                { type: "section",
+                  text: { type: "mrkdwn",
+                          text: (":rocket: *GitLab release pipeline triggered*\n<" + $purl + "|Pipeline " + $pid + ">") } },
+                { type: "context",
+                  elements: [ { type: "mrkdwn",
+                                text: ("NGC tag: `" + $ngc_tag + "`") } ] }
+              ]
+            }')
+
+          RESPONSE=$(curl -fsSL -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "${PAYLOAD}")
+
+          OK=$(echo "${RESPONSE}" | jq -r '.ok')
+          if [ "${OK}" != "true" ]; then
+            echo "::error::Slack chat.postMessage failed: ${RESPONSE}"
+            exit 1
+          fi
+          echo "Posted GitLab trigger reply on thread ${SLACK_THREAD_TS}"
