@@ -1712,7 +1712,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "experimental kvTransferPolicy preferred without preferredWeight is valid",
+			name: "experimental kvTransferPolicy rejects preferred without preferredWeight",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -1732,7 +1732,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "spec.experimental.kvTransferPolicy.preferredWeight is required when enforcement is \"preferred\"",
 		},
 		{
 			name: "experimental kvTransferPolicy rejects preferredWeight with required enforcement",
