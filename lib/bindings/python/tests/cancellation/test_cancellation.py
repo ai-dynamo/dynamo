@@ -41,16 +41,13 @@ class MockServer:
 
     async def _generate_until_context_cancelled(self, request, context):
         """
-        Generate method that yields numbers 0-999 every 0.1 seconds
+        Generate method that yields numbers 0-999 every 0.1 seconds.
         Checks for context.is_stopped() / context.is_killed() before each yield and raises
-        CancelledError if stopped / killed
+        CancelledError if stopped / killed.
         """
-        include_metadata = request == "_generate_until_context_cancelled_with_metadata"
-
         for i in range(1000):
             print(f"Processing iteration {i}")
 
-            # Check if context is stopped
             if context.is_stopped():
                 print(f"Context stopped at iteration {i}")
                 self.context_is_stopped = True
@@ -58,7 +55,6 @@ class MockServer:
                 self.context_metadata = dict(context.metadata.items())
                 raise asyncio.CancelledError
 
-            # Check if context is killed
             if context.is_killed():
                 print(f"Context killed at iteration {i}")
                 self.context_is_stopped = context.is_stopped()
@@ -67,16 +63,40 @@ class MockServer:
                 raise asyncio.CancelledError
 
             await asyncio.sleep(0.1)
-
             print(f"Sending iteration {i}")
-            if include_metadata:
-                yield {"i": i, "metadata": dict(context.metadata.items())}
-            else:
-                yield i
+            yield i
 
-        assert (
-            False
-        ), "Test failed: generate_until_cancelled did not raise CancelledError"
+        assert False, "Test failed: generate_until_cancelled did not raise CancelledError"
+
+    async def _generate_until_context_cancelled_with_metadata(self, request, context):
+        """
+        Variant of _generate_until_context_cancelled that includes context metadata
+        in each yielded payload so the test can assert metadata propagation.
+        """
+        for i in range(1000):
+            print(f"Processing iteration {i}")
+            context.metadata["iteration"] = str(i)
+            assert context.metadata["iteration"] == str(i), "Context metadata should be mutable and updateable"
+
+            if context.is_stopped():
+                print(f"Context stopped at iteration {i}")
+                self.context_is_stopped = True
+                self.context_is_killed = context.is_killed()
+                self.context_metadata = dict(context.metadata.items())
+                raise asyncio.CancelledError
+
+            if context.is_killed():
+                print(f"Context killed at iteration {i}")
+                self.context_is_stopped = context.is_stopped()
+                self.context_is_killed = True
+                self.context_metadata = dict(context.metadata.items())
+                raise asyncio.CancelledError
+
+            await asyncio.sleep(0.1)
+            print(f"Sending iteration {i}")
+            yield {"i": i, "metadata": dict(context.metadata.items())}
+
+        assert False, "Test failed: generate_until_cancelled did not raise CancelledError"
 
     async def _generate_until_asyncio_cancelled(self, request, context):
         """
