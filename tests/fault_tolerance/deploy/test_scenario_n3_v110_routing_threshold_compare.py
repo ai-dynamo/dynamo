@@ -47,6 +47,8 @@
 #       - 503 fires only when ALL pods are over threshold (rung 5)
 #       - SLA held until full-fleet saturation
 
+import os
+
 import pytest
 
 from tests.fault_tolerance.deploy.checks import (
@@ -76,12 +78,17 @@ from tests.fault_tolerance.deploy.scenario import run_scenario
 from tests.utils.managed_deployment import DeploymentSpec
 from tests.utils.managed_load import LoadConfig
 
-_TEMPLATE = (
-    "/workspace/tests/fault_tolerance/deploy/templates/vllm/"
-    "disagg_qwen3_30b_unit_prod.yaml"
+_TEMPLATE = os.path.join(
+    os.path.dirname(__file__),
+    "templates",
+    "vllm",
+    "disagg_qwen3_30b_unit_prod.yaml",
 )
 
-_V110_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0"
+_V110_IMAGE = os.environ.get(
+    "OVERLOAD_VLLM_IMAGE",
+    "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1",
+)
 
 _PROD_SEQ_DIST = "100,200:5;500,200:15;1000,200:20;1600,200:30;3400,200:20;7000,200:10"
 _NUM_PREFIX_PROMPTS = 15

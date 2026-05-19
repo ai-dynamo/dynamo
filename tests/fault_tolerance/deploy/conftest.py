@@ -13,26 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
+import sys
+from pathlib import Path
 
-import pytest
+# Ensure the repo root is on sys.path so `tests.fault_tolerance.deploy.*`
+# imports resolve when this harness runs as the standalone dynamo-ft uv
+# project (where pytest's rootdir is this directory). Path is computed from
+# __file__ so it survives moves of this file or any parent dir.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-from tests.fault_tolerance.deploy.scenarios import scenarios
+# The harness uses repo-root-relative paths (e.g.
+# ``examples/backends/{backend}/deploy/agg.yaml`` in scenarios.py). Chdir
+# so those resolve whether pytest was invoked from the repo root or from
+# this directory under the dynamo-ft uv project. Side-effects on CWD-
+# sensitive code (e.g. ``DYN_TEST_OUTPUT_PATH`` default below) are
+# intentional and match the previous repo-root-invocation behavior.
+os.chdir(_REPO_ROOT)
+
+import pytest  # noqa: E402
+
+from tests.fault_tolerance.deploy.scenarios import scenarios  # noqa: E402
 
 
 def pytest_configure(config):
-    """Route this dir's tests' outputs to ``<cwd>/test_outputs/<test>/``.
-
-    Implemented as a ``pytest_configure`` hook (not an autouse fixture)
-    so the env var is set BEFORE any fixture runs — in particular before
-    the root ``tests/conftest.py``'s autouse ``logger`` fixture opens
-    its ``test.log.txt`` FileHandler. With a same-stage fixture, the
-    root fixture fires first, sees ``DYN_TEST_OUTPUT_PATH`` unset, and
-    points the FileHandler at the default ``/tmp/dynamo_tests/`` —
-    while everything inside the test body (scenario log_dir, reports)
-    correctly resolves under ``test_outputs/`` because the env var is
-    set by then. Net effect of the old fixture: ``test.log.txt``
-    ends up in a different directory from the rest of the run.
+    """Route this dir's tests' outputs to ``<cwd>/test_outputs/<test>/`` and
+    inherit the marker registry from the root pyproject.
 
     The shared ``resolve_test_output_path`` defaults to
     ``/tmp/dynamo_tests/`` to keep outputs out of the git tree, which is
@@ -47,6 +56,28 @@ def pytest_configure(config):
     """
     if "DYN_TEST_OUTPUT_PATH" not in os.environ:
         os.environ["DYN_TEST_OUTPUT_PATH"] = os.path.join(os.getcwd(), "test_outputs")
+
+    # Inherit the marker registry from the root pyproject so --strict-markers
+    # in the dynamo-ft uv project stays useful without duplicating the marker
+    # list here. Single source of truth: root pyproject.toml.
+    try:
+        import tomllib  # py3.11+
+    except ImportError:
+        import tomli as tomllib  # type: ignore
+
+    root_pp = _REPO_ROOT / "pyproject.toml"
+    try:
+        with open(root_pp, "rb") as f:
+            for marker in (
+                tomllib.load(f)
+                .get("tool", {})
+                .get("pytest", {})
+                .get("ini_options", {})
+                .get("markers", [])
+            ):
+                config.addinivalue_line("markers", marker)
+    except FileNotFoundError:
+        pass  # standalone runs without the surrounding repo still ok
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +119,34 @@ def _refresh_kubeconfig_if_requested():
         except Exception as e:
             logger.warning(f"DYN_TEST_REFRESH_KUBECONFIG hook failed: {e}")
     yield
+
+
+@pytest.fixture(autouse=True)
+def logger(request):
+    """Per-test ``test.log.txt`` file handler on the root logger.
+
+    Overrides the root ``tests/conftest.py`` fixture of the same name (pytest
+    resolves the nearest definition), so the harness works identically whether
+    run from the repo root or as the standalone dynamo-ft uv project. The
+    output dir comes from ``DYN_TEST_OUTPUT_PATH`` (set in ``pytest_configure``
+    above), so the handler always lands next to scenario logs / reports.
+    """
+    log_dir = Path(os.environ["DYN_TEST_OUTPUT_PATH"]) / request.node.name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_dir / "test.log.txt", mode="w")
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        yield
+    finally:
+        handler.close()
+        root.removeHandler(handler)
 
 
 @pytest.fixture
@@ -211,9 +270,60 @@ def goodput_slos(request):
     return slos or None
 
 
-# Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
-# Only fault_tolerance-specific options are defined here.
+def _add_or_skip(parser, name, **kwargs):
+    """Register an addoption, no-op if already registered by another conftest.
+
+    Lets us declare shared options here (so the harness runs standalone under
+    the dynamo-ft uv project) without conflicting when the root
+    ``tests/conftest.py`` is also loaded (e.g., when pytest is invoked from the
+    repo root).
+    """
+    try:
+        parser.addoption(name, **kwargs)
+    except ValueError:
+        pass  # already registered upstream
+
+
+# Shared CLI options (--image, --namespace, --skip-service-restart) are also
+# defined in tests/conftest.py. We re-declare them here (via _add_or_skip)
+# so the harness works standalone under the dynamo-ft uv project, where the
+# root conftest is not loaded.
 def pytest_addoption(parser):
+    # ---- shared options (also in root tests/conftest.py) ----
+    _add_or_skip(
+        parser,
+        "--image",
+        type=str,
+        default=None,
+        help="Container image to use for deployment (overrides YAML default).",
+    )
+    _add_or_skip(
+        parser,
+        "--namespace",
+        type=str,
+        default=None,
+        help="Kubernetes namespace for deployment.",
+    )
+    _add_or_skip(
+        parser,
+        "--skip-service-restart",
+        action="store_true",
+        default=None,
+        help="Skip restarting NATS and etcd services before deployment.",
+    )
+    # ---- per-test-file CLI options ----
+    # Each test file that exposes `add_cli_options(parser)` gets its options
+    # registered here. Keeps each file's flags scoped (own pytest --help
+    # group) and avoids one giant addoption block.
+    try:
+        from tests.fault_tolerance.deploy import test_overload as _overload_mod
+
+        _overload_mod.add_cli_options(parser)
+    except Exception:
+        # Test module not importable in this environment — skip gracefully.
+        pass
+
+    # ---- fault_tolerance-specific options ----
     parser.addoption(
         "--client-type",
         type=str,
