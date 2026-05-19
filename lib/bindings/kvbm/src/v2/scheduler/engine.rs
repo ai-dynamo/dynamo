@@ -12,12 +12,15 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::Result;
-use kvbm_connector::common::output::SchedulerOutput;
+use kvbm_connector::common::{Request, SchedulerOutput};
 use kvbm_common::BlockId;
-use kvbm_connector::common::request::Request;
 use kvbm_connector::connector::leader::ConnectorLeader;
-use kvbm_engine::G1;
 use kvbm_logical::{BlockManager, ImmutableBlock, SequenceHash};
+
+/// GPU VRAM tier — marker type for BlockManager (mirrors kvbm_engine::G1).
+/// Satisfies BlockMetadata via its blanket impl (Clone + Send + Sync + 'static).
+#[derive(Clone, Copy, Debug)]
+pub struct G1;
 
 /// Finish/eviction status for a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

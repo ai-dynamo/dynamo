@@ -29,9 +29,7 @@ pub mod status;
 pub use config::PySchedulerConfig;
 pub use status::PyRequestStatus;
 
-use kvbm_engine::G1;
-use kvbm_connector::common::request::Request;
-use kvbm_connector::common::output::SchedulerOutput;
+use kvbm_connector::common::{Request, SchedulerOutput};
 use kvbm_logical::{
     BlockManager, BlockRegistry,
     pools::BlockDuplicationPolicy,
@@ -42,7 +40,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::v2::connector::leader::PyConnectorLeader;
-use self::engine::{KVCacheManager, Scheduler};
+use self::engine::{G1, KVCacheManager, Scheduler};
 
 /// Python wrapper for the Rust Scheduler.
 ///
