@@ -114,12 +114,6 @@ impl AnnotationsProvider for NvCreateChatCompletionRequest {
     }
 
     /// Checks whether a specific annotation exists in the request.
-    ///
-    /// # Arguments
-    /// * `annotation` - A string slice representing the annotation to check.
-    ///
-    /// # Returns
-    /// `true` if the annotation exists, `false` otherwise.
     fn has_annotation(&self, annotation: &str) -> bool {
         self.nvext
             .as_ref()

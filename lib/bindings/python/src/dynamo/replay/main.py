@@ -6,18 +6,20 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from dynamo.planner.core.types import EngineCapabilities
 
-os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
-
+from dynamo._internal.aic import (
+    DEFAULT_GPU_MEMORY_UTILIZATION,
+    DEFAULT_MEM_FRACTION_STATIC,
+    estimate_num_gpu_blocks,
+)
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
@@ -29,6 +31,12 @@ from dynamo.replay.reporting import format_report_table, write_report_json
 
 class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
+
+
+_DEFAULT_AIC_SYSTEM = "h200_sxm"
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+_DEFAULT_VLLM_BLOCK_SIZE = 64
+_DEFAULT_SGLANG_BLOCK_SIZE = 1
 
 
 def resolve_planner_profile_data(
@@ -47,6 +55,68 @@ def resolve_planner_profile_data(
             npz_path=None,
         )
     return module.resolve_planner_profile_data(planner_profile_data)
+
+
+def _resolve_block_size_for_capacity(raw: dict) -> int:
+    block_size = raw.get("block_size")
+    if block_size is not None:
+        return cast(int, block_size)
+    if raw.get("engine_type") == "sglang":
+        sglang = raw.get("sglang")
+        if isinstance(sglang, dict) and sglang.get("page_size") is not None:
+            return cast(int, sglang["page_size"])
+        return _DEFAULT_SGLANG_BLOCK_SIZE
+    return _DEFAULT_VLLM_BLOCK_SIZE
+
+
+def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
+    if raw.get("num_gpu_blocks") is not None:
+        return
+
+    aic_backend = raw.get("aic_backend")
+    if aic_backend is None:
+        return
+
+    aic_model_path = raw.get("aic_model_path")
+    if not aic_model_path:
+        raise ValueError(
+            "AIC KV cache capacity estimation requires aic_model_path in engine args"
+        )
+
+    tp_size = raw.get("aic_tp_size")
+    max_num_batched_tokens = raw.get("max_num_batched_tokens")
+    gpu_memory_utilization = raw.get("gpu_memory_utilization")
+    mem_fraction_static = raw.get("mem_fraction_static")
+
+    raw["num_gpu_blocks"] = estimate_num_gpu_blocks(
+        backend_name=aic_backend,
+        system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
+        model_path=aic_model_path,
+        tp_size=cast(int, tp_size if tp_size is not None else 1),
+        block_size=_resolve_block_size_for_capacity(raw),
+        max_num_batched_tokens=cast(
+            int,
+            max_num_batched_tokens
+            if max_num_batched_tokens is not None
+            else _DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        ),
+        gpu_memory_utilization=cast(
+            float,
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else DEFAULT_GPU_MEMORY_UTILIZATION,
+        ),
+        mem_fraction_static=cast(
+            float,
+            mem_fraction_static
+            if mem_fraction_static is not None
+            else DEFAULT_MEM_FRACTION_STATIC,
+        ),
+        backend_version=raw.get("aic_backend_version"),
+        moe_tp_size=raw.get("aic_moe_tp_size"),
+        moe_ep_size=raw.get("aic_moe_ep_size"),
+        attention_dp_size=raw.get("aic_attention_dp_size"),
+    )
 
 
 def _load_engine_args(raw_args: str | None):
@@ -81,6 +151,7 @@ def _load_engine_args(raw_args: str | None):
                 raw["planner_profile_data"] = str(profile_data_result.npz_path)
             else:
                 del raw["planner_profile_data"]
+    _resolve_aic_num_gpu_blocks(raw)
     return MockEngineArgs.from_json(json.dumps(raw))
 
 
@@ -91,6 +162,9 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_model_path": args.aic_model_path,
         "aic_backend_version": args.aic_backend_version,
         "aic_tp_size": args.aic_tp_size,
+        "aic_moe_tp_size": args.aic_moe_tp_size,
+        "aic_moe_ep_size": args.aic_moe_ep_size,
+        "aic_attention_dp_size": args.aic_attention_dp_size,
     }
     if not any(value is not None for value in values.values()):
         return None
@@ -110,6 +184,9 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_model_path=values["aic_model_path"],
         aic_tp_size=values["aic_tp_size"] or 1,
         aic_backend_version=values["aic_backend_version"],
+        aic_moe_tp_size=values["aic_moe_tp_size"],
+        aic_moe_ep_size=values["aic_moe_ep_size"],
+        aic_attention_dp_size=values["aic_attention_dp_size"],
     )
 
 
@@ -309,6 +386,9 @@ def _run_planner_replay(
                     model_path=ref_args.aic_model_path,
                     tp_size=ref_args.aic_tp_size or 1,
                     backend_version=ref_args.aic_backend_version,
+                    moe_tp_size=ref_args.aic_moe_tp_size,
+                    moe_ep_size=ref_args.aic_moe_ep_size,
+                    attention_dp_size=ref_args.aic_attention_dp_size,
                 )
             except (
                 ImportError,
@@ -391,6 +471,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-backend-version")
     parser.add_argument("--aic-tp-size", type=int)
     parser.add_argument("--aic-model-path")
+    parser.add_argument("--aic-moe-tp-size", type=int)
+    parser.add_argument("--aic-moe-ep-size", type=int)
+    parser.add_argument("--aic-attention-dp-size", type=int)
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument(
@@ -420,9 +503,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
     parser.add_argument(
         "--trace-format",
-        choices=("mooncake", "applied_compute_agentic"),
+        choices=("mooncake", "mooncake-delta", "applied_compute_agentic"),
         default="mooncake",
-        help="format of trace_file when replaying from a file",
+        help=(
+            "format of trace_file when replaying from a file; mooncake-delta "
+            "accumulates per-session input deltas into cumulative prompts and "
+            "can use substantially more memory than mooncake"
+        ),
     )
     parser.add_argument(
         "--trace-block-size",

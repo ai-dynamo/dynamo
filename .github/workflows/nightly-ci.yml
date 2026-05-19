@@ -146,6 +146,27 @@ jobs:
           esac
 
   # ============================================================================
+  # MANUAL RELEASE APPROVAL GATE
+  # ============================================================================
+  # Manual workflow_dispatch that would publish (release=true) must be approved
+  # by a reviewer of the `manual-release-approval` environment before the
+  # `release` job runs release.yml. Scheduled runs skip this job; the `release`
+  # job below accepts `skipped` as success.
+  manual-release-approval:
+    name: Manual release approval gate
+    needs: [compute-release-mode]
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.compute-release-mode.outputs.release == 'true' }}
+    runs-on: prod-default-small-v2
+    environment: manual-release-approval
+    permissions:
+      contents: read
+    steps:
+      - name: Record approval
+        run: |
+          echo "Manual nightly release approved by ${{ github.actor }}"
+          echo "Run: ${{ github.run_id }} attempt ${{ github.run_attempt }}"
+
+  # ============================================================================
   # BUILD JOBS
   # ============================================================================
 
@@ -161,6 +182,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-build:
@@ -175,6 +197,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-build:
@@ -189,6 +212,7 @@ jobs:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   # ============================================================================
@@ -217,6 +241,7 @@ jobs:
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -236,6 +261,7 @@ jobs:
       gpu_test_markers: vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-test:
@@ -261,6 +287,7 @@ jobs:
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -280,6 +307,7 @@ jobs:
       gpu_test_markers: sglang and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-test:
@@ -305,6 +333,7 @@ jobs:
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -324,6 +353,7 @@ jobs:
       gpu_test_markers: trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   # ============================================================================
@@ -347,6 +377,7 @@ jobs:
       gpu_test_markers: 'pre_merge and none and gpu_1'
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
     secrets: inherit
 
   # ============================================================================
@@ -432,6 +463,7 @@ jobs:
     needs:
       - resolve-source-sha
       - compute-release-mode
+      - manual-release-approval
       - vllm-test
       - vllm-multi-gpu-test
       - sglang-test
@@ -441,7 +473,12 @@ jobs:
       - dynamo-pipeline
       - rust-tests
     # Framework (vllm/sglang/trtllm) and rust tests do not block publishing.
-    if: ${{ !cancelled() && needs.compute-release-mode.outputs.release == 'true' }}
+    # The manual-release-approval gate is `skipped` on cron and `success` after
+    # reviewer approval on workflow_dispatch — both are accepted here.
+    if: ${{ !cancelled()
+        && needs.compute-release-mode.outputs.release == 'true'
+        && (needs.manual-release-approval.result == 'success'
+            || needs.manual-release-approval.result == 'skipped') }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -577,11 +614,15 @@ jobs:
               echo "" >> coverage-rust-report.txt
             done
 
-            # Extract line coverage % (3rd percentage on TOTAL line: Region%, Func%, Line%, Branch%)
-            FIRST=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | head -1)
-            RUST_TOTAL_COVERAGE=$(grep "^TOTAL" "$FIRST" | grep -oE '[0-9]+\.[0-9]+%' | sed -n '3p' || true)
+            # Aggregate line coverage across all crates by summing total/missed lines
+            # from every TOTAL row. Columns on a `cargo llvm-cov report` TOTAL line:
+            #   $2 regions  $3 missed_regions  $4 region%
+            #   $5 funcs    $6 missed_funcs    $7 func%
+            #   $8 lines    $9 missed_lines    $10 line%
+            RUST_TOTAL_COVERAGE=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" -exec grep -h "^TOTAL" {} + \
+              | awk '{ total += $8; missed += $9 } END { if (total > 0) printf "%.2f%%", (total - missed) * 100 / total; else print "N/A" }')
             RUST_TOTAL_COVERAGE="${RUST_TOTAL_COVERAGE:-N/A}"
-            echo "Rust line coverage: ${RUST_TOTAL_COVERAGE}"
+            echo "Rust line coverage (aggregated across $(find coverage-rust-artifacts/ -name "coverage-rust.txt" | wc -l | tr -d ' ') crates): ${RUST_TOTAL_COVERAGE}"
           else
             echo "ℹ️  No Rust coverage artifacts found"
           fi

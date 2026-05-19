@@ -149,11 +149,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 		// Update Ready condition
 		dynamoDeployment.AddStatusCondition(metav1.Condition{
-			Type:               "Ready",
-			Status:             readyStatus,
-			Reason:             string(reason),
-			Message:            string(message),
-			LastTransitionTime: metav1.Now(),
+			Type:    "Ready",
+			Status:  readyStatus,
+			Reason:  string(reason),
+			Message: string(message),
 		})
 
 		// Only set ObservedGeneration when reconciliation succeeded (no error),
@@ -421,6 +420,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
 
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
+		return ReconcileResult{}, err
+	}
+
 	var result ReconcileResult
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
@@ -540,11 +543,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	if groveTopoCond == nil {
 		// No topology condition from Grove yet — don't assume healthy.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionUnknown,
-			Reason:             nvidiacomv1beta1.ConditionReasonTopologyConditionPending,
-			Message:            "Waiting for topology condition from the scheduling framework",
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionUnknown,
+			Reason:  nvidiacomv1beta1.ConditionReasonTopologyConditionPending,
+			Message: "Waiting for topology condition from the scheduling framework",
 		}
 	} else if groveTopoCond.Status == metav1.ConditionTrue {
 		// Grove reports topology levels are unavailable.
@@ -553,11 +555,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 			reason = nvidiacomv1beta1.ConditionReasonTopologyDefinitionNotFound
 		}
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            groveTopoCond.Message,
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionFalse,
+			Reason:  reason,
+			Message: groveTopoCond.Message,
 		}
 		prev := meta.FindStatusCondition(dgd.Status.Conditions, nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable)
 		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != groveTopoCond.Message {
@@ -567,11 +568,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	} else {
 		// Grove's TopologyLevelsUnavailable is False → all levels available.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionTrue,
-			Reason:             nvidiacomv1beta1.ConditionReasonAllTopologyLevelsAvailable,
-			Message:            "All required topology levels are available in the cluster topology",
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionTrue,
+			Reason:  nvidiacomv1beta1.ConditionReasonAllTopologyLevelsAvailable,
+			Message: "All required topology levels are available in the cluster topology",
 		}
 	}
 
@@ -852,9 +852,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 	return nil
 }
 
-// reconcileGMSResourceClaimTemplates syncs one ResourceClaimTemplate per
-// component when DRA is available, and otherwise fails fast if any component
-// needs DRA-backed GPU allocation.
+// reconcileGMSResourceClaimTemplates syncs ResourceClaimTemplates when DRA is
+// available, including deleting stale templates for components that no longer
+// use GMS. When DRA is unavailable, it fails fast if any component needs
+// DRA-backed GPU allocation.
 //
 // Both the GMS sidecar and inter-pod GMS
 // failover (failover.mode=interPod) allocate GPUs via DRA ResourceClaims.
@@ -869,7 +870,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 		for i := range dynamoDeployment.Spec.Components {
 			component := &dynamoDeployment.Spec.Components[i]
 			if dynamo.GetGPUMemoryService(component) != nil || component.IsInterPodFailoverEnabled() {
-				return fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but DRA is not available (either the resource.k8s.io API group is not registered on this cluster, which requires Kubernetes 1.32+, or DRA has been explicitly disabled in the operator configuration)")
+				return fmt.Errorf(
+					"gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), " +
+						"but DRA is not available (either the resource.k8s.io/v1 API is not registered on this cluster, " +
+						"which requires Kubernetes 1.34+, or DRA has been explicitly disabled in the operator configuration)")
 			}
 		}
 		return nil
@@ -877,8 +881,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
+		gmsSpec := dynamo.GetGPUMemoryService(component)
 		componentName := component.ComponentName
-		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(dynamo.GetGPUMemoryService(component), dynamo.GetMainContainerResources(component))
+		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(gmsSpec, dynamo.GetMainContainerResources(component))
 		if err != nil {
 			return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate for %s: %w", componentName, err)
 		}
@@ -896,10 +901,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
-
-	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
-		return ReconcileResult{}, err
-	}
 
 	renderDeployment, existingPodCliqueSet, err := r.prepareGroveRenderDeployment(ctx, dynamoDeployment)
 	if err != nil {

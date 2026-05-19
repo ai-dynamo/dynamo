@@ -70,6 +70,8 @@ const X_REQUEST_ID_HEADER: &str = "x-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+const ADMISSION_CONTROL_REJECTION_HINT: &str =
+    "If this rejection is not intended, consider passing --no-admission-control to the frontend.";
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -227,7 +229,7 @@ impl ErrorMessage {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    message: err.to_string(),
+                    message: format!("{}. {}", err, ADMISSION_CONTROL_REJECTION_HINT),
                     error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
                     code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 }),
@@ -2733,7 +2735,9 @@ mod tests {
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.1.message,
-            "ResourceExhausted: All workers are busy, please retry later"
+            format!(
+                "ResourceExhausted: All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}"
+            )
         );
     }
 

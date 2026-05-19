@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[path = "common/ports.rs"]
 mod ports;
-use ports::get_random_port;
+use ports::bind_random_port;
 
 /// Engine slot is process-global; ensure we install it at most once across all
 /// tests in this binary, with `DYN_TOKEN_ECHO_DELAY_MS` pinned before the
@@ -58,10 +58,10 @@ async fn wait_for_health(port: u16) {
 async fn realtime_websocket_echoes_per_char_and_finishes_per_request() {
     ensure_echo_engine_installed();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
     let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
+    let handle = service.spawn_with_listener(token.clone(), listener).await;
     wait_for_health(port).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
@@ -148,10 +148,10 @@ async fn realtime_websocket_echoes_per_char_and_finishes_per_request() {
 async fn realtime_websocket_emits_close_after_client_close() {
     ensure_echo_engine_installed();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
     let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
+    let handle = service.spawn_with_listener(token.clone(), listener).await;
     wait_for_health(port).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");
@@ -214,10 +214,10 @@ async fn realtime_websocket_emits_close_after_client_close() {
 async fn realtime_websocket_rejects_binary_frame() {
     ensure_echo_engine_installed();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
     let token = CancellationToken::new();
-    let handle = service.spawn(token.clone()).await;
+    let handle = service.spawn_with_listener(token.clone(), listener).await;
     wait_for_health(port).await;
 
     let url = format!("ws://127.0.0.1:{port}/v1/realtime");

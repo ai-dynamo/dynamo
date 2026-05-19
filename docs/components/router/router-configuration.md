@@ -15,7 +15,7 @@ This page collects the main router flags for frontend-embedded and standalone de
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 4.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. It also enables priority scheduling via `priority` hints in `nvext.agent_hints`. Must be greater than 0. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend.
+- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 16.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. It also enables priority scheduling via `priority` hints in `nvext.agent_hints`. Must be greater than 0. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend.
 - `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`).
 
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
@@ -51,6 +51,14 @@ Optional AIC knobs:
 
 - `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
 - `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
+- `--aic-moe-tp-size`: MoE tensor-parallel size for models that require AIC MoE parallelism
+- `--aic-moe-ep-size`: MoE expert-parallel size for models that require AIC MoE parallelism
+- `--aic-attention-dp-size`: attention data-parallel size for models that require AIC MoE parallelism
+
+For MoE models, these values must satisfy AIC's parallelism constraint:
+`aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`.
+For Kimi-style TP-only MoE runs, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
+`--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
 
 ## KV Event Transport and Persistence
 
