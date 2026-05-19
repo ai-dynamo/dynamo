@@ -772,15 +772,15 @@ def _make_engine_config_with_runner(runner="auto", **overrides):
 class TestRunnerPreservation:
     """update_engine_config_with_dynamo must not overwrite a user-set --runner."""
 
-    def test_runner_defaults_to_generate_when_auto(self):
-        """When user does not pass --runner (vLLM default is 'auto'),
-        Dynamo should set it to 'generate'."""
+    def test_runner_auto_is_preserved(self):
+        """When user passes --runner auto (also the vLLM default),
+        Dynamo must leave it alone so vLLM's own auto-detection runs."""
         dynamo_cfg = _make_dynamo_config()
         engine_cfg = _make_engine_config_with_runner(runner="auto")
 
         update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
-        assert engine_cfg.runner == "generate"
+        assert engine_cfg.runner == "auto"
 
     def test_runner_pooling_preserved(self):
         """When user passes --runner pooling (for embedding models),
