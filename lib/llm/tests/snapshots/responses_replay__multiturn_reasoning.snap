@@ -255,7 +255,22 @@ expression: redacted_events(&text)
             "reasoning_tokens": 0
           },
           "total_tokens": 77
-        }
+,
+        "billing": null,
+        "conversation": null,
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "max_tool_calls": null,
+        "previous_response_id": null,
+        "prompt": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": null,
+        "reasoning": null,
+        "safety_identifier": null,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "store": false
       }
     }
   },
