@@ -61,7 +61,7 @@ Cross-check the driver version against the image tag the user plans to deploy. S
 ```bash
 NAMESPACE=${NAMESPACE:-default}
 kubectl run dynamo-pull-test \
-  --image=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1 \
+  --image=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2 \
   --restart=Never \
   --overrides='{"spec":{"nodeSelector":{"nvidia.com/gpu.present":"true"}}}' \
   -n "$NAMESPACE" --command -- sleep 5 2>&1
@@ -93,7 +93,7 @@ After running all checks, emit:
 | ---------------------- | ------ | --------------------------------------------------- |
 | CRDs installed         | PASS   | 3/3                                                 |
 | Default storage class  | WARN   | Default is `gp3`, not `standard` -- auto-fix avail. |
-| GPU driver             | PASS   | 570.x on 4 nodes (>= matrix minimum for 1.0.1)      |
+| GPU driver             | PASS   | 570.x on 4 nodes (>= matrix minimum for 1.0.2)      |
 | Image pull             | PASS   | nvcr.io reachable, pulled in 7s                     |
 | GPU operator           | PASS   | nvidia-device-plugin Running on 4 nodes             |
 ```

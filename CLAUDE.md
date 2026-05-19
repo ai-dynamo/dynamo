@@ -35,7 +35,7 @@ your help based on which one you're talking to.
 | Repo conventions, DCO, sign-off | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | File a bug, propose a DEP, monitor a PR | [SKILLS.md](SKILLS.md) "Contributor skills" |
 | Update the docs site | [.agents/skills/dynamo-docs/SKILL.md](.agents/skills/dynamo-docs/SKILL.md) |
-| Run / extend the Kubernetes operator | [deploy/cloud/operator/](deploy/cloud/operator/) |
+| Run / extend the Kubernetes operator | [deploy/operator/](deploy/operator/) |
 
 ## Conventions for agents
 

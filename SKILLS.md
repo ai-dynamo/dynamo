@@ -31,7 +31,8 @@ The procedures below remain as a fallback for users without an agent CLI.
 ### Build a local image for Kimi-k2.5 (or any top-of-tree use case)
 
 ```bash
-./container/build.sh --framework vllm --tag my-tag
+python container/render.py --framework vllm --target runtime --output-short-filename
+docker build -f container/rendered.vllm.Dockerfile -t <your-registry>/ai-dynamo/vllm-runtime:my-tag .
 docker push <your-registry>/ai-dynamo/vllm-runtime:my-tag
 yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub("nvcr\.io/nvidia/ai-dynamo/(.+):my-tag", "<your-registry>/ai-dynamo/$1:my-tag")' recipes/kimi-k2.5/vllm/agg/deploy.yaml
 ```
@@ -84,6 +85,7 @@ nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
 | [`dep-update`](.agents/skills/dep-update/SKILL.md) | Update DEP status through its lifecycle — triage, review, approve, defer, or close. |
 | [`dynamo-docs`](.agents/skills/dynamo-docs/SKILL.md) | Maintain the Dynamo Fern docs site — add, update, move, or remove pages. |
 | [`gh-issue-bug`](.agents/skills/gh-issue-bug/SKILL.md) | File a well-structured bug report against `ai-dynamo/dynamo` using conversation context. |
+| [`graham-code-review`](.agents/skills/graham-code-review/SKILL.md) | Code review in Graham King's style — strict on Rust, runtime, networking, and performance-critical paths. |
 | [`pr-monitor`](.agents/skills/pr-monitor/SKILL.md) | Check CI status, analyze failures, and explain skips for a Dynamo PR. |
 | [`tool-parser-generator`](.agents/skills/tool-parser-generator/SKILL.md) | Generate optimized tool-call parsers from HuggingFace model chat templates. |
 

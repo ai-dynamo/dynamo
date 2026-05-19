@@ -25,7 +25,7 @@ Cause: the image tag doesn't exist, or the cluster lacks credentials for the reg
 
 Fix:
 
-1. **First check the tag.** All canonical Dynamo images are public on NGC at `nvcr.io/nvidia/ai-dynamo/{vllm-runtime,sglang-runtime,tensorrtllm-runtime,mocker-runtime}` and **do not require an `imagePullSecrets`**. Confirm the pinned tag exists — [release-artifacts.md](reference/release-artifacts.md) lists the canonical `:1.0.1` tag.
+1. **First check the tag.** All canonical Dynamo images are public on NGC at `nvcr.io/nvidia/ai-dynamo/{vllm-runtime,sglang-runtime,tensorrtllm-runtime,mocker-runtime}` and **do not require an `imagePullSecrets`**. Confirm the pinned tag exists — [release-artifacts.md](reference/release-artifacts.md) lists the canonical `:1.0.2` tag.
 2. If you're running a top-of-tree recipe (e.g. Kimi-k2.5), you must build and push your own image. See [`recipes/kimi-k2.5/README.md`](../recipes/kimi-k2.5/README.md) and the "Build a local image" workflow in [`SKILLS.md`](../SKILLS.md).
 3. **Only if** you're pulling from a private registry mirror or a non-public third-party image, create a registry pull secret and reference it via `imagePullSecrets` on the pod spec:
    ```bash

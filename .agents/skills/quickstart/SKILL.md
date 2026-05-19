@@ -71,7 +71,8 @@ The recipe `deploy.yaml` ships with a placeholder image. Pick the correct tag:
 - **Released images** are at `nvcr.io/nvidia/ai-dynamo/{vllm,sglang,tensorrtllm,mocker}-runtime:<tag>`. Latest stable tag is in [`docs/reference/release-artifacts.md`](../../../docs/reference/release-artifacts.md). Match the tag to the cluster's GPU driver via the [Feature Support Matrix](../../../docs/backends/trtllm/README.md#feature-support-matrix).
 - **Top-of-tree paths** (e.g. Kimi-k2.5, GLM-5-NVFP4) require a custom build. Run the `build-image` flow inline:
   ```bash
-  ./container/build.sh --framework vllm --tag my-tag
+  python container/render.py --framework vllm --target runtime --output-short-filename
+  docker build -f container/rendered.vllm.Dockerfile -t <your-registry>/ai-dynamo/vllm-runtime:my-tag .
   docker push <your-registry>/ai-dynamo/vllm-runtime:my-tag
   ```
   Then patch:
