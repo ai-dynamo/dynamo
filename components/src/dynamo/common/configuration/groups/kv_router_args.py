@@ -117,7 +117,7 @@ class KvRouterConfigBase(ConfigBase):
     router_reset_states: bool
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
-    router_queue_depth_by_missing_isl: list[tuple[int, int]] = []
+    router_queue_depth_by_missing_isl: list[tuple[int, int]] = [(0, 1024)]
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False

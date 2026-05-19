@@ -464,6 +464,10 @@ pub struct KvRouterConfig {
     /// - request missing 2000 tokens → matches (1024, 2)     → cap = 2*4 = 8
     /// - request missing 8000 tokens → matches (4096, 1)     → cap = 1*4 = 4
     ///
+    /// Default: `[(0, 1024)]` — 1024 slots per worker, a high ceiling that
+    /// won't trigger false backpressure under normal bursty traffic. Operators
+    /// can tune down (e.g., 64 or 128 per worker) for tighter memory bounds.
+    ///
     /// When configured, the vec must start with `missing_isl_floor = 0` and
     /// be strictly ascending in floor. The first tier therefore matches
     /// every request, so admission always has a cap. Empty vec disables
@@ -542,7 +546,10 @@ impl Default for KvRouterConfig {
             router_reset_states: false,
             router_ttl_secs: 120.0,
             router_queue_threshold: Some(16.0),
-            router_queue_depth_by_missing_isl: Vec::new(),
+            router_queue_depth_by_missing_isl: vec![RouterQueueDepthByMissingIslTier {
+                missing_isl_floor: 0,
+                max_queue_depth: 1024,
+            }],
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
