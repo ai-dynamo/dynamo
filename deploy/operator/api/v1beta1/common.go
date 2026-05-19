@@ -365,6 +365,8 @@ const (
 // KvTransferPolicy configures topology-aware routing for KV-cache transfers
 // between prefill and decode workers. This is a graph-wide concern placed
 // under `spec.experimental` while the API is incubating.
+// +kubebuilder:validation:XValidation:rule="!has(self.enforcement) || self.enforcement != 'preferred' || has(self.preferredWeight)",message="preferredWeight is required when enforcement is preferred"
+// +kubebuilder:validation:XValidation:rule="!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == 'preferred')",message="preferredWeight may only be set when enforcement is preferred"
 type KvTransferPolicy struct {
 	// labelKey is a Kubernetes node label key (e.g.
 	// "topology.kubernetes.io/zone") whose value identifies the topology
@@ -389,11 +391,12 @@ type KvTransferPolicy struct {
 	// +kubebuilder:validation:Enum=required;preferred
 	Enforcement KvTransferEnforcement `json:"enforcement,omitempty"`
 
-	// preferredWeight is used only when enforcement is "preferred". Higher
-	// values create a stronger same-domain routing preference, but do not
-	// guarantee same-domain selection. The value is not a probability; worker
-	// selection still depends on load and other routing inputs. A value of 0
-	// disables the topology preference; 1 is the strongest supported preference.
+	// preferredWeight is required and used only when enforcement is
+	// "preferred". Higher values create a stronger same-domain routing
+	// preference, but do not guarantee same-domain selection. The value is not
+	// a probability; worker selection still depends on load and other routing
+	// inputs. A value of 0 disables the topology preference; 1 is the strongest
+	// supported preference.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1

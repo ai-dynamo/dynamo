@@ -949,6 +949,10 @@ func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
 			"must be \"required\" or \"preferred\"", fieldPath, kvt.Enforcement))
 	}
 
+	if enforcement == nvidiacomv1alpha1.KvTransferEnforcementPreferred && kvt.PreferredWeight == nil {
+		errs = append(errs, fmt.Errorf("%s.preferredWeight is required when enforcement is \"preferred\"", fieldPath))
+	}
+
 	if kvt.PreferredWeight != nil {
 		if *kvt.PreferredWeight < 0 || *kvt.PreferredWeight > 1 {
 			errs = append(errs, fmt.Errorf("%s.preferredWeight %g is invalid; "+

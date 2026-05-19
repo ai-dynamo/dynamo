@@ -266,11 +266,12 @@ spec:
                           type: string
                         preferredWeight:
                           description: |-
-                            PreferredWeight is used only when enforcement is "preferred". Higher
-                            values create a stronger same-domain routing preference, but do not
-                            guarantee same-domain selection. The value is not a probability; worker
-                            selection still depends on load and other routing inputs. A value of 0
-                            disables the topology preference; 1 is the strongest supported preference.
+                            PreferredWeight is required and used only when enforcement is
+                            "preferred". Higher values create a stronger same-domain routing
+                            preference, but do not guarantee same-domain selection. The value is not
+                            a probability; worker selection still depends on load and other routing
+                            inputs. A value of 0 disables the topology preference; 1 is the strongest
+                            supported preference.
                           maximum: 1
                           minimum: 0
                           type: number
@@ -278,6 +279,11 @@ spec:
                         - domain
                         - labelKey
                       type: object
+                      x-kubernetes-validations:
+                        - message: preferredWeight is required when enforcement is preferred
+                          rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
+                        - message: preferredWeight may only be set when enforcement is preferred
+                          rule: '!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == ''preferred'')'
                   type: object
                 labels:
                   additionalProperties:
@@ -20660,11 +20666,12 @@ spec:
                           type: string
                         preferredWeight:
                           description: |-
-                            preferredWeight is used only when enforcement is "preferred". Higher
-                            values create a stronger same-domain routing preference, but do not
-                            guarantee same-domain selection. The value is not a probability; worker
-                            selection still depends on load and other routing inputs. A value of 0
-                            disables the topology preference; 1 is the strongest supported preference.
+                            preferredWeight is required and used only when enforcement is
+                            "preferred". Higher values create a stronger same-domain routing
+                            preference, but do not guarantee same-domain selection. The value is not
+                            a probability; worker selection still depends on load and other routing
+                            inputs. A value of 0 disables the topology preference; 1 is the strongest
+                            supported preference.
                           maximum: 1
                           minimum: 0
                           type: number
@@ -20672,6 +20679,11 @@ spec:
                         - domain
                         - labelKey
                       type: object
+                      x-kubernetes-validations:
+                        - message: preferredWeight is required when enforcement is preferred
+                          rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
+                        - message: preferredWeight may only be set when enforcement is preferred
+                          rule: '!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == ''preferred'')'
                   type: object
                 labels:
                   additionalProperties:
