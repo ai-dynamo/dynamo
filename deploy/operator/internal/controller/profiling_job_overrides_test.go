@@ -286,7 +286,7 @@ func TestApplyProfilingJobOverrides_ImagePullSecrets_Merge(t *testing.T) {
 			Spec: corev1.PodSpec{
 				ImagePullSecrets: []corev1.LocalObjectReference{
 					{Name: "nvcr-imagepullsecret"},
-					{Name: "nvcr.io/nvidia/ai-dynamo-secret"},
+					{Name: "my-registry-secret"},
 				},
 			},
 		},
@@ -298,7 +298,7 @@ func TestApplyProfilingJobOverrides_ImagePullSecrets_Merge(t *testing.T) {
 	if secrets[0].Name != "nvcr-imagepullsecret" {
 		t.Errorf("expected base secret first, got %s", secrets[0].Name)
 	}
-	if secrets[1].Name != "nvcr.io/nvidia/ai-dynamo-secret" {
+	if secrets[1].Name != "my-registry-secret" {
 		t.Errorf("expected override secret second, got %s", secrets[1].Name)
 	}
 }
