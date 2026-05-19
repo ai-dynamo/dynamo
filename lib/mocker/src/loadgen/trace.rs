@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_data_gen::MooncakeRow;
+use dynamo_data_gen::{AgenticMooncakeRow, MooncakeRow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_block_hash_for_seq,
@@ -21,8 +21,9 @@ use uuid::Uuid;
 
 use super::driver::WorkloadDriver;
 use super::types::{
-    ArrivalSpec, DelaySpec, LengthSpec, ReplayRequestHashes, RouterSequence, SequenceHashMode,
-    SessionPartitionSpec, SessionTrace, SyntheticTraceSpec, Trace, TurnTrace,
+    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, LengthSpec, ReplayRequestHashes,
+    RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace, SyntheticTraceSpec,
+    Trace, TurnTrace,
 };
 use crate::common::protocols::DirectRequest;
 
@@ -89,6 +90,68 @@ impl TurnTrace {
             dp_rank: 0,
             arrival_timestamp_ms,
         })
+    }
+
+    pub fn to_replay_hashes(
+        &self,
+        trace_block_size: usize,
+        engine_block_size: usize,
+    ) -> Result<ReplayRequestHashes> {
+        if engine_block_size == 0 {
+            bail!("engine_block_size must be greater than 0");
+        }
+
+        let tokens = self.synthesize_tokens(trace_block_size)?;
+        let engine_block_size =
+            u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
+        let local_block_hashes =
+            compute_block_hash_for_seq(&tokens, engine_block_size, BlockHashOptions::default());
+        let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
+
+        Ok(ReplayRequestHashes {
+            local_block_hashes,
+            sequence_hashes,
+        })
+    }
+}
+
+impl AgenticTurnTrace {
+    fn validate_block_size_and_capacity(&self, trace_block_size: usize) -> Result<()> {
+        if trace_block_size == 0 {
+            bail!("trace_block_size must be greater than 0");
+        }
+        if self.hash_ids.len() * trace_block_size < self.input_length {
+            bail!(
+                "input_length {} exceeds synthesized capacity {}",
+                self.input_length,
+                self.hash_ids.len() * trace_block_size
+            );
+        }
+        Ok(())
+    }
+
+    pub fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
+        self.validate_block_size_and_capacity(trace_block_size)?;
+
+        let mut tokens = Vec::with_capacity(self.input_length);
+        for &hash_id in &self.hash_ids {
+            let token_id = hash_id as u32;
+            tokens.extend((0..trace_block_size).map(|_| token_id));
+            if tokens.len() >= self.input_length {
+                tokens.truncate(self.input_length);
+                break;
+            }
+        }
+
+        if tokens.len() != self.input_length {
+            bail!(
+                "failed to synthesize {} tokens from {} hash_ids",
+                self.input_length,
+                self.hash_ids.len()
+            );
+        }
+
+        Ok(tokens)
     }
 
     pub fn to_replay_hashes(
@@ -886,6 +949,208 @@ impl Trace {
 
         Ok(())
     }
+}
+
+impl AgenticTrace {
+    pub fn from_agentic_mooncake(path: &Path, trace_block_size: usize) -> Result<Self> {
+        if trace_block_size == 0 {
+            bail!("trace_block_size must be greater than 0");
+        }
+
+        let file = File::open(path)
+            .with_context(|| format!("failed to open trace file {}", path.display()))?;
+        let reader = BufReader::new(file);
+        let mut turns = Vec::new();
+        let mut request_ids = std::collections::HashSet::new();
+
+        for (line_idx, line) in reader.lines().enumerate() {
+            let line = line.with_context(|| {
+                format!(
+                    "failed to read line {} from {}",
+                    line_idx + 1,
+                    path.display()
+                )
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let raw: AgenticMooncakeRow = serde_json::from_str(&line).with_context(|| {
+                format!(
+                    "failed to parse line {} from {} as agentic Mooncake JSON",
+                    line_idx + 1,
+                    path.display()
+                )
+            })?;
+            if raw.request_id.trim().is_empty() {
+                bail!("trace line {} has empty request_id", line_idx + 1);
+            }
+            if !request_ids.insert(raw.request_id.clone()) {
+                bail!(
+                    "trace line {} duplicates request_id {}",
+                    line_idx + 1,
+                    raw.request_id
+                );
+            }
+
+            let delay_after_dependencies_ms = raw.dependency_delay_ms();
+            let hash_ids = raw
+                .hash_ids
+                .ok_or_else(|| anyhow!("trace line {} is missing hash_ids", line_idx + 1))?;
+            let synthesizable_capacity =
+                hash_ids
+                    .len()
+                    .checked_mul(trace_block_size)
+                    .ok_or_else(|| {
+                        anyhow!("trace line {} synthesized capacity overflow", line_idx + 1)
+                    })?;
+            let input_length = raw
+                .input_length
+                .unwrap_or(synthesizable_capacity)
+                .min(synthesizable_capacity);
+            let output_length = raw
+                .output_length
+                .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
+            if !delay_after_dependencies_ms.is_finite() || delay_after_dependencies_ms < 0.0 {
+                bail!(
+                    "trace line {} has invalid dependency delay {}",
+                    line_idx + 1,
+                    delay_after_dependencies_ms
+                );
+            }
+            if let Some(timestamp_ms) = raw.timestamp
+                && (!timestamp_ms.is_finite() || timestamp_ms < 0.0)
+            {
+                bail!(
+                    "trace line {} has invalid timestamp {}",
+                    line_idx + 1,
+                    timestamp_ms
+                );
+            }
+
+            turns.push(AgenticTurnTrace {
+                request_id: raw.request_id,
+                session_id: raw
+                    .session_id
+                    .unwrap_or_else(|| format!("request_{}", line_idx + 1)),
+                input_length,
+                max_output_tokens: output_length,
+                hash_ids,
+                first_ready_timestamp_ms: raw.timestamp,
+                delay_after_dependencies_ms,
+                wait_for: raw.wait_for,
+                prefix_reset: raw.prefix_reset.unwrap_or(false),
+            });
+        }
+
+        if turns.is_empty() {
+            bail!(
+                "agentic trace file {} did not contain any requests",
+                path.display()
+            );
+        }
+
+        for turn in &turns {
+            for dependency in &turn.wait_for {
+                if !request_ids.contains(dependency) {
+                    bail!(
+                        "request {} waits for unknown request_id {}",
+                        turn.request_id,
+                        dependency
+                    );
+                }
+                if dependency == &turn.request_id {
+                    bail!("request {} cannot wait for itself", turn.request_id);
+                }
+            }
+        }
+        validate_agentic_trace_is_acyclic(&turns)?;
+
+        Ok(Self {
+            block_size: trace_block_size,
+            turns,
+        })
+    }
+
+    pub fn normalize_starts(mut self) -> Self {
+        let Some(min_timestamp_ms) = self
+            .turns
+            .iter()
+            .filter_map(|turn| turn.first_ready_timestamp_ms)
+            .min_by(|left, right| left.total_cmp(right))
+        else {
+            return self;
+        };
+
+        for turn in &mut self.turns {
+            if let Some(timestamp_ms) = turn.first_ready_timestamp_ms.as_mut() {
+                *timestamp_ms -= min_timestamp_ms;
+            }
+        }
+        self
+    }
+
+    pub fn speed_up_timing(mut self, ratio: f64) -> Result<Self> {
+        if !ratio.is_finite() || ratio <= 0.0 {
+            bail!("ratio must be a finite positive number, got {ratio}");
+        }
+
+        for turn in &mut self.turns {
+            if let Some(timestamp_ms) = turn.first_ready_timestamp_ms.as_mut() {
+                *timestamp_ms /= ratio;
+            }
+            turn.delay_after_dependencies_ms /= ratio;
+        }
+        Ok(self)
+    }
+
+    pub fn into_trace_driver_with_block_size(
+        self,
+        engine_block_size: usize,
+    ) -> Result<WorkloadDriver> {
+        WorkloadDriver::new_agentic_trace(self, engine_block_size)
+    }
+}
+
+fn validate_agentic_trace_is_acyclic(turns: &[AgenticTurnTrace]) -> Result<()> {
+    let mut index_by_id = HashMap::new();
+    for (idx, turn) in turns.iter().enumerate() {
+        index_by_id.insert(turn.request_id.as_str(), idx);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mark {
+        Visiting,
+        Done,
+    }
+
+    fn visit<'a>(
+        idx: usize,
+        turns: &'a [AgenticTurnTrace],
+        index_by_id: &HashMap<&'a str, usize>,
+        marks: &mut Vec<Option<Mark>>,
+    ) -> Result<()> {
+        match marks[idx] {
+            Some(Mark::Done) => return Ok(()),
+            Some(Mark::Visiting) => bail!("cycle detected at request {}", turns[idx].request_id),
+            None => {}
+        }
+        marks[idx] = Some(Mark::Visiting);
+        for dependency in &turns[idx].wait_for {
+            let dep_idx = *index_by_id
+                .get(dependency.as_str())
+                .expect("dependencies were prevalidated");
+            visit(dep_idx, turns, index_by_id, marks)?;
+        }
+        marks[idx] = Some(Mark::Done);
+        Ok(())
+    }
+
+    let mut marks = vec![None; turns.len()];
+    for idx in 0..turns.len() {
+        visit(idx, turns, &index_by_id, &mut marks)?;
+    }
+    Ok(())
 }
 
 fn extend_applied_compute_agentic_hash_ids(
