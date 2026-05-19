@@ -487,9 +487,12 @@ where
     /// "fleet is overloaded" case (`ResourceExhausted` / 503 retry-later,
     /// matching the post-selection check in `route()` and the KV scheduler's
     /// `AllEligibleWorkersOverloaded`) from "no workers registered at all"
-    /// (generic 5xx "no instances found").
+    /// or "all routable workers were reported down" (generic 5xx
+    /// "no instances found"). Overload is signaled only when `routable_ids`
+    /// is non-empty and `free_ids` is empty — i.e., workers are alive and
+    /// up but every one of them is over its admission threshold.
     fn empty_free_pool_error(&self, routing_instances: &RoutingInstances) -> anyhow::Error {
-        if !routing_instances.discovered_ids().is_empty() {
+        if !routing_instances.routable_ids().is_empty() {
             let cause = PipelineError::ServiceOverloaded(
                 "All workers are busy, please retry later".to_string(),
             );
@@ -690,7 +693,7 @@ where
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn select_next_worker(&self) -> Option<u64> {
         let routing_instances = self.client.routing_instances();
-        let count = routing_instances.routable_ids().len();
+        let count = routing_instances.free_ids().len();
         if count == 0 {
             return None;
         }
@@ -698,11 +701,11 @@ where
         match self.router_mode {
             RouterMode::RoundRobin => {
                 let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
-                Some(routing_instances.routable_ids()[counter % count])
+                Some(routing_instances.free_ids()[counter % count])
             }
             RouterMode::Random => {
                 let counter = rand::rng().random::<u64>() as usize;
-                Some(routing_instances.routable_ids()[counter % count])
+                Some(routing_instances.free_ids()[counter % count])
             }
             RouterMode::PowerOfTwoChoices
             | RouterMode::Direct
@@ -722,7 +725,7 @@ where
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn peek_next_worker(&self) -> Option<u64> {
         let routing_instances = self.client.routing_instances();
-        let count = routing_instances.routable_ids().len();
+        let count = routing_instances.free_ids().len();
         if count == 0 {
             return None;
         }
@@ -731,13 +734,13 @@ where
             RouterMode::RoundRobin => {
                 // Just peek at the current counter value without incrementing
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
-                Some(routing_instances.routable_ids()[counter % count])
+                Some(routing_instances.free_ids()[counter % count])
             }
             RouterMode::Random => {
                 // For random, peeking implies a fresh random selection since it's stateless.
                 // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
                 let counter = rand::rng().random::<u64>() as usize;
-                Some(routing_instances.routable_ids()[counter % count])
+                Some(routing_instances.free_ids()[counter % count])
             }
             RouterMode::PowerOfTwoChoices
             | RouterMode::Direct
@@ -870,10 +873,13 @@ where
                 result
             } else {
                 // Instance vanished — pick a different one from the current
-                // availability list and retry the lookup once.
+                // free set and retry the lookup once. Using `free_ids()` keeps
+                // the fallback consistent with the pre-selection filter so we
+                // don't silently dispatch to an overloaded peer without
+                // re-running the admission check.
                 let routing_instances = self.client.routing_instances();
                 let fallback_id = routing_instances
-                    .routable_ids()
+                    .free_ids()
                     .iter()
                     .copied()
                     .find(|&id| id != instance_id);
