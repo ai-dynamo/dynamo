@@ -92,8 +92,6 @@ ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 {% endif %}
 
 {% if framework == "vllm" -%}
-# Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF={{ context[framework][device_key].vllm_ref }}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
 {% if device == "cuda" -%}
 # FlashInfer cubin/jit-cache version used by the vLLM installer.

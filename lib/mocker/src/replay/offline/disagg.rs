@@ -448,10 +448,20 @@ impl DisaggRuntime {
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
-        choose_next_timestamp(
+        let next = choose_next_timestamp(
             self.admission.next_ready_time_ms(self.cluster_in_flight()),
             next_event_ms,
-        )
+        );
+        #[cfg(feature = "kvbm-offload")]
+        {
+            let next_offload = choose_next_timestamp(
+                self.prefill_engine.earliest_offload_deadline(),
+                self.decode_engine.earliest_offload_deadline(),
+            );
+            return choose_next_timestamp(next, next_offload);
+        }
+        #[cfg(not(feature = "kvbm-offload"))]
+        next
     }
 
     /// Apply prefill-side KV router events at the scheduler-selected visibility phase.
@@ -464,6 +474,21 @@ impl DisaggRuntime {
             bail!("offline disagg replay prefill KV events must not admit requests");
         }
         Ok(())
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn tick_offload_engines(&mut self) -> Result<bool> {
+        let prefill_events = self.prefill_engine.tick_offload_engines(self.now_ms);
+        let decode_events = self.decode_engine.tick_offload_engines(self.now_ms);
+        let changed = !prefill_events.is_empty() || !decode_events.is_empty();
+        self.apply_prefill_router_events(prefill_events)?;
+        if !decode_events.is_empty() {
+            tracing::debug!(
+                events = decode_events.len(),
+                "offline disagg replay dropping decode-side offload router events"
+            );
+        }
+        Ok(changed)
     }
 
     /// Process one prefill output signal, including router updates and decode handoff scheduling.
@@ -784,7 +809,13 @@ impl DisaggRuntime {
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> Result<()> {
         loop {
-            let mut changed = self.apply_worker_completions()?;
+            #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
+            let mut changed = false;
+            #[cfg(feature = "kvbm-offload")]
+            {
+                changed |= self.tick_offload_engines()?;
+            }
+            changed |= self.apply_worker_completions()?;
             changed |= self.apply_worker_ready_events()?;
             changed |= self.apply_decode_handoffs()?;
             changed |= self.release_ready_arrivals()?;
