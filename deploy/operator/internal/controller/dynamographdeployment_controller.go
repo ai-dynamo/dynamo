@@ -41,6 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -645,6 +646,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
 	preserveGrovePodCliqueSetOrder(grovePodCliqueSet, existingPodCliqueSet)
+	preserveGrovePodCliqueSetReplicas(grovePodCliqueSet, existingPodCliqueSet)
 	_, syncedGrovePodCliqueSet, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
 		return grovePodCliqueSet, false, nil
 	})
@@ -706,6 +708,48 @@ func preserveGrovePodCliqueSetOrder(desired *grovev1alpha1.PodCliqueSet, existin
 	desired.Spec.Template.Cliques = orderLikeExisting(existing.Spec.Template.Cliques, desired.Spec.Template.Cliques, podCliqueTemplateName)
 	desired.Spec.Template.PodCliqueScalingGroupConfigs = orderLikeExisting(existing.Spec.Template.PodCliqueScalingGroupConfigs, desired.Spec.Template.PodCliqueScalingGroupConfigs, podCliqueScalingGroupConfigName)
 	desired.Spec.Template.ResourceClaimTemplates = orderLikeExisting(existing.Spec.Template.ResourceClaimTemplates, desired.Spec.Template.ResourceClaimTemplates, resourceClaimTemplateConfigName)
+}
+
+// Grove replicas are driven through scale subresources after creation; keep
+// existing template values so DGD replica changes do not update the PCS spec.
+func preserveGrovePodCliqueSetReplicas(desired *grovev1alpha1.PodCliqueSet, existing *grovev1alpha1.PodCliqueSet) {
+	if desired == nil || existing == nil {
+		return
+	}
+
+	cliqueReplicasByName := make(map[string]int32, len(existing.Spec.Template.Cliques))
+	for _, clique := range existing.Spec.Template.Cliques {
+		if clique == nil || clique.Name == "" {
+			continue
+		}
+		cliqueReplicasByName[clique.Name] = clique.Spec.Replicas
+	}
+	for _, clique := range desired.Spec.Template.Cliques {
+		if clique == nil {
+			continue
+		}
+		if replicas, ok := cliqueReplicasByName[clique.Name]; ok {
+			clique.Spec.Replicas = replicas
+		}
+	}
+
+	scalingGroupReplicasByName := make(map[string]*int32, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
+	for _, config := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
+		if config.Name == "" {
+			continue
+		}
+		if config.Replicas == nil {
+			scalingGroupReplicasByName[config.Name] = nil
+		} else {
+			scalingGroupReplicasByName[config.Name] = ptr.To(*config.Replicas)
+		}
+	}
+	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		if replicas, ok := scalingGroupReplicasByName[config.Name]; ok {
+			config.Replicas = replicas
+		}
+	}
 }
 
 func orderLikeExisting[T any](existing []T, desired []T, nameOf func(T) string) []T {
