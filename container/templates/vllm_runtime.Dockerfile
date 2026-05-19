@@ -164,7 +164,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
 # Reinstalling triton-xpu ensures the triton namespace is properly configured
-RUN uv pip uninstall -y triton && \
+RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
 {% endif %}
 {% endif %}
