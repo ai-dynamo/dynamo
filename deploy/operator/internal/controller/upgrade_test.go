@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -48,11 +49,13 @@ type nonEPPWorkerIdentityLabels struct {
 type nonEPPWorkerIdentityRender struct {
 	labelSets       []nonEPPWorkerIdentityLabels
 	serviceSelector map[string]string
+	existingObject  client.Object
+	desiredObject   client.Object
 	existingHash    string
 	desiredHash     string
 }
 
-func TestNonEPPWorkerIdentityLabelsDoNotTriggerRollout(t *testing.T) {
+func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
 		name   string
@@ -66,18 +69,20 @@ func TestNonEPPWorkerIdentityLabelsDoNotTriggerRollout(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.render(ctx, t)
+			require.NotNil(t, got.existingObject, "existing downstream object")
+			require.NotNil(t, got.desiredObject, "desired downstream object")
+			require.NotEmpty(t, got.existingHash, "existing downstream object hash")
+			require.NotEmpty(t, got.desiredHash, "desired downstream object hash")
+			require.Equal(t, got.existingHash, got.desiredHash, "upgrade should not change the downstream spec hash")
+
 			for _, labelSet := range got.labelSets {
 				require.Equal(t, commonconsts.ComponentTypeWorker, labelSet.labels[commonconsts.KubeLabelDynamoComponentType], labelSet.name)
 				require.Equal(t, labelSet.subComponentType, labelSet.labels[commonconsts.KubeLabelDynamoSubComponentType], labelSet.name)
 				require.NotContains(t, labelSet.labels, commonconsts.KubeLabelDynamoComponentClass, labelSet.name)
 			}
 
-			if got.serviceSelector != nil {
-				require.Equal(t, commonconsts.ComponentTypeWorker, got.serviceSelector[commonconsts.KubeLabelDynamoComponentType])
-			}
-			if got.existingHash != "" || got.desiredHash != "" {
-				require.Equal(t, got.existingHash, got.desiredHash)
-			}
+			require.NotNil(t, got.serviceSelector, "service selector")
+			require.Equal(t, commonconsts.ComponentTypeWorker, got.serviceSelector[commonconsts.KubeLabelDynamoComponentType])
 		})
 	}
 }
@@ -85,8 +90,8 @@ func TestNonEPPWorkerIdentityLabelsDoNotTriggerRollout(t *testing.T) {
 func renderNonEPPDeploymentWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWorkerIdentityRender {
 	t.Helper()
 	s := newNonEPPWorkerIdentityScheme(t)
-	dcd := newNonEPPDecodeDCD(false)
-	seed := &appsv1.Deployment{
+	dcd := convertedLegacyDecodeDCD(t, false)
+	preUpgradeDeployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: dcd.Name, Namespace: dcd.Namespace},
 		Spec: appsv1.DeploymentSpec{
 			Template: corev1.PodTemplateSpec{
@@ -95,28 +100,35 @@ func renderNonEPPDeploymentWorkerIdentity(ctx context.Context, t *testing.T) non
 		},
 	}
 
-	existing, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, seed).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	existing, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, preUpgradeDeployment).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)
 	require.False(t, toDelete)
 	desired, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, existing).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)
 	require.False(t, toDelete)
+	service, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, desired).generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
 	return nonEPPWorkerIdentityRender{
 		labelSets: []nonEPPWorkerIdentityLabels{{
 			name:             "deployment pod template",
 			labels:           desired.Spec.Template.Labels,
 			subComponentType: commonconsts.ComponentTypeDecode,
 		}},
-		existingHash: specHash(t, existing),
-		desiredHash:  specHash(t, desired),
+		serviceSelector: service.Spec.Selector,
+		existingObject:  existing,
+		desiredObject:   desired,
+		existingHash:    specHash(t, existing),
+		desiredHash:     specHash(t, desired),
 	}
 }
 
 func renderNonEPPLeaderWorkerSetWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWorkerIdentityRender {
 	t.Helper()
 	s := newNonEPPWorkerIdentityScheme(t)
-	dcd := newNonEPPDecodeDCD(true)
-	seed := &leaderworkersetv1.LeaderWorkerSet{
+	dcd := convertedLegacyDecodeDCD(t, true)
+	preUpgradeLWS := &leaderworkersetv1.LeaderWorkerSet{
 		ObjectMeta: metav1.ObjectMeta{Name: leaderWorkerSetName(dcd), Namespace: dcd.Namespace},
 		Spec: leaderworkersetv1.LeaderWorkerSetSpec{
 			LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
@@ -130,12 +142,16 @@ func renderNonEPPLeaderWorkerSetWorkerIdentity(ctx context.Context, t *testing.T
 		},
 	}
 
-	existing, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, seed).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	existing, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, preUpgradeLWS).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)
 	require.False(t, toDelete)
 	desired, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, existing).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)
 	require.False(t, toDelete)
+	service, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, desired).generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
 	return nonEPPWorkerIdentityRender{
 		labelSets: []nonEPPWorkerIdentityLabels{
 			{
@@ -149,15 +165,18 @@ func renderNonEPPLeaderWorkerSetWorkerIdentity(ctx context.Context, t *testing.T
 				subComponentType: commonconsts.ComponentTypeDecode,
 			},
 		},
-		existingHash: specHash(t, existing),
-		desiredHash:  specHash(t, desired),
+		serviceSelector: service.Spec.Selector,
+		existingObject:  existing,
+		desiredObject:   desired,
+		existingHash:    specHash(t, existing),
+		desiredHash:     specHash(t, desired),
 	}
 }
 
 func renderNonEPPGroveWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWorkerIdentityRender {
 	t.Helper()
-	dgd := newNonEPPGroveDGD()
-	seed := &grovev1alpha1.PodCliqueSet{
+	dgd := convertedLegacyGroveDGD(t)
+	preUpgradePCS := &grovev1alpha1.PodCliqueSet{
 		ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace},
 		Spec: grovev1alpha1.PodCliqueSetSpec{
 			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
@@ -182,10 +201,10 @@ func renderNonEPPGroveWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWo
 			},
 		},
 	}
-	seed.Spec.Template.Cliques[0].Labels = mergeStringMaps(seed.Spec.Template.Cliques[0].Labels, newLegacyWorkerLabels(commonconsts.ComponentTypePrefill))
-	seed.Spec.Template.Cliques[2].Labels = mergeStringMaps(seed.Spec.Template.Cliques[2].Labels, newLegacyWorkerLabels(commonconsts.ComponentTypeDecode))
+	preUpgradePCS.Spec.Template.Cliques[0].Labels = mergeStringMaps(preUpgradePCS.Spec.Template.Cliques[0].Labels, newLegacyWorkerLabels(commonconsts.ComponentTypePrefill))
+	preUpgradePCS.Spec.Template.Cliques[2].Labels = mergeStringMaps(preUpgradePCS.Spec.Template.Cliques[2].Labels, newLegacyWorkerLabels(commonconsts.ComponentTypeDecode))
 
-	renderDGD, existing := renderGrovePodCliqueSetFromExisting(ctx, t, dgd, seed)
+	renderDGD, existing := renderGrovePodCliqueSetFromExisting(ctx, t, dgd, preUpgradePCS)
 	renderDGD, desired := renderGrovePodCliqueSetFromExisting(ctx, t, dgd, existing.DeepCopy())
 	prefill := requireGroveClique(t, desired, "vllmprefillworker")
 	decode := requireGroveClique(t, desired, "vllmdecodeworker")
@@ -218,6 +237,8 @@ func renderNonEPPGroveWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWo
 			},
 		},
 		serviceSelector: service.Spec.Selector,
+		existingObject:  existing,
+		desiredObject:   desired,
 		existingHash:    specHash(t, existing),
 		desiredHash:     specHash(t, desired),
 	}
@@ -292,7 +313,9 @@ func newNonEPPDCDReconciler(
 			WithScheme(s).
 			WithObjects(objects...).
 			Build(),
-		Config:        &configv1alpha1.OperatorConfiguration{},
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		},
 		RuntimeConfig: &controller_common.RuntimeConfig{LWSEnabled: true},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
@@ -302,8 +325,10 @@ func newNonEPPDCDReconciler(
 	}
 }
 
-func newNonEPPDecodeDCD(multinode bool) *v1beta1.DynamoComponentDeployment {
-	dcd := &v1beta1.DynamoComponentDeployment{
+func convertedLegacyDecodeDCD(t *testing.T, multinode bool) *v1beta1.DynamoComponentDeployment {
+	t.Helper()
+	dynamoNamespace := "default"
+	alpha := &v1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "qwen-decode-db6b6891",
 			Namespace: "default",
@@ -311,40 +336,45 @@ func newNonEPPDecodeDCD(multinode bool) *v1beta1.DynamoComponentDeployment {
 				commonconsts.KubeLabelDynamoComponent:           "decode",
 				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
 				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
-				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeDecode,
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
 			},
 		},
-		Spec: v1beta1.DynamoComponentDeploymentSpec{
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework: string(dynamo.BackendFrameworkVLLM),
-			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "decode",
-				ComponentType: v1beta1.ComponentTypeDecode,
-				PodTemplate: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name:    commonconsts.MainContainerName,
-							Image:   "test-image:latest",
-							Command: []string{"python3"},
-							Args:    []string{"-m", "dynamo.vllm"},
-							Resources: corev1.ResourceRequirements{
-								Limits: corev1.ResourceList{
-									corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
-								},
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:      "decode",
+				ComponentType:    commonconsts.ComponentTypeWorker,
+				SubComponentType: commonconsts.ComponentTypeDecode,
+				DynamoNamespace:  &dynamoNamespace,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    commonconsts.MainContainerName,
+						Image:   "test-image:latest",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.vllm"},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 							},
-						}},
+						},
 					},
 				},
 			},
 		},
 	}
 	if multinode {
-		dcd.Spec.Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
+		alpha.Spec.Multinode = &v1alpha1.MultinodeSpec{NodeCount: 2}
 	}
+	dcd := betaDCD(t, alpha)
+	require.Equal(t, v1beta1.ComponentTypeDecode, dcd.Spec.ComponentType)
+	require.Equal(t, commonconsts.ComponentTypeWorker, dcd.Labels[commonconsts.KubeLabelDynamoComponentType])
 	return dcd
 }
 
-func newNonEPPGroveDGD() *v1beta1.DynamoGraphDeployment {
-	return &v1beta1.DynamoGraphDeployment{
+func convertedLegacyGroveDGD(t *testing.T) *v1beta1.DynamoGraphDeployment {
+	t.Helper()
+	alpha := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "vllm-disagg-planner",
 			Namespace: "jsm",
@@ -352,16 +382,34 @@ func newNonEPPGroveDGD() *v1beta1.DynamoGraphDeployment {
 				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
 			},
 		},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				{ComponentName: "Frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
-				{ComponentName: "Planner", ComponentType: v1beta1.ComponentTypePlanner, Replicas: ptr.To(int32(1))},
-				{ComponentName: "VllmDecodeWorker", ComponentType: v1beta1.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
-				{ComponentName: "VllmPrefillWorker", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"Planner": {
+					ComponentType: commonconsts.ComponentTypePlanner,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"VllmDecodeWorker": {
+					ComponentType:    commonconsts.ComponentTypeWorker,
+					SubComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:         ptr.To(int32(1)),
+				},
+				"VllmPrefillWorker": {
+					ComponentType:    commonconsts.ComponentTypeWorker,
+					SubComponentType: commonconsts.ComponentTypePrefill,
+					Replicas:         ptr.To(int32(1)),
+				},
 			},
 		},
 	}
+	dgd := betaDGD(t, alpha)
+	require.Equal(t, v1beta1.ComponentTypeDecode, dgd.GetComponentByName("VllmDecodeWorker").ComponentType)
+	require.Equal(t, v1beta1.ComponentTypePrefill, dgd.GetComponentByName("VllmPrefillWorker").ComponentType)
+	return dgd
 }
 
 func newNonEPPWorkerIdentityScheme(t *testing.T) *runtime.Scheme {
