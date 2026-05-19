@@ -544,10 +544,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="number of sweep points for synthetic perf model benchmark (default: 8, matching profiler)",
     )
     parser.add_argument(
-        "--max-sim-time-minutes",
+        "--max-sim-time-seconds",
         type=float,
         default=None,
-        help="optional cap on simulated wall-clock duration for offline replay (disagg and agg); when set, replay stops once the simulated clock would exceed this many minutes, leaving in-flight requests as incomplete in the report",
+        help="optional cap on simulated wall-clock duration for offline replay (disagg and agg); when set, replay stops once the simulated clock would exceed this many seconds, leaving in-flight requests as incomplete in the report",
     )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
@@ -579,14 +579,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
 
-    if args.max_sim_time_minutes is not None:
+    if args.max_sim_time_seconds is not None:
         if args.planner_config is not None:
             parser.error(
-                "--max-sim-time-minutes is not supported with --planner-config"
+                "--max-sim-time-seconds is not supported with --planner-config"
             )
         if not using_trace_file:
             parser.error(
-                "--max-sim-time-minutes currently only supports trace-file replay"
+                "--max-sim-time-seconds currently only supports trace-file replay"
             )
 
     extra_engine_args = _load_engine_args(args.extra_engine_args)
@@ -646,8 +646,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if using_trace_file:
         max_sim_time_ms = (
-            args.max_sim_time_minutes * 60_000.0
-            if args.max_sim_time_minutes is not None
+            args.max_sim_time_seconds * 1_000.0
+            if args.max_sim_time_seconds is not None
             else None
         )
         report = run_trace_replay(
