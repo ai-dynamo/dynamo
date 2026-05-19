@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
 
@@ -138,6 +139,7 @@ where
         let engine_ctx_ = engine_ctx.clone();
         let retry_manager = RetryManager::build(
             engine_ctx,
+            context.metadata().clone(),
             preprocessed_request,
             next,
             self.migration_limit,
@@ -162,6 +164,7 @@ where
     Resp: Data + HasTokenIds,
 {
     context: Arc<dyn AsyncEngineContext>,
+    metadata: BTreeMap<String, String>,
     request: PreprocessedRequest,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
@@ -175,8 +178,10 @@ impl<Resp> RetryManager<Resp>
 where
     Resp: Data + HasTokenIds,
 {
+    #[allow(clippy::too_many_arguments)]
     pub async fn build(
         context: Arc<dyn AsyncEngineContext>,
+        metadata: BTreeMap<String, String>,
         preprocessed_request: PreprocessedRequest,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
         mut retries_left: u32,
@@ -214,6 +219,7 @@ where
         }
         let mut slf = Self {
             context,
+            metadata,
             request: preprocessed_request,
             next_generate: next,
             next_stream: None,
@@ -260,7 +266,11 @@ where
         let mut response_stream: Option<Result<ManyOut<Annotated<Resp>>>> = None;
         while self.retries_left > 0 {
             self.retries_left -= 1;
-            let request = Context::with_id(self.request.clone(), self.context.id().to_string());
+            let request = Context::with_id_and_metadata(
+                self.request.clone(),
+                self.context.id().to_string(),
+                self.metadata.clone(),
+            );
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
                 tracing::debug!("Abort creating new stream after context is stopped or killed");
@@ -692,6 +702,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             0,
@@ -743,6 +754,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -795,6 +807,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -848,6 +861,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let retry_manager_result = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -888,6 +902,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -947,6 +962,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1011,6 +1027,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let retry_manager_result = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1090,6 +1107,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3, // migration_limit=3 — should be ignored for guided-decoding requests
@@ -1167,6 +1185,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1238,6 +1257,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1303,6 +1323,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
@@ -1381,6 +1402,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             1,

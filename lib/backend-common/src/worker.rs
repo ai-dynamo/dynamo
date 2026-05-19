@@ -48,8 +48,7 @@ pub struct RuntimeConfig {
     /// Discovery backend selector — e.g. `"etcd"`, `"kubernetes"`, `"file"`,
     /// `"mem"`. Maps to `DYN_DISCOVERY_BACKEND`.
     pub discovery_backend: Option<String>,
-    /// Request-plane transport — e.g. `"tcp"`, `"nats"`, `"http"`. Maps to
-    /// `DYN_REQUEST_PLANE`.
+    /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
     pub request_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
     /// derives a default from the discovery backend. Maps to `DYN_EVENT_PLANE`.

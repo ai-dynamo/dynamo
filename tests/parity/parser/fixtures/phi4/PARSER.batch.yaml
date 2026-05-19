@@ -38,16 +38,43 @@ cases:
       vllm: *id003
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &id004
+      dynamo:
         calls: []
         normal_text: ''
-      vllm: *id004
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.10:
@@ -69,8 +96,8 @@ cases:
       vllm: *id005
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.11:
-    description: Single JSON-array call with comma inside argument string value
+  PARSER.batch.30.a:
+    description: JSON-array call separator `,` inside one argument string value
     model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}]'
     tools:
     - name: run_query
@@ -80,18 +107,70 @@ cases:
           sql:
             type: string
     expected:
-      dynamo: &d_11
+      dynamo:
         calls:
         - name: run_query
           arguments:
             sql: SELECT a, SELECT b
         normal_text: ''
-      vllm: *d_11
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.12:
-    description: Parallel JSON-array calls where one argument contains a comma
-    model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}, {"name": "get_time", "arguments": {"timezone": "EST"}}]'
+  PARSER.batch.30.b:
+    description: JSON structural delimiters `}` and `]` inside one argument string value
+    ref: dynamo
+    model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}}]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+      vllm:
+        reason: vLLM Phi-4 splits on the closing bracket inside the argument string, then drops the call when JSON parsing fails.
+        calls: []
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.30.c:
+    description: Phi-4 marker-like text `func-tools` and `[]` inside one argument string value
+    ref: dynamo
+    model_text: 'functools[{"name": "run_query", "arguments": {"sql": "literal func-tools marker[] stays text"}}]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: literal func-tools marker[] stays text
+        normal_text: ''
+      vllm:
+        reason: vLLM Phi-4 splits on the marker-like bracket inside the argument string, then drops the call when JSON parsing fails.
+        calls: []
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.31.a:
+    description: Multi-call JSON array with call separator `,` inside the first argument string
+    model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}, {"name": "get_time", "arguments":
+      {"timezone": "EST"}}]'
     tools:
     - name: run_query
       parameters:
@@ -106,7 +185,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_12
+      dynamo:
         calls:
         - name: run_query
           arguments:
@@ -115,21 +194,105 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_12
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='phi4'
-  PARSER.batch.13:
-    description: Unknown tool name absent from supplied tools
+  PARSER.batch.31.b:
+    description: Multi-call response with structural delimiters inside one argument string value
+    ref: dynamo
+    model_text: 'functools[{"name": "run_query", "arguments": {"sql": "SELECT value WHERE note has brace } and bracket ]"}},
+      {"name": "get_time", "arguments": {"timezone": "EST"}}]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm:
+        reason: vLLM Phi-4 splits on the closing bracket inside the first argument string, then drops all calls when JSON parsing fails.
+        calls: []
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.13.a:
+    description: Unknown-only call under default behavior
     model_text: 'functools[{"name": "unknown_tool", "arguments": {"location": "NYC"}}]'
     tools:
-    - *id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &d_13
+      dynamo:
         calls:
         - name: unknown_tool
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_13
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls in one response
+    ref: dynamo
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "unknown_tool", "arguments":
+      {"location": "LA"}}]'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='phi4'

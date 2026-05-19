@@ -25,6 +25,7 @@ from dynamo.common.forward_pass_metrics import (
     ScheduledRequestMetrics,
 )
 from dynamo.llm import AicPerfConfig, KvRouterConfig, MockEngineArgs
+from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -119,6 +120,26 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     )
 
 
+def _resolve_kv_bytes_per_token(raw: dict) -> None:
+    if raw.get("kv_bytes_per_token") is not None:
+        return
+
+    offload_requested = any(
+        isinstance(raw.get(name), int) and raw[name] > 0
+        for name in ("num_g2_blocks", "num_g3_blocks")
+    )
+    if not offload_requested:
+        return
+
+    model_path = raw.get("aic_model_path")
+    if not model_path:
+        return
+
+    kv_bytes_per_token = compute_kv_bytes_per_token(model_path, "auto")
+    if kv_bytes_per_token is not None:
+        raw["kv_bytes_per_token"] = kv_bytes_per_token
+
+
 def _load_engine_args(raw_args: str | None):
     if raw_args is None:
         return None
@@ -152,6 +173,7 @@ def _load_engine_args(raw_args: str | None):
             else:
                 del raw["planner_profile_data"]
     _resolve_aic_num_gpu_blocks(raw)
+    _resolve_kv_bytes_per_token(raw)
     return MockEngineArgs.from_json(json.dumps(raw))
 
 
@@ -162,6 +184,9 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_model_path": args.aic_model_path,
         "aic_backend_version": args.aic_backend_version,
         "aic_tp_size": args.aic_tp_size,
+        "aic_moe_tp_size": args.aic_moe_tp_size,
+        "aic_moe_ep_size": args.aic_moe_ep_size,
+        "aic_attention_dp_size": args.aic_attention_dp_size,
     }
     if not any(value is not None for value in values.values()):
         return None
@@ -181,6 +206,9 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_model_path=values["aic_model_path"],
         aic_tp_size=values["aic_tp_size"] or 1,
         aic_backend_version=values["aic_backend_version"],
+        aic_moe_tp_size=values["aic_moe_tp_size"],
+        aic_moe_ep_size=values["aic_moe_ep_size"],
+        aic_attention_dp_size=values["aic_attention_dp_size"],
     )
 
 
@@ -380,6 +408,9 @@ def _run_planner_replay(
                     model_path=ref_args.aic_model_path,
                     tp_size=ref_args.aic_tp_size or 1,
                     backend_version=ref_args.aic_backend_version,
+                    moe_tp_size=ref_args.aic_moe_tp_size,
+                    moe_ep_size=ref_args.aic_moe_ep_size,
+                    attention_dp_size=ref_args.aic_attention_dp_size,
                 )
             except (
                 ImportError,
@@ -462,6 +493,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-backend-version")
     parser.add_argument("--aic-tp-size", type=int)
     parser.add_argument("--aic-model-path")
+    parser.add_argument("--aic-moe-tp-size", type=int)
+    parser.add_argument("--aic-moe-ep-size", type=int)
+    parser.add_argument("--aic-attention-dp-size", type=int)
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument(
@@ -531,6 +565,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=8,
         help="number of sweep points for synthetic perf model benchmark (default: 8, matching profiler)",
     )
+    parser.add_argument(
+        "--max-sim-time-seconds",
+        type=float,
+        default=None,
+        help="optional cap on simulated wall-clock duration for offline replay (disagg and agg); when set, replay stops once the simulated clock would exceed this many seconds, leaving in-flight requests as incomplete in the report",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     using_trace_file = args.trace_file is not None
@@ -560,6 +600,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
+
+    if args.max_sim_time_seconds is not None:
+        if args.planner_config is not None:
+            parser.error(
+                "--max-sim-time-seconds is not supported with --planner-config"
+            )
+        if not using_trace_file:
+            parser.error(
+                "--max-sim-time-seconds currently only supports trace-file replay"
+            )
 
     extra_engine_args = _load_engine_args(args.extra_engine_args)
     prefill_engine_args = _load_engine_args(args.prefill_engine_args)
@@ -617,6 +667,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if using_trace_file:
+        max_sim_time_ms = (
+            args.max_sim_time_seconds * 1_000.0
+            if args.max_sim_time_seconds is not None
+            else None
+        )
         report = run_trace_replay(
             args.trace_file,
             extra_engine_args=extra_engine_args,
@@ -635,6 +690,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace_format=args.trace_format,
             trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
             trace_num_prefix_groups=args.trace_num_prefix_groups,
+            max_sim_time_ms=max_sim_time_ms,
         )
     else:
         report = run_synthetic_trace_replay(
