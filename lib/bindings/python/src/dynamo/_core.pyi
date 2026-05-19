@@ -527,6 +527,7 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     enable_eagle: bool
     taints: Set[str]
+    stable_routing_id: str | None
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -1307,6 +1308,9 @@ class AicPerfConfig:
         aic_model_path: str,
         aic_tp_size: int = 1,
         aic_backend_version: Optional[str] = None,
+        aic_moe_tp_size: Optional[int] = None,
+        aic_moe_ep_size: Optional[int] = None,
+        aic_attention_dp_size: Optional[int] = None,
     ) -> None:
         ...
 

@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from types import SimpleNamespace
 
 import pytest
+
+import dynamo.replay.main as replay_main
 
 from .replay_utils import (
     _assert_basic_report_counts,
@@ -22,6 +25,41 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
+    captured_kwargs = {}
+
+    def fake_aic_perf_config(**kwargs):
+        captured_kwargs.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(replay_main, "AicPerfConfig", fake_aic_perf_config)
+
+    config = replay_main._load_aic_perf_config(
+        SimpleNamespace(
+            aic_backend="vllm",
+            aic_system="h200_sxm",
+            aic_model_path="moonshotai/Kimi-K2-Instruct",
+            aic_backend_version=None,
+            aic_tp_size=2,
+            aic_moe_tp_size=2,
+            aic_moe_ep_size=1,
+            aic_attention_dp_size=1,
+        )
+    )
+
+    assert config == captured_kwargs
+    assert captured_kwargs == {
+        "aic_backend": "vllm",
+        "aic_system": "h200_sxm",
+        "aic_model_path": "moonshotai/Kimi-K2-Instruct",
+        "aic_tp_size": 2,
+        "aic_backend_version": None,
+        "aic_moe_tp_size": 2,
+        "aic_moe_ep_size": 1,
+        "aic_attention_dp_size": 1,
+    }
 
 
 @pytest.mark.timeout(30)
