@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub(super) use super::components::ReplayMode;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
+    ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
@@ -708,16 +708,15 @@ impl DisaggRuntime {
             .admission
             .drain_ready(self.now_ms, self.cluster_in_flight())?
         {
-            let session_metadata = ready
-                .session_id
-                .as_ref()
-                .zip(ready.turn_index)
-                .map(|(s, t)| (s.clone(), t));
-            let uuid = self.on_external_arrival(
-                ready.request,
-                ready.arrival_time_ms,
-                ready.replay_hashes,
-            )?;
+            let ReadyArrival {
+                request,
+                arrival_time_ms,
+                replay_hashes,
+                session_id,
+                turn_index,
+            } = ready;
+            let session_metadata = session_id.zip(turn_index);
+            let uuid = self.on_external_arrival(request, arrival_time_ms, replay_hashes)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);

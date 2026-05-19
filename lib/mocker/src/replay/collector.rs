@@ -407,6 +407,9 @@ impl TraceCollector {
         session_id: String,
         turn_index: usize,
     ) {
+        if !self.capture_per_request {
+            return;
+        }
         if let Some(stats) = self.requests.get_mut(&uuid)
             && stats.session_id.is_none()
         {

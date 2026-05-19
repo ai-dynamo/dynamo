@@ -17,7 +17,7 @@ use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
+        ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
     },
     state::AggRequestState,
 };
@@ -538,13 +538,15 @@ impl AggRuntime {
             .admission
             .drain_ready(self.now_ms, self.cluster_in_flight())?
         {
-            let session_metadata = ready
-                .session_id
-                .as_ref()
-                .zip(ready.turn_index)
-                .map(|(s, t)| (s.clone(), t));
-            let uuid =
-                self.assign_request(ready.request, ready.arrival_time_ms, ready.replay_hashes)?;
+            let ReadyArrival {
+                request,
+                arrival_time_ms,
+                replay_hashes,
+                session_id,
+                turn_index,
+            } = ready;
+            let session_metadata = session_id.zip(turn_index);
+            let uuid = self.assign_request(request, arrival_time_ms, replay_hashes)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
