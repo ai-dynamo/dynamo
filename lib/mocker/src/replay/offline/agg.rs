@@ -505,11 +505,8 @@ impl AggRuntime {
                 .as_ref()
                 .zip(ready.turn_index)
                 .map(|(s, t)| (s.clone(), t));
-            let uuid = self.assign_request(
-                ready.request,
-                ready.arrival_time_ms,
-                ready.replay_hashes,
-            )?;
+            let uuid =
+                self.assign_request(ready.request, ready.arrival_time_ms, ready.replay_hashes)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);

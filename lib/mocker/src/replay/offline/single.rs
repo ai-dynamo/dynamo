@@ -66,14 +66,6 @@ impl SingleRuntime {
         }
     }
 
-    /// Toggle per-request record capture on the underlying collector. When
-    /// `true`, the final `TraceSimulationReport` returned from `run()` will
-    /// have `per_request` populated. Default `false` (cheap).
-    pub(super) fn with_per_request_records(mut self, capture: bool) -> Self {
-        self.collector.set_capture_per_request(capture);
-        self
-    }
-
     fn enqueue_trace_arrivals(&mut self) {
         let mut ready_requests = Vec::new();
         match &mut self.admission {

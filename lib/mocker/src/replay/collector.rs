@@ -253,6 +253,7 @@ struct TraceRequestStats {
     ///   - Aggregated replay (no separate prefill pool) — meaningless field.
     ///   - Offline disagg with conditional-prefill bypass — request was
     ///     routed directly to a decode worker without going through prefill.
+    ///
     /// Downstream tooling derives "was_bypassed" as `prefill_worker_idx is None`
     /// in disagg mode.
     prefill_worker_idx: Option<usize>,
