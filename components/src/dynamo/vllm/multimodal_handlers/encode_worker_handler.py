@@ -243,6 +243,9 @@ class EncodeWorkerHandler:
                         vision_encoder=self.vision_encoder,
                         projector=self.projector,
                     )
+                    # Sync XPU to ensure kernels complete before NIXL transfer.
+                    if embeddings.device.type == "xpu":
+                        torch.xpu.synchronize()
 
                 with _nvtx.annotate("mm:enc:split_embeddings", color="orange"):
                     # [gluo FIXME] This is specific to qwen vision processing..

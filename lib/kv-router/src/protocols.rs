@@ -169,6 +169,16 @@ pub trait WorkerConfigLike {
     fn taints(&self) -> &HashSet<String> {
         &EMPTY_WORKER_TAINTS
     }
+    /// Stable identifier for the worker, preserved across process restarts.
+    ///
+    /// In Kubernetes StatefulSet deployments this is the pod hostname (`worker-0`, `worker-1`,
+    /// …). Used by rendezvous-style routing (HRW hashing) so cache assignments survive worker
+    /// restarts and minimise cache movement when the set of live workers churns. Returns
+    /// `None` when the worker did not publish a stable id, in which case callers should fall
+    /// back to the (ephemeral) `worker_id`.
+    fn stable_routing_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
