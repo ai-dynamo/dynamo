@@ -151,20 +151,22 @@ impl PrefillRouter {
                 )
             })?;
 
-        // Release the phase barrier only after prefill starts streaming, confirming
-        // the prefill worker has entered async_generate() and registered the NIXL room.
-        // This gates the phase transition to Decode on the prefill worker being ready,
-        // which closes the race where decode-side NIXL connect lands before the room exists.
+        // Release the phase barrier now that routing has completed.
+        // The prefill engine wrapper (llm_engine.py) ensures the NIXL room is
+        // registered before yielding the bootstrap chunk via asyncio.sleep(0),
+        // so decode cannot connect before the room exists regardless of when
+        // this permit is dropped relative to first_output arriving.
+        // Dropping here (before next().await) avoids holding the barrier while
+        // waiting for the first stream item, which would deadlock mocker-based
+        // tests where the prefill stream blocks until decode connects.
+        drop(phase_transition_permit);
+
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
                 None,
             ));
         };
-
-        // Release the phase barrier now that routing completed and the prefill worker
-        // has entered async_generate() and registered the NIXL room. Decode may proceed.
-        drop(phase_transition_permit);
 
         // Record when prefill result arrived at the router (for KV transfer latency metric).
         if let Some(ref tracker) = tracker {

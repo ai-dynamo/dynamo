@@ -281,27 +281,29 @@ class SglangLLMEngine(LLMEngine):
             **bootstrap_kwargs,
         )
 
-        # ORDER MATTERS: async_generate must register the room (the await
-        # above) before we yield the bootstrap chunk — otherwise the
-        # decode peer can connect to a room that doesn't exist yet.
         if self.serving_mode == DisaggregationMode.PREFILL:
-            yield {
-                "token_ids": [],
-                "index": 0,
-                "disaggregated_params": dict(bootstrap_kwargs),
-            }
-            # Bootstrap path (router-populated bootstrap_info): drain
-            # inline so cancellation propagates to engine.abort().
-            # Completed path: router awaits our stream end before
-            # forwarding to decode — a sync drain deadlocks, so spawn.
-            if request.get("bootstrap_info"):
-                await self._consume_prefill_stream(stream, context, context.trace_id)
-                return
+            # async_generate(stream=True) returns a generator without executing the
+            # body — TokenizerManager.generate_request() only runs once the generator
+            # is first iterated. Start the consume task now (before yielding the
+            # bootstrap chunk) so SGLang enqueues the request and registers the NIXL
+            # room before we signal the decode peer to connect.
+            # We cannot await the first stream item here — SGLang prefill blocks in
+            # KVPoll::Bootstrapping until decode connects, creating a deadlock.
+            # Instead, create_task + sleep(0) advances generate_request() through its
+            # synchronous preamble (NIXL room registration) up to the first blocking
+            # await, then control returns here so we can yield the bootstrap chunk.
             task = asyncio.create_task(
                 self._consume_prefill_stream(stream, context, context.trace_id)
             )
             self._prefill_consume_tasks.add(task)
             task.add_done_callback(self._prefill_consume_tasks.discard)
+            await asyncio.sleep(0)
+
+            yield {
+                "token_ids": [],
+                "index": 0,
+                "disaggregated_params": dict(bootstrap_kwargs),
+            }
             return
 
         async for res in stream:
