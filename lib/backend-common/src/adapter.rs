@@ -63,6 +63,40 @@ fn is_otlp_export_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// On drop, marks the `engine.generate` span as cancelled unless
+/// `mark_completed` was called first — distinguishes abandoned streams
+/// from clean terminations in trace output.
+struct StreamSpanFinalizer {
+    span: tracing::Span,
+    completed: std::cell::Cell<bool>,
+}
+
+impl StreamSpanFinalizer {
+    fn new(span: tracing::Span) -> Self {
+        Self {
+            span,
+            completed: std::cell::Cell::new(false),
+        }
+    }
+
+    fn mark_completed(&self) {
+        self.completed.set(true);
+    }
+}
+
+impl Drop for StreamSpanFinalizer {
+    fn drop(&mut self) {
+        if !self.completed.get() {
+            self.span.record("cancelled", true);
+            // Synthetic value outside `FinishReason` — the engine never
+            // emits this, only the framework when a stream is abandoned.
+            self.span.record("finish_reason", "Dropped");
+            self.span
+                .set_status(Status::error("stream dropped before terminal"));
+        }
+    }
+}
+
 /// Record ITL percentile attrs on the span. No-op on fewer than 2 token
 /// chunks (no sample available). Mutates `samples` in place (sort) so we
 /// don't pay for a second allocation; caller doesn't reuse after.
@@ -131,8 +165,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // by the runtime's NATS ingress) so the trace tree has a contiguous
         // worker layer. Attributes get filled in across the stream lifecycle:
         // - `model`, `input_tokens`, `disagg_role` on entry,
-        // - `prefill_trace_id` / `prefill_span_id` on decode (when the prefill
-        //   peer embedded its trace identity in disaggregated_params),
+        // - `migration_trace_id` / `migration_span_id` on entry when the
+        //   request carries a predecessor link (prefill→decode handoff or
+        //   migration retry),
         // - `ttft_ms` on first non-empty chunk,
         // - `output_tokens`, `finish_reason`, `cancelled`, `itl_*_ms` on
         //   terminal.
@@ -142,8 +177,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             model = %request.model,
             input_tokens = request.token_ids.len(),
             disagg_role = self.mode.as_str(),
-            prefill_trace_id = tracing::field::Empty,
-            prefill_span_id = tracing::field::Empty,
+            migration_trace_id = tracing::field::Empty,
+            migration_span_id = tracing::field::Empty,
             ttft_ms = tracing::field::Empty,
             output_tokens = tracing::field::Empty,
             finish_reason = tracing::field::Empty,
@@ -155,21 +190,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             itl_max_ms = tracing::field::Empty,
         );
 
-        // Decode-side: attach a real OTel Link from the engine.generate span
-        // to the prefill peer's span. Tempo / Jaeger render this as a
-        // cross-trace edge — operators don't have to copy-paste trace IDs.
-        // We also record the IDs as attributes for log-analysis fallback
-        // (JSONL log readers can't render OTel Links).
-        //
-        // Reads from `prefill_trace_link` (framework-owned, typed), keeping
-        // the disagg trace contract separate from engine-owned
-        // `disaggregated_params` payloads.
-        if self.mode.is_decode()
-            && let Some(prefill) = request.prefill_result.as_ref()
-            && let Some(link) = prefill.prefill_trace_link.as_ref()
-        {
-            span.record("prefill_trace_id", link.trace_id.as_str());
-            span.record("prefill_span_id", link.span_id.as_str());
+        // If this request was migrated (either prefill→decode handoff or a
+        // retry from a previous attempt), attach a real OTel Link from
+        // engine.generate to the predecessor's span. Tempo / Jaeger render
+        // this as a directional pointer — operators can trace the
+        // request's path through any number of hops without copy-pasting
+        // span IDs. Attribute fallback (`migration_trace_id` /
+        // `migration_span_id`) covers JSONL log readers.
+        if let Some(link) = request.migration_link.as_ref() {
+            span.record("migration_trace_id", link.trace_id.as_str());
+            span.record("migration_span_id", link.span_id.as_str());
             if let (Ok(trace_id), Ok(span_id)) = (
                 TraceId::from_hex(&link.trace_id),
                 SpanId::from_hex(&link.span_id),
@@ -184,31 +214,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         }
 
-        // Prefill-side: capture this worker's trace identity for embedding
-        // into the terminal chunk's `prefill_trace_link`. `in_scope` reads
-        // from our `engine.generate` span (the DistributedTraceIdLayer has
-        // populated it in JSONL mode); yields None in non-JSONL deployments.
-        let prefill_trace_link: Option<dynamo_llm::protocols::common::preprocessor::TraceLink> =
-            if self.mode.is_prefill() {
-                let link = span.in_scope(|| {
-                    dynamo_runtime::logging::get_distributed_tracing_context().map(|tc| {
-                        dynamo_llm::protocols::common::preprocessor::TraceLink {
-                            trace_id: tc.trace_id,
-                            span_id: tc.span_id,
-                        }
-                    })
-                });
-                if link.is_none() {
-                    tracing::debug!(
-                        "disagg trace linking inactive — no DistributedTraceContext \
-                         on engine.generate span (DistributedTraceIdLayer requires JSONL \
-                         mode + OTEL_EXPORT_ENABLED)"
-                    );
-                }
-                link
-            } else {
-                None
-            };
+        // Capture this worker's trace identity once, for stamping on the
+        // first non-empty chunk. Yields None in non-JSONL deployments where
+        // `DistributedTraceIdLayer` is not installed.
+        let worker_trace_link: Option<dynamo_llm::protocols::common::preprocessor::TraceLink> = {
+            let link = span.in_scope(|| {
+                dynamo_runtime::logging::get_distributed_tracing_context().map(|tc| {
+                    dynamo_llm::protocols::common::preprocessor::TraceLink {
+                        trace_id: tc.trace_id,
+                        span_id: tc.span_id,
+                    }
+                })
+            });
+            if link.is_none() {
+                tracing::trace!(
+                    "worker_trace_link inactive — no DistributedTraceContext on \
+                     engine.generate (requires JSONL mode + OTEL_EXPORT_ENABLED)"
+                );
+            }
+            link
+        };
 
         // Decode workers defer engine.abort() until first-token to protect
         // in-flight NIXL transfers. The Sender goes to the engine (via
@@ -291,8 +316,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_span = span.clone();
         let should_record_attrs = is_otlp_export_enabled();
         let is_prefill_mode = self.mode.is_prefill();
+        let finalizer_span = span.clone();
         let mapped = async_stream::stream! {
             let _guard = guard;
+            let finalizer = StreamSpanFinalizer::new(finalizer_span);
             let mut inner = chunks;
             let mut chunk_count: usize = 0;
             let mut output_token_count: usize = 0;
@@ -306,12 +333,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 chunk_count += 1;
                 match item {
                     Ok(mut chunk) => {
-                        // First non-empty chunk releases the deferred abort.
+                        // First non-empty chunk: release deferred abort, record
+                        // ttft, and stamp this worker's trace link on the chunk
+                        // so downstream consumers (PrefillRouter on disagg,
+                        // migration RetryManager on retries) can propagate it.
                         // Token-less chunks (SGLang's bootstrap handshake) don't count.
                         if !signalled && !chunk.token_ids.is_empty() {
                             if should_record_attrs {
-                                // ttft = time from setup completion to first token.
-                                // Recorded once; subsequent non-empty chunks don't update.
                                 let ttft_ms = request_start.elapsed().as_secs_f64() * 1000.0;
                                 stream_span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
                                 last_token_at = Some(Instant::now());
@@ -321,6 +349,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 // fails if it panicked, in which case the abort is
                                 // already moot.
                                 let _ = tx.send(true);
+                            }
+                            if let Some(link) = &worker_trace_link {
+                                chunk.worker_trace_link = Some(link.clone());
                             }
                             signalled = true;
                         } else if should_record_attrs
@@ -344,19 +375,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             stream_span.record("cancelled", stream_ctx.is_stopped());
                             record_itl_distribution(&stream_span, &mut itl_samples_ms);
                         }
-                        // Prefill-side: stamp our trace identity into
-                        // `prefill_trace_link` (framework-owned, typed). The
-                        // decode peer reads from prefill_result.prefill_trace_link.
-                        // We never touch the engine's disaggregated_params
-                        // payload — it stays opaque to the framework.
+                        // Prefill-only: also stamp on the terminal chunk
+                        // (which may be the FIRST chunk for prefill, with
+                        // token_ids empty if the handoff is via
+                        // disaggregated_params). Belt-and-suspenders so the
+                        // decode peer always sees the link even when the
+                        // prefill terminal has no tokens.
                         if is_prefill_mode
                             && is_terminal
-                            && let Some(link) = &prefill_trace_link
+                            && chunk.worker_trace_link.is_none()
+                            && let Some(link) = &worker_trace_link
                         {
-                            chunk.prefill_trace_link = Some(link.clone());
+                            chunk.worker_trace_link = Some(link.clone());
                         }
                         yield Annotated::from_data(chunk);
                         if is_terminal {
+                            finalizer.mark_completed();
                             break;
                         }
                     }
@@ -381,6 +415,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             stream_span.set_status(Status::error(error_kind));
                         }
                         yield Annotated::from_err(dynamo_err);
+                        finalizer.mark_completed();
                         break;
                     }
                 }
@@ -893,6 +928,37 @@ mod tests {
         );
     }
 
+    /// Stream drop before terminal marks the span `cancelled=true` with
+    /// `finish_reason="Dropped"`.
+    #[tokio::test(start_paused = true)]
+    async fn stream_drop_records_cancellation_on_span() {
+        let (captured, _guard) = install_capture();
+        let (engine, _release, _abort) = ParkedEngine::new();
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
+
+        let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
+        let mut stream = adapter.generate(input).await.unwrap();
+
+        // Poll once with a timeout so the async-stream closure starts (and
+        // constructs the SpanFinalizer); ParkedEngine then pends forever.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(5), stream.next()).await;
+        drop(stream);
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+
+        let fields = captured.0.lock().unwrap().clone();
+        assert_eq!(
+            fields.get("cancelled").map(String::as_str),
+            Some("true"),
+            "dropped stream must record cancelled=true; got fields {fields:?}"
+        );
+        assert_eq!(
+            fields.get("finish_reason").map(String::as_str),
+            Some("Dropped"),
+            "dropped stream must record finish_reason=Dropped; got fields {fields:?}"
+        );
+    }
+
     // -------------------------------------------------------------------
     // Auto-span observation. Uses a custom tracing layer that records field
     // values on `engine.generate` spans into a shared map, then asserts on
@@ -1172,32 +1238,23 @@ mod tests {
     /// payload — the link branch must skip cleanly without recording attrs
     /// or panicking.
     #[tokio::test]
-    async fn auto_span_no_link_when_dynamo_trace_missing() {
-        use dynamo_llm::protocols::common::preprocessor::PrefillResult;
-
+    async fn auto_span_no_link_when_migration_link_missing() {
         let (captured, _guard) = install_capture();
         let (engine, _abort) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::length()]);
         let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
 
-        let mut request = make_request(vec![1, 2, 3]);
-        request.prefill_result = Some(PrefillResult {
-            // Engine packed its own kv-transfer payload; no Dynamo trace meta.
-            disaggregated_params: serde_json::json!({
-                "engine_specific": "value",
-            }),
-            prefill_trace_link: None,
-            prompt_tokens_details: None,
-        });
+        let request = make_request(vec![1, 2, 3]);
+        // No migration_link set — link branch must be a no-op.
         let input = Context::new(request);
         let stream = adapter.generate(input).await.unwrap();
         let _: Vec<_> = stream.collect().await;
 
         let fields = captured.0.lock().unwrap().clone();
-        assert!(!fields.contains_key("prefill_trace_id"));
-        assert!(!fields.contains_key("prefill_span_id"));
+        assert!(!fields.contains_key("migration_trace_id"));
+        assert!(!fields.contains_key("migration_span_id"));
     }
 
-    /// Decode-side: `prefill_trace_link` is set but the hex IDs are
+    /// Decode-side: `migration_link` is set but the hex IDs are
     /// malformed — the link branch records the raw strings as attrs but
     /// skips the OTel Link construction (TraceId::from_hex rejects bad hex).
     /// The test asserts the attrs are still recorded so operators get the
@@ -1205,20 +1262,16 @@ mod tests {
     /// the regression.
     #[tokio::test]
     async fn auto_span_handles_malformed_hex_gracefully() {
-        use dynamo_llm::protocols::common::preprocessor::{PrefillResult, TraceLink};
+        use dynamo_llm::protocols::common::preprocessor::TraceLink;
 
         let (captured, _guard) = install_capture();
         let (engine, _abort) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::length()]);
         let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
 
         let mut request = make_request(vec![1, 2, 3]);
-        request.prefill_result = Some(PrefillResult {
-            disaggregated_params: serde_json::json!({}),
-            prefill_trace_link: Some(TraceLink {
-                trace_id: "not-valid-hex".to_string(),
-                span_id: "ALSO-INVALID".to_string(),
-            }),
-            prompt_tokens_details: None,
+        request.migration_link = Some(TraceLink {
+            trace_id: "not-valid-hex".to_string(),
+            span_id: "ALSO-INVALID".to_string(),
         });
         let input = Context::new(request);
         let stream = adapter.generate(input).await.unwrap();
@@ -1227,36 +1280,32 @@ mod tests {
         let fields = captured.0.lock().unwrap().clone();
         // Attrs still set (fallback for log analysis).
         assert_eq!(
-            fields.get("prefill_trace_id").map(String::as_str),
+            fields.get("migration_trace_id").map(String::as_str),
             Some("not-valid-hex")
         );
         assert_eq!(
-            fields.get("prefill_span_id").map(String::as_str),
+            fields.get("migration_span_id").map(String::as_str),
             Some("ALSO-INVALID")
         );
         // No panic — Link branch must have skipped via `if let Ok(...)`.
     }
 
     /// Decode-side: when the upstream request carries a
-    /// `prefill_result.prefill_trace_link`, the adapter must record
-    /// `prefill_trace_id` and `prefill_span_id` on its `engine.generate`
-    /// span so operators can hop traces.
+    /// `migration_link`, the adapter must record `migration_trace_id` and
+    /// `migration_span_id` on its `engine.generate` span so operators can
+    /// trace the request's migration path.
     #[tokio::test]
-    async fn auto_span_records_prefill_link_on_decode() {
-        use dynamo_llm::protocols::common::preprocessor::{PrefillResult, TraceLink};
+    async fn auto_span_records_migration_link() {
+        use dynamo_llm::protocols::common::preprocessor::TraceLink;
 
         let (captured, _guard) = install_capture();
         let (engine, _abort) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::length()]);
         let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
 
         let mut request = make_request(vec![1, 2, 3]);
-        request.prefill_result = Some(PrefillResult {
-            disaggregated_params: serde_json::json!({}),
-            prefill_trace_link: Some(TraceLink {
-                trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-                span_id: "bbbbbbbbbbbbbbbb".to_string(),
-            }),
-            prompt_tokens_details: None,
+        request.migration_link = Some(TraceLink {
+            trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            span_id: "bbbbbbbbbbbbbbbb".to_string(),
         });
         let input = Context::new(request);
         let stream = adapter.generate(input).await.unwrap();
@@ -1264,12 +1313,166 @@ mod tests {
 
         let fields = captured.0.lock().unwrap().clone();
         assert_eq!(
-            fields.get("prefill_trace_id").map(String::as_str),
+            fields.get("migration_trace_id").map(String::as_str),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
         assert_eq!(
-            fields.get("prefill_span_id").map(String::as_str),
+            fields.get("migration_span_id").map(String::as_str),
             Some("bbbbbbbbbbbbbbbb")
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Tests for the writing side of `worker_trace_link` — the adapter
+    // stamps the predecessor pointer on outgoing chunks so PrefillRouter
+    // (disagg handoff) and RetryManager (migration retry) can propagate it
+    // to the next worker. The reading side is covered by
+    // `auto_span_records_migration_link` et al. above.
+    // -------------------------------------------------------------------
+
+    /// Layer that injects a fixed `DistributedTraceContext` into every
+    /// `engine.generate` span. `DistributedTraceIdLayer.on_enter` then
+    /// short-circuits instead of panicking on missing `OtelData` (the OTel
+    /// SDK is not installed in unit tests). Bootstrapped from a parent
+    /// span because `DistributedTraceContext` has private fields.
+    struct InjectingTraceContext {
+        template: Arc<std::sync::OnceLock<dynamo_runtime::logging::DistributedTraceContext>>,
+    }
+
+    impl<S> Layer<S> for InjectingTraceContext
+    where
+        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: TraceCtx<'_, S>) {
+            if attrs.metadata().name() != "engine.generate" {
+                return;
+            }
+            let Some(tmpl) = self.template.get() else {
+                return;
+            };
+            if let Some(span) = ctx.span(id) {
+                span.extensions_mut().insert(tmpl.clone());
+            }
+        }
+    }
+
+    fn install_trace_context_injection() -> (
+        tracing::dispatcher::DefaultGuard,
+        &'static str, // trace_id
+        &'static str, // span_id
+    ) {
+        const TRACE_ID: &str = "11111111111111111111111111111111";
+        const SPAN_ID: &str = "2222222222222222";
+
+        let template = Arc::new(std::sync::OnceLock::new());
+        let inject = InjectingTraceContext {
+            template: template.clone(),
+        };
+
+        let dispatch = tracing_subscriber::registry()
+            .with(inject)
+            .with(dynamo_runtime::logging::DistributedTraceIdLayer)
+            .set_default();
+
+        let bootstrap = tracing::info_span!("test_parent", trace_id = TRACE_ID, span_id = SPAN_ID);
+        bootstrap.in_scope(|| {
+            let ctx = dynamo_runtime::logging::get_distributed_tracing_context()
+                .expect("bootstrap span must yield a DistributedTraceContext");
+            template.set(ctx).expect("template should only be set once");
+        });
+
+        (dispatch, TRACE_ID, SPAN_ID)
+    }
+
+    /// Without `DistributedTraceIdLayer`, chunks must come out unstamped.
+    #[tokio::test]
+    async fn adapter_does_not_stamp_worker_trace_link_without_trace_context() {
+        let (_captured, _guard) = install_capture();
+
+        let (engine, _abort) = MockEngine::new(vec![
+            chunk::token(11),
+            chunk::token(22),
+            LLMEngineOutput::length().with_tokens(vec![33]),
+        ]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let input = Context::new(make_request(vec![1, 2, 3]));
+        let stream = adapter.generate(input).await.unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+
+        assert_eq!(chunks.len(), 3);
+        for (i, item) in chunks.iter().enumerate() {
+            let data = item.data.as_ref().expect("chunk should have data");
+            assert!(
+                data.worker_trace_link.is_none(),
+                "chunk {i} must not be stamped when no DistributedTraceContext is available, got {:?}",
+                data.worker_trace_link,
+            );
+        }
+    }
+
+    /// Adapter stamps the first non-empty chunk only; subsequent chunks
+    /// (including the terminal in Aggregated mode) are left untouched.
+    #[tokio::test]
+    async fn adapter_stamps_worker_trace_link_on_first_non_empty_chunk() {
+        let (_guard, trace_id, span_id) = install_trace_context_injection();
+
+        let (engine, _abort) = MockEngine::new(vec![
+            chunk::token(11),
+            chunk::token(22),
+            LLMEngineOutput::length().with_tokens(vec![33]),
+        ]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let input = Context::new(make_request(vec![1, 2, 3]));
+        let stream = adapter.generate(input).await.unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+
+        let datas: Vec<_> = chunks.iter().filter_map(|c| c.data.as_ref()).collect();
+        assert_eq!(datas.len(), 3);
+
+        let first_link = datas[0]
+            .worker_trace_link
+            .as_ref()
+            .expect("first non-empty chunk must carry worker_trace_link");
+        assert_eq!(first_link.trace_id, trace_id);
+        assert_eq!(first_link.span_id, span_id);
+
+        assert!(
+            datas[1].worker_trace_link.is_none(),
+            "second non-empty chunk must not be re-stamped (engine owns the field after first)"
+        );
+        assert!(
+            datas[2].worker_trace_link.is_none(),
+            "terminal chunk must not be stamped in Aggregated mode (no prefill→decode handoff)"
+        );
+    }
+
+    /// Prefill terminal with no token chunks (disagg handoff via
+    /// `disaggregated_params`) must still get stamped via the prefill-only
+    /// fallback so the decode peer sees the link.
+    #[tokio::test]
+    async fn prefill_mode_stamps_worker_trace_link_on_terminal_when_no_token_chunks() {
+        let (_guard, trace_id, span_id) = install_trace_context_injection();
+
+        let (engine, _abort) = MockEngine::new(vec![LLMEngineOutput::length()]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Prefill);
+        let input = Context::new(make_request(vec![1, 2, 3]));
+        let stream = adapter.generate(input).await.unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+
+        assert_eq!(chunks.len(), 1);
+        let data = chunks[0]
+            .data
+            .as_ref()
+            .expect("terminal chunk should have data");
+        assert!(
+            data.token_ids.is_empty(),
+            "test precondition: terminal should have no tokens"
+        );
+        let link = data
+            .worker_trace_link
+            .as_ref()
+            .expect("prefill terminal with no tokens must be stamped via fallback");
+        assert_eq!(link.trace_id, trace_id);
+        assert_eq!(link.span_id, span_id);
     }
 }

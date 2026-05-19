@@ -107,7 +107,7 @@ pub struct BackendOutput {
     /// Engine-owned payload — backends pack their own KV-transfer format
     /// here (vLLM `kv_transfer_params`, SGLang bootstrap triple, TRT-LLM
     /// encoded `LlmDisaggregatedParams`). Dynamo does NOT inject framework
-    /// metadata into this field — use `prefill_trace_link` instead.
+    /// metadata into this field — use `worker_trace_link` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
@@ -116,7 +116,7 @@ pub struct BackendOutput {
     /// can record an OTel `Link` on its `engine.generate` span. Engines
     /// should NOT read or write this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_trace_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    pub worker_trace_link: Option<crate::protocols::common::preprocessor::TraceLink>,
 
     /// Opaque engine data passed through from the backend worker to the response.
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
@@ -181,7 +181,7 @@ pub struct LLMEngineOutput {
     /// prefill terminal chunk; consumed by the decode adapter. Engines
     /// should NOT read or write this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_trace_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    pub worker_trace_link: Option<crate::protocols::common::preprocessor::TraceLink>,
 
     /// Additional arguments for extensibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,7 +212,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
-            prefill_trace_link: None,
+            worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
             engine_data: None,
@@ -233,7 +233,7 @@ impl LLMEngineOutput {
             top_logprobs: None,
             index: None,
             disaggregated_params: None,
-            prefill_trace_link: None,
+            worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
             engine_data: None,
@@ -254,7 +254,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
-            prefill_trace_link: None,
+            worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
             engine_data: None,
@@ -275,7 +275,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
-            prefill_trace_link: None,
+            worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
             engine_data: None,

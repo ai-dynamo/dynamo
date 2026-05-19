@@ -309,20 +309,20 @@ but per-chunk recording is skipped for cost.
 | `finish_reason`, `cancelled` | Terminal | engine's terminal chunk + ctx.is_stopped() |
 | `avg_itl_ms`, `itl_p50_ms`, `itl_p99_ms`, `itl_max_ms` | Terminal | per-chunk timestamp aggregation |
 | `error_kind` | Mid-stream typed error | Debug-formatted `ErrorType`, e.g. `Backend(InvalidArgument)` — search by substring |
-| `prefill_trace_id`, `prefill_span_id` | Decode entry | typed `prefill_trace_link` from prefill peer |
+| `migration_trace_id`, `migration_span_id` | Entry, when request has a predecessor | typed `migration_link` (set by framework on disagg-decode / migration retry) |
 
 The span also gets `OpenTelemetrySpanExt::set_status(Status::error(...))`
 on the error paths so Tempo / Jaeger render the span as failed natively.
 
-### Disaggregated trace linking
+### Cross-worker trace linking
 
-Prefill workers stamp the `{trace_id, span_id}` of their `engine.generate`
-span into the terminal chunk's `prefill_trace_link` (a typed
-`Option<TraceLink>` field, framework-owned — separate from the engine's
-opaque `disaggregated_params`). Decode workers read it on entry and attach
-a real OTel `Link` (via `OpenTelemetrySpanExt::add_link`) plus record the
-fallback `prefill_trace_id` / `prefill_span_id` attributes for log
-analysis. Tempo renders the link as a cross-span edge.
+When a request hops between workers (prefill→decode, or a migration
+retry), the downstream `engine.generate` span carries an OTel `Link`
+back to the predecessor. Two framework-owned fields drive this:
+`BackendOutput.worker_trace_link` (stamped on the first non-empty
+chunk) and `PreprocessedRequest.migration_link` (set by `PrefillRouter`
+and migration's `RetryManager`). See `TraceLink` in `preprocessor.rs`
+and the adapter source for the full contract.
 
 ### Engine-side instrumentation
 

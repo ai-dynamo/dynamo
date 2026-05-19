@@ -195,9 +195,9 @@ def test_disagg_decode_span_links_to_prefill_span(
 ):
     """Disaggregated mode: the decode-side `engine.generate` span must
     carry an OTel Link pointing at the prefill-side span. This regression-
-    tests the typed `prefill_trace_link` round-trip:
-        prefill EngineAdapter writes `chunk.prefill_trace_link`
-        → runtime carries it across to decode via `PrefillResult`
+    tests the typed `worker_trace_link` round-trip:
+        prefill EngineAdapter writes `chunk.worker_trace_link`
+        → PrefillRouter copies it onto `PreprocessedRequest.migration_link`
         → decode EngineAdapter reads it and calls `add_link(...)`.
     """
     collector, otlp_port = otlp_collector
@@ -284,7 +284,7 @@ def test_disagg_decode_span_links_to_prefill_span(
 
     assert decode_span.links, (
         "decode-side engine.generate span has no Links — the typed "
-        "`prefill_trace_link` round-trip is broken. Check EngineAdapter "
+        "`worker_trace_link` round-trip is broken. Check EngineAdapter "
         "decode-read at lib/backend-common/src/adapter.rs."
     )
     link_span_ids = {link.span_id for link in decode_span.links}
