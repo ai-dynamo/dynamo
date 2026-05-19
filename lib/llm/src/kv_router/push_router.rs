@@ -93,6 +93,23 @@ impl RequestGuard {
         if !self.first_response_received {
             self.first_response_received = true;
             self.dispatch_guard.take();
+            // [TTFT-TRACE] First RPC response back from the worker (any
+            // payload, not necessarily tokens). Matches the worker-side
+            // engine_first_response log when paired by request_id.
+            let phase = self
+                .tracker
+                .as_ref()
+                .map(|t| t.phase().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            tracing::info!(
+                request_id = %self.context_id,
+                phase = %phase,
+                epoch_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                "[TTFT-TRACE] stage=kv_push_router_first_response"
+            );
         }
 
         if !self.prefill_marked {
@@ -130,6 +147,24 @@ impl RequestGuard {
                         .time_to_first_token_seconds
                         .observe(ttft / 1000.0);
                 }
+                // [TTFT-TRACE] First token-bearing response. ttft_ms is from
+                // request_received, which is the canonical TTFT.
+                tracing::info!(
+                    request_id = %self.context_id,
+                    phase = %tracker.phase(),
+                    ttft_ms = tracker.ttft_ms(),
+                    prefill_wait_ms = tracker.prefill_wait_time_ms(),
+                    prefill_time_ms = tracker.prefill_time_ms(),
+                    kv_transfer_estimated_ms = tracker
+                        .kv_transfer_estimated_latency_secs()
+                        .map(|s| s * 1000.0),
+                    new_tokens = new_tokens,
+                    epoch_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                    "[TTFT-TRACE] stage=kv_push_router_first_token"
+                );
             }
             self.first_token_recorded = true;
         }
@@ -525,6 +560,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
 
         let block_size = self.chooser.block_size() as usize;
+        // [TTFT-TRACE] Time the worker-selection call (KV chooser
+        // find_best_match or pinned-worker resolution). Pair against
+        // kv_push_router_dispatch to isolate selection vs dispatch.
+        let select_start_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let selection = self
             .select_worker(&context_id, &request, phase, is_query_only)
             .instrument(tracing::info_span!("kv_router.select_worker"))
@@ -537,6 +579,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             cached_tokens,
             scheduler_tracked,
         } = selection;
+        let select_end_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        tracing::info!(
+            request_id = %context_id,
+            worker_id = instance_id,
+            dp_rank = dp_rank,
+            phase = ?phase,
+            select_ms = select_end_ms.saturating_sub(select_start_ms),
+            epoch_ms = select_end_ms,
+            "[TTFT-TRACE] stage=kv_push_router_worker_selected"
+        );
 
         // In approximate mode (use_kv_events=false), record the routing decision
         // so the indexer can track cache state based on routing decisions.
@@ -680,6 +735,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             deferred_close,
             dispatched: false,
         };
+
+        // [TTFT-TRACE] About to RPC-dispatch the request to the selected
+        // worker. For decode phase, this is "frontend sends decode request to
+        // decode worker"; for prefill phase, it's the dispatch into the
+        // prefill worker from KvPushRouter (paired with PrefillRouter's
+        // prefill_rpc_send / prefill_dispatch).
+        tracing::info!(
+            request_id = %context_id,
+            worker_id = instance_id,
+            dp_rank = dp_rank,
+            phase = ?phase,
+            epoch_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            "[TTFT-TRACE] stage=kv_push_router_dispatch"
+        );
 
         let mut response_stream = self
             .inner

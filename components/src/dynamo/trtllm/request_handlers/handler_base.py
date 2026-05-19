@@ -18,6 +18,7 @@ import dataclasses
 import logging
 import os
 import re
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -941,6 +942,19 @@ class HandlerBase(BaseGenerativeHandler):
         """
         logging.debug(f"Request: {request}")
 
+        # [TTFT-TRACE] Per-request timing checkpoints. epoch_ms is wall-clock so
+        # logs from prefill+decode workers can be aligned offline; perf_counter
+        # is monotonic and used for relative deltas within a worker.
+        ttft_mode = self.disaggregation_mode.value
+        ttft_req_id = context.id()
+        ttft_t_handler = time.perf_counter()
+        logging.info(
+            "[TTFT-TRACE] mode=%s request_id=%s stage=handler_received epoch_ms=%d",
+            ttft_mode,
+            ttft_req_id,
+            int(time.time() * 1000),
+        )
+
         # Additional metrics: request type detection
         metrics_collector = self.additional_metrics
 
@@ -971,8 +985,14 @@ class HandlerBase(BaseGenerativeHandler):
             except Exception as e:
                 logging.warning("Additional metrics (request type): %s", e)
 
+        # [TTFT-TRACE] sub-stage timing within the handler prep block.
+        # Each "*_ms" is the elapsed time for that single sub-stage.
+        ttft_t_prep_stage = time.perf_counter()
+
         # Normalize OpenAI format to TRT-LLM internal format
         self._normalize_request_format(request)
+        ttft_normalize_ms = (time.perf_counter() - ttft_t_prep_stage) * 1000.0
+        ttft_t_prep_stage = time.perf_counter()
 
         # Setup disaggregated params based on PREFILL/DECODE mode
         (
@@ -980,11 +1000,15 @@ class HandlerBase(BaseGenerativeHandler):
             ep_disaggregated_params,
             epd_metadata,
         ) = self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
+        ttft_setup_disagg_ms = (time.perf_counter() - ttft_t_prep_stage) * 1000.0
+        ttft_t_prep_stage = time.perf_counter()
 
         # Prepare input for generation (handles multimodal/text flows)
         processed_input = await self._prepare_input_for_generation(
             request, embeddings, ep_disaggregated_params, epd_metadata
         )
+        ttft_prepare_input_ms = (time.perf_counter() - ttft_t_prep_stage) * 1000.0
+        ttft_t_prep_stage = time.perf_counter()
 
         # Check if there is an error in the publisher error queue
         publishers_error = (
@@ -1101,7 +1125,38 @@ class HandlerBase(BaseGenerativeHandler):
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
 
+        # [TTFT-TRACE] sampling/trace block is everything from end of
+        # _prepare_input_for_generation to here (sampling params override,
+        # output_options, max_tokens/min_tokens/stop_tokens, trace_headers,
+        # scheduling_params, priority).
+        ttft_sampling_trace_ms = (time.perf_counter() - ttft_t_prep_stage) * 1000.0
+
         try:
+            # [TTFT-TRACE] Right before request enters TRT-LLM engine.
+            ttft_t_pre_engine = time.perf_counter()
+            logging.info(
+                "[TTFT-TRACE] mode=%s request_id=%s stage=pre_engine_generate_async "
+                "prep_ms=%.3f epoch_ms=%d",
+                ttft_mode,
+                ttft_req_id,
+                (ttft_t_pre_engine - ttft_t_handler) * 1000.0,
+                int(time.time() * 1000),
+            )
+            # [TTFT-TRACE] Per-sub-stage breakdown of prep_ms. Use this to
+            # identify which prep sub-stage dominates (e.g. multimodal
+            # extract showing up in prepare_input_ms, or sampling override
+            # showing up in sampling_trace_ms).
+            logging.info(
+                "[TTFT-TRACE] mode=%s request_id=%s stage=prep_breakdown "
+                "normalize_ms=%.3f setup_disagg_ms=%.3f prepare_input_ms=%.3f "
+                "sampling_trace_ms=%.3f",
+                ttft_mode,
+                ttft_req_id,
+                ttft_normalize_ms,
+                ttft_setup_disagg_ms,
+                ttft_prepare_input_ms,
+                ttft_sampling_trace_ms,
+            )
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
                 inputs=processed_input,  # Use the correctly extracted inputs
@@ -1111,6 +1166,14 @@ class HandlerBase(BaseGenerativeHandler):
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
                 priority=priority,
+            )
+            ttft_t_post_async_call = time.perf_counter()
+            logging.info(
+                "[TTFT-TRACE] mode=%s request_id=%s stage=post_engine_generate_async_call "
+                "submit_ms=%.3f",
+                ttft_mode,
+                ttft_req_id,
+                (ttft_t_post_async_call - ttft_t_pre_engine) * 1000.0,
             )
 
             # In disagg decode mode, wrap abort() to defer until first token
@@ -1122,10 +1185,29 @@ class HandlerBase(BaseGenerativeHandler):
             )
 
             # Monitor for cancellation triggers and cancel by calling abort()
+            ttft_engine_first_response_logged = False
+            ttft_first_yield_logged = False
             async with self._cancellation_monitor(
                 abort_guard or generation_result, context
             ):
                 async for res in generation_result:
+                    # [TTFT-TRACE] First response from engine. For PREFILL mode this
+                    # is the prefill-complete signal; for DECODE mode it is the
+                    # engine's first decode-step output (KV transfer + first forward
+                    # pass complete).
+                    if not ttft_engine_first_response_logged:
+                        ttft_engine_first_response_logged = True
+                        ttft_t_first_engine_resp = time.perf_counter()
+                        logging.info(
+                            "[TTFT-TRACE] mode=%s request_id=%s "
+                            "stage=engine_first_response "
+                            "engine_ms=%.3f total_ms_since_handler=%.3f epoch_ms=%d",
+                            ttft_mode,
+                            ttft_req_id,
+                            (ttft_t_first_engine_resp - ttft_t_pre_engine) * 1000.0,
+                            (ttft_t_first_engine_resp - ttft_t_handler) * 1000.0,
+                            int(time.time() * 1000),
+                        )
                     # Signal first token to deferred abort guard
                     if abort_guard is not None:
                         abort_guard.signal_first_token()
@@ -1222,6 +1304,27 @@ class HandlerBase(BaseGenerativeHandler):
                                 "prompt_tokens_details": prompt_tokens_details,
                             }
 
+                        # [TTFT-TRACE] First chunk with tokens yielded back to the
+                        # router. For decode this is when the first token leaves
+                        # this worker; for prefill it is the single prefill
+                        # response carrying disaggregated_params.
+                        if not ttft_first_yield_logged and out.get("token_ids"):
+                            ttft_first_yield_logged = True
+                            ttft_t_first_yield = time.perf_counter()
+                            logging.info(
+                                "[TTFT-TRACE] mode=%s request_id=%s "
+                                "stage=first_chunk_yielded "
+                                "engine_to_yield_ms=%.3f "
+                                "total_ms_since_handler=%.3f epoch_ms=%d "
+                                "num_tokens=%d",
+                                ttft_mode,
+                                ttft_req_id,
+                                (ttft_t_first_yield - ttft_t_first_engine_resp)
+                                * 1000.0,
+                                (ttft_t_first_yield - ttft_t_handler) * 1000.0,
+                                int(time.time() * 1000),
+                                len(out.get("token_ids", [])),
+                            )
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
                         yield out
