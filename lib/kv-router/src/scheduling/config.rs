@@ -21,9 +21,11 @@ const fn default_track_prefill_tokens() -> bool {
 
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
 
-/// Default max queue depth per worker for `router_queue_depth_by_missing_isl`.
-/// This matches the TCP request plane's fixed 1024-slot buffer per connection.
-pub const DEFAULT_ROUTER_QUEUE_DEPTH_PER_WORKER: usize = 1024;
+/// Default pending ISL token tiers per worker for `router_queue_depth_by_missing_isl`.
+/// - Cheap requests (0-2047 cache miss): 2M ISL tokens per worker
+/// - Expensive requests (2048+ cache miss): 256K ISL tokens per worker
+pub const DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS: &[(usize, usize)] =
+    &[(0, 2 * 1024 * 1024), (2048, 256 * 1024)];
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -183,13 +185,20 @@ pub struct RouterQueueDepthByMissingIslTier {
 pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
 
 impl RouterQueueDepthTiers {
-    /// Default: 1024 slots per worker (high ceiling for bursty traffic).
-    /// See [`DEFAULT_ROUTER_QUEUE_DEPTH_PER_WORKER`].
+    /// Default tiers for ISL token caps per worker.
+    /// - Cheap requests (0-2047 cache miss): 2M ISL tokens per worker
+    /// - Expensive requests (2048+ cache miss): 256K ISL tokens per worker
+    /// See [`DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS`].
     pub fn default_per_worker() -> Self {
-        Self(vec![RouterQueueDepthByMissingIslTier {
-            missing_cache_tokens_floor: 0,
-            max_queue_depth: DEFAULT_ROUTER_QUEUE_DEPTH_PER_WORKER,
-        }])
+        Self(
+            DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS
+                .iter()
+                .map(|&(floor, cap)| RouterQueueDepthByMissingIslTier {
+                    missing_cache_tokens_floor: floor,
+                    max_queue_depth: cap,
+                })
+                .collect(),
+        )
     }
 
     /// Disable capping entirely.
@@ -574,21 +583,23 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
-    /// Tiered per-worker queue-depth caps keyed on best-case missing prefill
+    /// Tiered per-worker pending ISL token caps keyed on best-case missing prefill
     /// tokens (ISL minus best cached tokens across eligible workers).
     ///
     /// For each request, the tier with the highest matched floor wins, and
-    /// that tier's `max_queue_depth * worker_count` is the effective cap.
-    /// Example with 4 workers:
-    ///   [(0, 32), (1024, 2), (4096, 1)]
-    /// - request missing 500 tokens  → matches (0, 32)       → cap = 32*4 = 128
-    /// - request missing 2000 tokens → matches (1024, 2)     → cap = 2*4 = 8
-    /// - request missing 8000 tokens → matches (4096, 1)     → cap = 1*4 = 4
+    /// that tier's `max_queue_depth * worker_count` is the effective ISL token cap.
+    /// The cap is compared against the sum of ISL tokens for all requests currently
+    /// parked in the pending queue.
     ///
-    /// Default: `[(0, 1024)]` — 1024 slots per worker, a high ceiling that
-    /// won't trigger false backpressure under normal bursty traffic. Operators
-    /// can tune down (e.g., 64 or 128 per worker) for tighter memory bounds.
-    /// Empty vec disables queue-depth capping entirely.
+    /// Example with 4 workers:
+    ///   [(0, 2097152), (2048, 262144)]  # 2M and 256K ISL tokens per worker
+    /// - request missing 500 tokens  → matches (0, 2097152)    → cap = 2M*4 = 8M tokens
+    /// - request missing 3000 tokens → matches (2048, 262144)  → cap = 256K*4 = 1M tokens
+    ///
+    /// Default: `[(0, 2097152), (2048, 262144)]` — 2M ISL tokens per worker for cheap
+    /// requests (low cache miss), 256K for expensive requests (high cache miss).
+    /// This allows more queued ISL tokens for cheap requests and fewer for expensive ones.
+    /// Empty vec disables ISL token capping entirely.
     ///
     /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
     /// buffers. The TCP request plane has a fixed 1024-slot buffer per

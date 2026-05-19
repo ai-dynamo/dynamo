@@ -210,14 +210,14 @@ impl<
         }
 
         if self.all_workers_prefill_busy(threshold, request.eligibility(), decay_now) {
-            let queue_depth = self.pending_count.load(AtomicOrdering::Relaxed);
-            if let Some(max_queue_depth) = self.tier_cap_for_request(&request)
-                && queue_depth >= max_queue_depth
+            let pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
+            if let Some(max_isl_tokens) = self.tier_cap_for_request(&request)
+                && pending_isl_tokens >= max_isl_tokens
             {
                 request.respond(Err(KvSchedulerError::Backpressure {
                     reason: RouterBackpressureReason::MaxQueueDepthExceeded,
-                    queue_depth,
-                    max_queue_depth: Some(max_queue_depth),
+                    queue_depth: pending_isl_tokens,
+                    max_queue_depth: Some(max_isl_tokens),
                 }));
                 return;
             }
@@ -754,6 +754,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             None,
+            RouterQueueDepthTiers::disabled(),
             block_size,
             selector,
             FcfsPolicy,
@@ -977,11 +978,11 @@ mod tests {
         let block_size = 16;
         let isl = 512;
 
-        // Single tier at floor=0 with cap=1 — every request matches, queue
-        // capped at 1 pending.
+        // Single tier at floor=0 with cap=512 ISL tokens — every request matches,
+        // queue capped at 512 ISL tokens (1 request worth).
         let tiers = RouterQueueDepthTiers::try_from(vec![RouterQueueDepthByMissingIslTier {
             missing_cache_tokens_floor: 0,
-            max_queue_depth: 1,
+            max_queue_depth: isl,
         }])
         .unwrap();
         let (queue, _slots, _cfg_tx) =
@@ -994,6 +995,7 @@ mod tests {
         let (req2, _rx2) = make_request("req-2", isl);
         queue.enqueue(req2).await;
         assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
 
         let (req3, rx3) = make_request("req-3", isl);
         queue.enqueue(req3).await;
@@ -1004,13 +1006,14 @@ mod tests {
                 resp3,
                 Err(KvSchedulerError::Backpressure {
                     reason: RouterBackpressureReason::MaxQueueDepthExceeded,
-                    queue_depth: 1,
-                    max_queue_depth: Some(1),
+                    queue_depth: 512,
+                    max_queue_depth: Some(512),
                 })
             ),
             "expected backpressure when queue is full, got {resp3:?}"
         );
         assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1019,18 +1022,18 @@ mod tests {
         let isl = 512; // every test request has 512 cache-miss tokens (no cache).
 
         // Two tiers:
-        //   (floor=0,   cap=4)  applies to cheap requests
-        //   (floor=256, cap=1)  applies to expensive (>=256 cache-miss) requests
+        //   (floor=0,   cap=2048)  applies to cheap requests (4 requests worth)
+        //   (floor=256, cap=512)   applies to expensive (>=256 cache-miss) requests (1 request worth)
         // All test requests are 512 cache-miss → they match the expensive tier
-        // and should backpressure once queue_depth reaches 1.
+        // and should backpressure once pending ISL tokens reaches 512.
         let tiers = RouterQueueDepthTiers::try_from(vec![
             RouterQueueDepthByMissingIslTier {
                 missing_cache_tokens_floor: 0,
-                max_queue_depth: 4,
+                max_queue_depth: 4 * isl,
             },
             RouterQueueDepthByMissingIslTier {
                 missing_cache_tokens_floor: 256,
-                max_queue_depth: 1,
+                max_queue_depth: isl,
             },
         ])
         .unwrap();
@@ -1045,6 +1048,7 @@ mod tests {
         let (req2, _rx2) = make_request("req-2", isl);
         queue.enqueue(req2).await;
         assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
 
         let (req3, rx3) = make_request("req-3", isl);
         queue.enqueue(req3).await;
@@ -1055,8 +1059,8 @@ mod tests {
                 resp3,
                 Err(KvSchedulerError::Backpressure {
                     reason: RouterBackpressureReason::MaxQueueDepthExceeded,
-                    queue_depth: 1,
-                    max_queue_depth: Some(1),
+                    queue_depth: 512,
+                    max_queue_depth: Some(512),
                 })
             ),
             "expensive-tier request should backpressure at depth 1, got {resp3:?}"

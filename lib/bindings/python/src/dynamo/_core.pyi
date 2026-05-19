@@ -1378,7 +1378,7 @@ class KvRouterConfig:
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
-        router_queue_depth_by_missing_isl: list[tuple[int, int]] = [(0, 1024)],
+        router_queue_depth_by_missing_isl: list[tuple[int, int]] = [(0, 2097152), (2048, 262144)],
     ) -> None:
         """
         Create a KV router configuration.
@@ -1413,20 +1413,20 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
-            router_queue_depth_by_missing_isl: Tiered absolute queue-depth caps
+            router_queue_depth_by_missing_isl: Tiered per-worker pending ISL token caps
                 keyed on the request's best-case missing prefill tokens
                 (ISL minus best cached tokens across eligible workers). Each
-                entry is a `(missing_isl_floor, max_queue_depth)` tuple; the
-                tier with the highest matched floor wins. The list must:
+                entry is a `(missing_isl_floor, max_isl_tokens)` tuple; the
+                tier with the highest matched floor wins. The cap is multiplied
+                by worker count to get the total ISL token limit. The list must:
                   * be empty (disables capping), OR
                   * start with `missing_isl_floor == 0`, be strictly ascending
-                    in floor, and have `max_queue_depth > 0` for each tier.
-                Caps are absolute totals (not multiplied by worker count).
-                Example: `[(0, 128), (1024, 8), (4096, 2)]` admits cheap
-                requests with up to 128 pending, requests missing >=1024
-                tokens with up to 8, and requests missing >=4096 with up to 2.
-                Backpressure (ResourceExhausted) is returned when the cap is
-                reached.
+                    in floor, and have `max_isl_tokens > 0` for each tier.
+                The cap is compared against the sum of ISL tokens for all requests
+                currently parked in the pending queue.
+                Default: `[(0, 2097152), (2048, 262144)]` — 2M ISL tokens per worker
+                for cheap requests (low cache miss), 256K for expensive requests.
+                Backpressure (ResourceExhausted) is returned when the cap is reached.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
