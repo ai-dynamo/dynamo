@@ -20,6 +20,9 @@ from .multimodal import (
     MultimodalWorkerHandler,
 )
 
+# Realtime video handlers (sgl-project/sglang#19817)
+from .realtime_video import RealtimeVideoWorkerHandler
+
 # Video generation handlers
 from .video_generation import VideoGenerationWorkerHandler
 
@@ -36,6 +39,8 @@ __all__ = [
     "EmbeddingWorkerHandler",
     # Image diffusion handlers
     "ImageDiffusionWorkerHandler",
+    # Realtime video handlers
+    "RealtimeVideoWorkerHandler",
     # Video generation handlers
     "VideoGenerationWorkerHandler",
     # Multimodal handlers

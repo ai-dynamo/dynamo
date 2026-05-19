@@ -14,6 +14,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     ImageDiffusionHealthCheckPayload,
+    RealtimeVideoHealthCheckPayload,
     SglangHealthCheckPayload,
     VideoGenerationHealthCheckPayload,
 )
@@ -30,6 +31,7 @@ from dynamo.sglang.register import (
 from dynamo.sglang.request_handlers import (
     DiffusionWorkerHandler,
     ImageDiffusionWorkerHandler,
+    RealtimeVideoWorkerHandler,
     VideoGenerationWorkerHandler,
 )
 
@@ -274,6 +276,108 @@ async def init_video_diffusion(
         logging.error(f"Failed to serve video generation endpoints: {e}")
         raise
     finally:
+        handler.cleanup()
+        if run_deferred_handlers is not None:
+            logging.info("Running deferred handlers")
+            await run_deferred_handlers()
+
+
+async def init_realtime_video_diffusion(
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_endpoints: list,
+    run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+) -> None:
+    """Initialize the Krea realtime video worker component.
+
+    Reuses `DiffGenerator.from_pretrained()` to bootstrap the SGLang scheduler
+    subprocess that the realtime pipeline talks to via ZMQ. The handler then
+    drives `process_generation_batch` per chunk and yields one MP4 chunk per
+    response so the Rust frontend's `/v1/videos` SSE route can forward each
+    chunk to the client.
+
+    The realtime path goes through `async_scheduler_client`, a module-level
+    singleton that is normally initialized by sglang's diffusion FastAPI
+    lifespan (sgl-project/sglang#19817 `http_server.py:lifespan`). Dynamo's
+    worker bypasses FastAPI, so we replicate that bootstrap here: after
+    `DiffGenerator.from_pretrained` has spawned the scheduler (and populated
+    `get_global_server_args()` via `launch_server`), we call
+    `async_scheduler_client.initialize(...)` and pair it with `close()` on
+    teardown. The `run_zeromq_broker` background task from the upstream
+    lifespan is intentionally omitted — it only services external offline
+    clients connecting to the FastAPI process, which doesn't exist here.
+    """
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    from sglang.multimodal_gen import DiffGenerator
+    from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
+    from sglang.multimodal_gen.runtime.server_args import get_global_server_args
+
+    if not server_args.model_path:
+        raise ValueError("--model is required for realtime video workers")
+
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    num_gpus = tp_size * dp_size
+
+    dist_timeout = getattr(server_args, "dist_timeout", None)
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=server_args.model_path,
+        num_gpus=num_gpus,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        dist_timeout=dist_timeout,
+    )
+
+    # DiffGenerator.from_pretrained -> launch_server -> set_global_server_args,
+    # so the global is populated by now. Mirror the FastAPI lifespan init.
+    async_scheduler_client.initialize(get_global_server_args())
+
+    fs_url = dynamo_args.media_output_fs_url
+
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+
+    shutdown_endpoints[:] = [generate_endpoint]
+
+    handler = RealtimeVideoWorkerHandler(
+        generator,
+        config,
+        publisher=None,
+        fs=get_fs(fs_url),
+    )
+
+    health_check_payload = RealtimeVideoHealthCheckPayload(
+        model_path=server_args.model_path
+    ).to_dict()
+
+    ready_event = asyncio.Event()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[],
+                health_check_payload=health_check_payload,
+            ),
+            register_video_generation_model(
+                generator,
+                generate_endpoint,
+                server_args,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve realtime video endpoints: {e}")
+        raise
+    finally:
+        try:
+            async_scheduler_client.close()
+        except Exception as e:
+            logging.warning(f"async_scheduler_client.close() failed: {e}")
         handler.cleanup()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")

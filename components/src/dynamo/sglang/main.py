@@ -15,6 +15,7 @@ from dynamo.sglang.args import parse_args
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
+    init_realtime_video_diffusion,
     init_video_diffusion,
 )
 from dynamo.sglang.init_embedding import init_embedding
@@ -77,6 +78,10 @@ async def worker():
         )
     elif config.dynamo_args.video_generation_worker:
         await init_video_diffusion(
+            runtime, config, shutdown_endpoints, run_deferred_handlers
+        )
+    elif config.dynamo_args.realtime_video_worker:
+        await init_realtime_video_diffusion(
             runtime, config, shutdown_endpoints, run_deferred_handlers
         )
     elif config.dynamo_args.embedding_worker:

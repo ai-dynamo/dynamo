@@ -111,6 +111,15 @@ ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
 {% endif %}
 {%- endif -%}
 
+{% if framework == "sglang" %}
+# Optional pin for the sglang Python package. Empty (default) keeps the version
+# baked into the upstream lmsysorg/sglang runtime image. When set, the runtime
+# stage swaps the Python package only — sgl-kernel/FlashInfer/torch stay from
+# the base image (see templates/sglang_runtime.Dockerfile).
+ARG SGLANG_REF={{ context.sglang.sglang_ref }}
+ARG SGLANG_REPO={{ context.sglang.sglang_repo }}
+{% endif %}
+
 {% if framework == "trtllm" %}
 # TensorRT-LLM specific configuration
 ARG HAS_TRTLLM_CONTEXT={{ context.trtllm.has_trtllm_context }}

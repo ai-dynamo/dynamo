@@ -231,3 +231,30 @@ class VideoGenerationHealthCheckPayload(HealthCheckPayload):
         }
 
         super().__init__()
+
+
+class RealtimeVideoHealthCheckPayload(HealthCheckPayload):
+    """Health check payload for the Krea realtime video worker.
+
+    Drives one full chunk through the realtime pipeline (single session,
+    single block_idx=0, minimal frame count and steps). This exercises the
+    same code path as production traffic — including session creation and
+    teardown — without requiring a long video.
+    """
+
+    def __init__(self, model_path: str):
+        self.default_payload = {
+            "prompt": "test",
+            "model": model_path,
+            "seconds": 1,
+            "size": "256x256",
+            "response_format": "b64_json",
+            "nvext": {
+                "fps": 6,
+                "num_frames": 6,
+                "num_inference_steps": 1,
+                "guidance_scale": 5.0,
+            },
+        }
+
+        super().__init__()

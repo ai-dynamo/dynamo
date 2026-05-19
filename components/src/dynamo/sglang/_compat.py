@@ -145,9 +145,67 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
         server_args.incremental_streaming_output = True
 
 
+# ---------------------------------------------------------------------------
+# Krea realtime video (sgl-project/sglang#19817 / antgroup chunk_diffusion).
+#
+# These symbols live in sglang.multimodal_gen.runtime.* and only exist on the
+# antgroup `chunk_diffusion` fork (and upstream sglang once #19817 merges).
+# Imported lazily so Dynamo still builds against vanilla sglang releases.
+# ---------------------------------------------------------------------------
+def import_realtime_video_api() -> Any:
+    """Return a namespace of antgroup chunk_diffusion realtime symbols.
+
+    Raises ImportError with build guidance when the installed sglang does not
+    provide the realtime API (i.e. upstream sgl-project/sglang prior to #19817).
+    """
+    from types import SimpleNamespace
+
+    try:
+        from sglang.multimodal_gen.runtime.entrypoints.openai.protocol import (
+            RealtimeVideoGenerationsRequest,
+        )
+        from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
+            process_generation_batch,
+        )
+        from sglang.multimodal_gen.runtime.entrypoints.realtime.generate_session import (
+            GenerateSession,
+            RealtimeVideoMode,
+        )
+        from sglang.multimodal_gen.runtime.entrypoints.utils import (
+            ReleaseRealtimeSessionReq,
+            prepare_request,
+        )
+        from sglang.multimodal_gen.runtime.scheduler_client import (
+            async_scheduler_client,
+        )
+        from sglang.multimodal_gen.runtime.server_args import get_global_server_args
+    except ImportError as e:
+        raise ImportError(
+            "Krea realtime video support requires sgl-project/sglang#19817 "
+            "(currently only available via the antgroup/sglang `chunk_diffusion` "
+            "fork). Build the container with "
+            "`--build-arg SGLANG_REF=chunk_diffusion "
+            "--build-arg SGLANG_REPO=https://github.com/antgroup/sglang.git`, "
+            "or update SGLANG_REF in container/context.yaml. See "
+            "container/templates/sglang_runtime.Dockerfile for the install step."
+        ) from e
+
+    return SimpleNamespace(
+        GenerateSession=GenerateSession,
+        RealtimeVideoMode=RealtimeVideoMode,
+        ReleaseRealtimeSessionReq=ReleaseRealtimeSessionReq,
+        prepare_request=prepare_request,
+        process_generation_batch=process_generation_batch,
+        async_scheduler_client=async_scheduler_client,
+        get_global_server_args=get_global_server_args,
+        RealtimeVideoGenerationsRequest=RealtimeVideoGenerationsRequest,
+    )
+
+
 __all__ = [
     "enable_disjoint_streaming_output",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
     "get_scheduler_info",
+    "import_realtime_video_api",
 ]

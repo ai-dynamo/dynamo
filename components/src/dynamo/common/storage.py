@@ -115,3 +115,31 @@ async def upload_to_fs(
     """
     await asyncio.to_thread(fs.pipe, storage_path, data)
     return get_media_url(fs, storage_path, base_url)
+
+
+async def upload_file_to_fs(
+    fs: DirFileSystem,
+    storage_path: str,
+    local_path: str,
+    base_url: Optional[str] = None,
+) -> str:
+    """Upload a local file to the media filesystem and return the public URL.
+
+    Equivalent to ``upload_to_fs`` but takes a source path instead of bytes,
+    so the payload never has to round-trip through Python memory. Prefer this
+    when the caller already has the data on disk (e.g. an inference engine
+    that writes outputs to a scratch dir): on a ``file://`` filesystem the
+    underlying ``fs.put`` is a kernel-level copy, and on object stores it
+    streams via the fsspec implementation's native multipart path.
+
+    Args:
+        fs: The DirFileSystem returned by ``get_fs()``.
+        storage_path: Relative path within the filesystem.
+        local_path: Absolute path of the source file on the local filesystem.
+        base_url: Optional CDN / proxy base URL for URL rewriting.
+
+    Returns:
+        Public URL string for the uploaded file.
+    """
+    await asyncio.to_thread(fs.put, local_path, storage_path)
+    return get_media_url(fs, storage_path, base_url)

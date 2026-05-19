@@ -106,6 +106,16 @@ class DynamoSGLangArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
+            flag_name="--realtime-video-worker",
+            env_var="DYN_SGL_REALTIME_VIDEO_WORKER",
+            default=False,
+            help="Run as realtime video worker driving the Krea chunked generation "
+            "pipeline (sgl-project/sglang#19817). Yields one MP4 chunk per response; "
+            "clients call POST /v1/videos with stream:true to receive SSE events. "
+            "One-shot CreateVideoRequest input (no mid-flight action stream).",
+        )
+        add_negatable_bool_argument(
+            g,
             flag_name="--enable-rl",
             env_var="DYN_SGL_ENABLE_RL",
             default=False,
@@ -142,6 +152,7 @@ class DynamoSGLangConfig(ConfigBase):
     disagg_config_key: Optional[str] = None
 
     video_generation_worker: bool
+    realtime_video_worker: bool
     enable_rl: bool
     frontend_decoding: bool = False
     sglang_trace_level: int
