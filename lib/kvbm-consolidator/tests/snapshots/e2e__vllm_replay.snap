@@ -13,7 +13,9 @@ expression: collected
         - 30
         - 40
       block_size: 4
-    - type: BlockStored
+  - 0
+- - 0
+  - - type: BlockStored
       block_hashes:
         - 5370979798324801
       parent_block_hash: 3114443937531979
