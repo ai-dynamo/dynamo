@@ -15,6 +15,7 @@ import enum
 import logging
 import re
 import threading
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
@@ -326,6 +327,30 @@ def get_prometheus_expfmt(
     except Exception as e:
         logging.error(f"Error getting metrics: {e}")
         return ""
+
+
+def gather_with_labels(
+    registry: "CollectorRegistry",
+    auto_labels: Mapping[str, str],
+    *,
+    prefix_filters: Optional[list[str]] = None,
+    exclude_prefixes: Optional[list[str]] = None,
+) -> str:
+    """Scrape ``registry`` into Prometheus exposition text with
+    ``auto_labels`` injected at collection time. Existing labels on the
+    source metrics win over auto-labels of the same name.
+
+    Lives here (as a leaf utility next to :func:`get_prometheus_expfmt`)
+    so both ``dynamo.common.backend.metrics`` and
+    ``dynamo.common.backend._internal_metrics`` can import it without
+    creating a module-level cycle between them.
+    """
+    return get_prometheus_expfmt(
+        registry,
+        metric_prefix_filters=prefix_filters,
+        exclude_prefixes=exclude_prefixes,
+        inject_custom_labels=dict(auto_labels) if auto_labels else None,
+    )
 
 
 class LLMBackendMetrics:

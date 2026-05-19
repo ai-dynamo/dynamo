@@ -21,10 +21,9 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Optional
 
-from dynamo.common.utils.prometheus import get_prometheus_expfmt
+from dynamo.common.utils.prometheus import gather_with_labels
 
 from ._internal_metrics import register_engine_registry
 
@@ -34,24 +33,6 @@ if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
-
-
-def gather_with_labels(
-    registry: "CollectorRegistry",
-    auto_labels: Mapping[str, str],
-    *,
-    prefix_filters: Optional[list[str]] = None,
-    exclude_prefixes: Optional[list[str]] = None,
-) -> str:
-    """Scrape ``registry`` into Prometheus exposition text with
-    ``auto_labels`` injected at collection time. Existing labels on the
-    source metrics win over auto-labels of the same name."""
-    return get_prometheus_expfmt(
-        registry,
-        metric_prefix_filters=prefix_filters,
-        exclude_prefixes=exclude_prefixes,
-        inject_custom_labels=dict(auto_labels) if auto_labels else None,
-    )
 
 
 def ensure_prometheus_multiproc_dir(

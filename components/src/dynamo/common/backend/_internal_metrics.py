@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from dynamo.common.utils.prometheus import LLMBackendMetrics
+from dynamo.common.utils.prometheus import LLMBackendMetrics, gather_with_labels
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
@@ -76,13 +76,6 @@ def register_engine_registry(
     bridging its multiprocess registry) or via
     :func:`dynamo.common.backend.metrics.register_global_registry`.
     """
-    # Local import to break the metrics ↔ _internal_metrics cycle.
-    # `metrics` re-exports `register_engine_registry` for engine
-    # consumers, and `_internal_metrics` consumes `gather_with_labels`
-    # from `metrics` — pull the helper in at call time, not at module
-    # load.
-    from .metrics import gather_with_labels
-
     labels = metrics.auto_labels
     metrics.register_prometheus_expfmt_callback(
         lambda: gather_with_labels(
