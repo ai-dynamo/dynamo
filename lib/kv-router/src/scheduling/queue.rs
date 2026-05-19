@@ -133,7 +133,7 @@ impl<
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
         }
-        if !queue_depth_tiers.is_disabled() {
+        if !queue_depth_tiers.is_unbounded() {
             tracing::info!(
                 tier_count = queue_depth_tiers.as_slice().len(),
                 "Router queue depth tiered by cache-miss: {} tier(s) configured",
@@ -590,7 +590,7 @@ mod tests {
             block_size,
             isl,
             threshold_frac,
-            RouterQueueDepthTiers::disabled(),
+            RouterQueueDepthTiers::unbounded_cap(),
             None,
         );
         (queue, slots)
@@ -634,7 +634,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
-            RouterQueueDepthTiers::disabled(),
+            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
             FcfsPolicy,
@@ -661,7 +661,7 @@ mod tests {
             block_size,
             isl,
             threshold_frac,
-            RouterQueueDepthTiers::disabled(),
+            RouterQueueDepthTiers::unbounded_cap(),
             prefill_load_estimator,
         )
     }
@@ -754,7 +754,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             None,
-            RouterQueueDepthTiers::disabled(),
+            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
             FcfsPolicy,

@@ -201,18 +201,18 @@ impl RouterQueueDepthTiers {
         )
     }
 
-    /// Disable capping entirely.
-    pub fn disabled() -> Self {
+    /// Disable capping entirely (unbounded queue).
+    pub fn unbounded_cap() -> Self {
         Self(Vec::new())
     }
 
-    /// Check if capping is disabled (empty tiers).
-    pub fn is_disabled(&self) -> bool {
+    /// Check if capping is disabled (unbounded queue).
+    pub fn is_unbounded(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Get effective cap for a request's cache-miss tokens, scaled by worker count.
-    /// Returns None if capping is disabled.
+    /// Returns None if capping is disabled (unbounded queue).
     pub fn cap_for(&self, cache_miss_tokens: usize, worker_count: usize) -> Option<usize> {
         if self.0.is_empty() {
             return None;
@@ -255,7 +255,7 @@ impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
 
     fn try_from(tiers: Vec<RouterQueueDepthByMissingIslTier>) -> Result<Self, Self::Error> {
         if tiers.is_empty() {
-            return Ok(Self::disabled());
+            return Ok(Self::unbounded_cap());
         }
 
         // Must start with floor 0
@@ -599,7 +599,7 @@ pub struct KvRouterConfig {
     /// Default: `[(0, 2097152), (2048, 262144)]` — 2M ISL tokens per worker for cheap
     /// requests (low cache miss), 256K for expensive requests (high cache miss).
     /// This allows more queued ISL tokens for cheap requests and fewer for expensive ones.
-    /// Empty vec disables ISL token capping entirely.
+    /// Empty vec means unbounded queue (no ISL token capping).
     ///
     /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
     /// buffers. The TCP request plane has a fixed 1024-slot buffer per

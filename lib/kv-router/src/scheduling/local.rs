@@ -434,7 +434,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
-            crate::scheduling::config::RouterQueueDepthTiers::disabled(),
+            crate::scheduling::config::RouterQueueDepthTiers::unbounded_cap(),
             64,
             DefaultWorkerSelector::new(None, "test"),
             FcfsPolicy,
