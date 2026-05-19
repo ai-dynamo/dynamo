@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::protocols::tensor;
 use dynamo_kv_router::protocols::{KvTransferEnforcement, KvTransferPreferredWeight};
 
-// Namespace topology-generated taints so they cannot collide with caller-provided taints.
+// Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
 /// Canonical worker-taint form for topology metadata.
@@ -226,15 +226,16 @@ impl ModelRuntimeConfig {
         }
     }
 
-    /// Add canonical topology taints derived from `topology_domains`.
+    /// Rebuild canonical topology taints derived from `topology_domains`.
     ///
-    /// Existing caller-provided taints are preserved; generated topology taints are unioned into
-    /// the same set so `RoutingConstraints` can match them through the standard worker taints path.
+    /// Existing caller-provided taints outside the reserved topology prefix are preserved; generated
+    /// topology taints are refreshed in the same set so `RoutingConstraints` can match them through
+    /// the standard worker taints path.
     pub fn add_topology_taints(&mut self) -> &mut Self {
-        let topology_taints: Vec<_> = self
-            .topology_domains
-            .iter()
-            .filter_map(|(domain, value)| {
+        self.taints
+            .retain(|taint| !taint.starts_with(TOPOLOGY_TAINT_PREFIX));
+        self.taints
+            .extend(self.topology_domains.iter().filter_map(|(domain, value)| {
                 let domain = domain.trim();
                 let value = value.trim();
                 if domain.is_empty() || value.is_empty() {
@@ -242,9 +243,7 @@ impl ModelRuntimeConfig {
                 } else {
                     Some(topology_taint(domain, value))
                 }
-            })
-            .collect();
-        self.taints.extend(topology_taints);
+            }));
         self
     }
 
@@ -574,5 +573,38 @@ mod tests {
 
         assert!(config.taints.contains("caller/taint=value"));
         assert!(config.taints.contains("dynamo.topology/zone=us-east-1a"));
+    }
+
+    #[test]
+    fn test_add_topology_taints_rebuilds_generated_taints() {
+        let mut config = ModelRuntimeConfig {
+            taints: HashSet::from([
+                "caller/taint=value".to_string(),
+                "dynamo.topology/zone=stale-zone".to_string(),
+                "dynamo.topology/rack=stale-rack".to_string(),
+            ]),
+            ..Default::default()
+        };
+        config
+            .topology_domains
+            .insert("zone".to_string(), "us-east-1a".to_string());
+
+        config.add_topology_taints();
+
+        assert!(config.taints.contains("caller/taint=value"));
+        assert!(config.taints.contains("dynamo.topology/zone=us-east-1a"));
+        assert!(!config.taints.contains("dynamo.topology/zone=stale-zone"));
+        assert!(!config.taints.contains("dynamo.topology/rack=stale-rack"));
+
+        config.topology_domains.clear();
+        config.add_topology_taints();
+
+        assert!(config.taints.contains("caller/taint=value"));
+        assert!(
+            !config
+                .taints
+                .iter()
+                .any(|taint| taint.starts_with(TOPOLOGY_TAINT_PREFIX))
+        );
     }
 }
