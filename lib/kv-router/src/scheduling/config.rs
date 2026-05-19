@@ -468,6 +468,12 @@ pub struct KvRouterConfig {
     /// be strictly ascending in floor. The first tier therefore matches
     /// every request, so admission always has a cap. Empty vec disables
     /// queue-depth capping entirely. See [`RouterQueueDepthByMissingIslTier`].
+    ///
+    /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
+    /// buffers. The TCP request plane has a fixed 1024-slot buffer per
+    /// connection (see `REQUEST_CHANNEL_BUFFER` in tcp_client.rs). Requests
+    /// may accumulate there before reaching the scheduler, so the effective
+    /// end-to-end backlog can exceed the tier caps.
     #[serde(default)]
     pub router_queue_depth_by_missing_isl: Vec<RouterQueueDepthByMissingIslTier>,
 
