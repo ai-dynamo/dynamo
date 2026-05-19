@@ -560,6 +560,7 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     enable_eagle: bool
     taints: Set[str]
+    stable_routing_id: str | None
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None

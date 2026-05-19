@@ -51,6 +51,7 @@ PARITY.{md,html} are for local viewing only; don't check them in.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime
 import html as html_lib
 import json
@@ -294,15 +295,42 @@ TOP_N_FAMILIES = [
 ]
 
 SUB_CASE_GROUPS = [
-    ("Core", ("1", "3", "9", "10", "13")),
-    ("Multi-call", ("2.a", "2.b", "2.c", "2.d", "12")),
+    ("Core", ("1", "3", "9", "9.a", "9.b")),
+    ("Multi-call", ("2.a", "2.b", "2.c", "2.d", "10")),
     (
         "Malformed / recovery",
         ("4.a", "4.b", "4.c", "4.d", "4.e", "5.a", "5.b", "5.c", "5.d", "5.e"),
     ),
-    ("Args", ("6.a", "6.b", "6.c", "7.a", "7.b", "7.c", "7.d", "11")),
+    (
+        "Args",
+        (
+            "6.a",
+            "6.b",
+            "6.c",
+            "7.a",
+            "7.b",
+            "7.c",
+            "7.d",
+            "7.e",
+        ),
+    ),
     ("Text interleaving", ("8.a", "8.b", "8.c", "8.d")),
+    ("Unknown tools", ("13", "13.a", "13.c")),
+    (
+        "String contents",
+        ("30", "30.a", "30.b", "30.c", "31", "31.a", "31.b"),
+    ),
 ]
+
+SPLIT_PARENT_SUBCASES = {
+    # Once a taxonomy bucket has leaf cases, the matrix should render only the
+    # leaves. Existing parent fixtures still carry useful expectations/reasons
+    # for parser families that have not been rewritten to leaf IDs yet.
+    "9": ("9.a",),
+    "30": ("30.a", "30.b", "30.c"),
+    "31": ("31.a", "31.b"),
+    "13": ("13.a",),
+}
 
 _SUB_CASE_DISPLAY_ORDER = {
     sub: (group_idx, sub_idx)
@@ -343,6 +371,46 @@ def _subcase_band_class(sub: str) -> str:
 def _discover_sub_cases(cases: dict) -> list[str]:
     """Union of sub-case IDs across all loaded fixtures, in stable order."""
     return sorted({sub for _fam, sub in cases.keys()}, key=_sub_sort_key)
+
+
+def _normalize_split_parent_cases(cases: dict) -> dict:
+    """Render split taxonomy buckets as leaf cases only.
+
+    Some older fixture files still define parent buckets such as
+    `PARSER.batch.30`, while newer files define leaf buckets such as
+    `PARSER.batch.30.a`. For display, parent+leaf duplication is confusing:
+    once any leaf exists for a parent bucket, the chart should show only the
+    leaf columns. Parent entries are copied into missing leaf cells so their
+    existing expectations or n/a reasons remain visible until the YAML itself
+    is migrated.
+    """
+    all_subs = {sub for _fam, sub in cases.keys()}
+    active_split_parents = {
+        parent
+        for parent, children in SPLIT_PARENT_SUBCASES.items()
+        if any(child in all_subs for child in children)
+    }
+    if not active_split_parents:
+        return cases
+
+    normalized = dict(cases)
+    families = {fam for fam, _sub in cases.keys()}
+    for family in families:
+        for parent in active_split_parents:
+            parent_key = (family, parent)
+            parent_case = normalized.get(parent_key)
+            if parent_case is None:
+                continue
+            for child in SPLIT_PARENT_SUBCASES[parent]:
+                child_key = (family, child)
+                if child_key in normalized:
+                    continue
+                child_case = copy.deepcopy(parent_case)
+                child_case["__case_id"] = f"PARSER.batch.{child}"
+                child_case["__synthetic_from_case_id"] = parent_case.get("__case_id")
+                normalized[child_key] = child_case
+            del normalized[parent_key]
+    return normalized
 
 
 def _derive_no_peer_sets(cases: dict) -> tuple[set[str], set[str]]:
@@ -408,7 +476,7 @@ def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
             case["__fixture_path"] = rel
             case["__case_id"] = cid
             cases[(family, sub)] = case
-    return cases, labels
+    return _normalize_split_parent_cases(cases), labels
 
 
 def _build_display_groups(
