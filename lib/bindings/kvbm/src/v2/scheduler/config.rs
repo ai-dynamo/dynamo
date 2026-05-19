@@ -3,7 +3,7 @@
 
 //! Python bindings for scheduler configuration.
 
-use dynamo_kvbm::v2::integrations::scheduler::SchedulerConfig;
+use super::engine::SchedulerConfig;
 use pyo3::prelude::*;
 
 /// Python wrapper for SchedulerConfig.
