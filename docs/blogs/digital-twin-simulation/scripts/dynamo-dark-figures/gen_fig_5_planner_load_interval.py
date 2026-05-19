@@ -209,6 +209,7 @@ def main() -> None:
         tickvals=[1, 2, 5, 10, 20, 30, 60, 120, 300],
         ticktext=["1", "2", "5", "10", "20", "30", "60", "120", "300"],
         range=[math.log10(0.85), math.log10(360)],
+        minor=dict(showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.25),
     )
     # Y-axis uses 10^k scientific-notation labels to match Hongkuan's
     # matplotlib renderings of Planner Exp 1 / Exp 3 in PR-9139. Major
@@ -223,6 +224,7 @@ def main() -> None:
         tickvals=[1e3, 1e4, 1e5, 1e6],
         ticktext=["10³", "10⁴", "10⁵", "10⁶"],
         range=[math.log10(1000), math.log10(1e6)],
+        minor=dict(showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.25),
     )
 
     out_svg = HERE.parent / "images" / "fig-5-planner-load-interval.svg"

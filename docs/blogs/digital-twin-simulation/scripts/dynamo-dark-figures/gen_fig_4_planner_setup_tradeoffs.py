@@ -3,15 +3,17 @@
 #  SPDX-License-Identifier: Apache-2.0
 """Generate fig-4: planner setup tradeoffs (planner_exp_1 redraw, Dynamo Dark).
 
-Two panels: p90 TTFT (log y) and p90 ITL (linear y) vs cumulative GPU-hours.
-Static-deployment Pareto curves (agg in CPU blue, disagg in amber) overlay
-six planner runs (3 targets x 2 modes) as open markers.
+Simplified per blog-figure feedback (Alec, Hongkuan, May 18 2026):
+- One line vs one point. Line = agg-static deployment Pareto (varying num
+  replicas, from 4 to 16 GPU). Point = agg Planner-SLA, the headline.
+- Disagg variants removed (agg dominates on this dataset).
+- Other planner targets (throughput / latency) removed; only the SLA
+  target carries the story.
+- Two panels: p90 TTFT (log y) and p90 ITL (linear y).
 
-The headline: the agg planner-SLA point (NV green diamond) sits BELOW the
-static Pareto on TTFT at roughly the same GPU-hours as a 4-GPU static run.
-
-Data is approximated from the engineer's rendered PNG in PR 9139 so the
-narrative beats match. Values are illustrative, not the source of truth.
+Headline: a single Planner-SLA run lands at ~4 GPU-h (the leftmost
+static config) but with TTFT and ITL comparable to a 10-GPU static run —
+clear win on the cost-latency frontier.
 """
 
 from __future__ import annotations
@@ -34,7 +36,6 @@ TEXT_MUTED = C["text"]["muted"]
 BORDER_SUBTLE = C["border"]["subtle"]
 NV_GREEN = C["accent"]["dynamo_green"]
 CPU_BLUE = C["accent"]["cpu_blue"]
-AMBER = C["accent"]["amber"]
 SANS = TY["font_family"]
 MONO = TY["font_family_mono"]
 
@@ -49,140 +50,70 @@ AGG_STATIC = [
     (13.6, 5.0e3,  25, 14),
     (15.6, 4.0e3,  24, 16),
 ]
-DISAGG_STATIC = [
-    (3.9,  4.5e6, 25, 4),
-    (5.9,  4.0e6, 25, 6),
-    (8.6,  1.0e6, 25, 8),
-    (9.6,  1.0e6, 25, 10),
-    (11.8, 3.0e4, 25, 12),
-    (13.8, 3.0e4, 25, 14),
-]
 
-# Planner runs: (mode, target, gpu_hours, ttft, itl).
-PLANNER = [
-    ("agg",    "throughput", 5.0, 4.5e4, 200),
-    ("agg",    "latency",    5.0, 4.0e4, 195),
-    ("agg",    "sla",        4.2, 2.3e3,  25),   # <- the headline
-    ("disagg", "throughput", 6.5, 5.5e4, 200),
-    ("disagg", "latency",    6.5, 3.8e4, 195),
-    ("disagg", "sla",        8.5, 2.2e4, 175),
-]
-
-# Marker symbol per planner target.
-TARGET_SYMBOL = {
-    "throughput": "square-open",
-    "latency":    "triangle-up-open",
-    "sla":        "diamond-open",
-}
-MODE_COLOR = {"agg": CPU_BLUE, "disagg": AMBER}
+# Planner SLA-target run — the single point the figure is built around.
+PLANNER_SLA = dict(gpu_hours=4.2, ttft=2.3e3, itl=25)
 
 
-def _ttft_panel(fig, row, col):
-    # Static Pareto curves.
-    for label, color, rows in (
-        ("agg static",    CPU_BLUE, AGG_STATIC),
-        ("disagg static", AMBER,    DISAGG_STATIC),
-    ):
-        xs = [r[0] for r in rows]
-        ys = [r[1] for r in rows]
-        fig.add_trace(
-            go.Scatter(
-                x=xs, y=ys, mode="lines+markers",
-                name=label, legendgroup=label,
-                line=dict(color=color, width=1.6),
-                marker=dict(color=color, size=8,
-                            line=dict(color=C["background"]["primary"], width=1)),
-                hovertemplate=f"<b>{label}</b><br>%{{x:.1f}} GPU-h<br>%{{y:,.0f}} ms<extra></extra>",
+def _static_line(fig, row, col, y_index):
+    """Draw the agg-static Pareto line on a subplot.
+
+    y_index: 1 for TTFT (p90_ttft_ms), 2 for ITL (p90_itl_ms).
+    """
+    xs = [r[0] for r in AGG_STATIC]
+    ys = [r[y_index] for r in AGG_STATIC]
+    fig.add_trace(
+        go.Scatter(
+            x=xs, y=ys, mode="lines+markers",
+            name="Static deployment", legendgroup="static",
+            showlegend=(row == 1 and col == 1),
+            line=dict(color=CPU_BLUE, width=1.6),
+            marker=dict(color=CPU_BLUE, size=8,
+                        line=dict(color=C["background"]["primary"], width=1)),
+            hovertemplate=("<b>Static deployment</b><br>"
+                           "%{x:.1f} GPU-h<br>%{y:,.0f} ms<extra></extra>"),
+        ),
+        row=row, col=col,
+    )
+
+    # Direct GPU-count labels on each static point so the reader sees that
+    # the line is a sweep across deployment sizes, not a continuous variable.
+    LABELED = {4, 8, 12, 16}
+    gpu_xs, gpu_ys, gpu_texts = [], [], []
+    for r in AGG_STATIC:
+        if r[3] not in LABELED:
+            continue
+        gpu_xs.append(r[0])
+        gpu_ys.append(r[y_index])
+        gpu_texts.append(f"{r[3]} GPU")
+    fig.add_trace(
+        go.Scatter(
+            x=gpu_xs, y=gpu_ys, mode="text",
+            text=gpu_texts, textposition="top right",
+            textfont=dict(family=MONO, size=10, color=CPU_BLUE),
+            showlegend=False, hoverinfo="skip",
+        ),
+        row=row, col=col,
+    )
+
+
+def _planner_point(fig, row, col, y_value):
+    fig.add_trace(
+        go.Scatter(
+            x=[PLANNER_SLA["gpu_hours"]], y=[y_value],
+            mode="markers",
+            name="Planner (SLA target)", legendgroup="planner",
+            showlegend=(row == 1 and col == 1),
+            marker=dict(
+                symbol="diamond", size=14,
+                color=NV_GREEN,
+                line=dict(color=C["background"]["primary"], width=1.5),
             ),
-            row=row, col=col,
-        )
-
-    # GPU-count labels on the static curves so the reader can see that
-    # each static-line marker is a separate deployment at a different
-    # GPU budget (Hongkuan's PR-9139 feedback). Sparse-labeled (every
-    # other point) to avoid label crowding at high TTFT where the
-    # curves start; positioned to the side of the marker so the curve
-    # itself stays readable. Agg labels go top-right, disagg top-left.
-    AGG_LABELED = {4, 8, 12, 16}
-    DISAGG_LABELED = {4, 8, 14}
-    for label, color, rows, labeled, pos in (
-        ("agg static",    CPU_BLUE, AGG_STATIC,    AGG_LABELED,    "top right"),
-        ("disagg static", AMBER,    DISAGG_STATIC, DISAGG_LABELED, "bottom right"),
-    ):
-        gpu_xs, gpu_ys, gpu_texts = [], [], []
-        for r in rows:
-            if r[3] not in labeled:
-                continue
-            gpu_xs.append(r[0])
-            gpu_ys.append(r[1])
-            gpu_texts.append(f"{r[3]} GPU")
-        fig.add_trace(
-            go.Scatter(
-                x=gpu_xs, y=gpu_ys, mode="text",
-                text=gpu_texts, textposition=pos,
-                textfont=dict(family=MONO, size=10, color=color),
-                showlegend=False, hoverinfo="skip",
-            ),
-            row=row, col=col,
-        )
-
-    # Planner markers. Agg SLA is NV green (the punch line); others stay in
-    # their mode color so the eye picks out the green diamond on TTFT.
-    seen = set()
-    for mode, target, x, y, _itl in PLANNER:
-        color = NV_GREEN if (mode == "agg" and target == "sla") else MODE_COLOR[mode]
-        name = f"{mode} Planner-{target}"
-        showlegend = name not in seen
-        seen.add(name)
-        fig.add_trace(
-            go.Scatter(
-                x=[x], y=[y], mode="markers",
-                name=name, legendgroup=name, showlegend=showlegend,
-                marker=dict(
-                    symbol=TARGET_SYMBOL[target], size=11,
-                    color=color, line=dict(color=color, width=1.6),
-                ),
-                hovertemplate=f"<b>{name}</b><br>%{{x:.1f}} GPU-h<br>%{{y:,.0f}} ms<extra></extra>",
-            ),
-            row=row, col=col,
-        )
-
-
-def _itl_panel(fig, row, col):
-    for label, color, rows in (
-        ("agg static",    CPU_BLUE, AGG_STATIC),
-        ("disagg static", AMBER,    DISAGG_STATIC),
-    ):
-        xs = [r[0] for r in rows]
-        ys = [r[2] for r in rows]
-        fig.add_trace(
-            go.Scatter(
-                x=xs, y=ys, mode="lines+markers",
-                showlegend=False,
-                legendgroup=label,
-                line=dict(color=color, width=1.6),
-                marker=dict(color=color, size=8,
-                            line=dict(color=C["background"]["primary"], width=1)),
-                hovertemplate=f"<b>{label}</b><br>%{{x:.1f}} GPU-h<br>%{{y:.0f}} ms<extra></extra>",
-            ),
-            row=row, col=col,
-        )
-
-    for mode, target, x, _ttft, y in PLANNER:
-        color = NV_GREEN if (mode == "agg" and target == "sla") else MODE_COLOR[mode]
-        name = f"{mode} Planner-{target}"
-        fig.add_trace(
-            go.Scatter(
-                x=[x], y=[y], mode="markers",
-                showlegend=False, legendgroup=name,
-                marker=dict(
-                    symbol=TARGET_SYMBOL[target], size=11,
-                    color=color, line=dict(color=color, width=1.6),
-                ),
-                hovertemplate=f"<b>{name}</b><br>%{{x:.1f}} GPU-h<br>%{{y:.0f}} ms<extra></extra>",
-            ),
-            row=row, col=col,
-        )
+            hovertemplate=("<b>Planner (SLA target)</b><br>"
+                           "%{x:.1f} GPU-h<br>%{y:,.0f} ms<extra></extra>"),
+        ),
+        row=row, col=col,
+    )
 
 
 def main() -> None:
@@ -192,8 +123,10 @@ def main() -> None:
         subplot_titles=("", ""),
     )
 
-    _ttft_panel(fig, row=1, col=1)
-    _itl_panel(fig, row=1, col=2)
+    _static_line(fig, row=1, col=1, y_index=1)
+    _planner_point(fig, row=1, col=1, y_value=PLANNER_SLA["ttft"])
+    _static_line(fig, row=1, col=2, y_index=2)
+    _planner_point(fig, row=1, col=2, y_value=PLANNER_SLA["itl"])
 
     # Inline panel labels (above each panel, top-left, muted).
     for i, label in enumerate(("p90 TTFT", "p90 ITL")):
@@ -206,28 +139,18 @@ def main() -> None:
             font=dict(family=SANS, size=11, color=TEXT_MUTED),
         )
 
-    # Punch-line callout, anchored to the top-right of the TTFT panel as
-    # a Tufte block (subtle dark wash, hairline border, white display-sans,
-    # left-aligned). The leader Scatter still binds to the subplot axes
-    # and runs from the box down-left to the NV-green agg SLA diamond at
-    # (4.2, 2.3e3).
-    fig.add_trace(
-        go.Scatter(
-            x=[8.0, 4.6], y=[1.0e6, 3.0e3],
-            mode="lines",
-            line=dict(color=NV_GREEN, width=1.4),
-            showlegend=False, hoverinfo="skip",
-        ),
-        row=1, col=1,
-    )
+    # Punch-line callout, anchored to the top-right of the TTFT panel.
+    # The NV-green diamond at (4.2, 2.3e3) is its own visual anchor —
+    # the callout sits above the static curve sweep, where there's air.
     fig.add_annotation(
         xref="x domain", yref="y domain",
         x=0.98, y=0.95,
         xanchor="right", yanchor="top",
         align="left",
-        text="<b>SLA Planner</b><br>"
-             "same GPU-hours,<br>"
-             "~100x lower TTFT",
+        text="<b>Planner (SLA target)</b><br>"
+             "~4 GPU-h budget,<br>"
+             "~100x lower TTFT than<br>"
+             "static at the same cost",
         showarrow=False,
         bgcolor="rgba(20,20,20,0.65)",
         bordercolor="rgba(255,255,255,0.18)",
@@ -253,25 +176,24 @@ def main() -> None:
             bgcolor="rgba(0,0,0,0)",
             font=dict(family=SANS, size=11, color=TEXT_SECONDARY),
             itemsizing="constant",
-            tracegroupgap=12,
+            tracegroupgap=18,
         ),
         margin=dict(l=80, r=40, t=180, b=120),
         width=1240, height=560,
         shapes=[],
     )
 
-    # Subtitle parked 5px below the title's bottom edge. Derived from
-    # the standard formula in plotting.md:
+    # Subtitle parked 2px below title bottom (snug, descender-safe).
     #   title_top    = (1 - 0.96) * 560 = 22.4
-    #   title_bottom = 22.4 + 42 * 1.00 = 64.4   # 1.00 = cap + descender
-    #   subtitle_top = 64.4 + 2         = 66.4   # +2 px = snug
+    #   title_bottom = 22.4 + 42 * 1.00 = 64.4
+    #   subtitle_top = 64.4 + 2         = 66.4
     #   plot_h       = 560 - 180 - 120  = 260
     #   paper_y      = 1 + (180 - 66.4) / 260 = 1.437
     fig.add_annotation(
         x=-0.049, y=1.437,
         xref="paper", yref="paper",
         xanchor="left", yanchor="top",
-        text="Qwen3-32B / TP=2 / H200 — Planner holds p90 TTFT under SLA at ~30% of the static config's cumulative GPU-hours.",
+        text="Qwen3-32B / TP=2 / H200 — Planner matches a 10-GPU static deployment on TTFT and ITL at the cost of a 4-GPU one.",
         showarrow=False,
         font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
                   size=22, color=TEXT_MUTED, weight=300),
@@ -293,6 +215,7 @@ def main() -> None:
                      tickvals=[1e3, 1e4, 1e5, 1e6, 1e7],
                      ticktext=["10³", "10⁴", "10⁵", "10⁶", "10⁷"],
                      range=[3.0, 7.0],
+                     minor=dict(showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.25),
                      row=1, col=1)
     fig.update_yaxes(title=dict(text="p90 ITL (ms)",
                                 font=dict(family=SANS, size=11, color=TEXT_MUTED)),
