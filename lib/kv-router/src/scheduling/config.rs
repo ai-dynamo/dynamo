@@ -157,15 +157,16 @@ impl FromStr for SharedCacheType {
 /// - be strictly ascending in `missing_isl_floor`,
 /// - have `max_queue_depth > 0`.
 ///
-/// `max_queue_depth` is an absolute total queue depth — it does NOT scale
-/// with worker count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `max_queue_depth` is a per-worker queue depth cap — the effective cap
+/// is `max_queue_depth * worker_count` where worker_count is the total
+/// number of registered workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct RouterQueueDepthByMissingIslTier {
     /// Minimum best-case missing prefill tokens (ISL minus best cached tokens
     /// across eligible workers) for this tier to apply.
     pub missing_isl_floor: usize,
-    /// Absolute total queue depth cap when this tier is the highest one a
-    /// request matches. Independent of worker count.
+    /// Per-worker queue depth cap. Effective cap is `max_queue_depth * worker_count`.
+    #[validate(range(min = 1, message = "max_queue_depth must be > 0"))]
     pub max_queue_depth: usize,
 }
 
@@ -452,15 +453,16 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
-    /// Tiered absolute queue-depth caps keyed on best-case missing prefill
+    /// Tiered per-worker queue-depth caps keyed on best-case missing prefill
     /// tokens (ISL minus best cached tokens across eligible workers).
     ///
     /// For each request, the tier with the highest matched floor wins, and
-    /// that tier's `max_queue_depth` is the cap. Example:
-    ///   [(0, 128), (1024, 8), (4096, 2)]
-    /// - request missing 500 tokens  → matches (0, 128)            → cap = 128
-    /// - request missing 2000 tokens → matches (1024, 8) wins      → cap = 8
-    /// - request missing 8000 tokens → matches (4096, 2) wins      → cap = 2
+    /// that tier's `max_queue_depth * worker_count` is the effective cap.
+    /// Example with 4 workers:
+    ///   [(0, 32), (1024, 2), (4096, 1)]
+    /// - request missing 500 tokens  → matches (0, 32)       → cap = 32*4 = 128
+    /// - request missing 2000 tokens → matches (1024, 2)     → cap = 2*4 = 8
+    /// - request missing 8000 tokens → matches (4096, 1)     → cap = 1*4 = 4
     ///
     /// When configured, the vec must start with `missing_isl_floor = 0` and
     /// be strictly ascending in floor. The first tier therefore matches

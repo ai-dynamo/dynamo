@@ -386,11 +386,12 @@ impl<
         let workers = self.workers_with_configs.borrow();
         let ctx = SchedulingContext::new(request, &workers);
         let missing_isl = ctx.best_effective_prefill_tokens();
+        let worker_count = workers.len();
         self.queue_depth_tiers
             .iter()
             .rev()
             .find(|tier| missing_isl >= tier.missing_isl_floor)
-            .map(|tier| tier.max_queue_depth)
+            .map(|tier| tier.max_queue_depth * worker_count)
     }
 
     /// Check if all eligible workers are busy based on threshold.
