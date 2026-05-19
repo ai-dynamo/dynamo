@@ -26,12 +26,6 @@ cases:
             type: string
     expected:
       dynamo:
-        calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang:
         calls:
         - arguments:
             location: NYC
@@ -40,23 +34,7 @@ cases:
             timezone: EST
           name: get_time
         normal_text: ''
-        reason: "Dynamo drops back-to-back commentary blocks; SGLang extracts them"
-  PARSER.batch.2.c:
-    description: With surrounding narration
-    ref: dynamo
-    model_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-      to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
-    tools:
-    - *id001
-    - *id002
-    expected:
-      dynamo:
-        calls: []
-        normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang:
         calls:
         - arguments:
             location: NYC
@@ -64,7 +42,53 @@ cases:
         - arguments:
             timezone: EST
           name: get_time
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+  PARSER.batch.2.c:
+    description: With surrounding narration
+    ref: "OpenAI Harmony preambles should be commentary messages: https://developers.openai.com/cookbook/articles/openai-harmony#preambles"
+    model_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
+      to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
+    tools:
+    - *id001
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: I need both.  Done.
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: I need both.  Done.
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
         normal_text: I need both.   Done.
+        reason: "No spec-correct winner on whitespace: surrounding prose is outside Harmony messages, so this is recovery-only; SGLang extracts the same calls but preserves one extra separator space"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -75,12 +99,6 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang:
         calls:
         - arguments:
             location: NYC
@@ -89,3 +107,25 @@ cases:
             location: LA
           name: get_weather
         normal_text: ''
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+  PARSER.batch.2.b:
+    description: Two back-to-back fence pairs — not applicable to this family
+    reason: |-
+      harmony's multi-call form is exercised by PARSER.batch.2.a / 2.c / 2.d; no back-to-back fence/wrapper pattern applies to this family's parser syntax.

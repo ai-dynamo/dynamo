@@ -12,6 +12,7 @@ pub struct TraceSimulationReport {
     pub request_counts: TraceRequestCounts,
     pub throughput: TraceThroughputStats,
     pub prefix_cache_reused_ratio: f64,
+    pub first_admission_prefix_cache_reused_ratio: f64,
     pub latency: TraceLatencyStats,
 }
 
@@ -131,6 +132,11 @@ impl Display for TraceSimulationReport {
             "  prefix_cache_reused_ratio: {:.6}",
             self.prefix_cache_reused_ratio
         )?;
+        writeln!(
+            f,
+            "  first_admission_prefix_cache_reused_ratio: {:.6}",
+            self.first_admission_prefix_cache_reused_ratio
+        )?;
         write!(f, "  wall_time_ms: {:.6}", self.throughput.wall_time_ms)
     }
 }
@@ -140,7 +146,7 @@ impl Serialize for TraceSimulationReport {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(61))?;
+        let mut map = serializer.serialize_map(Some(62))?;
         map.serialize_entry("num_requests", &self.request_counts.num_requests)?;
         map.serialize_entry(
             "completed_requests",
@@ -179,6 +185,10 @@ impl Serialize for TraceSimulationReport {
             &self.processed_output_tokens_per_s(),
         )?;
         map.serialize_entry("prefix_cache_reused_ratio", &self.prefix_cache_reused_ratio)?;
+        map.serialize_entry(
+            "first_admission_prefix_cache_reused_ratio",
+            &self.first_admission_prefix_cache_reused_ratio,
+        )?;
         serialize_distribution(&mut map, "ttft", &self.latency.ttft)?;
         serialize_distribution(&mut map, "ttst", &self.latency.ttst)?;
         serialize_distribution(&mut map, "tpot", &self.latency.tpot)?;
@@ -242,6 +252,7 @@ struct TraceRequestStats {
     input_length: usize,
     output_length: usize,
     reused_input_tokens: usize,
+    first_admission_reused_input_tokens: usize,
 }
 
 #[cfg(test)]
@@ -254,6 +265,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
     pub input_length: usize,
     pub output_length: usize,
     pub reused_input_tokens: usize,
+    pub first_admission_reused_input_tokens: usize,
 }
 
 #[derive(Debug, Default)]
@@ -312,13 +324,17 @@ impl TraceCollector {
                 input_length,
                 output_length,
                 reused_input_tokens: 0,
+                first_admission_reused_input_tokens: 0,
             },
         );
     }
 
     pub(crate) fn on_admit(&mut self, uuid: Uuid, admit_time_ms: f64, reused_input_tokens: usize) {
         if let Some(stats) = self.requests.get_mut(&uuid) {
-            stats.first_admit_ms.get_or_insert(admit_time_ms);
+            if stats.first_admit_ms.is_none() {
+                stats.first_admission_reused_input_tokens = reused_input_tokens;
+                stats.first_admit_ms = Some(admit_time_ms);
+            }
             stats.reused_input_tokens = stats.reused_input_tokens.max(reused_input_tokens);
         }
     }
@@ -352,6 +368,7 @@ impl TraceCollector {
         let mut total_output_tokens = 0usize;
         let mut completed_requests = 0usize;
         let mut total_reused_tokens = 0usize;
+        let mut total_first_admission_reused_tokens = 0usize;
 
         for stats in requests.values() {
             if stats.first_admit_ms.is_none() {
@@ -368,6 +385,7 @@ impl TraceCollector {
             total_input_tokens += stats.input_length;
             total_output_tokens += stats.output_length;
             total_reused_tokens += stats.reused_input_tokens;
+            total_first_admission_reused_tokens += stats.first_admission_reused_input_tokens;
             duration_ms = duration_ms.max(last_token_ms);
 
             let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
@@ -413,6 +431,11 @@ impl TraceCollector {
             } else {
                 total_reused_tokens as f64 / total_input_tokens as f64
             },
+            first_admission_prefix_cache_reused_ratio: if total_input_tokens == 0 {
+                0.0
+            } else {
+                total_first_admission_reused_tokens as f64 / total_input_tokens as f64
+            },
             latency: TraceLatencyStats {
                 ttft: build_distribution_stats(ttfts),
                 ttst: build_distribution_stats(ttsts),
@@ -441,6 +464,7 @@ impl TraceCollector {
                 input_length: stats.input_length,
                 output_length: stats.output_length,
                 reused_input_tokens: stats.reused_input_tokens,
+                first_admission_reused_input_tokens: stats.first_admission_reused_input_tokens,
             })
     }
 
@@ -456,6 +480,7 @@ impl TraceCollector {
                 input_length: stats.input_length,
                 output_length: stats.output_length,
                 reused_input_tokens: stats.reused_input_tokens,
+                first_admission_reused_input_tokens: stats.first_admission_reused_input_tokens,
             })
             .collect()
     }
@@ -588,5 +613,20 @@ mod tests {
         assert_eq!(actual.p95_ms, expected.p95_ms);
         assert_eq!(actual.p99_ms, expected.p99_ms);
         assert_eq!(actual.std_ms, expected.std_ms);
+    }
+
+    #[test]
+    fn first_admission_reuse_ignores_later_readmission_self_reuse() {
+        let uuid = Uuid::from_u128(1);
+        let mut collector = TraceCollector::default();
+        collector.on_arrival(uuid, 0.0, 100, 1);
+        collector.on_admit(uuid, 1.0, 0);
+        collector.on_admit(uuid, 2.0, 80);
+        collector.on_token(uuid, 3.0);
+
+        let report = collector.finish();
+
+        assert_eq!(report.prefix_cache_reused_ratio, 0.8);
+        assert_eq!(report.first_admission_prefix_cache_reused_ratio, 0.0);
     }
 }

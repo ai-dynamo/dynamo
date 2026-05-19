@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -83,7 +84,7 @@ class DistributedRuntime:
         Args:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
-            request_plane: Request plane transport ("tcp", "http", or "nats")
+            request_plane: Request plane transport ("tcp" or "nats")
         """
         ...
 
@@ -237,6 +238,17 @@ class Client:
         """
         ...
 
+    async def wait_for_instance_by_runtime_data(
+            self,
+            key: str,
+            value: str,
+            timeout_s: float | None = None,
+        ) -> int:
+        """
+        Wait for exactly one instance whose MDC runtime_data contains the given string value.
+        """
+        ...
+
     async def random(
             self,
             request: JsonLike,
@@ -340,18 +352,41 @@ def compute_block_hash_for_seq(
 
     ...
 
+class ContextMetadata:
+    """
+    Live mutable view over propagated context metadata.
+    """
+    def __getitem__(self, key: str) -> str: ...
+    def __setitem__(self, key: str, value: str) -> None: ...
+    def __delitem__(self, key: str) -> None: ...
+    def __len__(self) -> int: ...
+    def __contains__(self, key: str) -> bool: ...
+    def __iter__(self) -> Any: ...
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]: ...
+    def pop(self, key: str, default: Optional[str] = None) -> Optional[str]: ...
+    def keys(self) -> List[str]: ...
+    def values(self) -> List[str]: ...
+    def items(self) -> List[Tuple[str, str]]: ...
+    def clear(self) -> None: ...
+    def copy(self) -> Dict[str, str]: ...
+
 class Context:
     """
     Context wrapper around AsyncEngineContext for Python bindings.
     Provides tracing and cancellation capabilities for request handling.
     """
 
-    def __init__(self, id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        id: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
         """
         Create a new Context instance.
 
         Args:
             id: Optional request ID. If None, a default ID will be generated.
+            metadata: Optional propagated metadata map.
         """
         ...
 
@@ -379,12 +414,12 @@ class Context:
         """
         ...
 
-    def id(self) -> Optional[str]:
+    def id(self) -> str:
         """
         Get the context ID.
 
         Returns:
-            The context identifier string, or None if not set.
+            The context identifier string.
         """
         ...
 
@@ -403,6 +438,16 @@ class Context:
         requests. Engines normally don't need this — the framework
         auto-fires on the first non-empty chunk in the response stream."""
         ...
+
+    @property
+    def metadata(self) -> ContextMetadata:
+        """
+        Get the live propagated context metadata mapping.
+        """
+        ...
+
+    @metadata.setter
+    def metadata(self, metadata: Dict[str, str]) -> None: ...
 
     @property
     def trace_id(self) -> Optional[str]:
@@ -514,6 +559,8 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     enable_eagle: bool
+    taints: Set[str]
+    stable_routing_id: str | None
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -544,6 +591,26 @@ class ModelRuntimeConfig:
     def get_tensor_model_config(self) -> Any | None:
         """Get the tensor model configuration."""
         ...
+
+class RoutingConstraints:
+    """
+    Request-side routing constraints.
+
+    ``required_taints`` is a hard eligibility filter.
+    ``preferred_taints`` maps taint -> signed weight.
+    Positive weights prefer matching workers, negative weights avoid them,
+    and ``0.0`` is neutral. Matching weights are summed and squashed with
+    ``tanh``, so opposite preferences cancel before Dynamo converts the
+    bounded bias into a strictly positive score multiplier.
+    """
+    required_taints: Set[str]
+    preferred_taints: Dict[str, float]
+
+    def __init__(
+        self,
+        required_taints: Optional[Set[str]] = None,
+        preferred_taints: Optional[Dict[str, float]] = None,
+    ) -> None: ...
 
 class OverlapScores:
     """
@@ -764,7 +831,7 @@ class KvEventPublisher:
     def __init__(
         self,
         endpoint: Endpoint,
-        worker_id: int = 0,
+        worker_id: Optional[int] = None,
         kv_block_size: int = 0,
         dp_rank: int = 0,
         enable_local_indexer: bool = False,
@@ -781,7 +848,7 @@ class KvEventPublisher:
 
         Args:
             endpoint: The endpoint to extract component information from for event publishing
-            worker_id: The worker ID (unused, inferred from endpoint)
+            worker_id: Optional worker ID override. Use None to infer from endpoint.
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer
@@ -1274,6 +1341,9 @@ class AicPerfConfig:
         aic_model_path: str,
         aic_tp_size: int = 1,
         aic_backend_version: Optional[str] = None,
+        aic_moe_tp_size: Optional[int] = None,
+        aic_moe_ep_size: Optional[int] = None,
+        aic_attention_dp_size: Optional[int] = None,
     ) -> None:
         ...
 
@@ -1364,8 +1434,6 @@ class KvRouterConfig:
     def from_json(config_json: str) -> "KvRouterConfig":
         ...
 
-    def dump_json(self) -> str: ...
-
     def copy(self) -> "KvRouterConfig": ...
 
     @property
@@ -1416,7 +1484,7 @@ class MockEngineArgs:
     def __init__(
         self,
         engine_type: str = "vllm",
-        num_gpu_blocks: int = 16384,
+        num_gpu_blocks: Optional[int] = None,
         block_size: int = 0,
         max_num_seqs: Optional[int] = 256,
         max_num_batched_tokens: Optional[int] = 8192,
@@ -1436,6 +1504,8 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        mem_fraction_static: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
@@ -1446,6 +1516,13 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
+        num_g2_blocks: Optional[int] = None,
+        num_g3_blocks: Optional[int] = None,
+        offload_batch_size: Optional[int] = None,
+        bandwidth_g1_to_g2_gbps: Optional[float] = None,
+        bandwidth_g2_to_g1_gbps: Optional[float] = None,
+        bandwidth_g2_to_g3_gbps: Optional[float] = None,
+        bandwidth_g3_to_g2_gbps: Optional[float] = None,
     ) -> None:
         ...
 
@@ -1454,8 +1531,6 @@ class MockEngineArgs:
         ...
 
     def copy(self) -> "MockEngineArgs": ...
-
-    def dump_json(self) -> str: ...
 
     @property
     def block_size(self) -> int: ...
@@ -1486,6 +1561,27 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def num_g2_blocks(self) -> Optional[int]: ...
+
+    @property
+    def num_g3_blocks(self) -> Optional[int]: ...
+
+    @property
+    def offload_batch_size(self) -> Optional[int]: ...
+
+    @property
+    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
@@ -1536,6 +1632,18 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def gpu_memory_utilization(self) -> Optional[float]: ...
+
+    @gpu_memory_utilization.setter
+    def gpu_memory_utilization(self, value: Optional[float]) -> None: ...
+
+    @property
+    def mem_fraction_static(self) -> Optional[float]: ...
+
+    @mem_fraction_static.setter
+    def mem_fraction_static(self, value: Optional[float]) -> None: ...
+
+    @property
     def worker_type(self) -> str: ...
 
     @worker_type.setter
@@ -1560,6 +1668,8 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        mem_fraction_static: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...
@@ -1683,6 +1793,7 @@ def run_mocker_trace_replay(
     trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
+    max_sim_time_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
     ...
@@ -1998,6 +2109,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         multi_modal_data: Optional[JsonLike] = None,
         mm_routing_info: Optional[JsonLike] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -2026,6 +2138,7 @@ class KvRouter:
             mm_routing_info: Optional structured routing-only multimodal payload
                             (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
                             used by router selection without changing execution token_ids.
+            routing_constraints: Optional request routing constraints used to constrain or prefer tainted workers.
 
         Returns:
             An async iterator yielding generation responses
@@ -2059,6 +2172,7 @@ class KvRouter:
         update_indexer: bool = False,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2383,6 +2497,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
         ) -> None: ...
         @property
         def model(self) -> str: ...
@@ -2406,6 +2521,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def runtime_data(self) -> Dict[str, Any]: ...
 
     class RuntimeConfig:
         def __init__(

@@ -23,8 +23,17 @@ parser lives in Dynamo's own registry or in the upstream engine (vLLM, SGLang).
 Start with the Dynamo path. Fall back to the engine path only when Dynamo's
 registry does not list a parser for your model.
 
+## Troubleshooting
+
+If a tool call comes back wrong, add `logprobs: true` to a single repro
+request and share the response. See
+[Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
+include when reporting an issue.
+
 ## See Also
 
+- [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model
+  output with `logprobs` so tool-call issues can be localized.
 - [Reasoning](../reasoning/README.md) -- separate `reasoning_content` from
   assistant content for chain-of-thought models. Several models need both a
   tool-call parser and a reasoning parser configured together.

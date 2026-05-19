@@ -14,7 +14,7 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -22,37 +22,68 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_1
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_1
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to deepseek_v4 because SGLang has no peer detector for this parser family.
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_3
+      dynamo: &id003
         calls: []
         normal_text: Hello, how can I help you today?
-      vllm: *d_3
+      vllm: *id003
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &d_9
+      dynamo:
         calls: []
         normal_text: ''
-      vllm: *d_9
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.10:
@@ -67,9 +98,9 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_10
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -78,6 +109,45 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_10
+      vllm: *id005
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.30:
+    description: Separator-character case not applicable
+    reason: |-
+      This case is not applicable to deepseek_v4 because it uses DSML invoke/parameter tags, not delimiter-separated call bodies.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
+    reason: |-
+      This case is not applicable to deepseek_v4 because it uses DSML invoke/parameter tags, not delimiter-separated call bodies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="unknown_tool">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'

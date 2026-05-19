@@ -25,12 +25,11 @@ cases:
         normal_text: ''
       vllm:
         calls: []
-        normal_text: '<｜DSML｜tool_calls>
-
+        normal_text: |-
+          <｜DSML｜tool_calls>
           not a valid invoke
-
-          </｜DSML｜tool_calls>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+          </｜DSML｜tool_calls>
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   # PARSER.batch.4.b (invalid JSON args) n/a: DSML uses attribute-encoded args, not JSON.
@@ -51,16 +50,13 @@ cases:
         normal_text: ''
       vllm:
         calls: []
-        normal_text: '<｜DSML｜tool_calls>
-
+        normal_text: |-
+          <｜DSML｜tool_calls>
           <｜DSML｜invoke>
-
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
-
           </｜DSML｜invoke>
-
-          </｜DSML｜tool_calls>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+          </｜DSML｜tool_calls>
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.4.d:
@@ -83,3 +79,11 @@ cases:
       vllm: *d_4_d
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.4.b:
+    description: Malformed variant 4.b — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.b not yet authored for deepseek_v4; see 4.a / 4.c / 4.d for this family's malformed-input scenarios.
+  PARSER.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in PARSER.batch.4.a through 4.d.
