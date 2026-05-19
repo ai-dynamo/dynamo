@@ -53,9 +53,9 @@ pub use config::{
 };
 #[allow(deprecated)]
 pub use indexer::{
-    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, AsyncShardHandle,
-    BranchShardedIndexer, LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache,
-    SyncIndexer, ThreadPoolIndexer,
+    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, AsyncShardHandle, BranchShardedIndexer,
+    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
+    ThreadPoolIndexer,
 };
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
