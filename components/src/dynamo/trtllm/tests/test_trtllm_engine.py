@@ -18,6 +18,7 @@ from typing import cast
 
 import pytest
 import pytest_asyncio
+from tests.utils.gpu_args import build_trtllm_override_args
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
 _BASE_ARGV = [
@@ -37,7 +38,6 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.unified,
     pytest.mark.gpu_1,
-    pytest.mark.pre_merge,
     pytest.mark.timeout(300),
     pytest.mark.skipif(
         importlib.util.find_spec("tensorrt_llm") is None,
@@ -67,7 +67,9 @@ class _FakeContext:
 async def started_engine():
     from dynamo.trtllm.llm_engine import TrtllmLLMEngine
 
-    engine, _ = await TrtllmLLMEngine.from_args(_BASE_ARGV)
+    engine, _ = await TrtllmLLMEngine.from_args(
+        [*_BASE_ARGV, *build_trtllm_override_args()]
+    )
     try:
         # Worker_id 0 is fine for tests — `disagg_machine_id` is derived
         # from worker_id but unused outside disagg PREFILL/DECODE roles.
@@ -77,7 +79,19 @@ async def started_engine():
         await engine.cleanup()
 
 
-async def test_start_populates_registration_metadata(started_engine):
+@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(3.9)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
+async def test_trtllm_engine_all(started_engine):
+    await _check_start_populates_registration_metadata(started_engine)
+    await _check_generate_streams_chunks_with_coherent_final_usage(started_engine)
+    await _check_abort_and_cleanup_are_safe_before_start()
+    await _check_abort_unknown_request_on_running_engine(started_engine)
+    await _check_drain_is_noop_for_aggregated_workers()
+    await _check_drain_returns_when_engine_idle()
+
+
+async def _check_start_populates_registration_metadata(started_engine):
     """``start`` threads ``max_seq_len`` / ``kv_block_size`` / ``max_batch_size``
     from ``from_args``'s parsed config through to ``EngineConfig`` —
     mismatches here surface as incorrect Rust-side routing decisions."""
@@ -87,7 +101,7 @@ async def test_start_populates_registration_metadata(started_engine):
     assert cfg.max_num_seqs == 4
 
 
-async def test_generate_streams_chunks_with_coherent_final_usage(started_engine):
+async def _check_generate_streams_chunks_with_coherent_final_usage(started_engine):
     engine, _ = started_engine
     ctx = _FakeContext("gen-1")
 
@@ -112,16 +126,18 @@ async def test_generate_streams_chunks_with_coherent_final_usage(started_engine)
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
 
 
-async def test_abort_and_cleanup_are_safe_before_start():
+async def _check_abort_and_cleanup_are_safe_before_start():
     from dynamo.trtllm.llm_engine import TrtllmLLMEngine
 
-    engine, _ = await TrtllmLLMEngine.from_args(_BASE_ARGV)
+    engine, _ = await TrtllmLLMEngine.from_args(
+        [*_BASE_ARGV, *build_trtllm_override_args()]
+    )
     await engine.abort(cast(object, _FakeContext()))  # type: ignore[arg-type]
     await engine.cleanup()
     await engine.cleanup()
 
 
-async def test_abort_unknown_request_on_running_engine(started_engine):
+async def _check_abort_unknown_request_on_running_engine(started_engine):
     """``_active_requests`` is only populated during ``generate``.  An unknown
     request id is silently ignored rather than raised."""
     engine, _ = started_engine
@@ -170,7 +186,7 @@ def _engine_with_stub(disagg_mode, stats_sequence: list[dict]):
     return engine
 
 
-async def test_drain_is_noop_for_aggregated_workers():
+async def _check_drain_is_noop_for_aggregated_workers():
     """Drain only matters on prefill workers (in-flight NIXL transfers).
     Aggregated/decode workers exit immediately so shutdown isn't gated
     on an unnecessary stats poll."""
@@ -180,7 +196,7 @@ async def test_drain_is_noop_for_aggregated_workers():
     await engine.drain()  # must return without consuming a stat
 
 
-async def test_drain_returns_when_engine_idle():
+async def _check_drain_returns_when_engine_idle():
     """Polls until active+queued == 0, then returns. The drain loop must
     not hang once the engine reports idle."""
     from dynamo.trtllm.constants import DisaggregationMode as TrtDisagg

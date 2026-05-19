@@ -198,6 +198,8 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.9),
+            pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(
                 300
             ),  # 3x measured time (37.91s) + download time (180s)
@@ -573,9 +575,9 @@ def test_deployment(
     """
     Test dynamo deployments with different configurations.
     """
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 2, (
+        "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    )
     # Use per-test ports so tests can run safely under pytest-xdist.
     config = dataclasses.replace(
         trtllm_config_test,
@@ -597,6 +599,8 @@ def test_deployment(
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
 @pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(3.9)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request,
