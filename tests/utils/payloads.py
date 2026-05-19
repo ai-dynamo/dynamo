@@ -959,6 +959,7 @@ class KvEventMetricsPayload(BasePayload):
     method: str = "GET"
     port: int = DefaultPort.SYSTEM1.value
     event_type: str = "stored"
+    source: str = "zmq"
     min_received: int = 1
     min_accepted: int = 1
     settle_seconds: float = 0.5
@@ -990,32 +991,41 @@ class KvEventMetricsPayload(BasePayload):
     def validate(self, response: Any, content: str) -> None:
         metric_name = (
             f"{prometheus_names.name_prefix.COMPONENT}_"
-            f"{prometheus_names.kv_publisher.ZMQ_EVENTS_TOTAL}"
+            f"{prometheus_names.kv_publisher.EVENTS_TOTAL}"
         )
         received = sum_metric_samples(
             content,
             metric_name,
-            {"stage": "received", "event_type": self.event_type},
+            {
+                "stage": "received",
+                "event_type": self.event_type,
+                "source": self.source,
+            },
         )
         accepted = sum_metric_samples(
             content,
             metric_name,
-            {"stage": "accepted", "event_type": self.event_type},
+            {
+                "stage": "accepted",
+                "event_type": self.event_type,
+                "source": self.source,
+            },
         )
 
         assert received >= self.min_received, (
             f"Expected at least {self.min_received} received KV events with "
-            f"event_type={self.event_type!r}, got {received:g}"
+            f"event_type={self.event_type!r}, source={self.source!r}, got {received:g}"
         )
         assert accepted >= self.min_accepted, (
             f"Expected at least {self.min_accepted} accepted KV events with "
-            f"event_type={self.event_type!r}, got {accepted:g}"
+            f"event_type={self.event_type!r}, source={self.source!r}, got {accepted:g}"
         )
 
         logger.info(
             "SUCCESS: KV event metrics found for event_type=%s: "
-            "received=%s accepted=%s",
+            "source=%s received=%s accepted=%s",
             self.event_type,
+            self.source,
             received,
             accepted,
         )

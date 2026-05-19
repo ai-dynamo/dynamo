@@ -98,6 +98,10 @@ class frontend_service:
     KV_HIT_RATE = "kv_hit_rate"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
+    # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    SHARED_CACHE_HIT_RATE = "shared_cache_hit_rate"
+    # Shared cache blocks beyond device overlap for the selected worker
+    SHARED_CACHE_BEYOND_BLOCKS = "shared_cache_beyond_blocks"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -152,6 +156,16 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Number of requests pending in the router's scheduler queue (gauge per worker_type)
     ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
+    # Number of replicas allocated for a LoRA adapter (gauge per LoRA)
+    LORA_REPLICA_FACTOR = "lora_replica_factor"
+    # Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
+    LORA_IS_ACTIVE = "lora_is_active"
+    # Estimated load (windowed request count) for a LoRA adapter
+    LORA_ESTIMATED_LOAD = "lora_estimated_load"
+    # Raw arrival count (windowed rate counter) for a LoRA adapter
+    LORA_RAW_ARRIVAL_COUNT = "lora_raw_arrival_count"
+    # Number of in-flight (active) requests for a LoRA adapter
+    LORA_ACTIVE_REQUESTS = "lora_active_requests"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
     # Label name for tokenizer operation
@@ -163,6 +177,8 @@ class kv_publisher:
 
     # Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     ENGINES_DROPPED_EVENTS_TOTAL = "kv_publisher_engines_dropped_events_total"
+    # Total number of KV events seen by publisher source, relay stage, and event type
+    EVENTS_TOTAL = "kv_publisher_events_total"
     # Total number of ZMQ KV events seen by the relay, labeled by stage and event type
     ZMQ_EVENTS_TOTAL = "kv_publisher_zmq_events_total"
     # Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
@@ -329,6 +345,10 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    SHARED_CACHE_HIT_RATE = "router_shared_cache_hit_rate"
+    # Shared cache blocks beyond device overlap for the selected worker
+    SHARED_CACHE_BEYOND_BLOCKS = "router_shared_cache_beyond_blocks"
 
 
 class router_request:
@@ -352,6 +372,10 @@ class routing_overhead:
     SCHEDULING_MS = "overhead_scheduling_ms"
     # Total routing overhead per request
     TOTAL_MS = "overhead_total_ms"
+    # Time spent querying the shared KV cache (Mooncake)
+    SHARED_CACHE_QUERY_MS = "overhead_shared_cache_query_ms"
+    # Total shared cache query errors (timeouts, HTTP failures)
+    SHARED_CACHE_ERRORS_TOTAL = "shared_cache_errors_total"
 
 
 class task_tracker:
@@ -438,8 +462,8 @@ class work_handler:
     # Configured capacity of the bounded work queue (gauge, static)
     QUEUE_CAPACITY = "queue_capacity"
     # Total times enqueuing work failed because the dispatcher channel was closed.
-    # tokio bounded mpsc applies backpressure on full — saturation shows up as
-    # rising QUEUE_DEPTH toward QUEUE_CAPACITY.
+    # Note: tokio bounded mpsc applies backpressure on full — it does NOT increment
+    # this counter. Saturation shows up as rising `QUEUE_DEPTH` toward `QUEUE_CAPACITY`.
     ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
     # Time spent waiting to acquire a worker-pool permit (histogram)
     PERMIT_WAIT_SECONDS = "permit_wait_seconds"

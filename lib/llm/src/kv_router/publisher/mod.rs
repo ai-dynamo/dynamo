@@ -21,8 +21,9 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
-    metrics::KvPublisherMetrics,
+    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
+    indexer::start_worker_kv_query_endpoint,
+    metrics::{KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE, KvPublisherMetrics},
 };
 
 mod batching;
@@ -40,7 +41,11 @@ use batching::BatchingState;
 use dedup::EventDedupFilter;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
-use event_processor::{start_event_processor, start_event_processor_jetstream};
+#[cfg(test)]
+use event_processor::start_event_processor;
+use event_processor::{
+    start_event_processor_jetstream_with_metric_source, start_event_processor_with_metric_source,
+};
 use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
@@ -210,6 +215,7 @@ impl KvEventPublisher {
         let next_event_id = Arc::new(AtomicU64::new(0));
 
         let mut source = None;
+        let has_external_source = source_config.is_some();
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
                 component.clone(),
@@ -221,6 +227,11 @@ impl KvEventPublisher {
                 next_event_id.clone(),
             )?);
         }
+        let metric_source = if has_external_source {
+            None
+        } else {
+            Some(KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE)
+        };
 
         let local_indexer = if enable_local_indexer {
             let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
@@ -271,13 +282,14 @@ impl KvEventPublisher {
                         }
                     };
 
-                start_event_processor(
+                start_event_processor_with_metric_source(
                     EventPlanePublisher(event_publisher),
                     worker_id,
                     cancellation_token_clone,
                     rx,
                     local_indexer_clone,
                     batching_timeout_ms,
+                    metric_source,
                 )
                 .await
             });
@@ -296,13 +308,14 @@ impl KvEventPublisher {
                     tracing::error!("Failed to connect NatsQueue: {e}");
                     return;
                 }
-                start_event_processor_jetstream(
+                start_event_processor_jetstream_with_metric_source(
                     nats_queue,
                     worker_id,
                     cancellation_token_clone,
                     rx,
                     local_indexer_clone,
                     batching_timeout_ms,
+                    metric_source,
                 )
                 .await
             });
