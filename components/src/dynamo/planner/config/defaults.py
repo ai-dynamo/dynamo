@@ -63,6 +63,9 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     metric_pulling_prometheus_ssl_verify = os.environ.get(
         "PROMETHEUS_SSL_VERIFY", "false"
     ).lower() in ("1", "true", "yes")
+    metric_pulling_prometheus_extra_query_params = os.environ.get(
+        "PROMETHEUS_EXTRA_QUERY_PARAMS"
+    )
     profile_results_dir = "profiling_results"
 
     isl = 3000  # in number of tokens
