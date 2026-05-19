@@ -793,6 +793,141 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 	require.Equal(t, commonconsts.ComponentTypeWorker, service.Spec.Selector[commonconsts.KubeLabelDynamoComponentType])
 }
 
+func TestDynamoComponentDeploymentReconciler_NonEPPKeepsLegacyWorkerIdentityLabels(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, appsv1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+	require.NoError(t, leaderworkersetv1.AddToScheme(s))
+
+	baseDCD := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "qwen-decode-db6b6891",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoComponent:           "decode",
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeDecode,
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:    commonconsts.MainContainerName,
+							Image:   "test-image:latest",
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm"},
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+								},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	makeReconciler := func(dcd *v1beta1.DynamoComponentDeployment, objects ...client.Object) *DynamoComponentDeploymentReconciler {
+		objects = append([]client.Object{dcd}, objects...)
+		return &DynamoComponentDeploymentReconciler{
+			Client: fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objects...).
+				Build(),
+			Config:        &configv1alpha1.OperatorConfiguration{},
+			RuntimeConfig: &controller_common.RuntimeConfig{LWSEnabled: true},
+			DockerSecretRetriever: &mockDockerSecretRetriever{
+				GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+					return nil, nil
+				},
+			},
+		}
+	}
+	restoreLegacyLabels := func(labels map[string]string) {
+		labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.ComponentTypeWorker
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = commonconsts.ComponentTypeDecode
+		delete(labels, commonconsts.KubeLabelDynamoComponentClass)
+	}
+
+	t.Run("deployment", func(t *testing.T) {
+		dcd := baseDCD.DeepCopy()
+		seed := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: dcd.Name, Namespace: dcd.Namespace},
+			Spec: appsv1.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				},
+			},
+		}
+		restoreLegacyLabels(seed.Spec.Template.Labels)
+
+		existing, toDelete, err := makeReconciler(dcd, seed).generateDeployment(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+		require.NoError(t, err)
+		require.False(t, toDelete)
+		desired, toDelete, err := makeReconciler(dcd, existing).generateDeployment(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+		require.NoError(t, err)
+		require.False(t, toDelete)
+		require.Equal(t, commonconsts.ComponentTypeWorker, desired.Spec.Template.Labels[commonconsts.KubeLabelDynamoComponentType])
+		require.Equal(t, commonconsts.ComponentTypeDecode, desired.Spec.Template.Labels[commonconsts.KubeLabelDynamoSubComponentType])
+		require.NotContains(t, desired.Spec.Template.Labels, commonconsts.KubeLabelDynamoComponentClass)
+
+		existingHash, err := controller_common.GetSpecHash(existing)
+		require.NoError(t, err)
+		desiredHash, err := controller_common.GetSpecHash(desired)
+		require.NoError(t, err)
+		require.Equal(t, existingHash, desiredHash)
+	})
+
+	t.Run("leaderworkerset", func(t *testing.T) {
+		dcd := baseDCD.DeepCopy()
+		seed := &leaderworkersetv1.LeaderWorkerSet{
+			ObjectMeta: metav1.ObjectMeta{Name: leaderWorkerSetName(dcd), Namespace: dcd.Namespace},
+			Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+				LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+					LeaderTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+					},
+					WorkerTemplate: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+					},
+				},
+			},
+		}
+		restoreLegacyLabels(seed.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels)
+		restoreLegacyLabels(seed.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels)
+
+		existing, toDelete, err := makeReconciler(dcd, seed).generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+		require.NoError(t, err)
+		require.False(t, toDelete)
+		desired, toDelete, err := makeReconciler(dcd, existing).generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+		require.NoError(t, err)
+		require.False(t, toDelete)
+
+		for _, labels := range []map[string]string{
+			desired.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels,
+			desired.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels,
+		} {
+			require.Equal(t, commonconsts.ComponentTypeWorker, labels[commonconsts.KubeLabelDynamoComponentType])
+			require.Equal(t, commonconsts.ComponentTypeDecode, labels[commonconsts.KubeLabelDynamoSubComponentType])
+			require.NotContains(t, labels, commonconsts.KubeLabelDynamoComponentClass)
+		}
+
+		existingHash, err := controller_common.GetSpecHash(existing)
+		require.NoError(t, err)
+		desiredHash, err := controller_common.GetSpecHash(desired)
+		require.NoError(t, err)
+		require.Equal(t, existingHash, desiredHash)
+	})
+}
+
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWithoutWorkerHash(t *testing.T) {
 	s := scheme.Scheme
 	require.NoError(t, v1beta1.AddToScheme(s))

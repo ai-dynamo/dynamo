@@ -1643,6 +1643,7 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 	}
 	g.Expect(prefillClique.Labels[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
 	g.Expect(prefillClique.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
+	g.Expect(prefillClique.Labels).NotTo(gomega.HaveKey(commonconsts.KubeLabelDynamoComponentClass))
 	g.Expect(prefillClique.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]).To(gomega.Equal("1.1.0"))
 
 	decodeService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
