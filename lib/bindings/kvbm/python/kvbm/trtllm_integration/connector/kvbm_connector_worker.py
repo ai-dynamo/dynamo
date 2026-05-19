@@ -8,7 +8,9 @@ import torch
 from kvbm.trtllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
 from kvbm.utils import is_dyn_runtime_enabled, nvtx_annotate
 from tensorrt_llm import logger
-from tensorrt_llm._torch.pyexecutor.kv_cache_connector import KvCacheConnectorWorker
+from tensorrt_llm._torch.pyexecutor.connectors.kv_cache_connector import (
+    KvCacheConnectorWorker,
+)
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 
 DistributedRuntime = None
