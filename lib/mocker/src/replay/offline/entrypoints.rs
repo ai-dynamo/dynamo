@@ -130,7 +130,13 @@ pub(crate) fn simulate_trace(
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_trace_single(args, requests, arrival_speedup_ratio, record_per_request, max_sim_time_ms)
+        simulate_trace_single(
+            args,
+            requests,
+            arrival_speedup_ratio,
+            record_per_request,
+            max_sim_time_ms,
+        )
     } else {
         simulate_trace_multi(
             args,
@@ -159,7 +165,13 @@ pub(crate) fn simulate_concurrency(
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_concurrency_single(args, requests, max_in_flight, record_per_request, max_sim_time_ms)
+        simulate_concurrency_single(
+            args,
+            requests,
+            max_in_flight,
+            record_per_request,
+            max_sim_time_ms,
+        )
     } else {
         simulate_concurrency_multi(
             args,
@@ -236,7 +248,13 @@ fn simulate_trace_workload_with_delta_mode(
     max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_trace_workload_single(args, trace, accumulate_session_deltas, record_per_request, max_sim_time_ms)
+        simulate_trace_workload_single(
+            args,
+            trace,
+            accumulate_session_deltas,
+            record_per_request,
+            max_sim_time_ms,
+        )
     } else {
         simulate_trace_workload_multi(
             args,
