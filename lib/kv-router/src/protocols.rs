@@ -451,7 +451,7 @@ pub struct WorkerSelectionResult {
     pub cached_tokens: usize,
 }
 
-/// Active load metrics for a worker, used for busy detection.
+/// Active load metrics for a worker, used for overload detection.
 ///
 /// Published by workers (with `kv_used_blocks`) and by the scheduler (with
 /// `active_decode_blocks` and `active_prefill_tokens`).
@@ -467,7 +467,7 @@ pub struct ActiveLoad {
     /// Total KV blocks currently in use on the worker.
     ///
     /// This is published by workers only and is the authoritative signal for
-    /// backend KV occupancy used by busy detection.
+    /// backend KV occupancy used by overload detection.
     #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }

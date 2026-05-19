@@ -4,8 +4,8 @@
 use dynamo_kv_router::protocols::SharedCacheHits;
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, PotentialLoad, SchedulingRequest, SchedulingResponse,
-    TierOverlapBlocks,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -42,6 +42,7 @@ impl<Sel> KvScheduler<Sel>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
@@ -49,6 +50,7 @@ where
         selector: Sel,
         kv_router_config: &KvRouterConfig,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
@@ -77,7 +79,7 @@ where
             kv_router_config.router_queue_policy
         );
 
-        let inner = Arc::new(LocalScheduler::new(
+        let inner = Arc::new(LocalScheduler::new_with_overload_provider(
             slots,
             workers_with_configs.clone(),
             kv_router_config.router_queue_threshold,
@@ -86,6 +88,7 @@ where
             selector,
             policy,
             prefill_load_estimator,
+            overloaded_worker_provider,
             kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
             component.drt().child_token(),

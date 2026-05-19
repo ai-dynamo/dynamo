@@ -15,8 +15,8 @@ use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, RoutingEligibility, SchedulingContext, SchedulingRequest, SchedulingResponse,
-    pinned_worker_config,
+    KvSchedulerError, OverloadedWorkerProvider, RoutingEligibility, SchedulingContext,
+    SchedulingRequest, SchedulingResponse, pinned_worker_config,
 };
 use crate::protocols::{
     PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -84,6 +84,7 @@ pub struct SchedulerQueue<
     selector: Sel,
     policy: S,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    overloaded_worker_provider: Option<OverloadedWorkerProvider>,
 }
 
 impl<
@@ -103,6 +104,31 @@ impl<
         selector: Sel,
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    ) -> Self {
+        Self::new_with_overload_provider(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            queue_depth_tiers,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_overload_provider(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        queue_depth_tiers: RouterQueueDepthTiers,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     ) -> Self {
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
@@ -128,6 +154,7 @@ impl<
             selector,
             policy,
             prefill_load_estimator,
+            overloaded_worker_provider,
         }
     }
 
@@ -164,7 +191,7 @@ impl<
     pub async fn enqueue(&self, mut request: SchedulingRequest) {
         let eligibility = request.eligibility();
 
-        if let Err(error) = eligibility.validate_pinned_worker() {
+        if let Err(error) = eligibility.validate_pinned_worker_allowed() {
             request.respond(Err(error));
             return;
         }
@@ -182,7 +209,7 @@ impl<
             return;
         }
 
-        if self.all_workers_busy(threshold, request.eligibility(), decay_now) {
+        if self.all_workers_prefill_busy(threshold, request.eligibility(), decay_now) {
             let queue_depth = self.pending_count.load(AtomicOrdering::Relaxed);
             if let Some(max_queue_depth) = self.tier_cap_for_request(&request)
                 && queue_depth >= max_queue_depth
@@ -194,7 +221,7 @@ impl<
                 }));
                 return;
             }
-            tracing::debug!("all workers busy, queueing request");
+            tracing::debug!("all workers prefill-busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = {
                 let workers = self.workers_with_configs.borrow();
@@ -212,7 +239,7 @@ impl<
     }
 
     /// Called on prefill_complete/free. Drains pending requests while workers have capacity.
-    /// Each scheduled request updates active_tokens via add_request, so the busy check
+    /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
     pub async fn update(&self) {
         let Some(threshold) = self.threshold_frac else {
@@ -249,7 +276,7 @@ impl<
             // drain overhead bounded to the heap front. A blocked pinned or
             // otherwise constrained request can temporarily stall later
             // schedulable entries until we adopt a cheaper non-HOL strategy.
-            if self.all_workers_busy(threshold, front.request.eligibility(), decay_now) {
+            if self.all_workers_prefill_busy(threshold, front.request.eligibility(), decay_now) {
                 break;
             }
             let entry = heap.pop().expect("heap front vanished before pop");
@@ -275,8 +302,13 @@ impl<
 
         let selection = {
             let workers = self.workers_with_configs.borrow();
+            let overloaded_worker_ids = self
+                .overloaded_worker_provider
+                .as_ref()
+                .and_then(|provider| provider());
+            let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
             self.selector
-                .select_worker(&workers, &request, self.block_size)
+                .select_worker(&workers, &request, eligibility, self.block_size)
         };
 
         let selection = match selection {
@@ -384,13 +416,13 @@ impl<
             .cap_for(cache_miss_tokens, worker_count)
     }
 
-    /// Check if all eligible workers are busy based on threshold.
+    /// Check if all eligible workers are prefill-busy based on threshold.
     /// When `pinned_worker` is `Some`, only that exact worker/rank is considered.
     /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
     /// otherwise all registered workers are checked.
     /// Returns false when no eligible workers exist so the request falls
     /// through to `schedule`, which returns a proper `NoEndpoints` error.
-    fn all_workers_busy(
+    fn all_workers_prefill_busy(
         &self,
         threshold: f64,
         eligibility: RoutingEligibility<'_>,
@@ -507,6 +539,7 @@ mod tests {
             &self,
             workers: &HashMap<WorkerId, SimpleWorkerConfig>,
             request: &SchedulingRequest,
+            eligibility: RoutingEligibility<'_>,
             block_size: u32,
         ) -> Result<WorkerSelectionResult, KvSchedulerError> {
             if let Some(rendezvous) = &self.rendezvous {
@@ -515,6 +548,7 @@ mod tests {
 
             let Some(worker) = workers
                 .iter()
+                .filter(|(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
                 .flat_map(|(worker_id, config)| {
                     let dp_start = config.data_parallel_start_rank();
                     let dp_end = dp_start + config.data_parallel_size();
@@ -681,6 +715,53 @@ mod tests {
         ));
 
         (queue, slots, cfg_tx)
+    }
+
+    fn make_queue_with_overload_provider(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        overloaded_worker_provider: OverloadedWorkerProvider,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let selector = DefaultWorkerSelector::new(None, "test");
+        let queue = Arc::new(SchedulerQueue::new_with_overload_provider(
+            Arc::clone(&slots),
+            cfg_rx,
+            None,
+            block_size,
+            selector,
+            FcfsPolicy,
+            None,
+            Some(overloaded_worker_provider),
+        ));
+
+        (queue, slots)
     }
 
     fn make_request(
@@ -857,7 +938,7 @@ mod tests {
         let _resp1 = rx1.await.unwrap().unwrap();
         assert_eq!(queue.pending_count(), 0); // scheduled immediately
 
-        // Second and third requests should be queued (worker is now busy)
+        // Second and third requests should be queued (worker is now prefill-busy)
         let (req2, _rx2) = make_request("req-2", isl);
         queue.enqueue(req2).await;
         assert_eq!(queue.pending_count(), 1);
@@ -1024,6 +1105,23 @@ mod tests {
             ),
             "expected NoEndpoints, got {resp:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_overloaded_provider_filters_at_admission() {
+        let overloaded_worker_provider: OverloadedWorkerProvider =
+            Arc::new(|| Some(HashSet::from([0])));
+        let (queue, _slots) =
+            make_queue_with_overload_provider(1, 16, 256, overloaded_worker_provider);
+
+        let (req, rx) = make_request("overloaded", 256);
+        queue.enqueue(req).await;
+
+        let resp = rx.await.expect("oneshot dropped");
+        assert!(matches!(
+            resp,
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
     }
 
     /// Simulates the EPP path: router starts with zero workers (skip_initial_worker_wait),
@@ -1337,7 +1435,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_queue_busy_check_ignores_untracked_prefill_tokens() {
+    async fn test_queue_prefill_busy_check_ignores_untracked_prefill_tokens() {
         let (queue, slots) = make_queue(1, 16, 256, Some(0.0));
 
         let (mut req1, rx1) = make_request("req-1", 256);
