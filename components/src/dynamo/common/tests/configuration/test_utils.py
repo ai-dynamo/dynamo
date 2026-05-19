@@ -10,6 +10,7 @@ from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
+    nullable_float,
 )
 
 pytestmark = [
@@ -169,6 +170,23 @@ class TestAddArgument:
 
         with pytest.raises(SystemExit):
             parser.parse_args([])
+
+    def test_callable_type_with_non_none_default_coerces_env(self, monkeypatch):
+        """Test callable arg_type validates env values when the default has a type."""
+        monkeypatch.setenv("TEST_THRESHOLD", "None")
+        parser = argparse.ArgumentParser()
+
+        add_argument(
+            parser,
+            flag_name="--threshold",
+            env_var="TEST_THRESHOLD",
+            default=16.0,
+            help="Threshold",
+            arg_type=nullable_float,
+        )
+
+        args = parser.parse_args([])
+        assert args.threshold is None
 
 
 class TestAddNegatableBool:
