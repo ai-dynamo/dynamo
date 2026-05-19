@@ -18,6 +18,12 @@ from tests.hf_cache import (
     _enable_offline_with_mistral_patch,
     _restore_models_dir_env,
 )
+from tests.utils.collection_env_guard import (
+    collection_env_guard_disabled,
+    diff_collection_env,
+    format_collection_env_changes,
+    snapshot_collection_env,
+)
 from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -36,8 +42,27 @@ _logger = logging.getLogger(__name__)
 _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
 _gpu_slots_key: pytest.StashKey[int | None] = pytest.StashKey()
+_collection_env_snapshot_key: pytest.StashKey[dict[str, str]] = pytest.StashKey()
 
 _GPU_PARALLEL_DOWNLOADS_READY_ENV = "DYNAMO_GPU_PARALLEL_DOWNLOADS_READY"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    if not collection_env_guard_disabled():
+        session.config.stash[_collection_env_snapshot_key] = snapshot_collection_env()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    if collection_env_guard_disabled():
+        return
+    before = session.config.stash.get(_collection_env_snapshot_key, None)
+    if before is None:
+        return
+    changes = diff_collection_env(before)
+    if changes:
+        raise pytest.UsageError(format_collection_env_changes(changes))
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
