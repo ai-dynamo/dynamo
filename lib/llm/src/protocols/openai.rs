@@ -152,6 +152,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             guided_grammar,
             guided_decoding_backend,
             guided_whitespace_pattern,
+            None,
         ) {
             Ok(options) => options,
             Err(e) => {

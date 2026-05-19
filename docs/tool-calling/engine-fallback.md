@@ -46,8 +46,15 @@ python -m dynamo.sglang ...
 python -m dynamo.frontend --dyn-chat-processor sglang --tool-call-parser kimi_k2
 ```
 
+> [!TIP]
+> If a tool call comes back wrong, add `"logprobs": true` to a single repro
+> request and share the response. See
+> [Troubleshooting Tool Calls](troubleshooting.md) for what to capture and
+> include when reporting an issue.
+
 ## See Also
 
+- [Troubleshooting Tool Calls](troubleshooting.md) -- capture raw model output with `logprobs` so tool-call issues can be localized
 - [Tool Call Parsing (Dynamo)](dynamo.md) -- Dynamo-native parsers and request examples
 - [Reasoning Parsing (Engine Fallback)](../reasoning/engine-fallback.md) -- Equivalent fallback for reasoning
 - [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md) -- vLLM chat-processor details

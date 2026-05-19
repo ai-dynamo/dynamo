@@ -35,6 +35,7 @@ xxhash-rust = { workspace = true }
 testing = []
 
 [dev-dependencies]
+criterion = "0.5"
 proptest = "1.5.0"
 rand = { workspace = true }
 rand_chacha = "0.9"
@@ -47,3 +48,10 @@ tokio = { workspace = true, features = ["full"] }
 # unacceptable on production hot paths.
 tracing-mutex = { version = "0.3", features = ["parking_lot"] }
 tracing-subscriber = { workspace = true }
+
+# Criterion benchmark for the match_blocks / acquire hot path. Needs the
+# `testing` feature for src/testing/ helpers (create_test_manager, etc.).
+[[bench]]
+name = "block_manager"
+harness = false
+required-features = ["testing"]

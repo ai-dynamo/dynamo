@@ -57,7 +57,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
-| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | |
+| [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 13 and arm64/aarch64 containers may require building LMCache from source |
 | [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
 | [**Multimodal Support**](vllm-omni.md) | ✅ | Via vLLM-Omni integration |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |

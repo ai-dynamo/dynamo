@@ -23,6 +23,7 @@ from dynamo.llm import (
     register_model,
 )
 from dynamo.sglang._compat import get_scheduler_info
+from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -276,6 +277,23 @@ async def _get_runtime_config(
     runtime_config.data_parallel_size = dp_size
     if dp_size > 1:
         logging.info(f"Registering with data_parallel_size={dp_size}")
+
+    worker_group_id = get_sglang_worker_group_id(server_args)
+    if worker_group_id is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SGLANG_WORKER_GROUP_ID_KEY,
+                json.dumps(worker_group_id),
+            )
+            logging.info(
+                "Published SGLang worker group metadata for KV attribution: %s",
+                worker_group_id,
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to attach SGLang worker group metadata to registration: %s",
+                e,
+            )
 
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
