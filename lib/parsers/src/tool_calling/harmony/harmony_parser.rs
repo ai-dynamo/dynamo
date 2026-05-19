@@ -204,6 +204,57 @@ fn push_harmony_text(out: &mut String, content: &[Content]) {
     }
 }
 
+fn content_looks_like_json(content: &[Content]) -> bool {
+    content.iter().any(|item| match item {
+        Content::Text(text) => {
+            matches!(text.text.trim_start().as_bytes().first(), Some(b'{' | b'['))
+        }
+        _ => false,
+    })
+}
+
+fn contains_recipientless_commentary_call(text: &str) -> bool {
+    let channel_marker = "<|channel|>commentary";
+    let message_marker = "<|message|>";
+    let call_marker = "<|call|>";
+    let boundaries = ["<|end|>", "<|return|>", "<|start|>", "<|channel|>"];
+
+    let mut remaining = text;
+    while let Some(channel_start) = remaining.find(channel_marker) {
+        let after_channel = &remaining[channel_start + channel_marker.len()..];
+        let Some(message_start) = after_channel.find(message_marker) else {
+            return false;
+        };
+
+        let header = &after_channel[..message_start];
+        let after_message = &after_channel[message_start + message_marker.len()..];
+        remaining = after_message;
+
+        if header
+            .split_whitespace()
+            .any(|part| part.starts_with("to="))
+        {
+            continue;
+        }
+
+        let Some(call_start) = after_message.find(call_marker) else {
+            continue;
+        };
+
+        let next_boundary = boundaries
+            .iter()
+            .filter_map(|boundary| after_message.find(boundary))
+            .min();
+
+        match next_boundary {
+            Some(boundary) if call_start >= boundary => {}
+            _ => return true,
+        };
+    }
+
+    false
+}
+
 /// Extract calls via regex when harmony's strict tokenizer rejects the input
 /// (truncated JSON, multiple back-to-back commentary blocks, etc.).
 /// Returns (calls, residual_text) where residual_text is everything not
@@ -318,6 +369,7 @@ pub async fn parse_tool_calls_harmony_complete(
     let mut call_idx = 0; // Index of the tool call
     let mut normal_text = String::new();
     let has_tool_call_stop = text.contains("<|call|>");
+    let has_recipientless_commentary_call = contains_recipientless_commentary_call(text);
 
     for message in messages.iter() {
         if message.author.role != Role::Assistant {
@@ -359,7 +411,11 @@ pub async fn parse_tool_calls_harmony_complete(
                         arguments: args_json,
                     },
                 });
-            } else if recipient.is_empty() {
+            } else if recipient.is_empty()
+                && !(has_recipientless_commentary_call
+                    && (message.content_type.as_deref() == Some("<|constrain|>json")
+                        || content_looks_like_json(&message.content)))
+            {
                 push_harmony_text(&mut normal_text, &message.content);
             }
         } else if matches!(channel, Some("analysis" | "final")) {
@@ -572,6 +628,21 @@ mod tests {
         assert_eq!(normal, "Done.");
         assert!(!normal.contains("secret weather"));
         assert!(!normal.contains("browser.search"));
+        assert!(!normal.contains("<|channel|>"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_harmony_drops_recipientless_tool_call_payload() {
+        let text = r#"<|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>final<|message|>Done.<|return|>"#;
+        let (tool_calls, normal_content) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
+
+        assert!(tool_calls.is_empty());
+        let normal = normal_content.unwrap_or_default();
+        assert_eq!(normal, "Done.");
+        assert!(!normal.contains("NYC"));
         assert!(!normal.contains("<|channel|>"));
     }
 
