@@ -395,7 +395,11 @@ trtllm_configs = {
         marks=[
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 17.1 GiB
             pytest.mark.trtllm,
-            pytest.mark.pre_merge,
+            # TODO: move back to pre_merge once the parallel scheduler models
+            # system RAM (currently VRAM-only). On the amd64 pre_merge runner
+            # this test plus image_diffusion plus aggregated_multimodal exceed
+            # the system-RAM budget despite fitting the 24 GiB VRAM cap.
+            pytest.mark.nightly,
             # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens
             # doesn't apply.  requested_trtllm_vram_gib maps to
             # KvCacheConfig.max_gpu_total_bytes which has no effect on the
@@ -454,7 +458,11 @@ trtllm_configs = {
         marks=[
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 20.0 GiB
             pytest.mark.trtllm,
-            pytest.mark.pre_merge,
+            # TODO: move back to pre_merge once the parallel scheduler models
+            # system RAM (currently VRAM-only). On the amd64 pre_merge runner
+            # this test plus video_diffusion plus aggregated_multimodal exceed
+            # the system-RAM budget despite fitting the 24 GiB VRAM cap.
+            pytest.mark.nightly,
             # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens
             # doesn't apply.  requested_trtllm_vram_gib maps to
             # KvCacheConfig.max_gpu_total_bytes which has no effect on the
@@ -502,7 +510,11 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.pre_merge,
+            # TODO: move back to pre_merge once the parallel scheduler models
+            # system RAM (currently VRAM-only). On the amd64 pre_merge runner
+            # this test plus video_diffusion plus image_diffusion exceed the
+            # system-RAM budget despite fitting the 24 GiB VRAM cap.
+            pytest.mark.nightly,
             pytest.mark.timeout(900),
             # Bisected with tests/utils/profile_pytest.py: minimum = 528 tokens,
             # 2x safety = 1056. Peak 8.1 GiB at 1056 tokens. Override threads
