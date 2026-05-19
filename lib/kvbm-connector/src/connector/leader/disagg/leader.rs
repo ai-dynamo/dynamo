@@ -501,7 +501,7 @@ fn role_to_hub(role: DisaggregationRole) -> ConditionalDisaggRole {
     }
 }
 
-fn build_hub_client(hub_url: &str) -> Result<Arc<HubClient>> {
+pub fn build_hub_client(hub_url: &str) -> Result<Arc<HubClient>> {
     let url =
         Url::parse(hub_url).with_context(|| format!("parsing disagg hub_url: {}", hub_url))?;
     let scheme = url.scheme().to_string();

@@ -27,6 +27,37 @@ pub use kvbm_engine::{G1, G2, G3, G4, InstanceId, KvbmRuntime};
 pub use kvbm_config::KvbmConfig;
 pub use kvbm_engine::{KvbmRuntimeBuilder, PeerInfo, WorkerAddress};
 
+/// If the config carries `disagg.hub_url`, construct a [`kvbm_hub::HubClient`]
+/// and pre-seed the runtime builder so velo uses it as its peer-discovery
+/// backend.
+///
+/// Standalone (no disagg) leaders return the builder unmodified — velo falls
+/// back to whatever static discovery the messenger config specifies (or none).
+///
+/// This is the wiring the leader's `InstanceLeader::messenger`
+/// `discover_and_register_peer` flow needs. Without it, control-plane calls
+/// like `core/register_leader` fail with "No discovery backend configured"
+/// even though the hub knows every registered peer. The CD coordinator's
+/// internal `HubPeerResolver` uses the hub directly and is unaffected — but
+/// the public control-plane surface (which the P2P flow drives) goes
+/// through velo.
+///
+/// Workers do not need this — cross-worker data transfer rides NIXL, not
+/// velo, so only leaders configure a velo peer registry.
+pub fn seed_leader_builder_with_hub_discovery(
+    config: &KvbmConfig,
+    builder: KvbmRuntimeBuilder,
+) -> anyhow::Result<KvbmRuntimeBuilder> {
+    let Some(disagg) = config.disagg.as_ref() else {
+        return Ok(builder);
+    };
+    let hub_client = connector::leader::disagg::build_hub_client(&disagg.hub_url)?;
+    // Coerce Arc<HubClient> → Arc<dyn PeerDiscovery>. HubClient's
+    // `impl PeerDiscovery` (in kvbm-hub) makes this an upcast.
+    let discovery: std::sync::Arc<dyn velo::discovery::PeerDiscovery> = hub_client;
+    Ok(builder.with_discovery(discovery))
+}
+
 // Re-exports for bindings — memory/tensor types (already in public API via ConnectorWorkerInterface)
 pub use dynamo_memory::{MemoryDescriptor, StorageKind, TensorDescriptor};
 pub mod memory {

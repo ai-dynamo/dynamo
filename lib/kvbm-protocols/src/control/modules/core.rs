@@ -28,7 +28,12 @@ pub struct RegisterLeaderRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterLeaderResponse {
-    pub status: RegisterLeaderStatus,
+    /// Outcome of the register call. Field name is `outcome` rather than
+    /// `status` because the enclosing `ControlReply<T>` already tags the
+    /// success/error split with a `"status"` field (`#[serde(tag = "status")]`).
+    /// Having two `status` JSON keys produces a duplicate-field decode
+    /// error in the hub's HTTP→velo proxy.
+    pub outcome: RegisterLeaderStatus,
     pub remote_leaders: Vec<InstanceId>,
 }
 

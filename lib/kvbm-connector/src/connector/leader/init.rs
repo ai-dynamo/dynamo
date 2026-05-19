@@ -437,7 +437,15 @@ impl ConnectorLeader {
             // production `start_metrics_server` exposes. Without this, a
             // leader built with `control.metrics = true` would silently log
             // a warning at register time and the module would never appear.
-            .observability(self.runtime.observability().clone())
+            .observability(self.runtime.observability().clone());
+        // Plumb the full Velo handle when available — `core/register_leader`
+        // uses `velo.discover_and_register_peer` (both messenger + streaming
+        // registries). Without this the streaming registry stays empty and
+        // `attach_anchor` fails with "TCP streaming: peer <id> not registered".
+        if let Some(velo) = self.runtime.velo() {
+            leader_builder = leader_builder.velo(velo.clone());
+        }
+        leader_builder = leader_builder
             // Cross-leader block-layout compat policy
             // (Operational by default; Universal opts-in to canonical-only
             // matching across permutations / TP / PP).

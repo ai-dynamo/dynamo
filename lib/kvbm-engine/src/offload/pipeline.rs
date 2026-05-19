@@ -1523,6 +1523,33 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                 observer(&registered_blocks);
             }
 
+            // Audit emit: blocks just landed in the destination tier. Lets
+            // smokes / external observers discover the sequence hashes
+            // that were just made available (e.g. P2P smoke uses these to
+            // drive an open_session / pull_from_session pair).
+            //
+            // Hashes are emitted as 32-hex-char big-endian u128 values
+            // (the on-wire serde shape is 16 bytes BE, matching
+            // `u128::to_be_bytes`). Pythons / scripts can `bytes.fromhex`
+            // each comma-separated entry to rebuild the JSON byte array
+            // the hub's `SequenceHash` deserializer accepts. The human
+            // Display form (`pos:b58:lineage_b58`) is lossless but more
+            // work to parse — hex is the machine surface.
+            if !sequence_hashes.is_empty() {
+                let hashes_hex = sequence_hashes
+                    .iter()
+                    .map(|h| format!("{:032x}", h.as_u128()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                crate::engine_audit!(
+                    "offload_register_complete",
+                    src = std::any::type_name::<Src>(),
+                    dst = std::any::type_name::<Dst>(),
+                    num_blocks = registered_blocks.len(),
+                    sequence_hashes_hex = hashes_hex
+                );
+            }
+
             let registration_timepoint = Instant::now();
 
             // Compute timing statistics from batch timing (O(1), not per-block)

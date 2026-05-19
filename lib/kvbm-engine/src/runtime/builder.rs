@@ -42,6 +42,7 @@ pub struct KvbmRuntimeBuilder {
     messenger: Option<Arc<Messenger>>,
     nixl_agent: Option<NixlAgent>,
     observability: Option<SharedKvbmObservability>,
+    discovery_override: Option<Arc<dyn velo::discovery::PeerDiscovery>>,
 }
 
 impl KvbmRuntimeBuilder {
@@ -54,6 +55,7 @@ impl KvbmRuntimeBuilder {
             messenger: None,
             nixl_agent: None,
             observability: None,
+            discovery_override: None,
         }
     }
 
@@ -110,6 +112,26 @@ impl KvbmRuntimeBuilder {
         self
     }
 
+    /// Inject a peer-discovery backend that velo will use to resolve
+    /// remote instance ids → `PeerInfo`. Overrides the
+    /// [`kvbm_config::messenger::DiscoveryConfig`] field. Ignored when
+    /// a pre-built `Velo` is provided via [`with_velo`](Self::with_velo)
+    /// — that velo already has its own discovery, set at its own build
+    /// time.
+    ///
+    /// Intended for the kvbm-connector path: when `disagg.hub_url` is
+    /// configured, the connector builds an `Arc<HubClient>` (which
+    /// implements `PeerDiscovery`) and passes it here so velo's standard
+    /// `messenger.discover_and_register_peer` lookup goes through the
+    /// hub instead of a static filesystem dir.
+    pub fn with_discovery(
+        mut self,
+        discovery: Arc<dyn velo::discovery::PeerDiscovery>,
+    ) -> Self {
+        self.discovery_override = Some(discovery);
+        self
+    }
+
     /// Build runtime for leader role.
     pub async fn build_leader(self) -> Result<super::KvbmRuntime> {
         self.build_internal("leader").await
@@ -138,7 +160,11 @@ impl KvbmRuntimeBuilder {
             }
             (None, Some(m)) => (m, None),
             (None, None) => {
-                let velo = self.config.messenger.build_velo().await?;
+                let velo = self
+                    .config
+                    .messenger
+                    .build_velo_with_discovery(self.discovery_override)
+                    .await?;
                 let messenger = velo.messenger().clone();
                 (messenger, Some(velo))
             }

@@ -117,13 +117,17 @@ impl PyKvbmRuntime {
         let handle = tokio_rt.handle().clone();
         let rt_for_builder = tokio_rt.clone();
 
-        // Build KvbmRuntime using block_on
+        // Build KvbmRuntime using block_on. When `disagg.hub_url` is
+        // configured, seed velo's PeerDiscovery with a HubClient so the
+        // leader's `messenger.discover_and_register_peer` path resolves
+        // remote leaders via the hub (instead of failing with "No
+        // discovery backend configured"). Workers do not need this —
+        // their cross-instance data path uses NIXL, not velo.
         let runtime = handle
             .block_on(async {
-                KvbmRuntimeBuilder::new(config)
-                    .with_runtime(rt_for_builder)
-                    .build_leader()
-                    .await
+                let mut builder = KvbmRuntimeBuilder::new(config.clone()).with_runtime(rt_for_builder);
+                builder = kvbm_connector::seed_leader_builder_with_hub_discovery(&config, builder)?;
+                builder.build_leader().await
             })
             .map_err(to_pyerr)?;
 

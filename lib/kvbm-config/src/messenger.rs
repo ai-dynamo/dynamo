@@ -60,6 +60,24 @@ impl MessengerConfig {
     /// underlying Messenger should call [`Velo::messenger`] on the returned
     /// instance.
     pub async fn build_velo(&self) -> Result<std::sync::Arc<velo::Velo>> {
+        self.build_velo_with_discovery(None).await
+    }
+
+    /// Build a [`velo::Velo`] instance, optionally overriding (or filling in)
+    /// the peer-discovery backend.
+    ///
+    /// When `discovery_override` is `Some`, it takes precedence over the
+    /// `discovery` field on this config. Use this when the caller already
+    /// holds a `PeerDiscovery` impl that can't be constructed from static
+    /// config — e.g. `kvbm_hub::HubClient`, which the connector builds at
+    /// startup from `disagg.hub_url`. Wiring it here lets velo's standard
+    /// `messenger.discover_and_register_peer` path resolve cross-instance
+    /// peers via the hub, instead of relying on each subsystem's bespoke
+    /// `HubPeerResolver`.
+    pub async fn build_velo_with_discovery(
+        &self,
+        discovery_override: Option<std::sync::Arc<dyn velo::discovery::PeerDiscovery>>,
+    ) -> Result<std::sync::Arc<velo::Velo>> {
         use std::net::TcpListener;
         use std::sync::Arc;
 
@@ -106,7 +124,10 @@ impl MessengerConfig {
 
         builder = builder.add_transport(tcp_transport);
 
-        if let Some(discovery_config) = &self.discovery {
+        if let Some(discovery) = discovery_override {
+            builder = builder.discovery(discovery);
+            tracing::info!("Using injected discovery backend (override)");
+        } else if let Some(discovery_config) = &self.discovery {
             match discovery_config {
                 DiscoveryConfig::Etcd(_cfg) => {
                     bail!("Etcd discovery not yet supported in velo");

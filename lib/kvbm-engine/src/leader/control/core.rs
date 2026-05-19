@@ -95,24 +95,38 @@ async fn register_leader(
 
     if leader.remote_leaders().contains(&instance_id) {
         return Ok(RegisterLeaderResponse {
-            status: RegisterLeaderStatus::AlreadyRegistered,
+            outcome: RegisterLeaderStatus::AlreadyRegistered,
             remote_leaders: leader.remote_leaders(),
         });
     }
 
-    leader
-        .messenger()
-        .discover_and_register_peer(instance_id)
-        .await
-        .map_err(|e| ControlError::PeerNotFound {
-            instance_id,
-            reason: format!("{e:#}"),
-        })?;
+    // Prefer the full Velo handle: `Velo::discover_and_register_peer`
+    // fans out to BOTH the messenger registry and the streaming-transport
+    // registry. Calling `messenger.discover_and_register_peer` only
+    // populates the messenger side; the next `attach_anchor` then fails
+    // with "TCP streaming: peer <worker_id> not registered".
+    match leader.velo() {
+        Some(velo) => velo
+            .discover_and_register_peer(instance_id)
+            .await
+            .map_err(|e| ControlError::PeerNotFound {
+                instance_id,
+                reason: format!("{e:#}"),
+            })?,
+        None => leader
+            .messenger()
+            .discover_and_register_peer(instance_id)
+            .await
+            .map_err(|e| ControlError::PeerNotFound {
+                instance_id,
+                reason: format!("{e:#}"),
+            })?,
+    }
 
     leader.add_remote_leader(instance_id);
 
     Ok(RegisterLeaderResponse {
-        status: RegisterLeaderStatus::Registered,
+        outcome: RegisterLeaderStatus::Registered,
         remote_leaders: leader.remote_leaders(),
     })
 }

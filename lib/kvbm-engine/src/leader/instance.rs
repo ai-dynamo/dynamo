@@ -82,6 +82,17 @@ pub struct InstanceLeader {
     /// Velo instance for distributed communication.
     messenger: Arc<Messenger>,
 
+    /// Full Velo handle when available. Required for the
+    /// `core/register_leader` control handler's
+    /// `velo.discover_and_register_peer` path, which fans out to both
+    /// the messenger registry and the streaming transport registry.
+    /// `messenger.discover_and_register_peer` only handles the
+    /// messenger side, so without this the streaming-transport
+    /// registry stays empty and `attach_anchor` fails with
+    /// "TCP streaming: peer <id> not registered". Optional because
+    /// some test/bench paths build a leader with just a messenger.
+    velo: Option<Arc<velo::Velo>>,
+
     /// Block registry for deduplication.
     #[allow(dead_code)]
     pub(crate) registry: BlockRegistry,
@@ -211,6 +222,7 @@ pub struct InstanceLeader {
 #[derive(Default)]
 pub struct InstanceLeaderBuilder {
     messenger: Option<Arc<Messenger>>,
+    velo: Option<Arc<velo::Velo>>,
     registry: Option<BlockRegistry>,
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
@@ -242,12 +254,22 @@ impl InstanceLeaderBuilder {
     ///     .build()?;
     /// ```
     pub fn with_runtime(self, runtime: &crate::KvbmRuntime) -> Self {
-        self.messenger(runtime.messenger().clone())
-            .observability(runtime.observability().clone())
+        let mut b = self
+            .messenger(runtime.messenger().clone())
+            .observability(runtime.observability().clone());
+        if let Some(v) = runtime.velo() {
+            b = b.velo(v.clone());
+        }
+        b
     }
 
     pub fn messenger(mut self, messenger: Arc<Messenger>) -> Self {
         self.messenger = Some(messenger);
+        self
+    }
+
+    pub fn velo(mut self, velo: Arc<velo::Velo>) -> Self {
+        self.velo = Some(velo);
         self
     }
 
@@ -403,6 +425,7 @@ impl InstanceLeaderBuilder {
 
         Ok(InstanceLeader {
             messenger,
+            velo: self.velo,
             registry: self
                 .registry
                 .ok_or_else(|| anyhow::anyhow!("block registry required"))?,
@@ -483,6 +506,14 @@ impl InstanceLeader {
     /// like event coordination and cross-instance communication.
     pub fn messenger(&self) -> &Arc<Messenger> {
         &self.messenger
+    }
+
+    /// Optional full Velo handle. Use for paths that need both messenger
+    /// and streaming-transport peer registration (e.g.
+    /// `velo.discover_and_register_peer`). `None` when the leader was
+    /// built from a bare messenger (some test/bench paths).
+    pub fn velo(&self) -> Option<&Arc<velo::Velo>> {
+        self.velo.as_ref()
     }
 
     /// Get the tokio runtime handle from Velo.
