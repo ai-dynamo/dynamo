@@ -159,17 +159,15 @@ class TestAddArgument:
                 raise argparse.ArgumentTypeError("model-name must be non-empty")
             return value.strip()
 
-        add_argument(
-            parser,
-            flag_name="--model-name",
-            env_var="TEST_MODEL_NAME",
-            default=None,
-            help="Model name",
-            arg_type=validate_model_name,
-        )
-
-        with pytest.raises(SystemExit):
-            parser.parse_args([])
+        with pytest.raises(argparse.ArgumentTypeError, match="model-name"):
+            add_argument(
+                parser,
+                flag_name="--model-name",
+                env_var="TEST_MODEL_NAME",
+                default=None,
+                help="Model name",
+                arg_type=validate_model_name,
+            )
 
     def test_callable_type_with_non_none_default_coerces_env(self, monkeypatch):
         """Test callable arg_type validates env values when the default has a type."""
