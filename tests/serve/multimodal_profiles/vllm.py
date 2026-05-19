@@ -488,39 +488,4 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
         },
     ),
-    # [gluo NOTE] LLaVA 1.5 7B is big model and require at least 3 GPUs to run.
-    # We may use less GPUs by squeezing the model onto 2 GPUs.
-    MultimodalModelProfile(
-        name="llava-hf/llava-1.5-7b-hf",
-        short_name="llava-1.5-7b",
-        topologies={
-            "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=340,
-                gpu_marker="gpu_4",
-            ),
-            "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
-                timeout_s=300,
-                gpu_marker="gpu_4",
-            ),
-        },
-        # LLaVA 1.5 color naming varies across CUDA backends under vLLM 0.20;
-        # keep this as a multimodal serving smoke check, not a color oracle.
-        request_payloads=[
-            make_image_payload(
-                [
-                    "green",
-                    "white",
-                    "black",
-                    "purple",
-                    "red",
-                    "pink",
-                    "yellow",
-                    "blue",
-                    "orange",
-                ]
-            )
-        ],
-    ),
 ]

@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_bac
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
+
 # ---------------------------------------------------------------------------
 # Per-layer KV axis discovery
 # ---------------------------------------------------------------------------
@@ -115,7 +116,6 @@ def probe_per_layer_axes(attn_backend: type) -> KvAxisMap:
         heads=_find(_PROBE_KVHEADS, "num_kv_heads"),
         head_size=_find(_PROBE_HEAD_SIZE, "head_size"),
     )
-
 
 
 # Import KvbmRuntime and ConnectorWorker from Rust bindings (requires v2 feature)
@@ -447,16 +447,19 @@ class SchedulerConnectorWorker:
         def _physical_axis(logical: int) -> int:
             return stride_order.index(logical)
 
+        # Positional checks (not set-equality): Rust's
+        # `FullyContiguousLayout::layout_view` for `OperationalNHD` hardcodes
+        # the order `[Block, Layer, Outer, Page, HeadCount, HeadSize]` and
+        # synthesizes strides from it. A tail-swapped layout (HeadSize@4,
+        # HeadCount@5) would silently pass a `{4,5}` set check but be
+        # mis-projected — stride math would treat HeadSize as HeadCount.
         expected = {
             "num_blocks @ physical 0": _physical_axis(num_blocks_log) == 0,
             "num_layers @ physical 1": _physical_axis(0) == 1,
             "K/V        @ physical 2": _physical_axis(kv_log) == 2,
             "block_size @ physical 3": _physical_axis(block_size_log) == 3,
-            "heads+head_size @ physical {4,5}": {
-                _physical_axis(heads_log),
-                _physical_axis(head_size_log),
-            }
-            == {4, 5},
+            "heads      @ physical 4": _physical_axis(heads_log) == 4,
+            "head_size  @ physical 5": _physical_axis(head_size_log) == 5,
         }
         if not all(expected.values()):
             failed = [name for name, ok in expected.items() if not ok]
@@ -485,6 +488,20 @@ class SchedulerConnectorWorker:
 
         num_blocks, num_layers, outer_dim, page_size = shape[:4]
         inner_dim = math.prod(shape[4:])
+
+        # Locate the heads axis in the cross-layer *physical* layout so Rust
+        # can split `inner_dim` into `(num_kv_heads, head_size)` for planner
+        # projection (see kvbm_physical::layout::resolve_head_dims). The
+        # set-equality check above only guarantees heads+head_size land at
+        # physical positions {4,5}; here we pull the heads-specific position
+        # to read the actual per-rank head count from the tensor.
+        num_kv_heads = int(shape[_physical_axis(heads_log)])
+        if num_kv_heads <= 0 or inner_dim % num_kv_heads != 0:
+            raise RuntimeError(
+                f"KVBM cross-layer num_kv_heads={num_kv_heads} does not split "
+                f"inner_dim={inner_dim}; shape={shape}, heads_logical={heads_log}, "
+                f"stride_order={stride_order}"
+            )
 
         # Cross-checks against vLLM config — catch a mismatch between the
         # tensor we got and what vLLM thinks it allocated.
@@ -515,6 +532,7 @@ class SchedulerConnectorWorker:
             num_layers,
             outer_dim,
             page_size,
+            num_kv_heads,
             inner_dim,
             dtype_width_bytes,
         )
@@ -540,7 +558,8 @@ class SchedulerConnectorWorker:
         print(
             "[KVBM] Cross-layer KV cache registered (deferred mode):"
             f" num_blocks={num_blocks} num_layers={num_layers}"
-            f" outer_dim={outer_dim} page_size={page_size} inner_dim={inner_dim}"
+            f" outer_dim={outer_dim} page_size={page_size}"
+            f" num_kv_heads={num_kv_heads} inner_dim={inner_dim}"
             f" dtype_width_bytes={dtype_width_bytes}",
             flush=True,
         )

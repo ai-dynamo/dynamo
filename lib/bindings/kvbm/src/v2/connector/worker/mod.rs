@@ -104,8 +104,8 @@ impl PyConnectorWorker {
     ///
     /// Used when vLLM allocates a uniform cross-layer KV cache (a single
     /// allocation whose physical byte layout is
-    /// `[num_blocks, num_layers, outer_dim, page_size, inner_dim]`). The
-    /// caller must validate the layout against the attention backend's
+    /// `[num_blocks, num_layers, outer_dim, page_size, num_kv_heads, head_size]`).
+    /// The caller must validate the layout against the attention backend's
     /// stride order before invoking this; the Rust side trusts the dims.
     ///
     /// Args:
@@ -114,9 +114,13 @@ impl PyConnectorWorker {
     ///     num_layers: Number of attention layers fused into the tensor.
     ///     outer_dim: K/V split dimension (typically 2 for standard attention).
     ///     page_size: Block/page size (tokens per block).
-    ///     inner_dim: Flattened head dimension (num_kv_heads * head_size).
+    ///     num_kv_heads: Per-rank KV head count. Must evenly divide `inner_dim`;
+    ///         used by the planner to split the inner axis into
+    ///         `(HeadCount, HeadSize)` for stride-aware projection.
+    ///     inner_dim: Flattened head dimension (`num_kv_heads * head_size`).
     ///     dtype_width_bytes: Data type width in bytes (e.g. 2 for fp16).
-    #[pyo3(signature = (tensor, num_device_blocks, num_layers, outer_dim, page_size, inner_dim, dtype_width_bytes))]
+    #[pyo3(signature = (tensor, num_device_blocks, num_layers, outer_dim, page_size, num_kv_heads, inner_dim, dtype_width_bytes))]
+    #[allow(clippy::too_many_arguments)]
     pub fn register_cross_layers_kv_cache(
         &self,
         tensor: Py<PyAny>,
@@ -124,6 +128,7 @@ impl PyConnectorWorker {
         num_layers: usize,
         outer_dim: usize,
         page_size: usize,
+        num_kv_heads: usize,
         inner_dim: usize,
         dtype_width_bytes: usize,
     ) -> PyResult<()> {
@@ -137,6 +142,7 @@ impl PyConnectorWorker {
                 num_layers,
                 outer_dim,
                 page_size,
+                num_kv_heads,
                 inner_dim,
                 dtype_width_bytes,
             )

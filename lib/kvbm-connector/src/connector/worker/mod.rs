@@ -85,14 +85,17 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register a single cross-layer KV cache tensor (deferred mode).
     ///
     /// The tensor's physical byte layout must be
-    /// `[num_blocks, num_layers, outer_dim, page_size, inner_dim]`, which is
-    /// what vLLM's `allocate_uniform_kv_caches` produces for FlashAttention NHD
-    /// after the stride-order permutation. The caller (Python) is responsible
-    /// for asserting the layout matches before invoking this method.
+    /// `[num_blocks, num_layers, outer_dim, page_size, num_kv_heads, head_size]`,
+    /// which is what vLLM's `allocate_uniform_kv_caches` produces for
+    /// FlashAttention NHD after the stride-order permutation. The caller
+    /// (Python) is responsible for asserting the layout matches before
+    /// invoking this method.
     ///
-    /// All dims are passed explicitly because they cannot be unambiguously
-    /// inferred from the raw tensor shape (the last dim is the product of
-    /// num_kv_heads and head_size, which we don't need to split).
+    /// `inner_dim = num_kv_heads * head_size` is passed pre-collapsed because
+    /// the physical layout treats the tail as one contiguous run; `num_kv_heads`
+    /// is passed separately so the planner can split the inner axis back into
+    /// `[HeadCount, HeadSize]` for stride-aware projection
+    /// (see [`kvbm_physical::layout::Layout::layout_view`]).
     #[allow(clippy::too_many_arguments)]
     fn register_cross_layers_kv_cache(
         &self,
@@ -101,6 +104,7 @@ pub trait ConnectorWorkerInterface: Send + Sync {
         num_layers: usize,
         outer_dim: usize,
         page_size: usize,
+        num_kv_heads: usize,
         inner_dim: usize,
         dtype_width_bytes: usize,
     ) -> Result<()>;
@@ -484,6 +488,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.runtime.messenger().instance_id()))]
+    #[allow(clippy::too_many_arguments)]
     fn register_cross_layers_kv_cache(
         &self,
         tensor: Arc<dyn TensorDescriptor>,
@@ -491,6 +496,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         num_layers: usize,
         outer_dim: usize,
         page_size: usize,
+        num_kv_heads: usize,
         inner_dim: usize,
         dtype_width_bytes: usize,
     ) -> Result<()> {
@@ -505,14 +511,29 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             bail!("Worker details already set");
         }
 
+        // `num_kv_heads` must split `inner_dim` exactly; otherwise the
+        // planner's `resolve_head_dims` will reject this layout downstream.
+        if num_kv_heads == 0 || !inner_dim.is_multiple_of(num_kv_heads) {
+            bail!(
+                "register_cross_layers_kv_cache: inner_dim ({}) is not divisible \
+                 by num_kv_heads ({})",
+                inner_dim,
+                num_kv_heads
+            );
+        }
+
         // Build LayoutConfig from explicit dims — Python already validated the
-        // physical layout matches `[num_blocks, num_layers, outer, page, inner]`.
+        // physical layout matches `[num_blocks, num_layers, outer, page, heads, head_size]`.
+        // `num_heads` is required because `KvBlockLayout::OperationalNHD` (set
+        // below) drives the planner to split `inner_dim` into `(HeadCount, HeadSize)`
+        // when projecting to a `LayoutView`.
         let layout_config = LayoutConfig::builder()
             .num_blocks(num_device_blocks)
             .num_layers(num_layers)
             .outer_dim(outer_dim)
             .page_size(page_size)
             .inner_dim(inner_dim)
+            .num_heads(Some(num_kv_heads))
             .dtype_width_bytes(dtype_width_bytes)
             .build()?;
 
@@ -521,6 +542,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             num_layers,
             outer_dim,
             page_size,
+            num_kv_heads,
             inner_dim,
             dtype_width_bytes,
             "Registering cross-layer KV cache (fully-contiguous, deferred mode)"
