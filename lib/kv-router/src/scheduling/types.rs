@@ -330,6 +330,7 @@ impl SchedulingRequest {
             .unwrap_or(0.0)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_worker_allowed(&self, worker_id: WorkerId) -> bool {
         self.allowed_worker_ids
             .as_ref()
