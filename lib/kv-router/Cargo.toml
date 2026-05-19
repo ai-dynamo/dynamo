@@ -31,6 +31,7 @@ dynamo-tokens = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
+futures = { workspace = true }
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }
 prometheus = { workspace = true, optional = true }

@@ -8,7 +8,6 @@
 //!
 //! - **In-process shards**: `ThreadPoolIndexer<T>` with `T: AnchorCapableSyncIndexer`.
 //! - **Remote shards**: a velo-backed client that sends requests over UDS/TCP
-//!   (see the `shard_router` module, feature-gated behind `velo-runtime`).
 //!
 //! ## Write vs. read semantics
 //!
@@ -256,8 +255,8 @@ mod tests {
         AsyncShardHandle::flush(&tpi).await;
         let lengths = AsyncShardHandle::node_edge_lengths(&tpi);
         assert!(
-            !lengths.is_empty() || lengths.iter().sum::<usize>() > 0,
-            "expected non-empty node_edge_lengths after storing blocks, got {lengths:?}"
+            lengths.iter().any(|&v| v > 0),
+            "expected at least one non-zero bucket in node_edge_lengths after storing blocks, got {lengths:?}"
         );
     }
 

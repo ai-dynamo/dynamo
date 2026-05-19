@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
+use futures::future::join_all;
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
 #[cfg(feature = "bench")]
@@ -121,6 +122,42 @@ pub struct BranchShardedIndexer<S: AsyncShardHandle> {
 /// Compatibility alias for the previous implementation name.
 #[deprecated(note = "use BranchShardedIndexer<ThreadPoolIndexer<T>> instead")]
 pub type AnchorAwareBranchShardedIndexer<T> = BranchShardedIndexer<ThreadPoolIndexer<T>>;
+
+impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<ThreadPoolIndexer<T>> {
+    /// Source-compatibility constructor: accepts raw `T` backends and wraps
+    /// each in a [`ThreadPoolIndexer`] with 2 worker threads.
+    ///
+    /// This shim exists because the former `AnchorAwareBranchShardedIndexer`
+    /// accepted `Vec<T>` directly.  Prefer the primary
+    /// [`BranchShardedIndexer::new`] constructor with pre-built
+    /// [`ThreadPoolIndexer`] shards when you need control over thread-pool
+    /// size.
+    #[deprecated(
+        note = "build ThreadPoolIndexers explicitly (choosing num_threads) and call \
+                BranchShardedIndexer::new"
+    )]
+    pub fn new_from_backends(backends: Vec<T>, prefix_depth: usize, kv_block_size: u32) -> Self {
+        let shards = backends
+            .into_iter()
+            .map(|b| ThreadPoolIndexer::new(b, 2, kv_block_size))
+            .collect();
+        BranchShardedIndexer::new(shards, prefix_depth, kv_block_size)
+    }
+
+    /// Alias of [`Self::new_from_backends`] for drop-in replacement of the
+    /// former `new_with_options` call pattern.
+    #[deprecated(
+        note = "build ThreadPoolIndexers explicitly (choosing num_threads) and call \
+                BranchShardedIndexer::new_with_options"
+    )]
+    pub fn new_with_options_from_backends(
+        backends: Vec<T>,
+        prefix_depth: usize,
+        kv_block_size: u32,
+    ) -> Self {
+        Self::new_from_backends(backends, prefix_depth, kv_block_size)
+    }
+}
 
 impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     /// Create a branch-sharded indexer from pre-built shard handles.
@@ -820,21 +857,22 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
     }
 
     async fn flush(&self) -> usize {
-        let mut total = 0;
-        for shard in &self.shards {
-            total += shard.flush().await;
-        }
-        total
+        join_all(self.shards.iter().map(|s| s.flush()))
+            .await
+            .into_iter()
+            .sum()
     }
 
     async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
-        let mut sizes = Vec::new();
-        for (idx, shard) in self.shards.iter().enumerate() {
-            let mut snapshot = shard.shard_sizes().await;
-            snapshot.shard_idx = idx;
-            sizes.push(snapshot);
-        }
-        sizes
+        join_all(self.shards.iter().map(|s| s.shard_sizes()))
+            .await
+            .into_iter()
+            .enumerate()
+            .map(|(idx, mut snapshot)| {
+                snapshot.shard_idx = idx;
+                snapshot
+            })
+            .collect()
     }
 
     fn node_edge_lengths(&self) -> Vec<usize> {
