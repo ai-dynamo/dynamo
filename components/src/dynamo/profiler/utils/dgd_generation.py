@@ -588,19 +588,23 @@ def _build_planner_config(
     if aic_spec is not None:
         planner_cfg.aic_interpolation = aic_spec
 
-    """
-    Propagate SLA targets from spec.sla so the post-deployment planner
-    enforces the same SLA used at sweep time. Without this, the planner silently uses SLAPlannerDefaults
-    ttft_ms=500 / itl_ms=50
+    # Propagate SLA targets from spec.sla so the post-deployment planner enforces
+    # the same SLA used at sweep time. Without this, the planner silently uses
+    # SLAPlannerDefaults ttft_ms=500 / itl_ms=50.
+    #
+    # Gate on model_fields_set: run_profile() calls valid_dgdr_spec() first, which
+    # injects a defaulted SLASpec() (ttft=2000, itl=30) when spec.sla is omitted.
+    # Only values the user explicitly set are in model_fields_set, so a defaulted
+    # SLASpec falls through and keeps the prior planner defaults.
+    #
+    # Explicit user overrides on features.planner.{ttft_ms, itl_ms} take precedence.
 
-    Explicit user overrides on features.planner.{ttft_ms, itl_ms} take precedence - detected via model_fields_set
-    """
     sla = dgdr.sla
     if (
         sla is not None
         and sla.e2eLatency is None
-        and sla.ttft is not None
-        and sla.itl is not None
+        and "ttft" in sla.model_fields_set
+        and "itl" in sla.model_fields_set
     ):
         explicit = (
             dgdr.features.planner.model_fields_set
