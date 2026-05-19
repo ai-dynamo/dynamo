@@ -28,8 +28,6 @@ from dynamo.common.utils.prometheus import gather_with_labels
 from ._internal_metrics import register_engine_registry
 
 if TYPE_CHECKING:
-    from prometheus_client import CollectorRegistry
-
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
