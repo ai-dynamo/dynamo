@@ -741,9 +741,6 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
-# --- update_engine_config_with_dynamo: --runner preservation tests ---
-
-
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {
@@ -773,7 +770,7 @@ def _make_engine_config_with_runner(runner="auto", **overrides):
 
 
 class TestRunnerPreservation:
-    """Tests for GitHub issue #7670: --runner must not be unconditionally overridden."""
+    """update_engine_config_with_dynamo must not overwrite a user-set --runner."""
 
     def test_runner_defaults_to_generate_when_auto(self):
         """When user does not pass --runner (vLLM default is 'auto'),
