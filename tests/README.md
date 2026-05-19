@@ -349,8 +349,8 @@ cd lib/bindings/python && maturin develop --uv && cd -
 
 Sanity check (optional but recommended) -- verify the environment is wired up correctly:
 ```bash
-deploy/sanity_check.py                        # local-dev / dev containers
-deploy/sanity_check.py --runtime-check-only   # runtime containers
+dev/sanity_check.py                        # local-dev / dev containers
+dev/sanity_check.py --runtime-check-only   # runtime containers
 ```
 
 ### Environment Setup
@@ -470,7 +470,7 @@ Runs per framework (vllm, sglang, trtllm). Each framework goes through: **Build*
 | Stage | What it does | Local equivalent |
 |-------|-------------|-----------------|
 | Build image | Render Dockerfile, build runtime container | `container/render.py --framework=vllm --target=runtime && docker build ...` |
-| Sanity check | Verify packages are installed in the image | `docker run --rm <image> /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check` |
+| Sanity check | Verify packages are installed in the image | `docker run --rm <image> /workspace/dev/sanity_check.py --runtime-check --no-gpu-check` |
 | CPU-only tests (parallel) | `(pre_merge or post_merge) and <framework> and gpu_0` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_0" -n auto --dist=loadscope -v --tb=short` |
 | Single GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and gpu_1` | `pytest -m "(pre_merge or post_merge) and vllm and gpu_1" -v --tb=short` |
 | Multi-GPU tests (sequential) | `(pre_merge or post_merge) and <framework> and (gpu_2 or gpu_4)` | `pytest -m "(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)" -v --tb=short` |
