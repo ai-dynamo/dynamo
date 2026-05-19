@@ -254,7 +254,7 @@ pub struct ModelDeploymentCard {
     ///
     /// Every worker is expected to set this explicitly; `None` means the
     /// worker has not declared a role and is treated as misconfiguration
-    /// (workers not ready). A temporary shim in `Model::ws_topology`
+    /// (workers not ready). A temporary shim in `Model::ws_role_and_needs`
     /// softens this while backends are being migrated — see
     /// `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]` is
     /// kept so pre-field cards still deserialize.
