@@ -8,6 +8,7 @@ members = [
     "lib/config",
     "lib/tokenizers",
     "lib/tokens",
+    "lib/data-gen",
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
@@ -46,6 +47,7 @@ dynamo-llm = { path = "lib/llm", version = "1.2.0" }
 dynamo-config = { path = "lib/config", version = "1.2.0" }
 dynamo-tokenizers = { path = "lib/tokenizers", version = "1.2.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.2.0" }
+dynamo-data-gen = { path = "lib/data-gen", version = "1.2.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.2.0" }
 dynamo-memory = { path = "lib/memory", version = "1.2.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.2.0" }
@@ -122,6 +124,7 @@ serde_bytes = { version = "0.11" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
+serde_path_to_error = "0.1"
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }

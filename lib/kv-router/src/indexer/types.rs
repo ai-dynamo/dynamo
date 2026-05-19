@@ -66,6 +66,8 @@ pub struct AnchorTask {
 pub struct WorkerKvQueryRequest {
     /// The worker ID of the worker to query.
     pub worker_id: WorkerId,
+    /// Data-parallel rank owned by this worker query endpoint.
+    pub dp_rank: DpRank,
 
     /// Start event ID (inclusive). If `None`, dumps entire tree.
     pub start_event_id: Option<u64>,
