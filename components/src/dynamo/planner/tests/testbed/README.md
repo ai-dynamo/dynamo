@@ -129,12 +129,12 @@ import time with a one-line reason. The marker is `@pytest.mark.real_aic`.
 1. **No `dynamo._core` native binding** (e.g., fresh dev box without `maturin`):
    the runtime stub installs a no-op `dynamo._core` and `conftest.py`'s
    `pytest_collection_modifyitems` hook skips every `@pytest.mark.gamma` test.
-   See [Appendix C.10](../../../../../../docs/design-docs/powerplanner-testbed-design.md).
+   See Appendix C.10 in `docs/design-docs/powerplanner-testbed-design.md`.
 2. **Older bridge API only** (`create_disagg` without `from_synthetic_disagg`):
    the α–γ cross-validation test (`test_alpha_gamma_agree_on_decode_drift`)
    skips because the placeholder trace fallback can't drive AIC drift. The
-   three γ scenarios + `test_gamma_no_bias` still run. See
-   [Appendix D.7](../../../../../../docs/design-docs/powerplanner-testbed-design.md).
+   three γ scenarios + `test_gamma_no_bias` still run. See Appendix D.7 in
+   `docs/design-docs/powerplanner-testbed-design.md`.
 
 Expected outcomes by environment:
 
