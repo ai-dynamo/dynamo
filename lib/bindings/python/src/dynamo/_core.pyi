@@ -1813,6 +1813,7 @@ class MockEngineArgs:
         max_num_batched_tokens: Optional[int] = 8192,
         enable_prefix_caching: bool = True,
         enable_chunked_prefill: bool = True,
+        scheduler_reserve_full_isl: bool = True,
         speedup_ratio: float = 1.0,
         decode_speedup_ratio: float = 1.0,
         dp_size: int = 1,

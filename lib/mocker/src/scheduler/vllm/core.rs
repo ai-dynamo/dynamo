@@ -1026,10 +1026,19 @@ impl VllmCore {
             .get(&uuid)
             .unwrap_or_else(|| panic!("schedule_request: {uuid} missing from state.requests"));
         request.debug_assert_invariants(uuid);
+        // Compute prefill cost once when either consumer needs it: the
+        // `cached_prefix_tokens` calc below (fresh requests only) and the
+        // waiting-admission gate further down. Avoids scanning the
+        // sequence blocks twice for a single fresh-from-waiting admit.
+        let prefill_cost = if request.num_computed_tokens == 0
+            || (from_waiting && self.args.scheduler_reserve_full_isl)
+        {
+            Some(self.kv_manager.get_prefill_cost(&request.sequence))
+        } else {
+            None
+        };
         let cached_prefix_tokens = if request.num_computed_tokens == 0 {
-            self.kv_manager
-                .get_prefill_cost(&request.sequence)
-                .cached_tokens
+            prefill_cost.as_ref().map(|c| c.cached_tokens).unwrap_or(0)
         } else {
             0
         };
@@ -1046,6 +1055,29 @@ impl VllmCore {
             && prompt_remaining > *token_budget
         {
             return ScheduleOutcome::Blocked;
+        }
+
+        // Mirror vLLM's `scheduler_reserve_full_isl`: when admitting a
+        // request off the waiting queue, refuse if the full ISL cannot fit
+        // in currently free KV capacity. Demand includes both the
+        // freshly-allocated blocks (uncached suffix) AND any cached blocks
+        // sitting in the inactive pool — reusing those promotes them from
+        // inactive→active and consumes free-pool capacity. Returning
+        // `Blocked` here bypasses the shared preemption branch below, so
+        // running requests are not evicted to make room for an admission
+        // that real vLLM would never have accepted.
+        if from_waiting && self.args.scheduler_reserve_full_isl && remaining_known_tokens > 0 {
+            let cost = prefill_cost
+                .as_ref()
+                .expect("prefill_cost is computed eagerly when reserve-full-isl gate fires");
+            let free_blocks = self
+                .kv_manager
+                .max_capacity()
+                .saturating_sub(self.kv_manager.num_active_blocks());
+            let demand = cost.new_blocks + cost.inactive_overlap_blocks;
+            if demand > free_blocks {
+                return ScheduleOutcome::Blocked;
+            }
         }
 
         let desired_tokens = remaining_known_tokens.min(*token_budget);

@@ -309,6 +309,9 @@ mod core_behavior {
             .max_num_seqs(Some(3))
             .enable_chunked_prefill(true)
             .enable_prefix_caching(false)
+            // Disable the full-ISL admission gate so this test continues
+            // to exercise the LIFO preemption ordering as written.
+            .scheduler_reserve_full_isl(false)
             .preemption_mode(PreemptionMode::Lifo)
             .speedup_ratio(0.0)
             .build()
@@ -338,6 +341,122 @@ mod core_behavior {
         assert_eq!(pass1.mocker_metrics.vllm_preemptions_total, 0);
         assert_eq!(pass2.mocker_metrics.vllm_preemptions_total, 1);
         assert_eq!(pass2.mocker_metrics.waiting_requests, 1);
+    }
+
+    /// Regression for https://github.com/ai-dynamo/dynamo/issues/9718:
+    /// when admitting a waiting request whose full ISL cannot fit in
+    /// available KV, the scheduler must leave the request queued instead
+    /// of preempting running work to make a partial chunk fit. Matches
+    /// vLLM's default `scheduler_reserve_full_isl=True` semantics.
+    #[test]
+    fn test_full_isl_gate_blocks_admission_without_preempt() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(12))
+            .max_num_seqs(Some(3))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        assert!(
+            args.scheduler_reserve_full_isl,
+            "scheduler_reserve_full_isl should default to true (vLLM parity)"
+        );
+
+        let mut core = VllmCore::new(args);
+        let r1 = Uuid::from_u128(1);
+        let r2 = Uuid::from_u128(2);
+        let r3 = Uuid::from_u128(3);
+        // r1 + r2 together pin 4 of 6 blocks; r3's 12-token prompt needs
+        // 3 blocks but only 2 are free at admission time.
+        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32), (r3, 200u32..212u32)] {
+            core.receive(DirectRequest {
+                tokens: range.collect(),
+                max_output_tokens: 2,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+            });
+        }
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass1 = core.execute_pass(&mut collector, 0.0);
+        let pass2 = core.execute_pass(&mut collector, 1.0);
+
+        // r3 must never have been admitted, so it should not appear in
+        // either pass's admissions.
+        let admitted_ever: Vec<Uuid> = pass1
+            .admissions
+            .iter()
+            .chain(pass2.admissions.iter())
+            .map(|a| a.uuid)
+            .collect();
+        assert!(
+            !admitted_ever.contains(&r3),
+            "r3 should not be admitted while its full ISL cannot fit; admissions: {:?}",
+            admitted_ever
+        );
+
+        // r3 must still be queued, never preempted, never partially
+        // computed.
+        assert!(
+            core.state.waiting.contains(&r3),
+            "r3 must remain in the waiting queue"
+        );
+        let r3_state = core.state.requests.get(&r3).unwrap();
+        assert_eq!(r3_state.num_preemptions, 0);
+        assert_eq!(r3_state.num_computed_tokens, 0);
+
+        // r2 must not be preempted by r3's failed admission attempt.
+        let r2_state = core.state.requests.get(&r2).unwrap();
+        assert_eq!(
+            r2_state.num_preemptions, 0,
+            "running r2 must not be preempted to admit a waiting r3 that real vLLM would refuse"
+        );
+        assert_eq!(r2_state.status, RequestStatus::Running);
+    }
+
+    /// Opt-out: when `scheduler_reserve_full_isl=false` the legacy
+    /// chunk-fits-then-preempt behavior is preserved.
+    #[test]
+    fn test_full_isl_gate_disabled_falls_back_to_preempt() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(12))
+            .max_num_seqs(Some(3))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .scheduler_reserve_full_isl(false)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let r1 = Uuid::from_u128(1);
+        let r2 = Uuid::from_u128(2);
+        let r3 = Uuid::from_u128(3);
+        for (uuid, range) in [(r1, 0u32..8u32), (r2, 100u32..108u32), (r3, 200u32..212u32)] {
+            core.receive(DirectRequest {
+                tokens: range.collect(),
+                max_output_tokens: 2,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: None,
+            });
+        }
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, 0.0);
+        core.execute_pass(&mut collector, 1.0);
+
+        let r2_state = core.state.requests.get(&r2).unwrap();
+        assert_eq!(
+            r2_state.num_preemptions, 1,
+            "with gate disabled, r3 admission must still trigger LIFO preempt of r2"
+        );
     }
 
     #[test]
@@ -492,6 +611,9 @@ mod router_events {
             .max_num_seqs(Some(3))
             .enable_chunked_prefill(true)
             .enable_prefix_caching(true)
+            // Disable the full-ISL admission gate so this test continues
+            // to exercise the preemption + KV-removal event path.
+            .scheduler_reserve_full_isl(false)
             .preemption_mode(PreemptionMode::Lifo)
             .speedup_ratio(0.0)
             .build()

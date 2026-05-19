@@ -1279,6 +1279,7 @@ impl KvManager {
             new_tokens,
             cached_tokens,
             active_cached_tokens,
+            inactive_overlap_blocks: overlap_blocks - active_overlap_blocks,
         }
     }
 }
