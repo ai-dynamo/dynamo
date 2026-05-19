@@ -256,6 +256,11 @@ impl LocalModelBuilder {
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
 
+        // Pick up a stable routing id from `DYN_STABLE_ROUTING_ID`. No-op if the caller
+        // already supplied one or the env var is unset. Published in etcd so routing
+        // layers can keep cache assignments stable across worker restarts.
+        self.runtime_config.populate_stable_routing_id_from_env();
+
         let template = self
             .template_file
             .as_deref()
@@ -560,13 +565,10 @@ impl LocalModel {
         let registry = drt.metadata_artifacts();
 
         let mut rewritten = 0usize;
-        for cf in self.card.iter_metadata_files_mut() {
+        for (cf, _) in self.card.iter_metadata_files_mut() {
             let Some(local_path) = cf.path().map(Path::to_path_buf) else {
                 continue;
             };
-            // Filename from the original path — HF cache symlinks would
-            // otherwise canonicalize to the LFS SHA1 and break downstream
-            // lookups by literal name (e.g. `parent.join("generation_config.json")`).
             let Some(filename) = local_path
                 .file_name()
                 .and_then(|f| f.to_str())
@@ -574,14 +576,13 @@ impl LocalModel {
             else {
                 continue;
             };
-            // Canonicalize so the handler serves the resolved HF blob, not the symlink.
-            let absolute = match fs::canonicalize(&local_path) {
+            let absolute = match std::path::absolute(&local_path) {
                 Ok(p) => p,
                 Err(err) => {
                     tracing::warn!(
                         path = %local_path.display(),
                         %err,
-                        "failed to canonicalize self-host metadata path; skipping",
+                        "failed to absolutize self-host metadata path; skipping",
                     );
                     continue;
                 }

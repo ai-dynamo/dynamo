@@ -453,8 +453,8 @@ func main() {
 	case *operatorCfg.DRA.Enabled:
 		if !draDetected {
 			setupLog.Error(nil,
-				"DRA is explicitly enabled in config but the resource.k8s.io API group"+
-					" was not detected in the cluster (requires Kubernetes 1.32+)",
+				"DRA is explicitly enabled in config but the resource.k8s.io/v1 API"+
+					" was not detected in the cluster (requires Kubernetes 1.34+)",
 			)
 			os.Exit(1)
 		}

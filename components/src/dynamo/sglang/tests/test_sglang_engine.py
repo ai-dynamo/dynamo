@@ -73,7 +73,8 @@ async def started_engine():
 
     engine, _ = await SglangLLMEngine.from_args(_BASE_ARGV)
     try:
-        engine_config = await engine.start()
+        # Worker_id 0 is fine for tests — the engine doesn't use it.
+        engine_config = await engine.start(0)
         yield engine, engine_config
     finally:
         await engine.cleanup()
@@ -90,6 +91,21 @@ async def test_start_populates_registration_metadata(started_engine):
     if cfg.total_kv_blocks is not None:
         assert cfg.total_kv_blocks > 0
     assert cfg.max_num_seqs == 4
+
+
+async def test_runtime_data_includes_worker_group(monkeypatch):
+    from dynamo.sglang import llm_engine as llm_engine_mod
+    from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY
+
+    monkeypatch.setattr(
+        llm_engine_mod,
+        "get_sglang_worker_group_id",
+        lambda server_args: "dist_init:tcp://10.0.0.1:2345",
+    )
+
+    assert llm_engine_mod._get_runtime_data(object()) == {
+        SGLANG_WORKER_GROUP_ID_KEY: "dist_init:tcp://10.0.0.1:2345"
+    }
 
 
 async def test_generate_streams_chunks_with_coherent_final_usage(started_engine):
