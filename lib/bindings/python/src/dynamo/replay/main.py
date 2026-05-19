@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,8 +14,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from dynamo.planner.core.types import EngineCapabilities
-
-os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
