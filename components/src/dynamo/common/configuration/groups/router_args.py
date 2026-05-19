@@ -41,6 +41,12 @@ _ROUTER_FIELDS: tuple[str, ...] = (
 # - "none": disable busy-worker admission checks entirely; router queueing
 #   remains controlled by --router-queue-threshold.
 ADMISSION_CONTROL_CHOICES: tuple[str, ...] = ("token-capacity", "none")
+# Sentinel default — distinguishes "user did not pass --admission-control"
+# (auto-decide based on whether any threshold flag is explicitly set)
+# from "user explicitly passed --admission-control none" (treat as
+# contradiction if combined with an explicit threshold flag, raise).
+# Not in ADMISSION_CONTROL_CHOICES so argparse never accepts it from input.
+_ADMISSION_CONTROL_AUTO: str = "_auto_"
 
 
 class RouterConfigBase(ConfigBase):
@@ -52,7 +58,10 @@ class RouterConfigBase(ConfigBase):
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
-    admission_control: str = "none"
+    # Sentinel default — see _ADMISSION_CONTROL_AUTO comment. After
+    # apply_admission_control runs, this is always one of
+    # ADMISSION_CONTROL_CHOICES.
+    admission_control: str = _ADMISSION_CONTROL_AUTO
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
@@ -62,26 +71,22 @@ class RouterConfigBase(ConfigBase):
     def apply_admission_control(self) -> None:
         """Apply the --admission-control mode to the busy thresholds.
 
+        Three input modes:
+        - `_ADMISSION_CONTROL_AUTO` (sentinel default; the user did not pass
+          --admission-control and did not set DYN_ADMISSION_CONTROL): if any
+          threshold flag is explicitly set, auto-promote to "token-capacity"
+          so the threshold takes effect (preserves the v1.0.x / v1.1.x
+          launch-config contract where setting a threshold flag implicitly
+          activated admission control). Otherwise resolve to "none".
         - "token-capacity": keep the configured busy thresholds as-is.
-        - "none": clear all busy thresholds; router queueing remains controlled
-          by --router-queue-threshold.
+        - "none" (explicit): clear all busy thresholds; if any threshold
+          flag was also explicitly set, raise — the combination is a
+          contradiction (you explicitly turned admission off while also
+          configuring a threshold value).
 
-        Compatibility auto-switch: if mode is "none" (the default) AND any
-        of the threshold flags was explicitly set to a non-None value, the
-        mode auto-promotes to "token-capacity" so the thresholds take
-        effect. This preserves the v1.0.x / v1.1.x launch-config contract
-        where passing a threshold flag implicitly activated admission
-        control. The auto-switch is logged at INFO so operators can see
-        it in startup output.
+        After this method returns, ``self.admission_control`` is always one
+        of ADMISSION_CONTROL_CHOICES.
         """
-        if self.admission_control not in ADMISSION_CONTROL_CHOICES:
-            raise ValueError(
-                f"--admission-control must be one of "
-                f"{ADMISSION_CONTROL_CHOICES}, got {self.admission_control!r}"
-            )
-        if self.admission_control == "token-capacity":
-            return
-        # mode is "none"
         explicit_thresholds: list[str] = []
         if self.active_decode_blocks_threshold is not None:
             explicit_thresholds.append("--active-decode-blocks-threshold")
@@ -89,17 +94,38 @@ class RouterConfigBase(ConfigBase):
             explicit_thresholds.append("--active-prefill-tokens-threshold")
         if self.active_prefill_tokens_threshold_frac is not None:
             explicit_thresholds.append("--active-prefill-tokens-threshold-frac")
-        if explicit_thresholds:
-            logger.info(
-                "admission-control: auto-switching mode 'none' -> 'token-capacity' "
-                "because %s was explicitly set. Pass --admission-control token-capacity "
-                "to make this explicit, or unset the threshold(s) to keep mode='none'.",
-                ", ".join(explicit_thresholds),
-            )
-            self.admission_control = "token-capacity"
+
+        if self.admission_control == _ADMISSION_CONTROL_AUTO:
+            if explicit_thresholds:
+                logger.info(
+                    "admission-control: implicit mode resolved to 'token-capacity' "
+                    "because %s was explicitly set. Pass --admission-control "
+                    "token-capacity to make this explicit, or unset the "
+                    "threshold(s) to keep admission control disabled.",
+                    ", ".join(explicit_thresholds),
+                )
+                self.admission_control = "token-capacity"
+                return
+            self.admission_control = "none"
+            # no thresholds set; nothing to clear
             return
-        # "none" with no thresholds explicitly set — clear (no-op, but
-        # keep the assignment for symmetry with future fields).
+
+        if self.admission_control not in ADMISSION_CONTROL_CHOICES:
+            raise ValueError(
+                f"--admission-control must be one of "
+                f"{ADMISSION_CONTROL_CHOICES}, got {self.admission_control!r}"
+            )
+        if self.admission_control == "token-capacity":
+            return
+        # admission_control == "none" (explicit). Contradiction with any
+        # explicit threshold flag — raise rather than silently overriding.
+        if explicit_thresholds:
+            raise ValueError(
+                "--admission-control none cannot be combined with explicit "
+                f"{', '.join(explicit_thresholds)} — drop the threshold flag(s) "
+                "to keep admission disabled, or pass --admission-control "
+                "token-capacity to activate the threshold(s)."
+            )
         self.active_decode_blocks_threshold = None
         self.active_prefill_tokens_threshold = None
         self.active_prefill_tokens_threshold_frac = None
@@ -201,7 +227,7 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--admission-control",
             env_var="DYN_ADMISSION_CONTROL",
-            default="none",
+            default=_ADMISSION_CONTROL_AUTO,
             help=(
                 "Admission control mode. 'token-capacity' enables per-worker busy "
                 "checks using --active-decode-blocks-threshold, "
