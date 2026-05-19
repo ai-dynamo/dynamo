@@ -33,6 +33,7 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -929,6 +930,9 @@ func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
 	// labelKey is required (only supported path in this phase)
 	if kvt.LabelKey == "" {
 		errs = append(errs, fmt.Errorf("%s.labelKey is required", fieldPath))
+	} else if labelKeyErrs := k8svalidation.IsQualifiedName(kvt.LabelKey); len(labelKeyErrs) > 0 {
+		errs = append(errs, fmt.Errorf("%s.labelKey %q is not a valid Kubernetes label key: %s",
+			fieldPath, kvt.LabelKey, strings.Join(labelKeyErrs, "; ")))
 	}
 
 	// domain is required and must be a valid topology domain format

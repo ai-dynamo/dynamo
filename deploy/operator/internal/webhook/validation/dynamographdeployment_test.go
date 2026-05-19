@@ -1594,6 +1594,29 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid experimental kvTransferPolicy with unprefixed labelKey",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
+						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+							LabelKey:    "rack",
+							Domain:      "rack",
+							Enforcement: nvidiacomv1alpha1.KvTransferEnforcementRequired,
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "experimental kvTransferPolicy missing labelKey",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1615,6 +1638,107 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "spec.experimental.kvTransferPolicy.labelKey is required",
+		},
+		{
+			name: "experimental kvTransferPolicy rejects invalid labelKey characters",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
+						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+							LabelKey: "topology.kubernetes.io/bad key",
+							Domain:   "zone",
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.experimental.kvTransferPolicy.labelKey \"topology.kubernetes.io/bad key\" is not a valid Kubernetes label key",
+			errContains: true,
+		},
+		{
+			name: "experimental kvTransferPolicy rejects malformed labelKey prefix",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
+						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+							LabelKey: "BadPrefix.example.com/zone",
+							Domain:   "zone",
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.experimental.kvTransferPolicy.labelKey \"BadPrefix.example.com/zone\" is not a valid Kubernetes label key",
+			errContains: true,
+		},
+		{
+			name: "experimental kvTransferPolicy rejects overlong labelKey name",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
+						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+							LabelKey: "topology.kubernetes.io/" + strings.Repeat("a", 64),
+							Domain:   "zone",
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.experimental.kvTransferPolicy.labelKey",
+			errContains: true,
+		},
+		{
+			name: "experimental kvTransferPolicy rejects overlong labelKey prefix",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					Experimental: &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
+						KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+							LabelKey: strings.Join([]string{
+								strings.Repeat("a", 63),
+								strings.Repeat("b", 63),
+								strings.Repeat("c", 63),
+								strings.Repeat("d", 63),
+							}, ".") + "/zone",
+							Domain: "zone",
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.experimental.kvTransferPolicy.labelKey",
+			errContains: true,
 		},
 		{
 			name: "experimental kvTransferPolicy missing domain",

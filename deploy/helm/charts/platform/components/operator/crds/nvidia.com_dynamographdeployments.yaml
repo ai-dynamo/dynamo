@@ -262,8 +262,13 @@ spec:
                             domain for each worker. The operator copies the node label onto worker
                             pods so the runtime can publish it as worker metadata. The label
                             should correspond to the topology level named in `domain`.
+                          maxLength: 317
                           minLength: 1
+                          pattern: ^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$
                           type: string
+                          x-kubernetes-validations:
+                            - message: labelKey prefix must be 253 characters or less
+                              rule: '!self.contains(''/'') || self.split(''/'')[0].size() <= 253'
                         preferredWeight:
                           description: |-
                             PreferredWeight is required and used only when enforcement is
@@ -20662,8 +20667,13 @@ spec:
                             domain for each worker. The operator copies the node label onto worker
                             pods so the runtime can publish it as worker metadata. The label
                             should correspond to the topology level named in `domain`.
+                          maxLength: 317
                           minLength: 1
+                          pattern: ^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$
                           type: string
+                          x-kubernetes-validations:
+                            - message: labelKey prefix must be 253 characters or less
+                              rule: '!self.contains(''/'') || self.split(''/'')[0].size() <= 253'
                         preferredWeight:
                           description: |-
                             preferredWeight is required and used only when enforcement is

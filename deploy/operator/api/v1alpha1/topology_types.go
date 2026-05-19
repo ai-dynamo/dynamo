@@ -105,6 +105,9 @@ type KvTransferPolicy struct {
 	// pods so the runtime can publish it as worker metadata. The label
 	// should correspond to the topology level named in `domain`.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=317
+	// +kubebuilder:validation:Pattern=`^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$`
+	// +kubebuilder:validation:XValidation:rule="!self.contains('/') || self.split('/')[0].size() <= 253",message="labelKey prefix must be 253 characters or less"
 	LabelKey string `json:"labelKey"`
 
 	// Domain is the logical name for the topology level to enforce
