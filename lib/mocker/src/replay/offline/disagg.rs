@@ -447,7 +447,7 @@ impl DisaggRuntime {
     /// decode flow).
     ///
     /// Override semantics differ from the live system because the offline
-    /// decode router bakes in `overlap_score_weight=0.0` as its baseline
+    /// decode router bakes in `overlap_score_credit=0.0` as its baseline
     /// (see `derive_decode_router_config`). The LHS peek therefore needs an
     /// explicit `Some(1.0)` override to recover the agg-equation behavior
     /// that the live probe gets implicitly from the decode router's `1.0`
@@ -468,7 +468,7 @@ impl DisaggRuntime {
         // LHS peek: agg-equation against decode pool to find the hottest-cache
         // decode worker plus its projected load.
         let lhs_override = RouterConfigOverride {
-            overlap_score_weight: Some(1.0),
+            overlap_score_credit: Some(1.0),
             assume_kv_reuse: Some(true),
             track_prefill_tokens: Some(true),
             ..Default::default()
@@ -538,7 +538,7 @@ impl DisaggRuntime {
     /// Peek the decode router with the load-only formulation (the same shape
     /// the post-prefill decode hop uses) and return the load on the least-
     /// loaded decode worker. Offline decode baseline is already
-    /// `overlap_score_weight=0.0`, so no override is needed.
+    /// `overlap_score_credit=0.0`, so no override is needed.
     fn peek_decode_pool_min_load_blocks(
         &mut self,
         request: &DirectRequest,

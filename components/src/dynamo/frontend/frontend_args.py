@@ -384,9 +384,9 @@ class FrontendArgGroup(ArgGroup):
             default="tcp",
             help=(
                 "Determines how requests are distributed from routers to workers. "
-                "'tcp' is fastest [nats|http|tcp]"
+                "'tcp' is fastest [nats|tcp]"
             ),
-            choices=["nats", "http", "tcp"],
+            choices=["nats", "tcp"],
         )
         add_argument(
             g,

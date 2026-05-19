@@ -169,6 +169,16 @@ pub trait WorkerConfigLike {
     fn taints(&self) -> &HashSet<String> {
         &EMPTY_WORKER_TAINTS
     }
+    /// Stable identifier for the worker, preserved across process restarts.
+    ///
+    /// In Kubernetes StatefulSet deployments this is the pod hostname (`worker-0`, `worker-1`,
+    /// …). Used by rendezvous-style routing (HRW hashing) so cache assignments survive worker
+    /// restarts and minimise cache movement when the set of live workers churns. Returns
+    /// `None` when the worker did not publish a stable id, in which case callers should fall
+    /// back to the (ephemeral) `worker_id`.
+    fn stable_routing_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -436,7 +446,7 @@ pub struct WorkerSelectionResult {
     pub chosen_worker_decode_blocks: Option<usize>,
 }
 
-/// Active load metrics for a worker, used for busy detection.
+/// Active load metrics for a worker, used for overload detection.
 ///
 /// Published by workers (with `kv_used_blocks`) and by the scheduler (with
 /// `active_decode_blocks` and `active_prefill_tokens`).
@@ -452,7 +462,7 @@ pub struct ActiveLoad {
     /// Total KV blocks currently in use on the worker.
     ///
     /// This is published by workers only and is the authoritative signal for
-    /// backend KV occupancy used by busy detection.
+    /// backend KV occupancy used by overload detection.
     #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }

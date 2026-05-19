@@ -79,6 +79,11 @@ impl PrefillRouter {
                 .or_else(|| decode_router.unique_dp_rank_for_worker(worker_id))?;
             Some(WorkerWithDpRank::new(worker_id, dp_rank))
         });
+        let routing_constraints = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.routing_constraints.clone())
+            .unwrap_or_default();
 
         let details = decode_router
             .find_best_match_details(
@@ -92,6 +97,7 @@ impl PrefillRouter {
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids.clone(),
+                routing_constraints.clone(),
             )
             .await?;
         let worker = details.worker;
@@ -123,6 +129,7 @@ impl PrefillRouter {
                     priority_jump,
                     expected_output_tokens,
                     allowed_worker_ids.clone(),
+                    routing_constraints.clone(),
                 )
                 .await;
             let decode_pool_min = self
@@ -135,6 +142,7 @@ impl PrefillRouter {
                     priority_jump,
                     expected_output_tokens,
                     allowed_worker_ids.clone(),
+                    routing_constraints.clone(),
                 )
                 .await;
             (overlap, load, decode_pool_min)
@@ -194,6 +202,7 @@ impl PrefillRouter {
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> (Option<u32>, Option<usize>) {
         let Some(inner) = self.prefill_router.get() else {
             return (None, None);
@@ -215,6 +224,7 @@ impl PrefillRouter {
                 expected_output_tokens,
                 None,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await
         else {
@@ -225,7 +235,7 @@ impl PrefillRouter {
         (overlap, load)
     }
 
-    /// Peek-query the decode router with `overlap_score_weight = 0` to find
+    /// Peek-query the decode router with `overlap_score_credit = 0` to find
     /// the least-loaded decode worker — the worker the standard disagg path
     /// would re-pick after remote prefill — and return its projected
     /// `decode_block`.
@@ -240,9 +250,10 @@ impl PrefillRouter {
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> Option<usize> {
         let load_only_override = RouterConfigOverride {
-            overlap_score_weight: Some(0.0),
+            overlap_score_credit: Some(0.0),
             ..existing_override.cloned().unwrap_or_default()
         };
         let details = decode_router
@@ -257,6 +268,7 @@ impl PrefillRouter {
                 expected_output_tokens,
                 None,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await
             .ok()?;

@@ -541,7 +541,7 @@ impl OfflineReplayRouter {
     /// enqueueing or mutating slot state.
     ///
     /// `router_config_override` lets callers run the same selector with
-    /// alternative cost-equation weights (e.g. `overlap_score_weight=0.0` to
+    /// alternative cost-equation weights (e.g. `overlap_score_credit=0.0` to
     /// find the least-loaded worker for the cost-policy RHS term).
     ///
     /// Used by the conditional-prefill probe in offline disagg replay.
@@ -560,9 +560,11 @@ impl OfflineReplayRouter {
             router_config_override,
             None,
         );
+        let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
             &scheduling_request,
+            eligibility,
             self.block_size,
         )?;
         let worker_idx = usize::try_from(selection.worker.worker_id)
@@ -664,9 +666,11 @@ impl OfflineReplayRouter {
     ) -> Result<AdmitOutcome> {
         let scheduling_request =
             self.build_scheduling_request_with_load(&request, decay_now, None, pinned_worker_idx);
+        let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
             &scheduling_request,
+            eligibility,
             self.block_size,
         )?;
         let worker_idx = usize::try_from(selection.worker.worker_id)
