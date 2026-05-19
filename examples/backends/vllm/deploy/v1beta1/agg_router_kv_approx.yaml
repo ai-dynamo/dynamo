@@ -26,7 +26,7 @@ spec:
           env:
           - name: DYN_ROUTER_MODE
             value: kv
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-post.1
           name: main
     replicas: 1
     type: frontend
@@ -46,7 +46,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-post.1
           name: main
           resources:
             limits:

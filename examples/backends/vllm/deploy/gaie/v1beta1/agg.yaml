@@ -45,7 +45,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:1.2.0-post.1
           name: main
     replicas: 1
     type: epp
@@ -71,7 +71,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-post.1
           name: main
           resources:
             limits:
@@ -87,7 +87,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-post.1
           name: sidecar-frontend
     replicas: 1
     sharedMemorySize: 2Gi

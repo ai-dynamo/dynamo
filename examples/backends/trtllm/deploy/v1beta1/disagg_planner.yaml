@@ -70,7 +70,7 @@ spec:
           - --no-kv-events
           command:
           - python3
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0-post.1
           name: main
           workingDir: /workspace/examples/backends/trtllm
     replicas: 1
@@ -97,7 +97,7 @@ spec:
           #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
           #   Dynamo <  1.1.0: use the backend runtime image
           #     <registry>/tensorrtllm-runtime:<version>.
-          image: my-registry/dynamo-planner:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0-post.1
           name: main
           ports:
           - containerPort: 9085
@@ -132,7 +132,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0-post.1
           livenessProbe:
             failureThreshold: 1
             httpGet:
@@ -175,7 +175,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0-post.1
           name: main
           resources:
             limits:
