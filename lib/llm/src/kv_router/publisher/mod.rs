@@ -157,6 +157,26 @@ impl KvEventPublisher {
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
+        Self::new_with_local_indexer_and_worker_id(
+            component,
+            None,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    pub fn new_with_local_indexer_and_worker_id(
+        component: Component,
+        worker_id: Option<WorkerId>,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
             .filter(|&ms| {
@@ -172,7 +192,7 @@ impl KvEventPublisher {
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
         let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
-        let worker_id = component.drt().connection_id();
+        let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
         let _ = KvPublisherMetrics::from_component(&component);
 

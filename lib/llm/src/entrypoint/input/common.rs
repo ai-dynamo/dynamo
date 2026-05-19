@@ -319,6 +319,7 @@ where
 }
 
 impl PreprocessedRouting {
+    /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,
         card: &ModelDeploymentCard,
@@ -342,7 +343,7 @@ impl PreprocessedRouting {
         let preprocessor_op = preprocessor.into_operator();
         let token_backend = Backend::from_tokenizer(tokenizer).into_operator();
         let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
-            .into_operator();
+            .into_operator_for::<BackendOutput>();
         let prefill_op = self.prefill_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
@@ -361,8 +362,14 @@ impl PreprocessedRouting {
         Ok(engine)
     }
 
-    pub fn build_prefill_pipeline(
+    /// Bring your own pre/post processor. Used when frontend has `--dyn-chat-processor
+    /// vllm|sglang`.
+    pub fn build_preprocessed_pipeline(
         &self,
+        card: &ModelDeploymentCard,
+        migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
+        metrics: Arc<Metrics>,
     ) -> anyhow::Result<
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     > {
@@ -370,13 +377,17 @@ impl PreprocessedRouting {
             SingleIn<PreprocessedRequest>,
             ManyOut<Annotated<LLMEngineOutput>>,
         >::new();
+        let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
+            .into_operator_for::<LLMEngineOutput>();
         let prefill_op = self.prefill_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
         let engine = frontend
+            .link(migration.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
+            .link(migration.backward_edge())?
             .link(frontend)?;
 
         Ok(engine)

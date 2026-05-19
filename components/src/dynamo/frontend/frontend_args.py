@@ -149,6 +149,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
+        self.apply_no_admission_control()
 
 
 @register_encoder(FrontendConfig)
@@ -354,9 +355,9 @@ class FrontendArgGroup(ArgGroup):
             default="tcp",
             help=(
                 "Determines how requests are distributed from routers to workers. "
-                "'tcp' is fastest [nats|http|tcp]"
+                "'tcp' is fastest [nats|tcp]"
             ),
-            choices=["nats", "http", "tcp"],
+            choices=["nats", "tcp"],
         )
         add_argument(
             g,

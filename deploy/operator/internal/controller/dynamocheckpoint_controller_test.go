@@ -369,7 +369,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 
 	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
 	weightsServer := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, gms.ServerContainerName)
-	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, checkpoint.GMSSaverContainer)
+	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, checkpoint.GMSSaverContainer)
 
 	volNames := map[string]bool{}
 	for _, v := range job.Spec.Template.Spec.Volumes {
@@ -387,8 +387,9 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, weightsServer.Command)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
-	require.NotNil(t, weightsServer.StartupProbe)
+	assert.Nil(t, weightsServer.StartupProbe, "no probe — clients drive readiness via connect-retry")
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"}, saver.Command)
+	assert.Nil(t, saver.RestartPolicy, "saver runs as a regular Job container so Job completion waits for it")
 
 	saverMounts := map[string]string{}
 	for _, m := range saver.VolumeMounts {

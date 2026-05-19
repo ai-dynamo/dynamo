@@ -4,6 +4,7 @@
 import dataclasses
 import logging
 import os
+import platform
 import random
 from dataclasses import dataclass, field
 from typing import Optional
@@ -25,23 +26,42 @@ from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
-    cached_tokens_chat_payload,
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
     completion_payload_default,
     completion_payload_with_logprobs,
+    kv_events_metrics_payload,
     metric_payload_default,
+    router_cached_tokens_chat_payload,
+    router_selection_chat_payload_default,
 )
 from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
 
 
-def _is_cuda13() -> bool:
+def _is_cuda12() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
-    # handles "13", "13.0", "13.0.1", etc.
-    return v.startswith("13")
+    # handles "12", "12.9", "12.9.1", etc.
+    return v.startswith("12")
+
+
+def _is_aarch64() -> bool:
+    arch = os.environ.get("TARGETARCH") or os.environ.get("ARCH") or platform.machine()
+    return arch in ("aarch64", "arm64")
+
+
+def _xfail_lmcache_upstream_container():
+    return pytest.mark.xfail(
+        _is_cuda12() or _is_aarch64(),
+        reason=(
+            "LMCache is provided by the upstream vLLM image. The CUDA 12 image "
+            "ships LMCache c_ops linked against libcudart.so.13, and LMCache "
+            "does not publish aarch64 wheels yet."
+        ),
+        strict=False,
+    )
 
 
 @dataclass
@@ -74,7 +94,12 @@ vllm_configs = {
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
+        # Forwarded through agg.sh -> dynamo.vllm. Required for the
+        # max_thinking_tokens payload below: vLLM only enables the thinking-
+        # budget logits processor when reasoning_config is populated.
+        script_args=["--reasoning-parser", "qwen3"],
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -108,6 +133,17 @@ vllm_configs = {
                     "include_stop_str_in_output": True,
                 },
             ),
+            # Smoke: nvext.max_thinking_tokens reaches vLLM's
+            # SamplingParams.thinking_token_budget without erroring. Requires
+            # the worker to be started with `--reasoning-parser qwen3`
+            # (see script_args above).
+            chat_payload(
+                "Solve: 1+1.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=64,
+                extra_body={"nvext": {"max_thinking_tokens": 16}},
+            ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
@@ -117,6 +153,7 @@ vllm_configs = {
         script_name="agg.sh",
         script_args=["--unified"],
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
@@ -135,6 +172,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -166,7 +204,9 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
+            _xfail_lmcache_upstream_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -188,7 +228,9 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_lmcache_multiproc.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.lmcache,
+            _xfail_lmcache_upstream_container(),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -213,6 +255,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_request_planes.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -230,50 +273,22 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "agg-request-plane-http": VLLMConfig(
-        name="agg-request-plane-http",
-        directory=vllm_dir,
-        script_name="agg_request_planes.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                1_119_388_000
-            ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                360
-            ),  # ~8.5x observed 42.3s; bumped for GPU-parallel headroom
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        script_args=["--http"],
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-        ],
-    ),
     "agg-router": VLLMConfig(
         name="agg-router",
         directory=vllm_dir,
         script_name="agg_router.sh",
         marks=[
             pytest.mark.gpu_2,
+            pytest.mark.router,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2263"),
         ],  # TODO: profile to get max_vram and timeout
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            chat_payload_default(
-                expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
-                    r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                ]
-            )
+            router_selection_chat_payload_default(),
+            kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
-        env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
     ),
     "agg-router-approx": VLLMConfig(
         name="agg-router-approx",
@@ -281,40 +296,26 @@ vllm_configs = {
         script_name="agg_router_approx.sh",
         marks=[
             pytest.mark.gpu_2,
+            pytest.mark.router,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="DYN-2264"),
         ],  # TODO: profile to get max_vram and timeout
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
-            # Repeated requests should show cache-aware routing in logs
-            chat_payload_default(
-                repeat_count=3,
-                expected_log=[
-                    # Verify scheduler is selecting workers with cache awareness
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                    # After first request, should see cached blocks being tracked
-                    r"with \d+ cached blocks",
-                ],
-            ),
+            # Repeated requests should show cache-aware routing in nvext.
+            router_selection_chat_payload_default(repeat_count=3),
             # Also test with cached tokens payload to verify usage field
-            cached_tokens_chat_payload(
-                repeat_count=3,
-                expected_log=[
-                    # Verify routing decision shows cache hits
-                    r"with \d+ cached blocks",
-                ],
-            ),
+            router_cached_tokens_chat_payload(repeat_count=3),
         ],
-        env={
-            "DYN_LOG": "dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
         directory=vllm_dir,
         script_name="disagg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
         ],  # TODO: profile to get max_vram and timeout
@@ -329,6 +330,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(7.3),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -397,6 +399,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="dsr1_dep.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.vllm,
             pytest.mark.h100,
@@ -510,6 +513,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -536,6 +540,7 @@ vllm_configs = {
         directory=os.path.join(WORKSPACE_DIR, "tests/serve"),
         script_name="multi_node_tp_headless.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
             # TODO: profile to get max_vram
@@ -552,6 +557,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -608,17 +614,22 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_serve_deployment(
     vllm_config_test,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    num_system_ports,
     predownload_models,
     image_server,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
@@ -664,6 +675,7 @@ def lora_chat_payload(
 
 
 @pytest.mark.vllm
+@pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
@@ -724,6 +736,7 @@ def test_lora_aggregated(
 
 
 @pytest.mark.vllm
+@pytest.mark.router
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
