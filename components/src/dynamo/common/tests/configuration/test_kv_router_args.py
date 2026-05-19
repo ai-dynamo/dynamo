@@ -590,6 +590,37 @@ def test_admission_control_default_none_with_no_thresholds_stays_none(
     assert config.router_queue_threshold == 32.0
 
 
+def test_admission_control_token_capacity_with_explicit_none_threshold_keeps_disabled(
+    monkeypatch,
+) -> None:
+    """Explicit ``--<threshold> None`` keeps that specific check disabled
+    even in ``--admission-control token-capacity`` mode, matching the
+    "Pass 'None' on the CLI to disable this check" help text. The other
+    thresholds still receive production defaults."""
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--admission-control",
+            "token-capacity",
+            "--active-decode-blocks-threshold",
+            "None",
+        ]
+    )
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.admission_control == "token-capacity"
+    # Explicit `None` is preserved — the documented disable-this-check semantic.
+    assert config.active_decode_blocks_threshold is None
+    # Un-passed thresholds still receive their production defaults.
+    assert config.active_prefill_tokens_threshold == 10_000_000
+    assert config.active_prefill_tokens_threshold_frac == 64.0
+
+
 def test_admission_control_env_var(monkeypatch) -> None:
     _clear_admission_control_env(monkeypatch)
     monkeypatch.setenv("DYN_ADMISSION_CONTROL", "token-capacity")

@@ -12,7 +12,7 @@ returns a dict that can be unpacked into
 """
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -49,14 +49,23 @@ ADMISSION_CONTROL_CHOICES: tuple[str, ...] = ("token-capacity", "none")
 _ADMISSION_CONTROL_AUTO: str = "_auto_"
 
 # Production defaults for the busy thresholds, applied only when
-# admission-control resolves to "token-capacity". The CLI/env defaults are
-# `None` (sentinel for "user did not set this") so apply_admission_control
-# can distinguish "user explicitly passed a threshold" from "argparse
-# filled in a default" — and so explicit `--admission-control none` does
-# not raise the contradiction error against defaults the user never set.
+# admission-control resolves to "token-capacity" AND the user did not pass
+# the corresponding flag at all.
 _DEFAULT_ACTIVE_DECODE_BLOCKS_THRESHOLD: float = 1.0
 _DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD: int = 10_000_000
 _DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: float = 64.0
+
+# Sentinel default for the three threshold flags. Distinguishes three
+# states that all collapse to the same Python value otherwise:
+#   - `_THRESHOLD_UNSET`: user did not pass the flag and the env var is
+#     unset — fill the production default in token-capacity mode.
+#   - `None`: user explicitly passed `--<flag> None` (or set the env var
+#     to "None") — keep the check disabled even in token-capacity mode.
+#   - numeric: user-supplied value — keep as-is.
+# Replaced with `None` in `apply_admission_control` before the value
+# leaves the config object, so downstream consumers still see
+# `Optional[float|int]`.
+_THRESHOLD_UNSET: Any = object()
 
 
 class RouterConfigBase(ConfigBase):
@@ -98,11 +107,11 @@ class RouterConfigBase(ConfigBase):
         of ADMISSION_CONTROL_CHOICES.
         """
         explicit_thresholds: list[str] = []
-        if self.active_decode_blocks_threshold is not None:
+        if self.active_decode_blocks_threshold is not _THRESHOLD_UNSET:
             explicit_thresholds.append("--active-decode-blocks-threshold")
-        if self.active_prefill_tokens_threshold is not None:
+        if self.active_prefill_tokens_threshold is not _THRESHOLD_UNSET:
             explicit_thresholds.append("--active-prefill-tokens-threshold")
-        if self.active_prefill_tokens_threshold_frac is not None:
+        if self.active_prefill_tokens_threshold_frac is not _THRESHOLD_UNSET:
             explicit_thresholds.append("--active-prefill-tokens-threshold-frac")
 
         if self.admission_control == _ADMISSION_CONTROL_AUTO:
@@ -125,18 +134,19 @@ class RouterConfigBase(ConfigBase):
             )
 
         if self.admission_control == "token-capacity":
-            # Fill in production defaults for any threshold the user did not
-            # explicitly set. Until now the threshold fields default to None
-            # so the explicit-user check above stays accurate.
-            if self.active_decode_blocks_threshold is None:
+            # Fill production defaults only for thresholds the user did not
+            # pass at all. Explicit `None` from the user is preserved so the
+            # documented "Pass 'None' on the CLI to disable this check"
+            # semantic holds even in token-capacity mode.
+            if self.active_decode_blocks_threshold is _THRESHOLD_UNSET:
                 self.active_decode_blocks_threshold = (
                     _DEFAULT_ACTIVE_DECODE_BLOCKS_THRESHOLD
                 )
-            if self.active_prefill_tokens_threshold is None:
+            if self.active_prefill_tokens_threshold is _THRESHOLD_UNSET:
                 self.active_prefill_tokens_threshold = (
                     _DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD
                 )
-            if self.active_prefill_tokens_threshold_frac is None:
+            if self.active_prefill_tokens_threshold_frac is _THRESHOLD_UNSET:
                 self.active_prefill_tokens_threshold_frac = (
                     _DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC
                 )
@@ -152,7 +162,10 @@ class RouterConfigBase(ConfigBase):
                 "to keep admission disabled, or pass --admission-control "
                 "token-capacity to activate the threshold(s)."
             )
-        # All thresholds remain None (their argparse default) — nothing to clear.
+        # Sentinel → None so downstream sees the documented Optional[…] type.
+        self.active_decode_blocks_threshold = None
+        self.active_prefill_tokens_threshold = None
+        self.active_prefill_tokens_threshold_frac = None
 
 
 class RouterArgGroup(ArgGroup):
@@ -215,7 +228,7 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-decode-blocks-threshold",
             env_var="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-            default=None,
+            default=_THRESHOLD_UNSET,
             help=(
                 "Threshold fraction (0.0-1.0) of KV cache block utilization above which a worker "
                 "is considered busy. Setting this implies --admission-control token-capacity. "
@@ -228,7 +241,7 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-prefill-tokens-threshold",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            default=None,
+            default=_THRESHOLD_UNSET,
             help=(
                 "Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
@@ -243,7 +256,7 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-prefill-tokens-threshold-frac",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-            default=None,
+            default=_THRESHOLD_UNSET,
             help=(
                 "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
                 "active_prefill_tokens > frac * max_num_batched_tokens. Setting this implies "
