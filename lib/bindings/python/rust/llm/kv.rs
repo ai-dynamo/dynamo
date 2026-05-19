@@ -19,7 +19,6 @@ use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
-use rs::error::{DynamoError, ErrorType as DynamoErrorType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -35,27 +34,6 @@ use super::entrypoint::AicPerfConfig;
 
 fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
     depythonize(obj).map_err(to_pyerr)
-}
-
-/// Create a BackpressureError from Python side.
-/// This is defined in Python (not Rust) so it can be shared across packages.
-fn create_backpressure_error(
-    py: Python<'_>,
-    message: String,
-    reason: Option<String>,
-    queue_depth: Option<usize>,
-    max_queue_depth: Option<usize>,
-) -> PyResult<PyErr> {
-    let exc_module = py.import("dynamo.llm.exceptions")?;
-    let exc_class = exc_module.getattr("BackpressureError")?;
-    let args = (
-        message,
-        reason,
-        queue_depth,
-        max_queue_depth,
-    );
-    let instance = exc_class.call1(args)?;
-    Ok(PyErr::from_value(instance))
 }
 
 #[cfg(feature = "kv-indexer")]
@@ -1168,18 +1146,25 @@ impl KvRouter {
                     queue_depth,
                     max_queue_depth,
                 } => {
-                    // Raise BackpressureError from dynamo.llm.exceptions
-                    let msg = format!(
-                        "router backpressure: {:?} (queue_depth={}, max_queue_depth={:?})",
-                        reason, queue_depth, max_queue_depth
+                    // Note: Backpressure is currently treated as Unavailable and falls through
+                    // to the error path. Distinguishing backpressure from regular errors in Python
+                    // would require returning a structured result type instead of raising an exception,
+                    // which is a breaking API change. For now, callers should treat any error from
+                    // best_worker as potentially transient and implement retry logic accordingly.
+                    // The backpressure info (reason, queue_depth, max_queue_depth) is logged but
+                    // not exposed to Python callers.
+                    tracing::warn!(
+                        reason = ?reason,
+                        queue_depth = queue_depth,
+                        max_queue_depth = ?max_queue_depth,
+                        "Router backpressure - treating as unavailable"
                     );
-                    return Err(create_backpressure_error(
-                        py,
-                        msg,
-                        Some(format!("{:?}", reason)),
-                        Some(queue_depth),
-                        max_queue_depth,
-                    )?);
+                    return Err(to_pyerr(anyhow::anyhow!(
+                        "router backpressure: {:?} (queue_depth={}, max_queue_depth={:?})",
+                        reason,
+                        queue_depth,
+                        max_queue_depth
+                    )));
                 }
             };
 
