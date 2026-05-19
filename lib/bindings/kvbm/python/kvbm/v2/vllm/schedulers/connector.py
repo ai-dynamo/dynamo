@@ -219,16 +219,71 @@ class DynamoConnector(KVConnectorBase_V1):
         comparisons, or to work around a backend whose physical layout
         doesn't match `FullyContiguousLayout`'s schema). Default is `true`.
 
-        Even with this `True`, vLLM still falls back to the per-layer path
-        when the backend doesn't support `get_kv_cache_stride_order(
-        include_num_layers_dimension=True)` or for MLA models.
+        Override precedence (highest first):
+          1. Env var `KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS={true,false}`.
+             Note: vLLM strips parent env when spawning EngineCore, so this
+             channel does NOT work for the connector running inside disagg
+             EngineCore subprocesses. Use the JSON config channel instead.
+          2. JSON config
+             `kv_transfer_config.kv_connector_extra_config.default.prefer_fully_contiguous_blocks`
+             (bool). This is the channel that survives the EngineCore spawn
+             and is the canonical way for tests / launch scripts to pin
+             FC vs LW per run.
+          3. Default `True` (prefer fully-contiguous).
+
+        Even with this `True`, vLLM still falls back to the per-layer
+        `register_kv_caches` path when the backend doesn't support
+        `get_kv_cache_stride_order(include_num_layers_dimension=True)` or
+        for MLA models.
         """
-        return os.getenv("KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS", "true").lower() in (
-            "true",
-            "1",
-            "yes",
-            "y",
-        )
+        override = os.getenv("KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS", "").lower()
+        if override in ("false", "0", "no", "n", "off"):
+            return False
+        if override in ("true", "1", "yes", "y", "on"):
+            return True
+
+        # JSON-config override. Survives the EngineCore subprocess spawn that
+        # strips env vars; the canonical channel for test/launch overrides.
+        try:
+            extra = (
+                getattr(self._vllm_config, "kv_transfer_config", None)
+                and getattr(
+                    self._vllm_config.kv_transfer_config,
+                    "kv_connector_extra_config",
+                    None,
+                )
+                or {}
+            )
+            json_pref = (extra.get("default") or {}).get(
+                "prefer_fully_contiguous_blocks"
+            )
+        except Exception:
+            json_pref = None
+        if isinstance(json_pref, bool):
+            print(
+                f"[KVBM] prefer_cross_layer_blocks={json_pref}: forced via "
+                f"kv_connector_extra_config.default.prefer_fully_contiguous_blocks"
+            )
+            return json_pref
+        if isinstance(json_pref, str):
+            jp = json_pref.lower()
+            if jp in ("true", "1", "yes", "y", "on"):
+                print(
+                    "[KVBM] prefer_cross_layer_blocks=True: forced via "
+                    "kv_connector_extra_config.default.prefer_fully_contiguous_blocks"
+                )
+                return True
+            if jp in ("false", "0", "no", "n", "off"):
+                print(
+                    "[KVBM] prefer_cross_layer_blocks=False: forced via "
+                    "kv_connector_extra_config.default.prefer_fully_contiguous_blocks"
+                )
+                return False
+
+        # Default: prefer fully-contiguous (current-branch default). vLLM
+        # guards FC-ineligible backends by falling back to the per-layer
+        # `register_kv_caches` path.
+        return True
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV caches - no-op for scheduler connector."""

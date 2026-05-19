@@ -71,11 +71,16 @@ class KvbmModelConfig:
 _VALID_ONBOARD_MODES = ("intra", "inter")
 
 
+_VALID_BLOCK_LAYOUTS = ("operational", "universal")
+
+
 def build_kv_transfer_config(
     kvbm_version: KvbmVersion,
     model_config: KvbmModelConfig,
     onboard_mode: str = "intra",
     cpu_blocks: Optional[int] = None,
+    block_layout: Optional[str] = None,
+    prefer_fc: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Build the vLLM ``--kv-transfer-config`` payload for the chosen KVBM version.
 
@@ -97,6 +102,21 @@ def build_kv_transfer_config(
     leader will then fail to start (matches v1's sanity_check) unless a disk
     tier is configured through some other channel. Callers are expected to
     pass ``spec.cpu_blocks`` from ``KvbmServerSpec``.
+
+    `block_layout` (v2 only, optional) pins the G2 block layout —
+    ``"operational"`` keeps G2 inheriting G1's NHD/HND; ``"universal"`` pins
+    G2 to ``KvBlockLayout::Universal`` regardless of G1 (G1↔G2 transfers
+    dispatch the fused permute kernel). Injected under
+    ``kv_connector_extra_config.default.block_layout``. ``None`` leaves
+    KVBM's default (``Operational``).
+
+    `prefer_fc` (v2 only, optional) pins the G1 registration path —
+    ``True`` forces FullyContiguous cross-layer registration,
+    ``False`` forces per-layer LayerSeparate registration, ``None`` lets
+    ``connector.prefer_cross_layer_blocks`` auto-detect from the backend.
+    Injected under ``kv_connector_extra_config.default.prefer_fully_contiguous_blocks``.
+    This is the only override channel that survives vLLM's EngineCore
+    subprocess spawn (env vars are stripped).
     """
     if kvbm_version == "v1":
         return {
@@ -110,23 +130,36 @@ def build_kv_transfer_config(
                 f"unknown onboard_mode: {onboard_mode!r} "
                 f"(expected one of {_VALID_ONBOARD_MODES})"
             )
+        if block_layout is not None and block_layout not in _VALID_BLOCK_LAYOUTS:
+            raise ValueError(
+                f"unknown block_layout: {block_layout!r} "
+                f"(expected one of {_VALID_BLOCK_LAYOUTS})"
+            )
         leader: Dict[str, Any] = {
             "tokio": {"worker_threads": 2},
             "onboard": {"mode": onboard_mode},
         }
         if cpu_blocks is not None:
             leader["cache"] = {"host": {"num_blocks": int(cpu_blocks)}}
+        default: Dict[str, Any] = {}
+        if block_layout is not None:
+            default["block_layout"] = block_layout
+        if prefer_fc is not None:
+            default["prefer_fully_contiguous_blocks"] = bool(prefer_fc)
+        extra: Dict[str, Any] = {
+            "leader": leader,
+            "worker": {
+                "nixl": {"backends": {"UCX": {}, "POSIX": {}}},
+                "tokio": {"worker_threads": 2},
+            },
+        }
+        if default:
+            extra["default"] = default
         return {
             "kv_connector": "DynamoConnector",
             "kv_role": "kv_both",
             "kv_connector_module_path": "kvbm.v2.vllm.connector",
-            "kv_connector_extra_config": {
-                "leader": leader,
-                "worker": {
-                    "nixl": {"backends": {"UCX": {}, "POSIX": {}}},
-                    "tokio": {"worker_threads": 2},
-                },
-            },
+            "kv_connector_extra_config": extra,
         }
     raise ValueError(f"unknown kvbm_version: {kvbm_version!r} (expected 'v1' or 'v2')")
 
@@ -147,18 +180,32 @@ class KvbmServerSpec:
     port: Optional[int] = None
     server_type: str = ServerType.vllm
     # v2 only: leader onboard mode. v1 ignores this field.
-    # Phase 5 TODO: decide whether to enumerate intra+inter per model in
-    # the spec list, or gate one behind a KVBM_ONBOARD_MODE env var like
-    # KVBM_ENABLE_MLA from phase 3.
     onboard_mode: str = "intra"
+    # v2 only: G2 block layout — "operational" inherits G1's NHD/HND, "universal"
+    # pins G2 to KvBlockLayout::Universal. None = leave KVBM's default.
+    block_layout: Optional[str] = None
+    # v2 only: force the G1 registration path. True = FullyContiguous (single
+    # cross-layer allocation), False = LayerSeparate (one tensor per layer),
+    # None = let connector.prefer_cross_layer_blocks auto-detect from the
+    # backend. Required for tests that pin the FC vs LW dimension explicitly.
+    prefer_fc: Optional[bool] = None
 
     @property
     def id(self) -> str:
-        """Pytest parametrize id."""
+        """Pytest parametrize id.
+
+        Encodes only the dimensions that vary across the parametrize axis,
+        in a stable order so test ids are diff-friendly.
+        """
         base = f"{self.kvbm_version}-{self.model_config.short_name}"
+        parts = []
         if self.kvbm_version == "v2":
-            return f"{base}-{self.onboard_mode}"
-        return base
+            parts.append(self.onboard_mode)
+        if self.block_layout is not None:
+            parts.append(f"g2{self.block_layout[:3]}")  # g2op | g2uni
+        if self.prefer_fc is not None:
+            parts.append("g1fc" if self.prefer_fc else "g1lw")
+        return "-".join([base, *parts]) if parts else base
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +301,8 @@ class KvbmServerManager:
             self.model_config,
             onboard_mode=self.spec.onboard_mode,
             cpu_blocks=self.spec.cpu_blocks,
+            block_layout=self.spec.block_layout,
+            prefer_fc=self.spec.prefer_fc,
         )
 
         self.server_cmd = [
