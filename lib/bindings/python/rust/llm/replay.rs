@@ -602,6 +602,18 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config);
     let replay_mode = replay_mode.to_owned();
+    if let Some(ms) = max_sim_time_ms {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(PyValueError::new_err(
+                "max_sim_time_ms must be a finite, non-negative value",
+            ));
+        }
+        if replay_mode != "offline" {
+            return Err(PyValueError::new_err(
+                "max_sim_time_ms only supports replay_mode='offline'",
+            ));
+        }
+    }
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic

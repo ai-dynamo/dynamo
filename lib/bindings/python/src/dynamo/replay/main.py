@@ -571,10 +571,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     if args.max_sim_time_minutes is not None:
-        if args.max_sim_time_minutes < 0:
-            parser.error("--max-sim-time-minutes must be non-negative")
-        if args.replay_mode != "offline":
-            parser.error("--max-sim-time-minutes only supports --replay-mode=offline")
         if args.planner_config is not None:
             parser.error(
                 "--max-sim-time-minutes is not supported with --planner-config"

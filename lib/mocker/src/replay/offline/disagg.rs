@@ -214,6 +214,17 @@ impl DisaggRuntime {
     /// Cap the simulated wall-clock duration. After construction, call this to
     /// have `run()` stop gracefully once the simulated clock would exceed
     /// `ms`. Pass `None` to run to natural completion (the default).
+    ///
+    /// max_sim_time_ms is a **soft cap** on the scheduling loop, not a hard truncation
+    /// of recorded work. When the next scheduled simulated timestamp would
+    /// exceed the cap, the loop exits, but worker passes already in flight
+    /// complete normally — even if their token timestamps land past `ms`.
+    /// Requests that hadn't received their first token before the cap fired
+    /// stay in the report as incomplete (`first_token_ms = None`,
+    /// `e2e_latency_ms = None`). `report.duration_ms` may exceed `ms` by up
+    /// to one in-flight pass's duration. Enforcing a precise cap would
+    /// require plumbing a deadline into the worker / engine core; not worth
+    /// it for the calibration use case this exists to serve.
     pub(in crate::replay) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
         self.max_sim_time_ms = ms;
         self
