@@ -19,10 +19,13 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_a
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_a
+      sglang: *d_6_a
   PARSER.batch.6.b:
     description: Invoke with extra newline
     ref: dynamo
@@ -35,7 +38,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_b
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_b
+      sglang: *d_6_b
+  PARSER.batch.6.c:
+    description: Empty-body variant 6.c — not yet authored for this family
+    reason: |-
+      Empty-body variant 6.c not yet authored for deepseek_v3_2; see 6.a / 6.b for this family's empty / whitespace scenarios.

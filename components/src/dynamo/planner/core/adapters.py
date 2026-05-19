@@ -28,7 +28,7 @@ class PrefillPlanner(NativePlannerBase):
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.namespace,
+                namespace=self.runtime_namespace,
                 worker_info=self.prefill_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.PREFILL,
@@ -67,7 +67,7 @@ class DecodePlanner(NativePlannerBase):
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.namespace,
+                namespace=self.runtime_namespace,
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
@@ -106,7 +106,7 @@ class AggPlanner(NativePlannerBase):
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
-                namespace=self.namespace,
+                namespace=self.runtime_namespace,
                 worker_info=self.decode_worker_info,
                 profile_results_dir=self.config.profile_results_dir,
                 component_type=SubComponentType.DECODE,
@@ -154,7 +154,7 @@ class DisaggPlanner(NativePlannerBase):
             try:
                 fpms = await fetch_pre_deployment_metrics(
                     runtime=self.runtime,
-                    namespace=self.namespace,
+                    namespace=self.runtime_namespace,
                     worker_info=worker_info,
                     profile_results_dir=self.config.profile_results_dir,
                     component_type=component,

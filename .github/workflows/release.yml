@@ -251,10 +251,19 @@ jobs:
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
+          # Nightly builds push ECR tags with a `-nightly` suffix so a missing
+          # or failed nightly build can't fall through to the post-merge image
+          # at the same SHA (which carries stable, non-dev wheel versions).
+          NIGHTLY_TAG_SUFFIX=""
+          if [ "${NIGHTLY}" = "true" ]; then
+            NIGHTLY_TAG_SUFFIX="-nightly"
+          fi
+
           echo "========================================"
           echo "Copying images from ECR to NGC (registry-to-registry)"
           echo "Source commit SHA: ${COMMIT_SHA}"
           echo "NGC Version Tag: ${NGC_VERSION_TAG}"
+          echo "Nightly tag suffix: '${NIGHTLY_TAG_SUFFIX}'"
           echo "========================================"
 
           copy_image() {
@@ -279,7 +288,7 @@ jobs:
           CUDA12_FRAMEWORKS=("vllm" "sglang")
           for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
             NGC_NAME="${FRAMEWORK}-runtime"
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
           done
@@ -295,7 +304,7 @@ jobs:
               NGC_NAME="${FRAMEWORK}-runtime"
             fi
 
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13${NIGHTLY_TAG_SUFFIX}"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
           done
@@ -521,7 +530,13 @@ jobs:
 
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime-cuda12"
+          # Nightly pushes to <sha>-dynamo-runtime-cuda12-nightly so a failed
+          # nightly build cannot fall through to the stable post-merge image.
+          NIGHTLY_TAG_SUFFIX=""
+          if [ "${NIGHTLY}" = "true" ]; then
+            NIGHTLY_TAG_SUFFIX="-nightly"
+          fi
+          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
 
           STAGE="${RUNNER_TEMP}/wheels"
           mkdir -p "${STAGE}/amd64" "${STAGE}/arm64"

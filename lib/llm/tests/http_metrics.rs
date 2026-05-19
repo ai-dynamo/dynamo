@@ -113,6 +113,7 @@ async fn test_metrics_prefix_default() {
             .unwrap();
 
         // Assert metrics that are actually present in the default configuration
+        assert!(body.contains("dynamo_frontend_requests_started_total"));
         assert!(body.contains("dynamo_frontend_requests_total"));
         assert!(body.contains("dynamo_frontend_inflight_requests"));
         assert!(body.contains("dynamo_frontend_request_duration_seconds"));
@@ -151,6 +152,7 @@ async fn test_metrics_prefix_custom() {
             .text()
             .await
             .unwrap();
+        assert!(body.contains("custom_prefix_requests_started_total"));
         assert!(body.contains("custom_prefix_requests_total"));
         assert!(!body.contains("dynamo_frontend_requests_total"));
 
@@ -505,6 +507,7 @@ mod integration_tests {
 
         // Assert basic metrics are present (using service_name from the model)
         let model_name = model.service_name();
+        assert!(metrics_body.contains("dynamo_frontend_requests_started_total"));
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains(&format!("model=\"{}\"", model_name)));
         assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));

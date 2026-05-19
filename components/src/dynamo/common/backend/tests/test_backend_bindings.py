@@ -69,6 +69,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
         total_kv_blocks=1000,
         max_num_seqs=64,
         max_num_batched_tokens=2048,
+        runtime_data={"sglang_worker_group_id": "group-a"},
     )
     assert cfg.model == "m2"
     assert cfg.served_model_name == "m2-serving"
@@ -77,6 +78,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert cfg.total_kv_blocks == 1000
     assert cfg.max_num_seqs == 64
     assert cfg.max_num_batched_tokens == 2048
+    assert cfg.runtime_data == {"sglang_worker_group_id": "group-a"}
 
 
 def test_worker_config_minimum_args():

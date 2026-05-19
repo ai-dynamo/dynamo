@@ -126,6 +126,8 @@ navigation:
             contents:
               - page: EKS Setup
                 path: kubernetes/cloud-providers/eks/eks.md
+              - page: EFA (RDMA over AWS Fabric)
+                path: kubernetes/cloud-providers/eks/efa.md
               - page: EFS
                 path: kubernetes/cloud-providers/eks/efs.md
               - page: ECS
@@ -150,6 +152,16 @@ navigation:
   # ==================== User Guides ====================
   - section: User Guides
     contents:
+      - section: Agents
+        slug: agents
+        path: agents/README.md
+        contents:
+          - page: Agent Tracing
+            path: agents/agent-tracing.md
+          - page: Agent Hints
+            path: agents/agent-hints.md
+          - page: Use Pi-Mono with Dynamo
+            path: agents/pi-mono.md
       - page: Disaggregated Serving
         path: features/disaggregated-serving/README.md
       - page: KV Cache Aware Routing
@@ -164,6 +176,8 @@ navigation:
             path: tool-calling/dynamo.md
           - page: Tool Call Parsing (Engine Fallback)
             path: tool-calling/engine-fallback.md
+          - page: Troubleshooting Tool Calls
+            path: tool-calling/troubleshooting.md
       - section: Reasoning
         slug: reasoning
         path: reasoning/README.md
@@ -198,16 +212,6 @@ navigation:
         path: features/lora/README.md
       - page: Fastokens Tokenizer
         path: features/tokenizer/README.md
-      - section: Agents
-        slug: agents
-        path: agents/README.md
-        contents:
-          - page: Agent Tracing
-            path: agents/agent-tracing.md
-          - page: Agent Hints
-            path: agents/agent-hints.md
-          - page: SGLang for Agentic Workloads
-            path: backends/sglang/agents.md
       - section: Observability (Local)
         path: observability/README.md
         contents:
@@ -259,14 +263,17 @@ navigation:
         contents:
           - page: Reference Guide
             path: backends/sglang/sglang-reference-guide.md
-          - page: Frontend Processor Fallback
-            path: backends/sglang/sglang-chat-processor.md
           - page: Examples
             path: backends/sglang/sglang-examples.md
           - page: Disaggregation
             path: backends/sglang/sglang-disaggregation.md
+          - page: HiCache
+            slug: hi-cache
+            path: backends/sglang/sglang-hicache.md
           - page: Diffusion
             path: backends/sglang/sglang-diffusion.md
+          - page: Frontend Processor Fallback
+            path: backends/sglang/sglang-chat-processor.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
           - page: Agentic Workloads
@@ -358,8 +365,6 @@ navigation:
     contents:
       - page: LMCache
         path: integrations/lmcache-integration.md
-      - page: SGLang HiCache
-        path: integrations/sglang-hicache.md
       - page: FlexKV
         path: integrations/flexkv-integration.md
       - page: KV Events for Custom Engines

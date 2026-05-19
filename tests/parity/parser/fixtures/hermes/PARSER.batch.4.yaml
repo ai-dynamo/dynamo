@@ -9,7 +9,7 @@ cases:
     ref: dynamo
     model_text: <tool_call>not even json</tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,42 +17,62 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <tool_call>not even json</tool_call>
+      dynamo: &id001
+        reason: "Dynamo's hermes parser leaves <tool_call> tag in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: <tool_call>not even json</tool_call>
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.4.b:
     description: Missing close brace in JSON body
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_hermes_tool_parser.py#L376
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
+      sglang:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
   PARSER.batch.4.c:
     description: Missing name key
     ref: dynamo
     model_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
+      dynamo: &id003
+        reason: "Dynamo's hermes parser leaves <tool_call> tag in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
+      vllm: *id003
+      sglang:
+        calls: []
+        normal_text: ''
   PARSER.batch.4.d:
     description: Missing </tool_call> close
     ref: dynamo
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id004
+      sglang: *id004
+  PARSER.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in PARSER.batch.4.a through 4.d.
