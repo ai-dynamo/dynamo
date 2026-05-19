@@ -8,7 +8,7 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
-use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId};
+use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
@@ -58,6 +58,11 @@ impl PrefillRouter {
                 .routing
                 .as_ref()
                 .and_then(|r| r.allowed_worker_ids.clone());
+            let routing_constraints = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.routing_constraints.clone())
+                .unwrap_or_default();
             let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
                 .query_prefill_worker(
@@ -67,6 +72,7 @@ impl PrefillRouter {
                     lora_name,
                     priority_jump,
                     allowed_worker_ids,
+                    routing_constraints,
                 )
                 .await
             {
@@ -264,6 +270,7 @@ impl PrefillRouter {
     ///
     /// This is the shared worker selection logic used by both `resolve_prefill_worker`
     /// and `query_route`.
+    #[expect(clippy::too_many_arguments)]
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],
@@ -272,6 +279,7 @@ impl PrefillRouter {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>)> {
         let prefill_router = self
             .prefill_router
@@ -292,6 +300,7 @@ impl PrefillRouter {
                         priority_jump,
                         None,
                         allowed_worker_ids,
+                        routing_constraints,
                     )
                     .await?;
                 Ok((worker.worker_id, Some(worker.dp_rank)))

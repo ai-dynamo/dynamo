@@ -64,3 +64,36 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. glm47 uses explicit <arg_key>/<arg_value> tags inside a <tool_call> envelope rather than delimiter-splitting call bodies, so generic string-value coverage remains in PARSER.batch.7.b.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. glm47 uses explicit <arg_key>/<arg_value> tags inside a <tool_call> envelope rather than delimiter-splitting call bodies, so generic string-value coverage remains in PARSER.batch.7.b. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: <tool_call>unknown_tool<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+        reason: vLLM forwards the unknown GLM tool name, while Dynamo validates against the supplied tools and drops the unparseable block.
+      sglang:
+        calls: []
+        normal_text: ''

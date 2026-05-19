@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AIPerf trace-replay benchmark for Kimi-K2.5-NVFP4 aggregated round-robin (eagle) deployment.
+#
+# Replays requests from a Mooncake-format trace file using
+# aiperf --custom-dataset-type mooncake_trace.
+#
+# Prerequisites:
+#   - DGD `kimi-k25-agg-rr-eagle` is ready
+#   - model-cache PVC exists in the namespace
+#   - Trace file copied to /model-cache/traces/<trace>.jsonl
+#
+# Results: /model-cache/perf/<epoch>_<job-name>/
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kimi-k25-agg-rr-eagle-bench
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200  # 2h hard cap on the Job
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: kimi-k25-agg-rr-eagle-bench
+    spec:
+      # Requires an untainted CPU/spare node so the bench pod doesn't share a node with
+      # GPU workers. If no spare node is available on your setup, remove the affinity block below.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: In
+                    values:
+                      - kimi-k25-agg-rr-eagle
+              topologyKey: kubernetes.io/hostname
+      # tolerations:     # uncomment to populate any tolerations for the gpu nodes
+      containers:
+      - name: perf
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        workingDir: /workspace
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          ulimit -n 600000
+          apt-get update && apt-get install -y curl jq procps git && apt-get clean
+          pip install "aiperf==0.7.0" protobuf "transformers==4.57.3"
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
+          export COLUMNS=200
+          EPOCH=$(date +%s)
+
+          wait_for_model_ready() {
+            local max_attempts=${WAIT_FOR_MODEL_MAX_ATTEMPTS:-720}  # 720 * 5s = 1h default
+            local attempt=0
+            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (max ${max_attempts} attempts) ..."
+            while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+              attempt=$((attempt + 1))
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "ERROR: model '$TARGET_MODEL' did not become ready after ${max_attempts} attempts. Aborting."
+                exit 1
+              fi
+              echo "[$(date '+%H:%M:%S')] not ready (attempt ${attempt}/${max_attempts}), sleeping 5s"
+              sleep 5
+            done
+            curl -s "http://$ENDPOINT/v1/models" | jq .
+          }
+
+          if [ ! -f "${TRACE_FILE}" ]; then
+            echo "ERROR: trace file not found at ${TRACE_FILE}"
+            echo "Copy it onto the PVC via a helper pod, e.g.:"
+            echo "  kubectl cp <local_trace.jsonl> <ns>/<helper-pod>:${TRACE_FILE}"
+            exit 1
+          fi
+
+          wait_for_model_ready
+
+          ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          mkdir -p "$ROOT_DIR"
+
+          echo "=============================================="
+          echo "Trace Replay Benchmark (aiperf)"
+          echo "=============================================="
+          echo "Endpoint:        http://${ENDPOINT}"
+          echo "Model:           ${TARGET_MODEL}"
+          echo "Trace file:      ${TRACE_FILE}"
+          echo "Concurrencies:   ${CONCURRENCIES}"
+          echo "TTFT threshold:  ${TTFT_THRESHOLD_MS}ms"
+          echo "ITL threshold:   ${ITL_THRESHOLD_MS}ms"
+          echo "Artifact root:   ${ROOT_DIR}"
+          echo "=============================================="
+
+          # Warmup
+          WARMUP_DIR="${ROOT_DIR}/warmup"
+          mkdir -p "$WARMUP_DIR"
+          aiperf profile \
+            -m "${TARGET_MODEL}" \
+            --tokenizer "${TARGET_MODEL}" \
+            --tokenizer-trust-remote-code \
+            --url "http://${ENDPOINT}" \
+            --streaming \
+            --ui dashboard \
+            --extra-inputs ignore_eos:true \
+            --concurrency 1 \
+            --request-count 5 \
+            --artifact-dir "${WARMUP_DIR}"
+          echo "Warmup complete"
+
+          MODEL_BASE="${TARGET_MODEL##*/}"
+          TS=$(date +'%Y%m%d_%H%M%S')
+
+          IFS=',' read -r -a CONCURRENCY_LIST <<< "${CONCURRENCIES}"
+          for C in "${CONCURRENCY_LIST[@]}"; do
+            echo ""
+            echo "=== Concurrency=${C} ==="
+            RUN_DIR="${ROOT_DIR}/${MODEL_BASE}_trace_c${C}_${TS}"
+            mkdir -p "$RUN_DIR"
+
+            aiperf profile \
+              -m "${TARGET_MODEL}" \
+              --tokenizer "${TARGET_MODEL}" \
+              --tokenizer-trust-remote-code \
+              --input-file "${TRACE_FILE}" \
+              --custom-dataset-type mooncake_trace \
+              --url "http://${ENDPOINT}" \
+              --streaming \
+              --extra-inputs ignore_eos:true \
+              --concurrency "${C}" \
+              --random-seed 42 \
+              --ui dashboard \
+              --artifact-dir "${RUN_DIR}" \
+              --goodput "time_to_first_token:${TTFT_THRESHOLD_MS} inter_token_latency:${ITL_THRESHOLD_MS}" \
+              --benchmark-duration "${BENCHMARK_DURATION}" \
+              --benchmark-grace-period 60 \
+              --request-timeout-seconds 1200 \
+              --workers-max 200 \
+              --record-processors 8 \
+              --profile-export-level raw \
+              --concurrency-ramp-duration 60 \
+              --export-http-trace
+
+            echo "Concurrency ${C} complete; artifacts in ${RUN_DIR}"
+            ls -la "${RUN_DIR}" || true
+          done
+
+          echo ""
+          echo "All concurrencies done. Root: ${ROOT_DIR}"
+        env:
+        - name: TARGET_MODEL
+          value: nvidia/Kimi-K2.5-NVFP4
+        - name: ENDPOINT
+          value: kimi-k25-agg-rr-eagle-frontend:8000
+        - name: TRACE_FILE
+          value: /model-cache/traces/agent_trace_data/dataset.jsonl
+        - name: CONCURRENCIES
+          value: "24"
+        - name: BENCHMARK_DURATION
+          value: "3600"
+        - name: TTFT_THRESHOLD_MS
+          value: "5000"
+        - name: ITL_THRESHOLD_MS
+          value: "10"
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: AIPERF_HTTP_SO_RCVTIMEO
+          value: "120"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "3600"
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "3600"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /model-cache/perf
+        - name: HF_HOME
+          value: /model-cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
+      restartPolicy: Never
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

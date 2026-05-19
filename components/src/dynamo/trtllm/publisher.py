@@ -31,7 +31,7 @@ from contextlib import asynccontextmanager
 from queue import Queue
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
-import msgpack
+import msgspec
 import zmq
 from prometheus_client import CollectorRegistry
 
@@ -223,8 +223,10 @@ class ZmqKvEventPublisher:
                 f"TensorRT-LLM: ZMQ publisher sending {event_type} event (dp_rank={attention_dp_rank}) to {self.zmq_endpoint}"
             )
 
-            # Serialize with msgpack (vLLM uses msgpack/rmp_serde compatible format)
-            payload = msgpack.packb(batch, use_bin_type=True)
+            # Serialize with msgspec's msgpack implementation to match the
+            # vLLM wire format without depending on the separate msgpack
+            # package.
+            payload = msgspec.msgpack.encode(batch)
 
             # Create multipart message: [topic, sequence, payload]
             # Format matches what consolidator expects: 3 frames [topic, sequence, payload]
