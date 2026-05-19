@@ -1182,7 +1182,7 @@ fn parse_trace_file_format(
             Ok(dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic)
         }
         other => Err(PyException::new_err(format!(
-            "trace_format must be 'mooncake', 'mooncake-delta', 'agentic_mooncake', or 'applied_compute_agentic', got '{}'",
+            "trace_format must be 'mooncake', 'mooncake-delta', 'agentic_mooncake'/'agentic-mooncake', or 'applied_compute_agentic', got '{}'",
             other
         ))),
     }

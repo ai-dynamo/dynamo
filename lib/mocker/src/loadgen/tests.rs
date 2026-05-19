@@ -132,6 +132,19 @@ fn test_from_agentic_mooncake_rejects_unknown_dependency() {
 }
 
 #[test]
+fn test_from_agentic_mooncake_rejects_input_length_above_hash_capacity() {
+    let file = write_trace(&[serde_json::json!({
+        "request_id": "r1",
+        "input_length": 9,
+        "output_length": 1,
+        "hash_ids": [1, 2]
+    })]);
+
+    let err = AgenticTrace::from_agentic_mooncake(file.path(), 4).unwrap_err();
+    assert!(err.to_string().contains("input_length 9"));
+}
+
+#[test]
 fn test_from_applied_compute_agentic_expands_rows_into_num_turns_plus_final_request() {
     let file = write_trace(&[serde_json::json!({
         "num_turns": 2,

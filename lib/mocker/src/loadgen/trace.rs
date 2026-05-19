@@ -1004,10 +1004,20 @@ impl AgenticTrace {
                     .ok_or_else(|| {
                         anyhow!("trace line {} synthesized capacity overflow", line_idx + 1)
                     })?;
-            let input_length = raw
-                .input_length
-                .unwrap_or(synthesizable_capacity)
-                .min(synthesizable_capacity);
+            let input_length = match raw.input_length {
+                Some(input_length) if input_length > synthesizable_capacity => {
+                    bail!(
+                        "trace line {} has input_length {} but only {} tokens can be synthesized from {} hash_ids at trace_block_size {}",
+                        line_idx + 1,
+                        input_length,
+                        synthesizable_capacity,
+                        hash_ids.len(),
+                        trace_block_size
+                    );
+                }
+                Some(input_length) => input_length,
+                None => synthesizable_capacity,
+            };
             let output_length = raw
                 .output_length
                 .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;

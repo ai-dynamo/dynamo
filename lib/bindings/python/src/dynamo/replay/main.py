@@ -598,6 +598,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("--planner-config only supports --replay-mode=offline")
         if not using_trace_file:
             parser.error("--planner-config requires a trace file (not synthetic)")
+        if args.trace_format != "mooncake":
+            parser.error("--planner-config only supports --trace-format=mooncake")
 
         planner_report = _run_planner_replay(
             trace_file=args.trace_file,

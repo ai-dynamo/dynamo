@@ -377,7 +377,20 @@ fn build_agentic_mooncake_rows(
             .as_ref()
             .and_then(|context| context.parent_trajectory_id.clone())
         {
-            parent_by_trajectory.entry(trajectory_id).or_insert(parent);
+            match parent_by_trajectory.get(&trajectory_id) {
+                Some(existing) if existing != &parent => {
+                    bail!(
+                        "trajectory {} has conflicting parent_trajectory_id values: {} and {}",
+                        trajectory_id,
+                        existing,
+                        parent
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    parent_by_trajectory.insert(trajectory_id, parent);
+                }
+            }
         }
     }
     for indices in trajectory_to_indices.values_mut() {
@@ -413,9 +426,25 @@ fn build_agentic_mooncake_rows(
             continue;
         };
         let first_child_idx = child_indices[0];
-        let last_child_idx = *child_indices.last().expect("child trajectory is non-empty");
+        let last_finishing_child_idx = *child_indices
+            .iter()
+            .max_by(|left, right| {
+                let left_request = &loaded.requests[**left];
+                let right_request = &loaded.requests[**right];
+                (
+                    left_request.end_ms,
+                    left_request.start_ms,
+                    &left_request.request.request_id,
+                )
+                    .cmp(&(
+                        right_request.end_ms,
+                        right_request.start_ms,
+                        &right_request.request.request_id,
+                    ))
+            })
+            .expect("child trajectory is non-empty");
         let child_start_ms = loaded.requests[first_child_idx].start_ms;
-        let child_end_ms = loaded.requests[last_child_idx].end_ms;
+        let child_end_ms = loaded.requests[last_finishing_child_idx].end_ms;
 
         if let Some(parent_spawn_idx) =
             latest_request_ending_before(&loaded.requests, parent_indices, child_start_ms)
@@ -429,7 +458,10 @@ fn build_agentic_mooncake_rows(
         if let Some(parent_join_idx) =
             first_request_starting_after(&loaded.requests, parent_indices, child_end_ms)
         {
-            let child_request_id = loaded.requests[last_child_idx].request.request_id.clone();
+            let child_request_id = loaded.requests[last_finishing_child_idx]
+                .request
+                .request_id
+                .clone();
             push_unique(&mut wait_for[parent_join_idx], child_request_id);
         }
     }
@@ -719,5 +751,42 @@ mod tests {
         assert_eq!(by_id["parent-1"].branches, vec!["child-1"]);
         assert_eq!(by_id["parent-2"].wait_for, vec!["parent-1", "child-1"]);
         assert_eq!(by_id["parent-2"].delay, Some(200.0));
+    }
+
+    #[test]
+    fn agentic_converter_rejects_conflicting_trajectory_parents() {
+        let loaded = LoadedAgentTrace {
+            requests: vec![
+                contextual_request("child-1", "child", Some("root-a"), 1_000, 1_100, vec![11]),
+                contextual_request("child-2", "child", Some("root-b"), 1_200, 1_300, vec![22]),
+            ],
+            tools: Vec::new(),
+        };
+
+        let err = build_agentic_mooncake_rows(loaded).unwrap_err();
+        assert!(err.to_string().contains("conflicting parent_trajectory_id"));
+    }
+
+    #[test]
+    fn agentic_converter_joins_on_last_finishing_child_request() {
+        let loaded = LoadedAgentTrace {
+            requests: vec![
+                contextual_request("parent-1", "root", None, 1_000, 1_100, vec![11]),
+                contextual_request("child-slow", "child", Some("root"), 1_200, 1_900, vec![33]),
+                contextual_request("child-fast", "child", Some("root"), 1_300, 1_400, vec![44]),
+                contextual_request("parent-2", "root", None, 1_500, 1_600, vec![11, 22]),
+                contextual_request("parent-3", "root", None, 2_000, 2_100, vec![11, 22, 33]),
+            ],
+            tools: Vec::new(),
+        };
+
+        let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
+        let by_id = rows
+            .iter()
+            .map(|row| (row.request_id.as_str(), row))
+            .collect::<HashMap<_, _>>();
+
+        assert!(!by_id["parent-2"].wait_for.contains(&"child-fast".into()));
+        assert!(by_id["parent-3"].wait_for.contains(&"child-slow".into()));
     }
 }

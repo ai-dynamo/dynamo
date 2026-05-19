@@ -325,17 +325,23 @@ impl WorkloadDriver {
     /// Terminating the session (marking it exhausted) prevents `run_workload` from
     /// deadlocking: `pop_ready` skips sessions with `in_flight.is_some()`, so a
     /// leaked session would leave `is_drained` stuck at `false` forever.
-    pub fn release_cap_slot(&mut self, request_uuid: Uuid) {
+    pub fn release_cap_slot(&mut self, request_uuid: Uuid, now_ms: f64) {
         let Some(in_flight) = self.in_flight.remove(&request_uuid) else {
             return;
         };
         let Some(session) = self.sessions.get_mut(in_flight.session_index) else {
             return;
         };
+        let request_id = session.turns[in_flight.turn_index].request_id.clone();
         if session.in_flight == Some(request_uuid) {
             session.in_flight = None;
             session.next_turn_index = session.turns.len();
             session.next_ready_at_ms = None;
+        }
+        if self.mode == DriverMode::AgenticTrace
+            && let Some(request_id) = request_id
+        {
+            self.release_agentic_dependents(&request_id, now_ms);
         }
     }
 
@@ -645,7 +651,7 @@ mod tests {
         let uuid = admitted[0].request_uuid;
         driver.on_complete(uuid, 5.0).unwrap();
 
-        driver.release_cap_slot(uuid);
+        driver.release_cap_slot(uuid, 5.0);
 
         let next = driver.pop_ready(5.0, usize::MAX);
         assert_eq!(next.len(), 1);
@@ -660,7 +666,7 @@ mod tests {
         let admitted = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(admitted.len(), 1);
 
-        driver.release_cap_slot(admitted[0].request_uuid);
+        driver.release_cap_slot(admitted[0].request_uuid, 0.0);
 
         let next = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(
@@ -679,7 +685,7 @@ mod tests {
         assert_eq!(admitted.len(), 1);
         let stuck_uuid = admitted[0].request_uuid;
 
-        driver.release_cap_slot(stuck_uuid);
+        driver.release_cap_slot(stuck_uuid, 0.0);
 
         let neighbor = driver.pop_ready(0.0, usize::MAX);
         assert_eq!(
@@ -772,6 +778,48 @@ mod tests {
         driver.on_complete(first[0].request_uuid, 10.0).unwrap();
         assert_eq!(driver.next_ready_time_ms(), Some(15.0));
         assert!(driver.pop_ready(14.0, usize::MAX).is_empty());
+        let second = driver.pop_ready(15.0, usize::MAX);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].scheduled_ready_at_ms, 15.0);
+    }
+
+    #[test]
+    fn agentic_mode_releases_dependents_when_cap_slot_is_released() {
+        let trace = AgenticTrace {
+            block_size: 1,
+            turns: vec![
+                AgenticTurnTrace {
+                    request_id: "r1".into(),
+                    session_id: "root".into(),
+                    input_length: 2,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1, 2],
+                    first_ready_timestamp_ms: Some(0.0),
+                    delay_after_dependencies_ms: 0.0,
+                    wait_for: Vec::new(),
+                    prefix_reset: true,
+                },
+                AgenticTurnTrace {
+                    request_id: "r2".into(),
+                    session_id: "child".into(),
+                    input_length: 2,
+                    max_output_tokens: 1,
+                    hash_ids: vec![1, 3],
+                    first_ready_timestamp_ms: Some(100.0),
+                    delay_after_dependencies_ms: 5.0,
+                    wait_for: vec!["r1".into()],
+                    prefix_reset: true,
+                },
+            ],
+        };
+        let mut driver = WorkloadDriver::new_agentic_trace(trace, 1).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(first.len(), 1);
+
+        driver.release_cap_slot(first[0].request_uuid, 10.0);
+
+        assert_eq!(driver.next_ready_time_ms(), Some(15.0));
         let second = driver.pop_ready(15.0, usize::MAX);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].scheduled_ready_at_ms, 15.0);
