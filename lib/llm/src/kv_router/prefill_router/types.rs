@@ -27,10 +27,12 @@ pub enum PrefillError {
 
 /// Result of the prefill phase in `generate()`.
 pub(super) enum PrefillOutcome {
-    /// Bootstrap optimization: prefill spawned in background, bootstrap info ready
-    Bootstrap(BootstrapInfo),
-    /// Synchronous prefill completed with result
-    Completed(PrefillResult),
+    /// Bootstrap optimization: prefill spawned in background, bootstrap info ready.
+    /// The `u64` is the prefill worker ID (for topology-aware decode routing).
+    Bootstrap(BootstrapInfo, u64),
+    /// Synchronous prefill completed with result.
+    /// The `Option<u64>` is the prefill worker ID when available.
+    Completed(PrefillResult, Option<u64>),
 }
 
 pub(super) enum PrefillResolveDecision {
@@ -41,7 +43,12 @@ pub(super) enum PrefillResolveDecision {
     },
     Unavailable,
     NotActivated,
-    NoBootstrapEndpoint,
+    /// Bootstrap endpoint unavailable, but a worker was selected.
+    /// Carries the worker_id so the synchronous path can route to the
+    /// same worker and use it for topology-aware decode routing.
+    NoBootstrapEndpoint {
+        worker_id: u64,
+    },
 }
 
 pub(super) fn build_decode_router_override(
