@@ -206,9 +206,7 @@ impl SingleRuntime {
         if let Some(cap_ms) = self.max_sim_time_ms
             && (!cap_ms.is_finite() || cap_ms < 0.0)
         {
-            anyhow::bail!(
-                "max_sim_time_ms must be a finite, non-negative value; got {cap_ms}"
-            );
+            anyhow::bail!("max_sim_time_ms must be a finite, non-negative value; got {cap_ms}");
         }
         while !self.is_done() {
             if let Some(cap_ms) = self.max_sim_time_ms
