@@ -206,6 +206,21 @@ def _apply_cluster_portability(spec):
         caps.setdefault("add", []).append("IPC_LOCK")
         spec[svc].set_env_var("DYN_TEST_MEMLOCK_UNLIMITED", "1")
 
+    # Pod-level fsGroup=1000 on every service: k8s recursively chowns the
+    # mounted PVC to gid 1000 (the `dynamo` user's group in the runtime
+    # image) and SGID-bits the directories. That way, when one pod
+    # (workers, running as root) creates the per-test sub-path on a
+    # reused log PVC, the other pods (Frontend, running as uid=1000) can
+    # still write under it as group members. Avoids the perm-collision
+    # race described in dynamo-observe/.../2026-05-03-cascade-repro-results/.
+    for svc in ("Frontend", "VllmPrefillWorker", "VllmDecodeWorker"):
+        pod_sec = (
+            spec[svc]
+            ._spec.setdefault("extraPodSpec", {})
+            .setdefault("securityContext", {})
+        )
+        pod_sec.setdefault("fsGroup", 1000)
+
     # Prod runs A100-40GB; both shared clusters above run 80GB cards.
     # Halve gpu-memory-utilization to match prod KV envelope.
     for svc in ("VllmPrefillWorker", "VllmDecodeWorker"):
@@ -332,16 +347,16 @@ async def test_decode_overload(runtime_env, request):
         events=events,
         checks=[
             LoadApplied(load_name=final, min_requests=100),
-            LoadCompleted(load_name=final),
+            LoadCompleted(name=final),
             _PerPodKvImbalanceGap(services=["VllmDecodeWorker"]),
-            # Report-only goodput / SLA observations.
-            SlaViolation(
-                services=["VllmDecodeWorker"], load_name=final, acceptable=True
-            ),
+            # Report-only goodput / SLA observations. SlaViolation reads
+            # aiperf summary p99s on the named load; ServiceLogPatternRate
+            # scans frontend logs for the 504 / inter-token-latency signal.
+            SlaViolation(load_name=final, e2e_p99_ms=30000, ttft_p99_ms=10000),
             ServiceLogPatternRate(
                 services=["Frontend"],
                 pattern=r"504|GatewayTimeout|inter.token.latency",
-                acceptable=True,
+                min_rate_per_sec=0.0,
             ),
             WorkerPanics(
                 services=["VllmDecodeWorker", "VllmPrefillWorker", "Frontend"],
