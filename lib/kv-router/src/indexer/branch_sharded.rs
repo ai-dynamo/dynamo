@@ -25,7 +25,6 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
-use futures::future::join_all;
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
 #[cfg(feature = "bench")]
@@ -150,6 +149,7 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<ThreadPoolIndexer<T>> {
         note = "build ThreadPoolIndexers explicitly (choosing num_threads) and call \
                 BranchShardedIndexer::new_with_options"
     )]
+    #[allow(deprecated)]
     pub fn new_with_options_from_backends(
         backends: Vec<T>,
         prefix_depth: usize,
@@ -857,22 +857,32 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
     }
 
     async fn flush(&self) -> usize {
-        join_all(self.shards.iter().map(|s| s.flush()))
-            .await
-            .into_iter()
-            .sum()
+        let mut set = tokio::task::JoinSet::new();
+        for shard in &self.shards {
+            let shard = Arc::clone(shard);
+            set.spawn(async move { shard.flush().await });
+        }
+        let mut total = 0;
+        while let Some(Ok(n)) = set.join_next().await {
+            total += n;
+        }
+        total
     }
 
     async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
-        join_all(self.shards.iter().map(|s| s.shard_sizes()))
-            .await
-            .into_iter()
-            .enumerate()
-            .map(|(idx, mut snapshot)| {
-                snapshot.shard_idx = idx;
-                snapshot
-            })
-            .collect()
+        let mut set: tokio::task::JoinSet<(usize, ShardSizeSnapshot)> =
+            tokio::task::JoinSet::new();
+        for (idx, shard) in self.shards.iter().enumerate() {
+            let shard = Arc::clone(shard);
+            set.spawn(async move { (idx, shard.shard_sizes().await) });
+        }
+        let mut sizes = Vec::with_capacity(self.shards.len());
+        while let Some(Ok((idx, mut snapshot))) = set.join_next().await {
+            snapshot.shard_idx = idx;
+            sizes.push(snapshot);
+        }
+        sizes.sort_by_key(|s| s.shard_idx);
+        sizes
     }
 
     fn node_edge_lengths(&self) -> Vec<usize> {
@@ -949,7 +959,6 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
-    use crate::indexer::SyncIndexer;
     use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
     use tokio::sync::Barrier as AsyncBarrier;
