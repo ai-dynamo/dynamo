@@ -37,22 +37,93 @@ def _get_workspace_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-class ServiceSpec:
-    """Wrapper around a single service in the deployment spec."""
+# Supported DynamoGraphDeployment CRD schemas. v1alpha1 uses ``spec.services``
+# (a dict of service name -> ServiceSpec); v1beta1 uses ``spec.components``
+# (a list of components with podTemplate.spec.containers).
+SCHEMA_V1ALPHA1 = "v1alpha1"
+SCHEMA_V1BETA1 = "v1beta1"
 
-    def __init__(self, service_name: str, service_spec: dict):
+
+class ServiceSpec:
+    """Wrapper around a single service/component in the deployment spec.
+
+    Supports both v1alpha1 (``spec.services[<name>]``) and v1beta1
+    (``spec.components[*]``) schemas. Accessors dispatch on ``schema`` so
+    callers see a uniform interface regardless of the underlying CRD version.
+    """
+
+    # Default sidecar container name used when ``frontendSidecar`` references a
+    # container by name in v1beta1. Matches the convention used by the
+    # examples and recipes that ship with dynamo.
+    _DEFAULT_SIDECAR_NAME = "sidecar-frontend"
+
+    def __init__(
+        self,
+        service_name: str,
+        service_spec: dict,
+        schema: str = SCHEMA_V1ALPHA1,
+    ):
         self._name = service_name
         self._spec = service_spec
+        self._schema = schema
 
     @property
     def name(self) -> str:
         """The service name (read-only)"""
         return self._name
 
+    @property
+    def schema(self) -> str:
+        """CRD schema this ServiceSpec is bound to."""
+        return self._schema
+
+    # ----- v1beta1 container helpers -----
+    def _containers_list(self, create: bool = False) -> Optional[list]:
+        """Return the v1beta1 ``podTemplate.spec.containers`` list, or None."""
+        if self._schema != SCHEMA_V1BETA1:
+            return None
+        if create:
+            return (
+                self._spec.setdefault("podTemplate", {})
+                .setdefault("spec", {})
+                .setdefault("containers", [])
+            )
+        return self._spec.get("podTemplate", {}).get("spec", {}).get("containers")
+
+    def _find_container(
+        self, container_name: str, create: bool = False
+    ) -> Optional[dict]:
+        """Find a container by name in v1beta1; optionally create if missing."""
+        containers = self._containers_list(create=create)
+        if containers is None:
+            return None
+        for c in containers:
+            if c.get("name") == container_name:
+                return c
+        if create:
+            new_c: dict[str, Any] = {"name": container_name}
+            containers.append(new_c)
+            return new_c
+        return None
+
+    def _main_container(self, create: bool = False) -> Optional[dict]:
+        return self._find_container("main", create=create)
+
+    def _sidecar_container_name(self) -> str:
+        # v1beta1 components reference the sidecar container by name via the
+        # ``frontendSidecar`` field; default to the canonical name otherwise.
+        return self._spec.get("frontendSidecar") or self._DEFAULT_SIDECAR_NAME
+
+    def _sidecar_container(self, create: bool = False) -> Optional[dict]:
+        return self._find_container(self._sidecar_container_name(), create=create)
+
     # ----- Image -----
     @property
     def image(self) -> Optional[str]:
         """Container image for the service"""
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container()
+            return container.get("image") if container else None
         try:
             return self._spec["extraPodSpec"]["mainContainer"]["image"]
         except KeyError:
@@ -60,6 +131,11 @@ class ServiceSpec:
 
     @image.setter
     def image(self, value: str):
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container(create=True)
+            assert container is not None
+            container["image"] = value
+            return
         if "extraPodSpec" not in self._spec:
             self._spec["extraPodSpec"] = {"mainContainer": {}}
         if "mainContainer" not in self._spec["extraPodSpec"]:
@@ -69,6 +145,9 @@ class ServiceSpec:
     @property
     def frontend_sidecar_image(self) -> Optional[str]:
         """Container image for the frontendSidecar (if present)."""
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._sidecar_container()
+            return container.get("image") if container else None
         try:
             return self._spec["frontendSidecar"]["image"]
         except KeyError:
@@ -76,17 +155,36 @@ class ServiceSpec:
 
     @frontend_sidecar_image.setter
     def frontend_sidecar_image(self, value: str):
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._sidecar_container(create=True)
+            assert container is not None
+            container["image"] = value
+            return
         if "frontendSidecar" not in self._spec:
             self._spec["frontendSidecar"] = {}
         self._spec["frontendSidecar"]["image"] = value
 
     @property
     def envs(self) -> list[dict[str, str]]:
-        """Environment variables for the service"""
+        """Environment variables for the service.
+
+        v1alpha1 stores envs at the service level (``spec.envs``); v1beta1
+        stores them per-container under ``podTemplate.spec.containers[main].env``.
+        """
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container()
+            if container is None:
+                return []
+            return container.get("env", [])
         return self._spec.get("envs", [])
 
     @envs.setter
     def envs(self, value: list[dict[str, str]]):
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container(create=True)
+            assert container is not None
+            container["env"] = value
+            return
         self._spec["envs"] = value
 
     def _get_args(self) -> list[str]:
@@ -95,16 +193,36 @@ class ServiceSpec:
         Always returns the same list object that is stored in the spec, so
         in-place mutations (append / index assignment) are reflected immediately
         without an explicit writeback.
+
+        In v1beta1, manifests sometimes invoke the worker via a shell:
+        ``command: [/bin/sh, -c]`` plus ``args: ["python3 -m ... --foo bar"]``
+        — i.e. a single multi-word string element. We split that element so
+        callers can read/modify individual flags consistently.
         """
-        try:
-            container = self._spec["extraPodSpec"]["mainContainer"]
-        except KeyError:
-            return []
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container(create=True)
+            if container is None:
+                return []
+        else:
+            try:
+                container = self._spec["extraPodSpec"]["mainContainer"]
+            except KeyError:
+                return []
         if "args" not in container:
             container["args"] = []
         args = container["args"]
         if isinstance(args, str):
             args = args.split()
+            container["args"] = args
+        elif (
+            self._schema == SCHEMA_V1BETA1
+            and len(args) == 1
+            and isinstance(args[0], str)
+            and " " in args[0]
+        ):
+            import shlex
+
+            args = shlex.split(args[0])
             container["args"] = args
         return args
 
@@ -137,8 +255,19 @@ class ServiceSpec:
                 return
 
     # ----- GPUs -----
+    # v1alpha1 stores GPU limits at ``spec.resources.limits.gpu``; v1beta1
+    # stores them per-container at
+    # ``podTemplate.spec.containers[main].resources.limits["nvidia.com/gpu"]``.
     @property
     def gpus(self) -> int:
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container()
+            if container is None:
+                return 0
+            try:
+                return int(container["resources"]["limits"]["nvidia.com/gpu"])
+            except KeyError:
+                return 0
         try:
             return int(self._spec["resources"]["limits"]["gpu"])
         except KeyError:
@@ -146,6 +275,12 @@ class ServiceSpec:
 
     @gpus.setter
     def gpus(self, value: int):
+        if self._schema == SCHEMA_V1BETA1:
+            container = self._main_container(create=True)
+            assert container is not None
+            limits = container.setdefault("resources", {}).setdefault("limits", {})
+            limits["nvidia.com/gpu"] = str(value)
+            return
         if "resources" not in self._spec:
             self._spec["resources"] = {}
         if "limits" not in self._spec["resources"]:
@@ -188,6 +323,41 @@ class DeploymentSpec:
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
+        self._schema = self._detect_schema()
+
+    def _detect_schema(self) -> str:
+        """Detect whether the loaded manifest is v1alpha1 (services dict) or
+        v1beta1 (components list).
+
+        We trust ``apiVersion`` first and fall back to inspecting ``spec`` so
+        manifests without an explicit version still work.
+        """
+        api_version = self._deployment_spec.get("apiVersion", "")
+        if api_version.endswith("/v1beta1"):
+            return SCHEMA_V1BETA1
+        if api_version.endswith("/v1alpha1"):
+            return SCHEMA_V1ALPHA1
+        spec = self._deployment_spec.get("spec", {})
+        if isinstance(spec.get("components"), list):
+            return SCHEMA_V1BETA1
+        return SCHEMA_V1ALPHA1
+
+    @property
+    def schema(self) -> str:
+        """CRD schema of the loaded manifest (``v1alpha1`` or ``v1beta1``)."""
+        return self._schema
+
+    @property
+    def api_version(self) -> str:
+        """CRD version string suitable for CustomObjectsApi calls."""
+        return self._schema
+
+    def _component_by_name(self, service_name: str) -> dict:
+        """Look up a v1beta1 component dict by its ``name`` field."""
+        for comp in self._deployment_spec["spec"].get("components", []):
+            if comp.get("name") == service_name:
+                return comp
+        raise KeyError(service_name)
 
     @property
     def name(self) -> str:
@@ -344,15 +514,29 @@ class DeploymentSpec:
     @property
     def services(self) -> list[ServiceSpec]:
         """List of ServiceSpec objects"""
+        if self._schema == SCHEMA_V1BETA1:
+            return [
+                ServiceSpec(comp["name"], comp, schema=self._schema)
+                for comp in self._deployment_spec["spec"].get("components", [])
+                if "name" in comp
+            ]
         return [
-            ServiceSpec(svc, spec)
+            ServiceSpec(svc, spec, schema=self._schema)
             for svc, spec in self._deployment_spec["spec"]["services"].items()
         ]
 
     def __getitem__(self, service_name: str) -> ServiceSpec:
         """Allow dict-like access: d['Frontend']"""
+        if self._schema == SCHEMA_V1BETA1:
+            return ServiceSpec(
+                service_name,
+                self._component_by_name(service_name),
+                schema=self._schema,
+            )
         return ServiceSpec(
-            service_name, self._deployment_spec["spec"]["services"][service_name]
+            service_name,
+            self._deployment_spec["spec"]["services"][service_name],
+            schema=self._schema,
         )
 
     def spec(self):
@@ -368,26 +552,21 @@ class DeploymentSpec:
             arg_value: Argument value (e.g., "1024")
         """
         service = self.get_service(service_name)
-        service_spec = service._spec
+        # _get_args is schema-aware and returns the live list stored in the
+        # spec, normalising scalar strings via shlex-equivalent splitting.
+        args_list = service._get_args()
 
-        # Ensure args list exists
-        if "extraPodSpec" not in service_spec:
-            service_spec["extraPodSpec"] = {"mainContainer": {}}
-        if "mainContainer" not in service_spec["extraPodSpec"]:
-            service_spec["extraPodSpec"]["mainContainer"] = {}
-        if "args" not in service_spec["extraPodSpec"]["mainContainer"]:
-            service_spec["extraPodSpec"]["mainContainer"]["args"] = []
-
-        args_list = service_spec["extraPodSpec"]["mainContainer"]["args"]
-
-        # Convert to list if needed (sometimes it's a single string)
         if isinstance(args_list, str):
             import shlex
 
             args_list = shlex.split(args_list)
-            service_spec["extraPodSpec"]["mainContainer"]["args"] = args_list
+            if self._schema == SCHEMA_V1BETA1:
+                container = service._main_container(create=True)
+                assert container is not None
+                container["args"] = args_list
+            else:
+                service._spec["extraPodSpec"]["mainContainer"]["args"] = args_list
 
-        # Find existing argument
         arg_index = None
         for i, arg in enumerate(args_list):
             if arg == arg_name:
@@ -395,28 +574,35 @@ class DeploymentSpec:
                 break
 
         if arg_index is not None:
-            # Argument found, check if it has a value
             if arg_index + 1 < len(args_list) and not args_list[
                 arg_index + 1
             ].startswith("-"):
-                # Has a value, replace it
                 args_list[arg_index + 1] = arg_value
             else:
-                # No value after the argument, insert the value
                 args_list.insert(arg_index + 1, arg_value)
         else:
-            # Add new argument
             args_list.extend([arg_name, arg_value])
 
     def get_service(self, service_name: str) -> ServiceSpec:
         """
         Get a specific service from the deployment spec
         """
+        if self._schema == SCHEMA_V1BETA1:
+            try:
+                comp = self._component_by_name(service_name)
+            except KeyError:
+                raise ValueError(
+                    f"Service '{service_name}' not found in deployment spec"
+                )
+            return ServiceSpec(service_name, comp, schema=self._schema)
+
         if service_name not in self._deployment_spec["spec"]["services"]:
             raise ValueError(f"Service '{service_name}' not found in deployment spec")
 
         return ServiceSpec(
-            service_name, self._deployment_spec["spec"]["services"][service_name]
+            service_name,
+            self._deployment_spec["spec"]["services"][service_name],
+            schema=self._schema,
         )
 
     def set_service_replicas(self, service_name: str, replicas: int):
@@ -651,7 +837,7 @@ class ManagedDeployment:
                 assert self._custom_api is not None, "Kubernetes API not initialized"
                 status = await self._custom_api.get_namespaced_custom_object(  # type: ignore[awaitable-is-not-coroutine]
                     group="nvidia.com",
-                    version="v1alpha1",
+                    version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
@@ -851,7 +1037,7 @@ class ManagedDeployment:
             assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.create_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.deployment_spec.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 body=self.deployment_spec.spec(),
@@ -878,21 +1064,34 @@ class ManagedDeployment:
                 "service_names cannot be empty for trigger_rolling_upgrade"
             )
 
-        patch_body: dict[str, Any] = {"spec": {"services": {}}}
-
+        # Apply env-var edits to the in-memory spec first; then build a
+        # schema-appropriate merge patch. JSON merge-patch replaces lists
+        # wholesale, so for v1beta1 we send the full components list.
         for service_name in service_names:
             self.deployment_spec.set_service_env_var(
                 service_name, "TEST_ROLLING_UPDATE_TRIGGER", secrets.token_hex(8)
             )
 
-            updated_envs = self.deployment_spec.get_service_env_vars(service_name)
-            patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
+        patch_body: dict[str, Any]
+        if self.deployment_spec.api_version == SCHEMA_V1BETA1:
+            patch_body = {
+                "spec": {
+                    "components": self.deployment_spec.spec()["spec"].get(
+                        "components", []
+                    )
+                }
+            }
+        else:
+            patch_body = {"spec": {"services": {}}}
+            for service_name in service_names:
+                updated_envs = self.deployment_spec.get_service_env_vars(service_name)
+                patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
 
         try:
             assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.patch_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.deployment_spec.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 name=self._deployment_name,
@@ -1044,7 +1243,7 @@ class ManagedDeployment:
             if self._deployment_name and self._custom_api is not None:
                 await self._custom_api.delete_namespaced_custom_object(
                     group="nvidia.com",
-                    version="v1alpha1",
+                    version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
