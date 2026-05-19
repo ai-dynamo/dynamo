@@ -50,7 +50,7 @@ async def init_video_diffusion_worker(
 
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
     from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
-    from dynamo.trtllm.request_handlers.video_diffusion import VideoGenerationHandler
+    from dynamo.trtllm.request_handlers.diffusion import VideoGenerationHandler
 
     logging.info(f"Initializing video diffusion worker with config: {config}")
 
@@ -65,52 +65,7 @@ async def init_video_diffusion_worker(
         raise ValueError("endpoint must be configured for video diffusion worker")
 
     # Build DiffusionConfig from the main Config
-    diffusion_config = DiffusionConfig(
-        namespace=config.namespace,
-        component=config.component,
-        endpoint=config.endpoint,
-        discovery_backend=config.discovery_backend,
-        request_plane=config.request_plane,
-        event_plane=config.event_plane,
-        model_path=config.model,
-        served_model_name=config.served_model_name,
-        torch_dtype=config.torch_dtype,
-        revision=config.revision,
-        media_output_fs_url=config.media_output_fs_url,
-        media_output_http_url=config.media_output_http_url,
-        default_height=config.default_height,
-        default_width=config.default_width,
-        default_num_frames=config.default_num_frames,
-        default_num_inference_steps=config.default_num_inference_steps,
-        default_guidance_scale=config.default_guidance_scale,
-        # Pipeline optimization
-        disable_torch_compile=config.disable_torch_compile,
-        enable_fullgraph=config.enable_fullgraph,
-        fuse_qkv=config.fuse_qkv,
-        enable_cuda_graph=config.enable_cuda_graph,
-        enable_layerwise_nvtx_marker=config.enable_layerwise_nvtx_marker,
-        skip_warmup=config.skip_warmup,
-        # Attention
-        attn_backend=config.attn_backend,
-        # Quantization
-        quant_algo=config.quant_algo,
-        quant_dynamic=config.quant_dynamic,
-        # TeaCache
-        enable_teacache=config.enable_teacache,
-        teacache_use_ret_steps=config.teacache_use_ret_steps,
-        teacache_thresh=config.teacache_thresh,
-        # Parallelism
-        dit_dp_size=config.dit_dp_size,
-        dit_tp_size=config.dit_tp_size,
-        dit_ulysses_size=config.dit_ulysses_size,
-        dit_ring_size=config.dit_ring_size,
-        dit_cfg_size=config.dit_cfg_size,
-        dit_fsdp_size=config.dit_fsdp_size,
-        # Offloading
-        enable_async_cpu_offload=config.enable_async_cpu_offload,
-        # Component loading
-        skip_components=skip_components,
-    )
+    diffusion_config = DiffusionConfig.from_config(config, skip_components)
 
     # Get the endpoint from the runtime
     endpoint = runtime.endpoint(

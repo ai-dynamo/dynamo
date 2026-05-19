@@ -6,6 +6,8 @@
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying TensorRT-LLM inference graphs using the **DynamoGraphDeployment** resource.
 
+The top-level `deploy/*.yaml` templates use `nvidia.com/v1alpha1` for compatibility with existing tooling. Equivalent `nvidia.com/v1beta1` templates are available under [`v1beta1/`](./v1beta1/).
+
 ## Available Deployment Patterns
 
 ### 1. **Aggregated Deployment** (`agg.yaml`)
@@ -27,16 +29,16 @@ High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
 Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server (with kv router mode enabled)
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker (2 replicas for load balancing)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (2 replicas for load balancing)
 
 ### 5. **Aggregated Deployment with Config** (`agg-with-config.yaml`)
 Aggregated deployment with custom configuration.
@@ -53,8 +55,8 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `Frontend`: HTTP API server coordinating between workers
 - `Planner`: SLA-based planner that monitors performance and scales workers automatically
 - `Prometheus`: Metrics collection and monitoring
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker
 
 > [!NOTE]
 > This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.

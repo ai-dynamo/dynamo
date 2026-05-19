@@ -67,9 +67,11 @@ class GMSMemorySaverImpl:
         self,
         device_index: int,
         mode=None,
+        ro_connect_timeout_ms=None,
     ):
         self._device = torch.device("cuda", device_index)
         self.imported_weights_bytes = 0
+        self.ro_connect_timeout_ms = ro_connect_timeout_ms
         requested_mode = mode or RequestedLockType.RW_OR_RO
         self.allocators = {
             tag: get_or_create_gms_client_memory_manager(
@@ -170,7 +172,10 @@ class GMSMemorySaverImpl:
                 continue
 
             logger.info("[GMS] Remapping %s", target_tag)
-            self.allocators[target_tag].connect(_TAG_LOCK_TYPES[target_tag])
+            timeout_ms = self.ro_connect_timeout_ms if target_tag == "weights" else None
+            self.allocators[target_tag].connect(
+                _TAG_LOCK_TYPES[target_tag], timeout_ms=timeout_ms
+            )
             if target_tag == "kv_cache":
                 # KV cache resumes into a new RW layout epoch, so the handles
                 # must be re-created before the VA range is mapped again.

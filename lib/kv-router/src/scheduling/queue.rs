@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -13,7 +13,10 @@ use tokio::time::Instant;
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
-use super::types::{SchedulingRequest, SchedulingResponse, pinned_worker_config};
+use super::types::{
+    RoutingEligibility, SchedulingContext, SchedulingRequest, SchedulingResponse,
+    pinned_worker_config,
+};
 use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
@@ -143,7 +146,9 @@ impl<
     /// When `allowed_worker_ids` is set on the request without an exact pin
     /// (external routing), the capacity check is skipped.
     pub async fn enqueue(&self, mut request: SchedulingRequest) {
-        if let Err(error) = request.validate_worker_constraints() {
+        let eligibility = request.eligibility();
+
+        if let Err(error) = eligibility.validate_pinned_worker() {
             request.respond(Err(error));
             return;
         }
@@ -156,20 +161,19 @@ impl<
             return;
         };
 
-        if request.bypass_capacity_check() {
+        if eligibility.bypasses_capacity_check() {
             self.admit_one(request, decay_now).await;
             return;
         }
 
-        if self.all_workers_busy(
-            threshold,
-            request.allowed_worker_ids.as_ref(),
-            request.pinned_worker,
-            decay_now,
-        ) {
+        if self.all_workers_busy(threshold, request.eligibility(), decay_now) {
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
-            let key = self.policy.enqueue_key(arrival_offset, &request);
+            let key = {
+                let workers = self.workers_with_configs.borrow();
+                self.policy
+                    .enqueue_key(arrival_offset, SchedulingContext::new(&request, &workers))
+            };
             let isl_tokens = request.isl_tokens;
             self.pending.lock().await.push(QueueEntry { key, request });
             self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
@@ -191,11 +195,16 @@ impl<
         if S::DYNAMIC {
             let now = self.start_time.elapsed();
             let mut heap = self.pending.lock().await;
+            let workers = self.workers_with_configs.borrow();
             let rekeyed: Vec<_> = std::mem::take(&mut *heap)
                 .into_vec()
                 .into_iter()
                 .map(|e| QueueEntry {
-                    key: self.policy.rekey(now, &e.key, &e.request),
+                    key: self.policy.rekey(
+                        now,
+                        &e.key,
+                        SchedulingContext::new(&e.request, &workers),
+                    ),
                     request: e.request,
                 })
                 .collect();
@@ -213,12 +222,7 @@ impl<
             // drain overhead bounded to the heap front. A blocked pinned or
             // otherwise constrained request can temporarily stall later
             // schedulable entries until we adopt a cheaper non-HOL strategy.
-            if self.all_workers_busy(
-                threshold,
-                front.request.allowed_worker_ids.as_ref(),
-                front.request.pinned_worker,
-                decay_now,
-            ) {
+            if self.all_workers_busy(threshold, front.request.eligibility(), decay_now) {
                 break;
             }
             let entry = heap.pop().expect("heap front vanished before pop");
@@ -234,15 +238,11 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
     async fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens_with_prefill_tracking(
-                request.token_seq.as_deref(),
-                request.isl_tokens,
-                request.overlaps.clone(),
-                request.track_prefill_tokens,
-                decay_now,
-            );
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
+            request.token_seq.as_deref(),
+            &request.prefill_token_deltas(),
+            decay_now,
+        );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
 
@@ -263,7 +263,8 @@ impl<
 
         request.respond(Ok(SchedulingResponse {
             best_worker: selection.worker,
-            overlap_blocks: selection.overlap_blocks,
+            effective_overlap_blocks: selection.effective_overlap_blocks,
+            cached_tokens: selection.cached_tokens,
         }));
 
         if !request.update_states {
@@ -277,7 +278,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selection.overlap_blocks,
+            selection.cached_tokens,
             request.track_prefill_tokens,
         );
 
@@ -291,7 +292,7 @@ impl<
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
             },
-            decay_now,
+            Instant::now(),
         ) {
             tracing::warn!("Failed to add request {request_id}: {e}");
         }
@@ -300,14 +301,14 @@ impl<
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let prefix = cached_tokens.min(isl_tokens);
         let effective_isl = isl_tokens.saturating_sub(prefix);
         if effective_isl == 0 {
             return None;
@@ -353,17 +354,19 @@ impl<
     fn all_workers_busy(
         &self,
         threshold: f64,
-        allowed: Option<&HashSet<WorkerId>>,
-        pinned_worker: Option<WorkerWithDpRank>,
+        eligibility: RoutingEligibility<'_>,
         decay_now: Instant,
     ) -> bool {
         let active_tokens = self.slots.active_tokens(decay_now);
         let configs = self.workers_with_configs.borrow();
 
-        if let Some(worker) = pinned_worker {
+        if let Some(worker) = eligibility.pinned_worker() {
             let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
                 return false;
             };
+            if !eligibility.allows_worker(worker.worker_id, config) {
+                return false;
+            }
 
             let max_batched = config
                 .max_num_batched_tokens()
@@ -374,9 +377,7 @@ impl<
 
         let mut checked_any = false;
         for (&worker_id, config) in configs.iter() {
-            if let Some(ids) = allowed
-                && !ids.contains(&worker_id)
-            {
+            if !eligibility.allows_worker(worker_id, config) {
                 continue;
             }
             let dp_size = config.data_parallel_size();
@@ -400,7 +401,7 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
@@ -408,7 +409,7 @@ mod tests {
     use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::protocols::{OverlapScores, WorkerSelectionResult, WorkerWithDpRank};
+    use crate::protocols::{WorkerSelectionResult, WorkerWithDpRank};
     use crate::scheduling::types::KvSchedulerError;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -482,11 +483,7 @@ mod tests {
                 })
                 .min_by_key(|worker| {
                     (
-                        request
-                            .prefill_tokens
-                            .get(worker)
-                            .copied()
-                            .unwrap_or(request.isl_tokens),
+                        request.prefill_tokens_for(*worker),
                         request.decode_blocks.get(worker).copied().unwrap_or(0),
                         worker.worker_id,
                         worker.dp_rank,
@@ -498,8 +495,9 @@ mod tests {
 
             Ok(WorkerSelectionResult {
                 worker,
-                required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
-                overlap_blocks: request.overlaps.scores.get(&worker).copied().unwrap_or(0),
+                required_blocks: request.request_blocks(block_size),
+                effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
+                cached_tokens: request.effective_cached_tokens_for(worker),
             })
         }
     }
@@ -628,7 +626,9 @@ mod tests {
             maybe_request_id: Some(request_id.to_string()),
             token_seq: None,
             isl_tokens,
-            overlaps: OverlapScores::default(),
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -639,6 +639,8 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         (req, rx)
@@ -1019,7 +1021,9 @@ mod tests {
             maybe_request_id: Some("filter-0".to_string()),
             token_seq: None,
             isl_tokens: isl,
-            overlaps: OverlapScores::default(),
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::new(),
+            effective_cached_tokens: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -1030,6 +1034,8 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: Some(allowed),
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
+            shared_cache_hits: None,
             resp_tx: Some(tx),
         };
         queue.enqueue(req).await;
@@ -1062,6 +1068,46 @@ mod tests {
             resp,
             Err(KvSchedulerError::PinnedWorkerNotAllowed { worker_id: 0 })
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_disallowed_worker_ids_fail_without_queueing() {
+        let (queue, _slots) = make_queue(1, 16, 256, Some(0.0));
+        let (mut req, rx) = make_request("disallowed", 256);
+        req.allowed_worker_ids = Some(HashSet::from([999]));
+
+        queue.enqueue(req).await;
+
+        let resp = rx.await.expect("oneshot dropped");
+        assert!(matches!(resp, Err(KvSchedulerError::NoEndpoints)));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_incompatible_required_taints_fail_without_queueing() {
+        let (queue, _slots, cfg_tx) = make_queue_with_sender(1, 16, 256, Some(0.0), None);
+        let mut configs = HashMap::new();
+        configs.insert(
+            0_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(256),
+                taints: HashSet::from(["mdc-a".to_string()]),
+                ..Default::default()
+            },
+        );
+        cfg_tx.send(configs).unwrap();
+
+        let (mut req, rx) = make_request("tainted", 256);
+        req.routing_constraints = crate::protocols::RoutingConstraints {
+            required_taints: HashSet::from(["mdc-b".to_string()]),
+            preferred_taints: HashMap::new(),
+        };
+
+        queue.enqueue(req).await;
+
+        let resp = rx.await.expect("oneshot dropped");
+        assert!(matches!(resp, Err(KvSchedulerError::NoEndpoints)));
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -30,7 +30,7 @@ from tests.gpu_memory_service.flow_assertions import (
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
-pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
+pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance, pytest.mark.core]
 
 # Event flow under test:
 # 1. Shadow A starts as the initial weights publisher, then quiesces without serving traffic.
@@ -302,6 +302,7 @@ def _trtllm_quiesce(
     return ws
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450")
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1

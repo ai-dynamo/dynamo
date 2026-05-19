@@ -189,7 +189,8 @@ class AudioGenerationHandler:
             prompt=prompt,
             sampling_params_list=None,
             request_type=RequestType.AUDIO_GENERATION,
-            response_format=req.response_format,
+            response_format=req.data_source,
+            output_format=req.response_format,
             speed=req.speed or 1.0,
         )
 
@@ -245,7 +246,8 @@ class AudioGenerationHandler:
             prompt=prompt,
             sampling_params_list=None,
             request_type=RequestType.AUDIO_GENERATION,
-            response_format=req.response_format,
+            response_format=req.data_source,
+            output_format=req.response_format,
             speed=req.speed or 1.0,
         )
 

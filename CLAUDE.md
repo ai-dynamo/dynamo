@@ -19,10 +19,10 @@ your help based on which one you're talking to.
 
 | Goal | Start here |
 |---|---|
-| Deploy a recipe end-to-end | [`.claude/skills/quickstart/SKILL.md`](.claude/skills/quickstart/SKILL.md) (or [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) for the human-facing guide) |
-| Preflight the cluster before deploying | [`.claude/skills/verify-cluster/SKILL.md`](.claude/skills/verify-cluster/SKILL.md) |
-| Inspect a running deployment | [`.claude/skills/inspect-pods/SKILL.md`](.claude/skills/inspect-pods/SKILL.md) |
-| Diagnose a failure | [`.claude/skills/troubleshoot/SKILL.md`](.claude/skills/troubleshoot/SKILL.md) (skill) or [docs/troubleshooting.md](docs/troubleshooting.md) (human-facing) |
+| Deploy a recipe end-to-end | [`.agents/skills/quickstart/SKILL.md`](.agents/skills/quickstart/SKILL.md) (or [docs/getting-started/quickstart.mdx](docs/getting-started/quickstart.mdx) for the human-facing guide) |
+| Preflight the cluster before deploying | [`.agents/skills/verify-cluster/SKILL.md`](.agents/skills/verify-cluster/SKILL.md) |
+| Inspect a running deployment | [`.agents/skills/inspect-pods/SKILL.md`](.agents/skills/inspect-pods/SKILL.md) |
+| Diagnose a failure | [`.agents/skills/troubleshoot/SKILL.md`](.agents/skills/troubleshoot/SKILL.md) (skill) or [docs/troubleshooting.md](docs/troubleshooting.md) (human-facing) |
 | Pick or compose an example | [examples/README.md](examples/README.md) (use-case index) |
 | Apply a production recipe | [recipes/README.md](recipes/README.md) |
 | Pick the right backend | [docs/backends/](docs/backends/) |
@@ -34,7 +34,7 @@ your help based on which one you're talking to.
 |---|---|
 | Repo conventions, DCO, sign-off | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | File a bug, propose a DEP, monitor a PR | [SKILLS.md](SKILLS.md) "Contributor skills" |
-| Update the docs site | [.claude/skills/dynamo-docs/SKILL.md](.claude/skills/dynamo-docs/SKILL.md) |
+| Update the docs site | [.agents/skills/dynamo-docs/SKILL.md](.agents/skills/dynamo-docs/SKILL.md) |
 | Run / extend the Kubernetes operator | [deploy/cloud/operator/](deploy/cloud/operator/) |
 
 ## Conventions for agents
@@ -43,7 +43,7 @@ your help based on which one you're talking to.
   sglang-runtime, tensorrtllm-runtime, mocker-runtime) are public on NGC.
   Do not invent `imagePullSecrets` steps unless the user is pulling from a
   private registry mirror or a non-public third-party image.
-- Treat `.claude/skills/<name>/SKILL.md` as the authoritative procedure for any
+- Treat `.agents/skills/<name>/SKILL.md` as the authoritative procedure for any
   skill listed in `SKILLS.md`. The table in `SKILLS.md` is an index, not the
   procedure.
 - Use `examples/` for "show me how this works" code; use `recipes/` for
@@ -52,7 +52,7 @@ your help based on which one you're talking to.
   [Feature Support Matrix](docs/backends/trtllm/README.md#feature-support-matrix),
   not in individual launch scripts.
 - User-facing skill modules live alongside the contributor ones under
-  `.claude/skills/` (e.g. `quickstart`, `verify-cluster`, `inspect-pods`,
+  `.agents/skills/` (e.g. `quickstart`, `verify-cluster`, `inspect-pods`,
   `troubleshoot`). The inline procedures in `SKILLS.md` are the same content
   in narrative form for users without an agent CLI.
 

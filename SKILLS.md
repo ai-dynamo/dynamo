@@ -21,10 +21,10 @@ instead of the inline procedures below.
 
 | Skill | Purpose |
 |---|---|
-| [`quickstart`](.claude/skills/quickstart/SKILL.md) | Walk a recipe from zero to a smoke-tested deployment -- recipe pick, namespace + HF secret, storage class, model cache, deploy, ready-wait, port-forward, smoke test. |
-| [`verify-cluster`](.claude/skills/verify-cluster/SKILL.md) | Preflight: CRDs, default storage class, GPU driver, image-pull, GPU operator. Returns go/no-go with remediation. |
-| [`inspect-pods`](.claude/skills/inspect-pods/SKILL.md) | Pod status + logs + describe + events + frontend port-forward, with the right Dynamo pod selector. |
-| [`troubleshoot`](.claude/skills/troubleshoot/SKILL.md) | Match a failure symptom to a ranked cause + fix from `docs/troubleshooting.md`, with live cluster evidence. |
+| [`quickstart`](.agents/skills/quickstart/SKILL.md) | Walk a recipe from zero to a smoke-tested deployment -- recipe pick, namespace + HF secret, storage class, model cache, deploy, ready-wait, port-forward, smoke test. |
+| [`verify-cluster`](.agents/skills/verify-cluster/SKILL.md) | Preflight: CRDs, default storage class, GPU driver, image-pull, GPU operator. Returns go/no-go with remediation. |
+| [`inspect-pods`](.agents/skills/inspect-pods/SKILL.md) | Pod status + logs + describe + events + frontend port-forward, with the right Dynamo pod selector. |
+| [`troubleshoot`](.agents/skills/troubleshoot/SKILL.md) | Match a failure symptom to a ranked cause + fix from `docs/troubleshooting.md`, with live cluster evidence. |
 
 The procedures below remain as a fallback for users without an agent CLI.
 
@@ -73,23 +73,23 @@ nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1
 
 > **Audience:** Dynamo maintainers and AI agents (Claude Code, Cursor) helping
 > them. Each entry is a runnable skill module under
-> [`.claude/skills/`](.claude/skills/) with its own `SKILL.md` and supporting
+> [`.agents/skills/`](.agents/skills/) with its own `SKILL.md` and supporting
 > files.
 
 | Skill | Purpose |
 |---|---|
-| [`debug-session`](.claude/skills/debug-session/SKILL.md) | Start a structured debugging session with a worklog file for an issue in the Dynamo ecosystem. |
-| [`dep-create`](.claude/skills/dep-create/SKILL.md) | Create a new Dynamo Enhancement Proposal (DEP) as a GitHub Issue on `ai-dynamo/dynamo`. |
-| [`dep-status`](.claude/skills/dep-status/SKILL.md) | List DEP issues with status, area, PIC, and approval state; find DEPs related to a topic. |
-| [`dep-update`](.claude/skills/dep-update/SKILL.md) | Update DEP status through its lifecycle — triage, review, approve, defer, or close. |
-| [`dynamo-docs`](.claude/skills/dynamo-docs/SKILL.md) | Maintain the Dynamo Fern docs site — add, update, move, or remove pages. |
-| [`gh-issue-bug`](.claude/skills/gh-issue-bug/SKILL.md) | File a well-structured bug report against `ai-dynamo/dynamo` using conversation context. |
-| [`pr-monitor`](.claude/skills/pr-monitor/SKILL.md) | Check CI status, analyze failures, and explain skips for a Dynamo PR. |
-| [`tool-parser-generator`](.claude/skills/tool-parser-generator/SKILL.md) | Generate optimized tool-call parsers from HuggingFace model chat templates. |
+| [`debug-session`](.agents/skills/debug-session/SKILL.md) | Start a structured debugging session with a worklog file for an issue in the Dynamo ecosystem. |
+| [`dep-create`](.agents/skills/dep-create/SKILL.md) | Create a new Dynamo Enhancement Proposal (DEP) as a GitHub Issue on `ai-dynamo/dynamo`. |
+| [`dep-status`](.agents/skills/dep-status/SKILL.md) | List DEP issues with status, area, PIC, and approval state; find DEPs related to a topic. |
+| [`dep-update`](.agents/skills/dep-update/SKILL.md) | Update DEP status through its lifecycle — triage, review, approve, defer, or close. |
+| [`dynamo-docs`](.agents/skills/dynamo-docs/SKILL.md) | Maintain the Dynamo Fern docs site — add, update, move, or remove pages. |
+| [`gh-issue-bug`](.agents/skills/gh-issue-bug/SKILL.md) | File a well-structured bug report against `ai-dynamo/dynamo` using conversation context. |
+| [`pr-monitor`](.agents/skills/pr-monitor/SKILL.md) | Check CI status, analyze failures, and explain skips for a Dynamo PR. |
+| [`tool-parser-generator`](.agents/skills/tool-parser-generator/SKILL.md) | Generate optimized tool-call parsers from HuggingFace model chat templates. |
 
 ### Adding a contributor skill
 
-1. Add a markdown file under `.claude/skills/<skill-name>/SKILL.md` with frontmatter:
+1. Add a markdown file under `.agents/skills/<skill-name>/SKILL.md` with frontmatter:
    ```yaml
    ---
    name: <skill-name>

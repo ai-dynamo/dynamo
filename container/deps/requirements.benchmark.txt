@@ -4,4 +4,3 @@
 # Benchmark and profiling tool dependencies.
 
 aiperf==0.6.0
-genai-perf==0.0.15
