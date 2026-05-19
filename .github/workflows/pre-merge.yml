@@ -21,6 +21,7 @@ on:
     - main
     - release/*.*.*
   pull_request:
+  workflow_dispatch:
 
 # Cancel any previous check runs for the same pull request to avoid redundant workflows.
 concurrency:
