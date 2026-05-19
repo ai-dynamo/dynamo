@@ -751,7 +751,11 @@ mod tests {
         }
     }
 
-    impl traits::Tokenizer for FailingDecoder {}
+    impl traits::Tokenizer for FailingDecoder {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
 
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
     /// should propagate the error. In the backend unfold closure, this error

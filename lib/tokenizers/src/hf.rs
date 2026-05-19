@@ -63,7 +63,11 @@ impl Decoder for HuggingFaceTokenizer {
     }
 }
 
-impl Tokenizer for HuggingFaceTokenizer {}
+impl Tokenizer for HuggingFaceTokenizer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
 
 impl From<HfTokenizer> for HuggingFaceTokenizer {
     fn from(tokenizer: HfTokenizer) -> Self {

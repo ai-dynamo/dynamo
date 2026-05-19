@@ -2747,6 +2747,8 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
+ "dashmap",
  "fastokens",
  "rayon",
  "rustc-hash 1.1.0",

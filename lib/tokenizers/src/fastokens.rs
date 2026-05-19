@@ -57,7 +57,11 @@ impl Decoder for FastTokenizer {
     }
 }
 
-impl Tokenizer for FastTokenizer {}
+impl Tokenizer for FastTokenizer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
 
 #[cfg(test)]
 mod tests {

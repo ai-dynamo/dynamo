@@ -41,7 +41,11 @@ impl tokenizer_traits::Decoder for TestTokenizer {
     }
 }
 
-impl tokenizer_traits::Tokenizer for TestTokenizer {}
+impl tokenizer_traits::Tokenizer for TestTokenizer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
 
 fn make_decoder(
     max_tokens: Option<u32>,
