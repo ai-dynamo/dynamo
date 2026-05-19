@@ -821,9 +821,7 @@ class TestScalingInProgress:
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is None
         assert effects.diagnostics.load_decision_reason == "scaling_in_progress"
-        assert (
-            effects.diagnostics.load_decision_reason_prefill == "scaling_in_progress"
-        )
+        assert effects.diagnostics.load_decision_reason_prefill == "scaling_in_progress"
         assert effects.diagnostics.load_decision_reason_decode == "scaling_in_progress"
 
 
