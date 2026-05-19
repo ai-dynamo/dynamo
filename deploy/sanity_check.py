@@ -1604,7 +1604,7 @@ class FilePermissionsInfo(NodeInfo):
 
         # Check .git directory separately
         git_dir = os.path.join(dynamo_root, ".git")
-        if os.path.exists(git_dir):
+        if os.path.isdir(git_dir):
             git_results = self._check_permissions_unified(
                 [git_dir], "Dynamo .git directory", recursive=recursive
             )
@@ -1612,6 +1612,26 @@ class FilePermissionsInfo(NodeInfo):
                 if self.runtime_check and result.status == NodeStatus.ERROR:
                     result.status = NodeStatus.WARNING
                 self.add_child(result)
+        elif os.path.isfile(git_dir):
+            readable = os.access(git_dir, os.R_OK)
+            writable = os.access(git_dir, os.W_OK)
+            try:
+                with open(git_dir, "r", encoding="utf-8") as f:
+                    first_line = f.readline().strip()
+            except OSError:
+                first_line = ""
+            desc = "worktree metadata file"
+            if first_line.startswith("gitdir:"):
+                desc = f"{desc}, {first_line}"
+            desc = f"{desc}, readable={str(readable).lower()}, writable={str(writable).lower()}"
+            status = NodeStatus.OK if readable and writable else NodeStatus.WARNING
+            self.add_child(
+                NodeInfo(
+                    label=f"Dynamo .git metadata ({self._replace_home_with_var(git_dir)})",
+                    desc=desc,
+                    status=status,
+                )
+            )
         else:
             self.add_child(
                 NodeInfo(
