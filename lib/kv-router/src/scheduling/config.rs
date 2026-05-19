@@ -21,6 +21,10 @@ const fn default_track_prefill_tokens() -> bool {
 
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
 
+/// Default max queue depth per worker for `router_queue_depth_by_missing_isl`.
+/// This matches the TCP request plane's fixed 1024-slot buffer per connection.
+pub const DEFAULT_ROUTER_QUEUE_DEPTH_PER_WORKER: usize = 1024;
+
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
         Ok(value) => value.parse::<usize>().map_err(|error| {
@@ -180,10 +184,11 @@ pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
 
 impl RouterQueueDepthTiers {
     /// Default: 1024 slots per worker (high ceiling for bursty traffic).
+    /// See [`DEFAULT_ROUTER_QUEUE_DEPTH_PER_WORKER`].
     pub fn default_per_worker() -> Self {
         Self(vec![RouterQueueDepthByMissingIslTier {
             missing_cache_tokens_floor: 0,
-            max_queue_depth: 1024,
+            max_queue_depth: DEFAULT_ROUTER_QUEUE_DEPTH_PER_WORKER,
         }])
     }
 
