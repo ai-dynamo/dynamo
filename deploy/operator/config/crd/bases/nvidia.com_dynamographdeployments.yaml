@@ -240,13 +240,6 @@ spec:
                           pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                           type: string
                         enforcement:
-                          allOf:
-                            - enum:
-                                - required
-                                - preferred
-                            - enum:
-                                - required
-                                - preferred
                           default: required
                           description: |-
                             Enforcement controls how the selected prefill worker's topology is
@@ -254,6 +247,9 @@ spec:
                             same topology domain as the selected prefill worker. "preferred" keeps
                             all decode workers eligible, but biases selection toward workers in the
                             same topology domain. Defaults to "required".
+                          enum:
+                            - required
+                            - preferred
                           type: string
                         labelKey:
                           description: |-
@@ -20645,13 +20641,6 @@ spec:
                           pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                           type: string
                         enforcement:
-                          allOf:
-                            - enum:
-                                - required
-                                - preferred
-                            - enum:
-                                - required
-                                - preferred
                           default: required
                           description: |-
                             enforcement controls how the selected prefill worker's topology is
@@ -20659,6 +20648,9 @@ spec:
                             same topology domain as the selected prefill worker. "preferred" keeps
                             all decode workers eligible, but biases selection toward workers in the
                             same topology domain. Defaults to "required".
+                          enum:
+                            - required
+                            - preferred
                           type: string
                         labelKey:
                           description: |-

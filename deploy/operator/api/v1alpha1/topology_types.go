@@ -122,7 +122,6 @@ type KvTransferPolicy struct {
 	// same topology domain. Defaults to "required".
 	// +optional
 	// +kubebuilder:default=required
-	// +kubebuilder:validation:Enum=required;preferred
 	Enforcement KvTransferEnforcement `json:"enforcement,omitempty"`
 
 	// PreferredWeight is required and used only when enforcement is
