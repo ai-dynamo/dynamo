@@ -19,7 +19,8 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
+from urllib.parse import parse_qsl
 
 import yaml
 from pydantic import AliasChoices, BaseModel, Field, model_validator
@@ -166,6 +167,23 @@ class PlannerConfig(BaseModel):
             "preserves the previous PrometheusConnect(disable_ssl=True) "
             "behavior. Set True for hardened monitoring stacks; pair with "
             "an injected CA bundle if the upstream uses a private CA."
+        ),
+    )
+    metric_pulling_prometheus_extra_query_params: Optional[Dict[str, str]] = Field(
+        default_factory=lambda: (
+            dict(
+                parse_qsl(
+                    os.environ.get("PROMETHEUS_EXTRA_QUERY_PARAMS", ""),
+                    strict_parsing=True,
+                )
+            )
+            or None
+        ),
+        exclude=True,
+        description=(
+            "Fixed key/value pairs appended as URL query parameters on every PromQL "
+            "request. Set via PROMETHEUS_EXTRA_QUERY_PARAMS as a URL query string, "
+            "e.g. `namespace=my-ns&tenant=foo`."
         ),
     )
     metric_reporting_prometheus_port: int = Field(
