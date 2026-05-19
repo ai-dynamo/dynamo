@@ -152,16 +152,6 @@ navigation:
   # ==================== User Guides ====================
   - section: User Guides
     contents:
-      - section: Agents
-        slug: agents
-        path: agents/README.md
-        contents:
-          - page: Agent Tracing
-            path: agents/agent-tracing.md
-          - page: Agent Hints
-            path: agents/agent-hints.md
-          - page: Use Pi-Mono with Dynamo
-            path: agents/pi-mono.md
       - page: Disaggregated Serving
         path: features/disaggregated-serving/README.md
       - page: KV Cache Aware Routing
@@ -186,6 +176,16 @@ navigation:
             path: reasoning/dynamo.md
           - page: Reasoning Parsing (Engine Fallback)
             path: reasoning/engine-fallback.md
+      - section: Agents
+        slug: agents
+        path: agents/README.md
+        contents:
+          - page: Agent Tracing
+            path: agents/agent-tracing.md
+          - page: Agent Hints
+            path: agents/agent-hints.md
+          - page: Use Pi-Mono with Dynamo
+            path: agents/pi-mono.md
       - section: Multimodal
         path: features/multimodal/README.md
         contents:
