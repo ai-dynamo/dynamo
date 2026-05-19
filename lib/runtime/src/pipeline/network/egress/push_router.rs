@@ -483,14 +483,8 @@ where
         Ok(router)
     }
 
-    /// Empty-pool error for non-KV selectors. Distinguishes the
-    /// "fleet is overloaded" case (`ResourceExhausted` / 503 retry-later,
-    /// matching the post-selection check in `route()` and the KV scheduler's
-    /// `AllEligibleWorkersOverloaded`) from "no workers registered at all"
-    /// or "all routable workers were reported down" (generic 5xx
-    /// "no instances found"). Overload is signaled only when `routable_ids`
-    /// is non-empty and `free_ids` is empty — i.e., workers are alive and
-    /// up but every one of them is over its admission threshold.
+    /// `ResourceExhausted` when workers are routable but all overloaded;
+    /// `anyhow!("no instances found")` when no routable workers exist.
     fn empty_free_pool_error(&self, routing_instances: &RoutingInstances) -> anyhow::Error {
         if !routing_instances.routable_ids().is_empty() {
             let cause = PipelineError::ServiceOverloaded(
@@ -636,9 +630,7 @@ where
             cuda_to_cpu_ratio,
         );
 
-        // Select least-loaded within the chosen group. An empty group means
-        // free workers exist but the budget-selected device class has none —
-        // same retry-later semantic as the empty-free-pool case.
+        // Empty group: budget-selected device class has no free workers.
         let instance_id = state
             .select_exact_min_and_increment(&candidates)
             .await
@@ -872,11 +864,8 @@ where
             if let Some(result) = resolve_transport(instance_id) {
                 result
             } else {
-                // Instance vanished — pick a different one from the current
-                // free set and retry the lookup once. Using `free_ids()` keeps
-                // the fallback consistent with the pre-selection filter so we
-                // don't silently dispatch to an overloaded peer without
-                // re-running the admission check.
+                // Instance vanished — pick another from free_ids (same filter
+                // as pre-selection) and retry the lookup once.
                 let routing_instances = self.client.routing_instances();
                 let fallback_id = routing_instances
                     .free_ids()
@@ -1286,10 +1275,59 @@ mod tests {
         let result = router.generate(SingleIn::new(42u64)).await;
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
+        // With pre-selection filtering on free_ids, the single-overloaded-worker
+        // case is now caught before selection rather than after — the chosen
+        // worker is never overloaded because the candidate pool excludes it.
+        // The post-selection check in route() remains as a race-condition
+        // backstop.
         assert!(
-            msg.contains("Selected worker is overloaded"),
-            "expected selected-worker overload rejection, got: {msg}"
+            msg.contains("All workers are busy"),
+            "expected empty-free-pool rejection, got: {msg}"
         );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn round_robin_excludes_overloaded_workers_from_candidates() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_round_robin_excludes_overloaded".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        // Two workers, mark one overloaded. round_robin must never select
+        // the overloaded one — that's the whole point of selecting from
+        // free_ids instead of routable_ids. The post-selection overload
+        // check in route() would otherwise 503 one of N requests on each
+        // pass, which is the bug this PR closes for non-KV selectors.
+        client.override_instance_avail(vec![1, 2]);
+        client.set_overloaded_instances(&[1]);
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        // Round-robin over N requests should land on worker 2 every time.
+        // We use peek_next_worker for a side-effect-free probe.
+        for _ in 0..6 {
+            let selected = router
+                .peek_next_worker()
+                .expect("peek should succeed with a free worker");
+            assert_eq!(
+                selected, 2,
+                "overloaded worker 1 must not appear in the candidate set"
+            );
+        }
 
         rt.shutdown();
     }
