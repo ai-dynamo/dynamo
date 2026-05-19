@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/h200_disagg.yaml
+name: A5_oscillating_drift_sub_interval
+description: >
+  Decode power bias oscillates with period 4 ticks (< aic_reoptimize_interval
+  of 5 ticks). No sweep storm; mean coefficient stays near 1.0 ± noise band.
+
+events:
+  - type: bias_sine
+    signal: power_bias_decode
+    amplitude: 0.20
+    period_ticks: 4
+    offset: 0.0
+
+assertions:
+  - at_tick: 100
+    field: c_power_d
+    op: "within"
+    value: 1.0
+    tolerance: 0.35
+    description: "Mean c_power_d stays near 1.0 despite oscillation"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

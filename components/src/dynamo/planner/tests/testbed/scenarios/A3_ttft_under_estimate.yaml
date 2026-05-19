@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/h200_disagg.yaml
+name: A3_ttft_under_estimate
+description: >
+  TTFT is 1.4× AIC prediction and ITL is 1.3×. SLA-miss trigger fires;
+  after aic_drift_consecutive_ticks a re-sweep occurs.
+
+fleet:
+  bias:
+    # 1.4 was the original design value but produces observed TTFT ≈ 261ms
+    # after the cap-factor inflation (cap_p=450 against tdp=700) which is
+    # well under the 500ms SLA — no drift trigger. 3.0 puts observed TTFT
+    # at ≈ 560ms, comfortably above SLA so the drift-consecutive counter
+    # actually advances and a re-sweep fires within ``eventually_by_tick``.
+    ttft_bias: 3.0
+    itl_bias: 1.3
+
+assertions:
+  - eventually_by_tick: 50
+    field: sweep_fired
+    op: "=="
+    value: 1.0
+    description: "Optimizer re-sweeps after sustained SLA violation"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

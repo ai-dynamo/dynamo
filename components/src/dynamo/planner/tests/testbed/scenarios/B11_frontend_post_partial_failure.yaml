@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+extends: _base/h200_disagg.yaml
+name: B11_frontend_post_partial_failure
+description: >
+  2/3 of frontend POSTs return 503 for 10 ticks. admission_partial_success_total
+  increments. _apply_aic_config does not roll back; next tick re-fans-out.
+
+planner:
+  admission_mode: autoset
+
+events:
+  # Fault active from startup so the cold-start /busy_threshold fan-out
+  # (which is the only POST fan-out in a no-sweep scenario) hits it. With
+  # failing_fraction=0.67 and 3 synthetic frontend pods the Bernoulli
+  # probability of zero failures is (1-0.67)^3 ≈ 0.036 — vanishingly small.
+  - type: frontend_post_fault
+    at_tick: 0
+    duration_ticks: 30
+    failing_fraction: 0.67
+
+assertions:
+  - eventually_by_tick: 35
+    field: admission_partial_failures
+    op: ">"
+    value: 0
+    description: "Partial POST failure counter increments during fault window"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"
