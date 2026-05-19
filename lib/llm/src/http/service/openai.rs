@@ -1108,8 +1108,14 @@ fn make_dispatch_event(
 
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
 /// `role` is excluded — backends set it on every delta.
+/// A populated `nvext` keeps the chunk alive: annotation flows such as
+/// `query_instance_id` deliver metadata (worker_id, token_ids, timing, …)
+/// on chunks whose `inner` deltas are otherwise empty.
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
+    if resp.nvext.is_some() {
+        return false;
+    }
     resp.inner.usage.is_none()
         && resp.inner.choices.iter().all(|c| {
             let ChatCompletionStreamResponseDelta {
@@ -1132,6 +1138,9 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
 /// Completions variant of [`is_empty_stream_response`].
 fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
     use dynamo_protocols::types::Choice;
+    if resp.nvext.is_some() {
+        return false;
+    }
     resp.inner.usage.is_none()
         && resp.inner.choices.iter().all(|c| {
             let Choice {
@@ -4560,6 +4569,22 @@ mod tests {
             )),
             "function_call present → not empty",
         );
+
+        // Not empty: nvext annotation metadata (e.g. `query_instance_id` flow
+        // emits worker_id + token_ids on a chunk with otherwise empty deltas).
+        let mut nvext_chunk =
+            make_delta(None, None, None, None, None, None, None, None);
+        nvext_chunk.nvext = Some(serde_json::json!({
+            "worker_id": {
+                "prefill_worker_id": 42,
+                "decode_worker_id": 42,
+            },
+            "token_ids": [1, 2, 3],
+        }));
+        assert!(
+            !is_empty_stream_response(&nvext_chunk),
+            "nvext payload (worker_id/token_ids) must not be dropped",
+        );
     }
 
     // ── completions empty-stream-response tests ──────────────────────
@@ -4627,6 +4652,21 @@ mod tests {
         assert!(
             !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
             "usage present → not empty",
+        );
+
+        // Not empty: nvext annotation metadata (mirror of the chat-completion
+        // case — `query_instance_id` etc. ride on `nvext`, not on `text`).
+        let mut nvext_chunk = make_completion_chunk("", None, None);
+        nvext_chunk.nvext = Some(serde_json::json!({
+            "worker_id": {
+                "prefill_worker_id": 42,
+                "decode_worker_id": 42,
+            },
+            "token_ids": [1, 2, 3],
+        }));
+        assert!(
+            !is_empty_completion_stream_response(&nvext_chunk),
+            "nvext payload (worker_id/token_ids) must not be dropped",
         );
     }
 }
