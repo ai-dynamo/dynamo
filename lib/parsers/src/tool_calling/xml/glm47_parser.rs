@@ -423,6 +423,7 @@ mod tests {
         assert!(!detect_tool_call_start_glm47("Just normal text", &config));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/glm47/PARSER.batch.yaml.
     #[test] // PARSER.batch.1
     fn test_parse_simple_tool_call() {
         let config = get_test_config();
@@ -442,6 +443,7 @@ mod tests {
         assert_eq!(normal_text, Some("".to_string()));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1, PARSER.batch.7.d in tests/parity/parser/fixtures/glm47/PARSER.batch.7.yaml, tests/parity/parser/fixtures/glm47/PARSER.batch.yaml.
     #[test] // PARSER.batch.1, PARSER.batch.7
     fn test_parse_tool_call_with_multiple_args() {
         let config = get_test_config();
@@ -459,6 +461,7 @@ mod tests {
         assert_eq!(args.get("date").unwrap().as_str().unwrap(), "2026-03-15");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/glm47/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_tool_call_with_json_value() {
         let config = get_test_config();
@@ -475,6 +478,7 @@ mod tests {
         assert!(filters.is_object());
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b in tests/parity/parser/fixtures/glm47/PARSER.batch.2.yaml.
     #[test] // PARSER.batch.2
     fn test_parse_multiple_tool_calls() {
         let config = get_test_config();
@@ -487,6 +491,7 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/glm47/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.8
     fn test_parse_with_normal_text() {
         let config = get_test_config();
@@ -502,6 +507,7 @@ mod tests {
         );
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/glm47/PARSER.batch.6.yaml.
     #[test] // PARSER.batch.6
     fn test_parse_tool_call_no_args() {
         let config = get_test_config();
@@ -569,6 +575,7 @@ mod tests {
         );
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.c, PARSER.batch.8.a in tests/parity/parser/fixtures/glm47/PARSER.batch.2.yaml, tests/parity/parser/fixtures/glm47/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.2 + PARSER.batch.8 — bug report repro: text + parallel calls
     fn test_parse_text_then_parallel_calls() {
         let config = get_test_config();
@@ -597,6 +604,7 @@ mod tests {
         );
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/glm47/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7, PARSER.fmt.2
     fn test_parse_multiline_arg_value() {
         let config = get_test_config();
@@ -618,6 +626,7 @@ mod tests {
         assert!(content.contains("print(\"Hello, World!\")"));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/glm47/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4
     fn test_malformed_tool_call() {
         let config = get_test_config();
@@ -635,6 +644,7 @@ mod tests {
     // when the inner arg pairs are well-formed, treat EOF as the end token
     // and extract the call. The arg_key opener gates recovery so plain text
     // that happens to start with `<tool_call>` is still preserved verbatim.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/glm47/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.5
     fn test_parse_no_end_tag_complete_args_recovers() {
         let config = Glm47ParserConfig {
@@ -651,6 +661,7 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b, PARSER.batch.5.a in tests/parity/parser/fixtures/glm47/PARSER.batch.2.yaml, tests/parity/parser/fixtures/glm47/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.5
     fn test_parse_no_end_tag_multiple_calls_recovers() {
         let config = Glm47ParserConfig {
@@ -666,6 +677,7 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.c, PARSER.batch.13 in tests/parity/parser/fixtures/glm47/PARSER.batch.13.yaml, tests/parity/parser/fixtures/glm47/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.4, PARSER.batch.8
     fn test_unparseable_block_dropped_no_tag_leak() {
         let config = get_test_config();
@@ -839,6 +851,7 @@ mod tests {
     /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/glm47/PARSER.batch.yaml.
     #[test] // PARSER.batch.9
     fn test_parse_glm47_empty_and_whitespace_inputs() {
         let config = get_test_config();
@@ -861,6 +874,7 @@ mod tests {
     /// PARSER.batch.10 — duplicate calls (same function name twice in one section).
     /// Universal gap noted in the test taxonomy; pin parser-level behavior —
     /// both calls returned with distinct ids.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/glm47/PARSER.batch.yaml.
     #[test] // PARSER.batch.10
     fn test_parse_glm47_duplicate_calls_same_name() {
         let config = get_test_config();

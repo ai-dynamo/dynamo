@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,8 +14,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from dynamo.planner.core.types import EngineCapabilities
-
-os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
@@ -165,6 +162,9 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_model_path": args.aic_model_path,
         "aic_backend_version": args.aic_backend_version,
         "aic_tp_size": args.aic_tp_size,
+        "aic_moe_tp_size": args.aic_moe_tp_size,
+        "aic_moe_ep_size": args.aic_moe_ep_size,
+        "aic_attention_dp_size": args.aic_attention_dp_size,
     }
     if not any(value is not None for value in values.values()):
         return None
@@ -184,6 +184,9 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_model_path=values["aic_model_path"],
         aic_tp_size=values["aic_tp_size"] or 1,
         aic_backend_version=values["aic_backend_version"],
+        aic_moe_tp_size=values["aic_moe_tp_size"],
+        aic_moe_ep_size=values["aic_moe_ep_size"],
+        aic_attention_dp_size=values["aic_attention_dp_size"],
     )
 
 
@@ -383,6 +386,9 @@ def _run_planner_replay(
                     model_path=ref_args.aic_model_path,
                     tp_size=ref_args.aic_tp_size or 1,
                     backend_version=ref_args.aic_backend_version,
+                    moe_tp_size=ref_args.aic_moe_tp_size,
+                    moe_ep_size=ref_args.aic_moe_ep_size,
+                    attention_dp_size=ref_args.aic_attention_dp_size,
                 )
             except (
                 ImportError,
@@ -465,6 +471,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-backend-version")
     parser.add_argument("--aic-tp-size", type=int)
     parser.add_argument("--aic-model-path")
+    parser.add_argument("--aic-moe-tp-size", type=int)
+    parser.add_argument("--aic-moe-ep-size", type=int)
+    parser.add_argument("--aic-attention-dp-size", type=int)
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument(

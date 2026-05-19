@@ -1,20 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generic Mooncake JSONL primitives.
+//! Mooncake JSONL primitives.
 //!
-//! This module is intentionally producer-agnostic: it defines the row schema,
+//! This module is producer- and consumer-agnostic: it defines the row schema,
 //! the block-hash-to-id mapping, the token-block hashing helper, and the JSONL
 //! writer. Workload-specific orchestration (session scheduling, tokenization,
-//! parsing) lives elsewhere -- the Claude exporter in
-//! [`crate::coding::claude::export`] is one such producer; future producers
-//! (e.g. a Dynamo agent trace exporter) consume the same primitives.
+//! parsing) lives elsewhere -- the Claude exporter in `dynamo-bench` is one
+//! such producer; the `dynamo-mocker` load generator is one such consumer.
+//!
+//! The [`MooncakeRow`] schema deliberately matches the externally-authored
+//! Mooncake trace format: `timestamp` and `delay` are `f64` milliseconds, and
+//! `input_length`/`output_length`/`timestamp`/`delay` accept the upstream
+//! aliases (`input_tokens`, `output_tokens`, `created_time`, `delay_ms`) on
+//! deserialization. Dynamo-produced traces always emit the canonical names.
 
 use anyhow::{Context, Result, bail};
 use bytemuck::cast_slice;
 use dynamo_tokens::compute_hash_v2;
 use rustc_hash::FxHashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -25,17 +30,29 @@ use std::path::Path;
 /// without a `session_id` are independent request arrivals. Rows that share a
 /// `session_id` are interpreted as closed-loop turns; later turns use `delay`
 /// or timestamp deltas relative to the previous row in that session.
-#[derive(Debug, Clone, Serialize)]
+///
+/// The row type is `Serialize + Deserialize` so the same definition serves
+/// producers and consumers. Field-level aliases on deserialization accept the
+/// upstream Mooncake field names (`input_tokens`, `output_tokens`,
+/// `created_time`, `delay_ms`) without requiring producers to emit them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MooncakeRow {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    pub input_length: usize,
-    pub output_length: usize,
-    pub hash_ids: Vec<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delay: Option<i64>,
+    #[serde(default, alias = "input_tokens")]
+    pub input_length: Option<usize>,
+    #[serde(default, alias = "output_tokens")]
+    pub output_length: Option<usize>,
+    #[serde(default)]
+    pub hash_ids: Option<Vec<u64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "created_time"
+    )]
+    pub timestamp: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "delay_ms")]
+    pub delay: Option<f64>,
 }
 
 /// Maps sequence-aware block hashes to compact, stable `u64` ids.
@@ -141,9 +158,9 @@ pub struct WriterStats {
 ///
 /// The sidecar stream is configured at construction time. Producers that do
 /// not emit sidecar metadata pass `None` for `sidecar_path` and never call
-/// [`Self::write_sidecar`]. When a sidecar path is configured, the path
-/// convention from [`crate::coding::common::sidecar_path_for`] is the typical
-/// choice but not enforced here -- callers pass the sidecar path explicitly.
+/// [`Self::write_sidecar`]. When a sidecar path is configured, callers are
+/// responsible for choosing the path -- this writer does not enforce a naming
+/// convention.
 pub struct MooncakeJsonlWriter {
     output: BufWriter<File>,
     sidecar: Option<BufWriter<File>>,
@@ -250,7 +267,6 @@ pub fn require_positive(name: &str, value: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coding::common::sidecar_path_for;
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
@@ -320,9 +336,9 @@ mod tests {
     fn row_omits_timestamp_and_delay_when_absent() {
         let row = MooncakeRow {
             session_id: Some("s".to_string()),
-            input_length: 4,
-            output_length: 1,
-            hash_ids: vec![0, 1],
+            input_length: Some(4),
+            output_length: Some(1),
+            hash_ids: Some(vec![0, 1]),
             timestamp: None,
             delay: None,
         };
@@ -336,42 +352,76 @@ mod tests {
     fn row_serializes_optional_fields_when_set() {
         let with_timestamp = MooncakeRow {
             session_id: Some("s".to_string()),
-            input_length: 4,
-            output_length: 1,
-            hash_ids: vec![],
-            timestamp: Some(0),
+            input_length: Some(4),
+            output_length: Some(1),
+            hash_ids: Some(vec![]),
+            timestamp: Some(0.0),
             delay: None,
         };
         let with_delay = MooncakeRow {
             session_id: Some("s".to_string()),
-            input_length: 4,
-            output_length: 1,
-            hash_ids: vec![],
+            input_length: Some(4),
+            output_length: Some(1),
+            hash_ids: Some(vec![]),
             timestamp: None,
-            delay: Some(123),
+            delay: Some(123.0),
         };
         let v_ts: Value = serde_json::to_value(&with_timestamp).unwrap();
         let v_dl: Value = serde_json::to_value(&with_delay).unwrap();
-        assert_eq!(v_ts["timestamp"], json!(0));
+        assert_eq!(v_ts["timestamp"], json!(0.0));
         assert!(v_ts.get("delay").is_none());
-        assert_eq!(v_dl["delay"], json!(123));
+        assert_eq!(v_dl["delay"], json!(123.0));
         assert!(v_dl.get("timestamp").is_none());
+    }
+
+    #[test]
+    fn row_deserializes_canonical_field_names() {
+        let raw = r#"{"session_id":"s","input_length":4,"output_length":1,"hash_ids":[0,1],"timestamp":12.5,"delay":3.0}"#;
+        let row: MooncakeRow = serde_json::from_str(raw).unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("s"));
+        assert_eq!(row.input_length, Some(4));
+        assert_eq!(row.output_length, Some(1));
+        assert_eq!(row.hash_ids, Some(vec![0, 1]));
+        assert_eq!(row.timestamp, Some(12.5));
+        assert_eq!(row.delay, Some(3.0));
+    }
+
+    #[test]
+    fn row_deserializes_upstream_mooncake_aliases() {
+        let raw = r#"{"input_tokens":4,"output_tokens":1,"hash_ids":[0,1],"created_time":12.5,"delay_ms":3.0}"#;
+        let row: MooncakeRow = serde_json::from_str(raw).unwrap();
+        assert_eq!(row.input_length, Some(4));
+        assert_eq!(row.output_length, Some(1));
+        assert_eq!(row.timestamp, Some(12.5));
+        assert_eq!(row.delay, Some(3.0));
+    }
+
+    #[test]
+    fn row_deserializes_with_missing_optional_fields() {
+        let raw = r#"{"output_length":2}"#;
+        let row: MooncakeRow = serde_json::from_str(raw).unwrap();
+        assert_eq!(row.session_id, None);
+        assert_eq!(row.input_length, None);
+        assert_eq!(row.output_length, Some(2));
+        assert_eq!(row.hash_ids, None);
+        assert_eq!(row.timestamp, None);
+        assert_eq!(row.delay, None);
     }
 
     #[test]
     fn writer_writes_rows_and_sidecar_jsonl() {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("trace.jsonl");
-        let sidecar = sidecar_path_for(&output);
+        let sidecar = temp.path().join("trace.sidecar.jsonl");
 
         let mut writer = MooncakeJsonlWriter::create(&output, Some(&sidecar)).unwrap();
         writer
             .write_row(&MooncakeRow {
                 session_id: Some("s".to_string()),
-                input_length: 2,
-                output_length: 1,
-                hash_ids: vec![0],
-                timestamp: Some(0),
+                input_length: Some(2),
+                output_length: Some(1),
+                hash_ids: Some(vec![0]),
+                timestamp: Some(0.0),
                 delay: None,
             })
             .unwrap();
@@ -405,14 +455,5 @@ mod tests {
         assert!(!writer.has_sidecar());
         let err = writer.write_sidecar(&json!({})).unwrap_err();
         assert!(err.to_string().contains("sidecar was not configured"));
-    }
-
-    #[test]
-    fn sidecar_path_convention_is_preserved() {
-        let path = std::path::Path::new("/tmp/example/trace.jsonl");
-        assert_eq!(
-            sidecar_path_for(path),
-            std::path::PathBuf::from("/tmp/example/trace.sidecar.jsonl")
-        );
     }
 }

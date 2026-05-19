@@ -123,6 +123,16 @@ impl ModelRuntimeConfig {
         self.inner.taints = taints;
     }
 
+    #[setter]
+    fn set_stable_routing_id(&mut self, stable_routing_id: Option<String>) {
+        self.inner.stable_routing_id = stable_routing_id;
+    }
+
+    #[getter]
+    fn get_stable_routing_id(&self) -> Option<String> {
+        self.inner.stable_routing_id.clone()
+    }
+
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
         self.inner
