@@ -35,8 +35,13 @@ impl RoutedEngine {
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
         let request_context = if let Some(parent_context) = context.as_ref() {
+            let parent_metadata = parent_context.metadata_snapshot();
             let parent_context = parent_context.inner();
-            let child_context = SingleIn::with_id(request, parent_context.id().to_string());
+            let child_context = SingleIn::with_id_and_metadata(
+                request,
+                parent_context.id().to_string(),
+                parent_metadata,
+            );
             let child_controller = child_context.context();
             parent_context.link_child(child_controller.clone());
             if parent_context.is_killed() {
