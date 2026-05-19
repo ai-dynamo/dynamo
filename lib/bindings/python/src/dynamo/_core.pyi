@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -30,6 +31,31 @@ def get_tool_parser_names() -> list[str]:
 
 def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
+    ...
+
+async def parse_tool_call(
+    parser_name: str,
+    message: str,
+    tools_json: Optional[str] = None,
+) -> str:
+    """Parse tool calls from a model output string using the specified parser.
+
+    Args:
+        parser_name: Parser name (e.g. "kimi_k25"). Empty string falls back to default.
+        message:     Model output text to parse.
+        tools_json:  Optional JSON-serialized list of tool definitions in the form
+                     `[{"name": "...", "parameters": {...}}, ...]` (or OpenAI shape
+                     with `{"function": {...}}` wrapper). Used by parsers that need
+                     schema-aware coercion (e.g. XML family).
+
+    Returns:
+        JSON-serialized string `{"calls": [...], "normal_text": str | None}`.
+        Each entry in `calls` is `{"id", "type", "function": {"name", "arguments"}}`
+        with `arguments` itself a JSON-serialized string.
+
+    Raises:
+        ValueError on parser failure or malformed `tools_json`.
+    """
     ...
 
 def run_kv_indexer(args: List[str]) -> None:
@@ -212,6 +238,17 @@ class Client:
         """
         ...
 
+    async def wait_for_instance_by_runtime_data(
+            self,
+            key: str,
+            value: str,
+            timeout_s: float | None = None,
+        ) -> int:
+        """
+        Wait for exactly one instance whose MDC runtime_data contains the given string value.
+        """
+        ...
+
     async def random(
             self,
             request: JsonLike,
@@ -372,6 +409,13 @@ class Context:
         """
         ...
 
+    def notify_first_token(self) -> None:
+        """Fire the first-token signal so the framework can release any
+        deferred ``engine.abort()``. Idempotent; no-op on non-decode
+        requests. Engines normally don't need this — the framework
+        auto-fires on the first non-empty chunk in the response stream."""
+        ...
+
     @property
     def trace_id(self) -> Optional[str]:
         """
@@ -482,6 +526,8 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     enable_eagle: bool
+    taints: Set[str]
+    stable_routing_id: str | None
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -512,6 +558,26 @@ class ModelRuntimeConfig:
     def get_tensor_model_config(self) -> Any | None:
         """Get the tensor model configuration."""
         ...
+
+class RoutingConstraints:
+    """
+    Request-side routing constraints.
+
+    ``required_taints`` is a hard eligibility filter.
+    ``preferred_taints`` maps taint -> signed weight.
+    Positive weights prefer matching workers, negative weights avoid them,
+    and ``0.0`` is neutral. Matching weights are summed and squashed with
+    ``tanh``, so opposite preferences cancel before Dynamo converts the
+    bounded bias into a strictly positive score multiplier.
+    """
+    required_taints: Set[str]
+    preferred_taints: Dict[str, float]
+
+    def __init__(
+        self,
+        required_taints: Optional[Set[str]] = None,
+        preferred_taints: Optional[Dict[str, float]] = None,
+    ) -> None: ...
 
 class OverlapScores:
     """
@@ -732,7 +798,7 @@ class KvEventPublisher:
     def __init__(
         self,
         endpoint: Endpoint,
-        worker_id: int = 0,
+        worker_id: Optional[int] = None,
         kv_block_size: int = 0,
         dp_rank: int = 0,
         enable_local_indexer: bool = False,
@@ -749,7 +815,7 @@ class KvEventPublisher:
 
         Args:
             endpoint: The endpoint to extract component information from for event publishing
-            worker_id: The worker ID (unused, inferred from endpoint)
+            worker_id: Optional worker ID override. Use None to infer from endpoint.
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
             enable_local_indexer: Enable worker-local KV indexer
@@ -1250,7 +1316,9 @@ class KvRouterConfig:
 
     def __init__(
         self,
-        overlap_score_weight: float = 1.0,
+        overlap_score_weight: Optional[float] = None,
+        host_cache_hit_weight: float = 0.75,
+        disk_cache_hit_weight: float = 0.25,
         router_temperature: float = 0.0,
         use_kv_events: bool = True,
         durable_kv_events: bool = False,
@@ -1263,16 +1331,28 @@ class KvRouterConfig:
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
-        router_queue_threshold: Optional[float] = 4.0,
+        router_queue_threshold: Optional[float] = 16.0,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
+        use_remote_indexer: bool = False,
+        serve_indexer: bool = False,
+        shared_cache_multiplier: float = 0.0,
+        shared_cache_type: str = "none",
+        router_predicted_ttl_secs: Optional[float] = None,
+        *,
+        overlap_score_credit: float = 1.0,
+        prefill_load_scale: float = 1.0,
     ) -> None:
         """
         Create a KV router configuration.
 
         Args:
-            overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
-            router_temperature: Temperature for worker sampling via softmax (default: 0.0)
+            overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
+            overlap_score_credit: Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 (default: 1.0). Use prefill_load_scale above 1.0 to weigh TTFT/prompt-side load more heavily.
+            prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
+            disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
+            router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
             durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
                 This option will be removed in a future release. The event-plane subscriber
@@ -1292,7 +1372,7 @@ class KvRouterConfig:
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
-            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 4.0).
+            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 16.0).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
@@ -1303,6 +1383,14 @@ class KvRouterConfig:
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+            use_remote_indexer: Query a remote KV indexer served from the worker component (default: False).
+            serve_indexer: Serve this router's local indexer from the worker component (default: False).
+            shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
+            shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
+            router_predicted_ttl_secs: Enables predict-on-route when set. This TTL
+                applies to entries in the local side indexer and requires
+                use_kv_events=True. Set to None to disable. Independent of
+                router_ttl_secs, which covers pure approximate mode.
         """
         ...
 
@@ -1310,19 +1398,29 @@ class KvRouterConfig:
     def from_json(config_json: str) -> "KvRouterConfig":
         ...
 
-    def dump_json(self) -> str: ...
-
     def copy(self) -> "KvRouterConfig": ...
 
+    @property
+    def overlap_score_credit(self) -> float: ...
+
+    @overlap_score_credit.setter
+    def overlap_score_credit(self, value: float) -> None: ...
     @property
     def overlap_score_weight(self) -> float: ...
 
     @overlap_score_weight.setter
     def overlap_score_weight(self, value: float) -> None: ...
+    @property
+    def prefill_load_scale(self) -> float: ...
+    @prefill_load_scale.setter
+    def prefill_load_scale(self, value: float) -> None: ...
 
     def with_overrides(
         self,
         overlap_score_weight: Optional[float] = None,
+        *,
+        overlap_score_credit: Optional[float] = None,
+        prefill_load_scale: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:
@@ -1350,7 +1448,7 @@ class MockEngineArgs:
     def __init__(
         self,
         engine_type: str = "vllm",
-        num_gpu_blocks: int = 16384,
+        num_gpu_blocks: Optional[int] = None,
         block_size: int = 0,
         max_num_seqs: Optional[int] = 256,
         max_num_batched_tokens: Optional[int] = 8192,
@@ -1370,6 +1468,8 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        mem_fraction_static: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
@@ -1388,8 +1488,6 @@ class MockEngineArgs:
         ...
 
     def copy(self) -> "MockEngineArgs": ...
-
-    def dump_json(self) -> str: ...
 
     @property
     def block_size(self) -> int: ...
@@ -1470,6 +1568,18 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def gpu_memory_utilization(self) -> Optional[float]: ...
+
+    @gpu_memory_utilization.setter
+    def gpu_memory_utilization(self, value: Optional[float]) -> None: ...
+
+    @property
+    def mem_fraction_static(self) -> Optional[float]: ...
+
+    @mem_fraction_static.setter
+    def mem_fraction_static(self, value: Optional[float]) -> None: ...
+
+    @property
     def worker_type(self) -> str: ...
 
     @worker_type.setter
@@ -1494,6 +1604,8 @@ class MockEngineArgs:
         aic_moe_tp_size: Optional[int] = None,
         aic_moe_ep_size: Optional[int] = None,
         aic_attention_dp_size: Optional[int] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        mem_fraction_static: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...
@@ -1932,6 +2044,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         multi_modal_data: Optional[JsonLike] = None,
         mm_routing_info: Optional[JsonLike] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -1960,6 +2073,7 @@ class KvRouter:
             mm_routing_info: Optional structured routing-only multimodal payload
                             (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
                             used by router selection without changing execution token_ids.
+            routing_constraints: Optional request routing constraints used to constrain or prefer tainted workers.
 
         Returns:
             An async iterator yielding generation responses
@@ -1993,6 +2107,7 @@ class KvRouter:
         update_indexer: bool = False,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2044,6 +2159,33 @@ class KvRouter:
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.
             If you need aggregated loads per worker_id, sum the values manually.
+        """
+        ...
+
+    async def get_overlap_scores(
+        self,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
+        include_shared: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Get per-worker KV overlap by storage tier.
+
+        Args:
+            token_ids: List of token IDs to evaluate.
+            router_config_override: Optional router configuration override for
+                                   score-credit fields.
+            block_mm_infos: Optional block-level multimodal metadata aligned to
+                           request blocks.
+            lora_name: Optional LoRA adapter name for adapter-aware matching.
+            include_shared: Whether to query the configured shared cache.
+
+        Returns:
+            A dictionary containing block_size, num_blocks, shared_cache, and
+            workers. Each worker row is keyed by worker_id and dp_rank and
+            reports device, host-pinned, disk, and shared-cache overlap blocks.
         """
         ...
 
@@ -2256,3 +2398,101 @@ class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
     ...
+
+# ---------------------------------------------------------------------------
+# `dynamo._core.backend` submodule.
+#
+# Registered at import time by the pyo3 bindings via `sys.modules`, so it has
+# no filesystem layout that mypy can discover. Declaring it as a typed
+# namespace class lets `from dynamo._core import backend as _backend` resolve
+# and preserves attribute typing for the pyclasses it exposes.
+# ---------------------------------------------------------------------------
+
+class backend:
+    class DisaggregationMode:
+        # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
+        # this on the WorkerConfig to switch their per-mode protocol behavior;
+        # the Rust Worker reads it for registration (Prefill→ModelType::Prefill,
+        # Decode→disable local indexer).
+        Aggregated: "backend.DisaggregationMode"
+        Prefill: "backend.DisaggregationMode"
+        Decode: "backend.DisaggregationMode"
+
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            context_length: Optional[int] = None,
+            kv_cache_block_size: Optional[int] = None,
+            total_kv_blocks: Optional[int] = None,
+            max_num_seqs: Optional[int] = None,
+            max_num_batched_tokens: Optional[int] = None,
+            data_parallel_size: Optional[int] = None,
+            data_parallel_start_rank: Optional[int] = None,
+            bootstrap_host: Optional[str] = None,
+            bootstrap_port: Optional[int] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
+        @property
+        def context_length(self) -> Optional[int]: ...
+        @property
+        def kv_cache_block_size(self) -> Optional[int]: ...
+        @property
+        def total_kv_blocks(self) -> Optional[int]: ...
+        @property
+        def max_num_seqs(self) -> Optional[int]: ...
+        @property
+        def max_num_batched_tokens(self) -> Optional[int]: ...
+        @property
+        def data_parallel_size(self) -> Optional[int]: ...
+        @property
+        def data_parallel_start_rank(self) -> Optional[int]: ...
+        @property
+        def bootstrap_host(self) -> Optional[str]: ...
+        @property
+        def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def runtime_data(self) -> Dict[str, Any]: ...
+
+    class RuntimeConfig:
+        def __init__(
+            self,
+            discovery_backend: Optional[str] = None,
+            request_plane: Optional[str] = None,
+            event_plane: Optional[str] = None,
+        ) -> None: ...
+
+    class WorkerConfig:
+        def __init__(
+            self,
+            namespace: str,
+            component: str = ...,
+            endpoint: str = ...,
+            model_name: str = ...,
+            served_model_name: Optional[str] = None,
+            model_input: ModelInput = ...,
+            endpoint_types: str = ...,
+            custom_jinja_template: Optional[str] = None,
+            tool_call_parser: Optional[str] = None,
+            reasoning_parser: Optional[str] = None,
+            exclude_tools_when_tool_choice_none: bool = ...,
+            enable_local_indexer: bool = ...,
+            enable_kv_routing: bool = ...,
+            metrics_labels: List[Tuple[str, str]] = ...,
+            runtime: Optional["backend.RuntimeConfig"] = None,
+            disaggregation_mode: "backend.DisaggregationMode" = ...,
+        ) -> None: ...
+
+    class Worker:
+        def __init__(
+            self,
+            engine: Any,
+            config: "backend.WorkerConfig",
+            event_loop: Any,
+        ) -> None: ...
+        def run(self) -> Awaitable[None]: ...

@@ -160,13 +160,13 @@ Edit `agg_qwen_lora.yaml` to use your container image:
 ```bash
 # Using yq to update the image
 export FRAMEWORK_RUNTIME_IMAGE=your-registry/your-image:tag
-yq '.spec.services[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' agg_qwen_lora.yaml > agg_qwen_lora_updated.yaml
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' v1beta1/agg_qwen_lora.yaml > v1beta1/agg_qwen_lora_updated.yaml
 ```
 
 ### Deploy the LoRA-enabled Multimodal Graph
 
 ```bash
-kubectl apply -f agg_qwen_lora.yaml -n ${NAMESPACE}
+kubectl apply -f v1beta1/agg_qwen_lora_updated.yaml -n ${NAMESPACE}
 ```
 
 ### Verify Deployment

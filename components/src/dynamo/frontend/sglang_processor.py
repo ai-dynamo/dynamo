@@ -17,19 +17,10 @@ from typing import Any
 
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
-from dynamo._core import Client
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import (
-    KvRouter,
-    ModelCardInstanceId,
-    PythonAsyncEngine,
-    RouterConfig,
-    RouterMode,
-    fetch_model,
-)
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
 from dynamo.llm.exceptions import InvalidArgument, Unknown
-from dynamo.runtime import DistributedRuntime
 
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
@@ -41,7 +32,15 @@ from .sglang_prepost import (
     detect_force_reasoning_from_template,
     preprocess_chat_request,
 )
-from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
+from .utils import (
+    PreprocessError,
+    extract_mm_urls,
+    handle_engine_error,
+    make_internal_error,
+    nvext_extra_field_requested,
+    random_uuid,
+    worker_warmup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +58,6 @@ def _runtime_config_parser_name(
 
 def _unsupported_n_message(n: int) -> str:
     return f"Unsupported value: 'n={n}'. " "This endpoint currently supports only n=1."
-
-
-def _engine_error_message(
-    engine_response: Any,
-    request_id: str,
-) -> str:
-    """Extract a human-readable message from an invalid engine response."""
-    if isinstance(engine_response, dict) and engine_response.get("status") == "error":
-        backend_msg = engine_response.get("message") or "unknown backend error"
-        return f"Backend error for request {request_id}: {backend_msg}"
-    return f"Invalid engine response for request {request_id}"
 
 
 _FINISH_REASON_MAP: dict[str, str] = {
@@ -197,12 +185,16 @@ def _build_dynamo_preproc(
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
     stop = request.get("stop")
+    stop_token_ids = request.get("stop_token_ids", [])
     if isinstance(stop, str):
         stop = [stop]
+    elif isinstance(stop, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in stop
+    ):
+        stop_token_ids = [*stop_token_ids, *stop]
+        stop = []
     elif stop is None:
         stop = []
-
-    stop_token_ids = request.get("stop_token_ids", [])
 
     # Handle logprobs
     logprobs_val = None
@@ -246,6 +238,7 @@ def _build_dynamo_preproc(
             # (e.g. <|tool_call|>) to detect calls. Mirrors the
             # post-processor's _skip_special_tokens logic.
             "skip_special_tokens": tool_call_parser is None,
+            "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
@@ -264,7 +257,7 @@ class SglangProcessor:
     def __init__(
         self,
         tokenizer,
-        router,  # Client or KvRouter
+        routed_engine: RoutedEngine,
         tool_call_parser_name: str | None,
         reasoning_parser_name: str | None,
         eos_token_id: int | None,
@@ -288,8 +281,7 @@ class SglangProcessor:
                 "separate_reasoning=false or "
                 "chat_template_kwargs.enable_thinking=false)."
             )
-        self.router = router
-        self.is_kv_router = isinstance(router, KvRouter)
+        self.routed_engine = routed_engine
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
         self.exclude_tools_when_tool_choice_none = True
@@ -305,7 +297,7 @@ class SglangProcessor:
             self._worker_semaphore = None
 
     async def generator(
-        self, request: dict[str, Any]
+        self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
         if self.debug_perf:
@@ -320,10 +312,10 @@ class SglangProcessor:
 
         try:
             if self.preprocess_pool is None:
-                async for item in self._generator_inner(request):
+                async for item in self._generator_inner(request, context=context):
                     yield item
             else:
-                async for item in self._generator_inner_pool(request):
+                async for item in self._generator_inner_pool(request, context=context):
                     yield item
         finally:
             if self.debug_perf:
@@ -336,7 +328,7 @@ class SglangProcessor:
                 )
 
     async def _generator_inner(
-        self, request: dict[str, Any]
+        self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Single-process path: preprocess, dispatch, stream post-process."""
         request_id = random_uuid()
@@ -395,12 +387,12 @@ class SglangProcessor:
         )
 
         async for item in self._generate_and_stream(
-            request_id, request, dynamo_preproc, tokens, post
+            request_id, request, dynamo_preproc, tokens, post, context=context
         ):
             yield item
 
     async def _generator_inner_pool(
-        self, request: dict[str, Any]
+        self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Pool path: preprocess in worker, stream in main process."""
         request_id = random_uuid()
@@ -456,6 +448,7 @@ class SglangProcessor:
             preproc_result.dynamo_preproc,
             preproc_result.prompt_token_ids,
             post,
+            context=context,
         ):
             yield item
 
@@ -466,6 +459,7 @@ class SglangProcessor:
         dynamo_preproc: dict[str, Any],
         tokens: list[int],
         post: SglangStreamingPostProcessor,
+        context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
         token_count = 0
@@ -474,19 +468,9 @@ class SglangProcessor:
         stream_interval = self.stream_interval
 
         try:
-            if self.is_kv_router:
-                dynamo_stream = await self.router.generate(
-                    token_ids=tokens,
-                    model=dynamo_preproc["model"],
-                    stop_conditions=dynamo_preproc["stop_conditions"],
-                    sampling_options=dynamo_preproc["sampling_options"],
-                    output_options=dynamo_preproc["output_options"],
-                    multi_modal_data=dynamo_preproc.get("multi_modal_data"),
-                )
-            else:
-                dynamo_stream = await self.router.generate(
-                    dynamo_preproc, annotated=False
-                )
+            dynamo_stream = await self.routed_engine.generate(
+                dynamo_preproc, context=context
+            )
 
             # Accumulate tokens for batched detokenization when
             # stream_interval > 1.  Flush every N tokens or on
@@ -497,28 +481,34 @@ class SglangProcessor:
             first_chunk = True
 
             async for dynamo_response in dynamo_stream:
-                if self.is_kv_router:
-                    engine_response = dynamo_response
-                elif hasattr(dynamo_response, "data"):
-                    engine_response = dynamo_response.data()
-                else:
-                    engine_response = dynamo_response
+                if dynamo_response.is_error():
+                    comments = dynamo_response.comments() or []
+                    message = "; ".join(comments) or "unknown routed_engine error"
+                    logger.error(
+                        "routed_engine error for request %s: %s",
+                        request_id,
+                        message,
+                    )
+                    yield make_internal_error(request_id, message)
+                    break
+                engine_response = dynamo_response.data()
+
+                if engine_response is None:
+                    # No data or error fields, means we may have a comment or other kind of event.
+                    # Skip for now.
+                    continue
 
                 if (
                     not isinstance(engine_response, dict)
                     or "token_ids" not in engine_response
                 ):
-                    msg = _engine_error_message(engine_response, request_id)
-                    logger.error(
-                        "Engine returned an invalid response for request %s: %s",
-                        request_id,
-                        engine_response,
-                    )
-                    raise Unknown(msg)
+                    yield handle_engine_error(engine_response, request_id, logger)
+                    break
 
                 new_ids = engine_response["token_ids"]
                 raw_finish = engine_response.get("finish_reason")
                 finish_reason = _map_finish_reason(raw_finish)
+                stop_reason = engine_response.get("stop_reason")
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
@@ -554,6 +544,10 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
+                        if stop_reason is not None and nvext_extra_field_requested(
+                            request, "stop_reason"
+                        ):
+                            dynamo_out["nvext"] = {"stop_reason": stop_reason}
 
                         yield dynamo_out
 
@@ -582,15 +576,11 @@ class SglangProcessor:
 class SglangEngineFactory:
     def __init__(
         self,
-        runtime: DistributedRuntime,
-        router_config: RouterConfig,
         config: FrontendConfig,
         debug_perf: bool = False,
         tool_call_parser_name: str | None = None,
         reasoning_parser_name: str | None = None,
     ):
-        self.runtime = runtime
-        self.router_config = router_config
         self.config = config
         self.debug_perf = debug_perf
         self.tool_call_parser_name = tool_call_parser_name
@@ -613,6 +603,7 @@ class SglangEngineFactory:
         self,
         instance_id: ModelCardInstanceId,
         mdc: ModelDeploymentCard,
+        routed_engine: RoutedEngine,
     ) -> PythonAsyncEngine:
         """Called by Rust when a model is discovered."""
         model_type = mdc.model_type()
@@ -622,6 +613,9 @@ class SglangEngineFactory:
             )
         loop = asyncio.get_running_loop()
 
+        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
+        # instead of re-running fetch_model. The MDC cache already has
+        # blake3-verified copies; this path duplicates the download.
         source_path = mdc.source_path()
         if not os.path.exists(source_path):
             await fetch_model(source_path, ignore_weights=True)
@@ -651,22 +645,6 @@ class SglangEngineFactory:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)
         if reasoning_parser_name:
             logger.info("SGLang reasoning parser: %s", reasoning_parser_name)
-
-        (namespace_name, component_name, endpoint_name) = instance_id.triple()
-        generate_endpoint = self.runtime.endpoint(
-            f"{namespace_name}.{component_name}.{endpoint_name}"
-        )
-        router: Client | KvRouter
-        if self.router_config.router_mode == RouterMode.KV:
-            router = KvRouter(
-                endpoint=generate_endpoint,
-                block_size=self.config.kv_cache_block_size or 16,
-                kv_router_config=self.router_config.kv_router_config,
-            )
-        else:
-            router = await generate_endpoint.client(
-                router_mode=self.router_config.router_mode
-            )
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -713,7 +691,7 @@ class SglangEngineFactory:
 
         gen = SglangProcessor(
             tokenizer,
-            router,
+            routed_engine,
             tool_call_parser_name,
             reasoning_parser_name,
             eos_token_id,

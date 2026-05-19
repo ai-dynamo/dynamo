@@ -28,6 +28,8 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.prometheus import sum_metric_samples
+from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +172,7 @@ class ChatPayload(BasePayload):
             if field_content:
                 return field_content
 
-        raise ValueError(
+        raise AssertionError(
             "All possible content fields are empty in message. "
             f"Checked: content={repr(content)}, reasoning_content={repr(reasoning_content)}, "
             f"refusal={repr(refusal)}, tool_calls={tool_calls}"
@@ -191,6 +193,27 @@ class ChatPayload(BasePayload):
         assert len(choices) == self.expected_num_choices, (
             f"Expected {self.expected_num_choices} choices, "
             f"got {len(choices)}: {result}"
+        )
+
+
+class RouterNvextChatPayload(ChatPayload):
+    """Chat payload that validates structured router metadata in nvext."""
+
+    def __init__(
+        self,
+        *args,
+        router_nvext_expectation: RouterNvextExpectation | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.router_nvext_expectation = router_nvext_expectation
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        validate_router_nvext(
+            response.json(),
+            self.router_nvext_expectation,
+            context=type(self).__name__,
         )
 
 
@@ -380,6 +403,7 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        router_nvext_expectation: RouterNvextExpectation | None = None,
     ):
         super().__init__(
             body=body,
@@ -391,6 +415,7 @@ class CachedTokensChatPayload(ChatPayload):
         self.min_cached_tokens = min_cached_tokens
         self._request_count = 0
         self._cached_tokens_found = False
+        self.router_nvext_expectation = router_nvext_expectation
 
     def validate(self, response: Any, content: str) -> None:
         """Validate response and check for cached tokens on repeated requests."""
@@ -399,6 +424,11 @@ class CachedTokensChatPayload(ChatPayload):
 
         self._request_count += 1
         result = response.json()
+        validate_router_nvext(
+            result,
+            self.router_nvext_expectation,
+            context=f"{type(self).__name__} request {self._request_count}",
+        )
 
         # Check usage field for cached tokens
         # Expected structure: usage.prompt_tokens_details.cached_tokens
@@ -919,6 +949,76 @@ class MetricCheck:
     error_msg: Callable[[str, Any], str]
     success_msg: Callable[[str, Any], str]
     multiline: bool = False
+
+
+@dataclass
+class KvEventMetricsPayload(BasePayload):
+    """Validate structured KV event counters instead of grepping event logs."""
+
+    endpoint: str = "/metrics"
+    method: str = "GET"
+    port: int = DefaultPort.SYSTEM1.value
+    event_type: str = "stored"
+    min_received: int = 1
+    min_accepted: int = 1
+    settle_seconds: float = 0.5
+
+    def with_model(self, model):
+        return self
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        if self.settle_seconds > 0:
+            time.sleep(self.settle_seconds)
+
+        contents = []
+        seen_ports: set[int] = set()
+
+        for port in [self.port, *self.system_ports]:
+            if port in seen_ports:
+                continue
+            seen_ports.add(port)
+            metrics_response = requests.get(
+                f"http://{self.host}:{port}/{self.endpoint.lstrip('/')}",
+                timeout=self.timeout,
+            )
+            metrics_response.raise_for_status()
+            contents.append(metrics_response.text)
+
+        return "\n".join(contents)
+
+    def validate(self, response: Any, content: str) -> None:
+        metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.kv_publisher.ZMQ_EVENTS_TOTAL}"
+        )
+        received = sum_metric_samples(
+            content,
+            metric_name,
+            {"stage": "received", "event_type": self.event_type},
+        )
+        accepted = sum_metric_samples(
+            content,
+            metric_name,
+            {"stage": "accepted", "event_type": self.event_type},
+        )
+
+        assert received >= self.min_received, (
+            f"Expected at least {self.min_received} received KV events with "
+            f"event_type={self.event_type!r}, got {received:g}"
+        )
+        assert accepted >= self.min_accepted, (
+            f"Expected at least {self.min_accepted} accepted KV events with "
+            f"event_type={self.event_type!r}, got {accepted:g}"
+        )
+
+        logger.info(
+            "SUCCESS: KV event metrics found for event_type=%s: "
+            "received=%s accepted=%s",
+            self.event_type,
+            received,
+            accepted,
+        )
 
 
 @dataclass

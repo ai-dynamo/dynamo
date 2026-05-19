@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+use crate::disagg::DisaggregationMode;
+
 /// CLI flags that every Rust backend needs. Flatten these into your engine's
 /// `Args` struct:
 ///
@@ -47,4 +49,15 @@ pub struct CommonArgs {
     /// template shipped with the model.
     #[arg(long, env = "DYN_CUSTOM_JINJA_TEMPLATE")]
     pub custom_jinja_template: Option<PathBuf>,
+
+    /// Disaggregation role: `agg` (default), `prefill`, or `decode`.
+    /// Prefill workers register as `ModelType::Prefill` regardless of
+    /// `endpoint_types`; decode workers do not advertise a local KV indexer.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = DisaggregationMode::Aggregated,
+        env = "DYN_DISAGGREGATION_MODE",
+    )]
+    pub disaggregation_mode: DisaggregationMode,
 }

@@ -7,7 +7,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
@@ -39,7 +39,7 @@ use dynamo_llm::{self as llm_rs};
 
 use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 
-use crate::llm::local_model::ModelRuntimeConfig;
+use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints};
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
@@ -70,6 +70,7 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+mod backend;
 mod context;
 mod engine;
 pub mod errors;
@@ -182,6 +183,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
+    m.add_class::<RoutingConstraints>()?;
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
@@ -197,6 +199,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::KvRouter>()?;
+    m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -207,6 +210,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     engine::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
+    backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
@@ -526,6 +530,7 @@ struct ModelCardInstanceId {
 #[derive(Clone)]
 struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
+    endpoint: rs::component::Endpoint,
 }
 
 #[pyclass]
@@ -920,6 +925,7 @@ impl Endpoint {
             .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
+                endpoint: inner,
             })
         })
     }
@@ -996,6 +1002,76 @@ impl Client {
                 .await
                 .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)
+        })
+    }
+
+    /// Wait for exactly one ready endpoint instance whose MDC runtime_data contains
+    /// the requested JSON string value.
+    #[pyo3(signature = (key, value, timeout_s=None))]
+    fn wait_for_instance_by_runtime_data<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: String,
+        timeout_s: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let endpoint = self.endpoint.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let last_matches = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+            let wait_state = last_matches.clone();
+            let error_key = key.clone();
+            let error_value = value.clone();
+            let wait = async move {
+                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint)
+                    .await
+                    .map_err(to_pyerr)?;
+
+                loop {
+                    let matches: Vec<u64> = rx
+                        .borrow_and_update()
+                        .iter()
+                        .filter_map(|(worker_id, runtime_config)| {
+                            let matched = runtime_config
+                                .runtime_data
+                                .get(&key)
+                                .and_then(|value| value.as_str())
+                                == Some(value.as_str());
+                            matched.then_some(*worker_id)
+                        })
+                        .collect();
+
+                    if let Ok(mut last) = wait_state.lock() {
+                        *last = matches.clone();
+                    }
+
+                    if let [worker_id] = matches.as_slice() {
+                        return Ok(*worker_id);
+                    }
+
+                    rx.changed().await.map_err(to_pyerr)?;
+                }
+            };
+
+            if let Some(timeout_s) = timeout_s {
+                if !timeout_s.is_finite() || timeout_s < 0.0 {
+                    return Err(PyValueError::new_err(
+                        "timeout_s must be a finite non-negative number",
+                    ));
+                }
+                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                tokio::time::timeout(timeout, wait).await.map_err(|_| {
+                    let matches = last_matches
+                        .lock()
+                        .map(|matches| matches.clone())
+                        .unwrap_or_default();
+                    PyTimeoutError::new_err(format!(
+                        "Timed out waiting for one endpoint instance with runtime_data[{error_key:?}] == {error_value:?}; last_match_count={}, matching_ids={matches:?}",
+                        matches.len(),
+                    ))
+                })?
+            } else {
+                wait.await
+            }
         })
     }
 

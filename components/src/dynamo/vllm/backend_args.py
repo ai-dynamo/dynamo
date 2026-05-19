@@ -8,6 +8,9 @@ from typing import Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.frontend_decoding_args import (
+    add_frontend_decoding_arg,
+)
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
@@ -114,17 +117,7 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--frontend-decoding",
-            env_var="DYN_VLLM_FRONTEND_DECODING",
-            default=False,
-            help=(
-                "Enable frontend decoding of multimodal images. "
-                "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
-                "Without this flag, images are decoded in the Python backend (default behavior)."
-            ),
-        )
+        add_frontend_decoding_arg(g, env_prefix="VLLM")
 
         add_argument(
             g,

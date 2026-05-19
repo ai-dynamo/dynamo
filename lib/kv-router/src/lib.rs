@@ -51,6 +51,7 @@ pub use config::{
     KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
     SharedCacheType,
 };
+#[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
     LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,

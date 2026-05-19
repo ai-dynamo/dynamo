@@ -14,7 +14,7 @@ This experiment searches over disaggregated replay states to answer a concrete q
 - for a workload with real prefix overlap
 - and latency SLAs that still permit meaningful throughput
 
-which `(prefill_tp, decode_tp, prefill_workers, decode_workers, overlap_score_weight)` combination
+which `(prefill_tp, decode_tp, prefill_workers, decode_workers, overlap_score_credit)` combination
 produces the best offline replay result?
 
 This is a heuristic search over replay states, not an exact optimizer over all feasible
@@ -24,14 +24,15 @@ configurations.
 
 The public API takes a single [`ReplayOptimizeSpec`](specs.py) composed of:
 
-- `EngineSpec` — model, backend, engine args (prefill + decode for disagg; single `baseEngineArgs`
-  for agg)
+- `EngineSpec` — model, backend, JSON-like engine-arg inputs (prefill + decode for disagg; single
+  `baseEngineArgs` for agg)
 - `HardwareSpec` — GPU SKU + total GPU budget
 - `WorkloadSpec` — synthetic workload knobs (isl/osl/concurrency/...) **or** a trace source
   (`traceFile`/`arrivalSpeedupRatio`), discriminated by whether `traceFile` is set
 - `SLASpec` — latency bounds (`ttft`, `itl`, `e2eLatency`, plus p95 variants); each is independent
   and optional
-- `RouterSpec` — router mode, overlap-score-weight sweep, KV-router base config
+- `RouterSpec` — router mode, overlap-score-credit sweep, prefill-load-scale sweep, KV-router base
+  config input
 - `objective` — `ReplayObjective.THROUGHPUT` (default), `MEAN_TTFT`, or `MEAN_E2E_LATENCY`
 - `maxParallelEvals` — how many replay evaluations to run concurrently
 
@@ -128,9 +129,11 @@ matter:
 The base engine args stay conservative:
 
 - `block_size=512`
-- `num_gpu_blocks=20000`
 - `enable_prefix_caching=True`
 - explicit `worker_type` for prefill vs decode
+
+It intentionally omits `num_gpu_blocks`; AIC-backed replay estimates capacity
+for each candidate TP shape unless a base input explicitly pins it.
 
 This setup does not force scheduler-specific bottlenecks such as:
 
@@ -147,7 +150,7 @@ Only add those when the experiment is specifically about scheduler limits.
 ```mermaid
 flowchart LR
     A["TP search<br/>choose TP shape<br/>(prefill_tp, decode_tp)<br/>under GPU budget"] --> B["Worker search<br/>choose worker split<br/>(prefill_workers, decode_workers)<br/>for the chosen TP"]
-    B --> C["Router search<br/>choose routing mode<br/>and overlap_score_weight"]
+    B --> C["Router search<br/>choose routing mode<br/>and overlap_score_credit"]
     C --> A
 ```
 
@@ -166,7 +169,8 @@ your search:
 
 - change the `WorkloadSpec` shape (or switch to a trace source with `traceFile=...`)
 - add SLA bounds on `SLASpec` (`ttft`, `itl`, `e2eLatency`, or their p95 variants)
-- change `RouterSpec.overlapWeights`
+- change `RouterSpec.overlapCredits` within the valid 0.0 to 1.0 range
+- change `RouterSpec.prefillLoadScales` when you want to weigh TTFT/prompt-side load more or less heavily
 - print different columns from `result.evaluated_df` or `result.feasible_df`
 - persist the tables to CSV or parquet if you want downstream analysis
 
@@ -189,7 +193,7 @@ The returned object is a `DenseReplayOptimizationResult` with:
 Useful columns to inspect:
 
 - topology: `prefill_tp`, `decode_tp`, `prefill_workers`, `decode_workers`
-- routing: `router_mode`, `overlap_score_weight`
+- routing: `router_mode`, `overlap_score_credit`, `prefill_load_scale`
 - budget: `total_gpus_used`
   This is the simulated GPU footprint of the candidate replay state, not a count of GPUs actually
   allocated on the machine running the search.
@@ -204,7 +208,7 @@ renaming the Rust output keys is a follow-up in the Rust replay runner.
 
 In local testing, this setup produced a non-trivial mean-E2E winner around:
 
-- `prefill_tp=4`, `decode_tp=1`, `prefill_workers=3`, `decode_workers=4`, `overlap_score_weight=0.5`
+- `prefill_tp=4`, `decode_tp=1`, `prefill_workers=3`, `decode_workers=4`, `overlap_score_credit=0.5`, `prefill_load_scale=1.0`
 - `output_throughput_tok_s ~= 970`, `prefix_cache_reused_ratio ~= 0.5`,
   `mean_ttft_ms ~= 42800`, `mean_tpot_ms ~= 35`, `mean_e2e_latency_ms ~= 51900`
 
@@ -216,7 +220,8 @@ Treat those as sanity-check ranges, not fixed assertions. See the regression anc
 To broaden or shift the search, vary one axis at a time:
 
 - `HardwareSpec.totalGpus`
-- `RouterSpec.overlapWeights`
+- `RouterSpec.overlapCredits`
+- `RouterSpec.prefillLoadScales`
 - `WorkloadSpec.sharedPrefixRatio`
 - `WorkloadSpec.numPrefixGroups`
 - base prefill/decode engine args

@@ -380,6 +380,18 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                     }
                 }
             }
+            dynamo_protocols::types::Stop::TokenIdArray(token_ids) => {
+                if token_ids.is_empty() {
+                    anyhow::bail!("Stop token IDs array cannot be empty");
+                }
+                if token_ids.len() > MAX_STOP_SEQUENCES {
+                    anyhow::bail!(
+                        "Maximum of {} stop token IDs allowed, got {}",
+                        MAX_STOP_SEQUENCES,
+                        token_ids.len()
+                    );
+                }
+            }
         }
     }
     Ok(())
