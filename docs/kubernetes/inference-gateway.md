@@ -58,7 +58,19 @@ kubectl get gateway inference-gateway -n ${NAMESPACE}
 
 ### 2b. Istio Gateway (Alternative) ###
 
-If you are using Istio as your gateway implementation instead of kGateway, the EPP uses secure serving (TLS) by default. You must create an Istio `DestinationRule` so the gateway proxy can communicate with the EPP service. Without this, the Istio ext_proc filter will fail with `connection termination` errors.
+If you are using Istio as your gateway implementation,
+the EPP uses secure serving (TLS) by default. The gateway proxy needs an
+Istio `DestinationRule` to talk to the EPP service; without it the Istio
+`ext_proc` filter fails with `connection termination` errors.
+
+The Dynamo operator can create this `DestinationRule` for you. Install or
+upgrade the platform Helm chart with `dynamo.serviceMesh.enabled=true`
+(see [Service Mesh Integration (Istio)](#service-mesh-integration-istio)
+below). When that is set, you can skip the rest of this section.
+
+If you are not using the operator's Helm chart, or have left
+`dynamo.serviceMesh.enabled=false`, apply a `DestinationRule` manually for
+each EPP service:
 
 ```yaml
 apiVersion: networking.istio.io/v1
