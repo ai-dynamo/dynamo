@@ -60,8 +60,13 @@ These options are used only when `--router-mode kv` is combined with `--router-p
 | `--aic-model-path` | `DYN_AIC_MODEL_PATH` | — | Model path or model identifier used for AIC perf lookup |
 | `--aic-backend-version` | `DYN_AIC_BACKEND_VERSION` | backend-specific | Pinned AIC database version. If omitted, Dynamo uses the backend default |
 | `--aic-tp-size` | `DYN_AIC_TP_SIZE` | `1` | Tensor-parallel size to model in AIC |
+| `--aic-moe-tp-size` | `DYN_AIC_MOE_TP_SIZE` | — | MoE tensor-parallel size for models that require AIC MoE parallelism |
+| `--aic-moe-ep-size` | `DYN_AIC_MOE_EP_SIZE` | — | MoE expert-parallel size for models that require AIC MoE parallelism |
+| `--aic-attention-dp-size` | `DYN_AIC_ATTENTION_DP_SIZE` | — | Attention data-parallel size for models that require AIC MoE parallelism |
 
 When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix. The router then decays only the oldest active prefill request on each worker for prompt-side load accounting.
+
+For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--aic-moe-tp-size` to the same value as `--aic-tp-size`, with `--aic-moe-ep-size 1` and `--aic-attention-dp-size 1`.
 
 ## Fault Tolerance
 
