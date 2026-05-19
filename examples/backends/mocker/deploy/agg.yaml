@@ -4,7 +4,7 @@
 # NOTE: There is no dedicated `mocker-runtime` image. The published
 # `dynamo-planner` image includes the ai-dynamo wheel, ai-dynamo-runtime, and
 # planner/profiler dependencies needed by `python3 -m dynamo.mocker`.
-# Replace `my-tag` below with the Dynamo release tag you deploy.
+# Replace `1.2.0-post.1` below with the Dynamo release tag you deploy.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0-post.1
     decode:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -24,7 +24,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0-post.1
           workingDir: /workspace
           command:
           - python3
