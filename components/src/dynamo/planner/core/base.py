@@ -701,6 +701,8 @@ class NativePlannerBase:
             ready_num_decode=num_d if self.require_decode else None,
             expected_num_prefill=expected_p if self.require_prefill else None,
             expected_num_decode=expected_d if self.require_decode else None,
+            prefill_scaling_in_progress=self.require_prefill and not is_stable,
+            decode_scaling_in_progress=self.require_decode and not is_stable,
         )
 
     # ------------------------------------------------------------------

@@ -802,6 +802,30 @@ class TestScalingInProgress:
         assert effects.scale_to is None
         assert effects.diagnostics.load_decision_reason == "scaling_in_progress"
 
+    def test_disagg_no_decision_when_status_unstable(self):
+        core = _make_core(mode="disagg", optimization_target="latency")
+        p_fpm = _make_fpm(queued_prefill_tokens=CONTEXT_LENGTH * 2)
+        d_fpm = _make_fpm(sum_decode_kv_tokens=MAX_KV_TOKENS, queued_decode_kv_tokens=0)
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(
+                prefill={("w1", 0): p_fpm},
+                decode={("w1", 0): d_fpm},
+            ),
+            worker_counts=WorkerCounts(
+                ready_num_prefill=1,
+                ready_num_decode=1,
+                prefill_scaling_in_progress=True,
+            ),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "scaling_in_progress"
+        assert (
+            effects.diagnostics.load_decision_reason_prefill == "scaling_in_progress"
+        )
+        assert effects.diagnostics.load_decision_reason_decode == "scaling_in_progress"
+
 
 # ── Budget clamping ──────────────────────────────────────────────────
 
