@@ -17,6 +17,18 @@ env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+  testing:
+    runs-on: prod-default-small-v2
+    env:
+      KUBECONFIG_B64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Test
+        run: |
+          echo $KUBECONFIG_B64 | base64 -d > kubeconfig
+          KUBECONFIG=kubeconfig kubectl get nodes
+          sleep 1000
   # ============================================================================
   # SETUP & DETECTION JOBS
   # ============================================================================
