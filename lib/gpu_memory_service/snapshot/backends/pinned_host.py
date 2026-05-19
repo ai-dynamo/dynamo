@@ -67,6 +67,10 @@ class PinnedCopySlot:
         cuda_utils.cuda_memcpy_h2d_async(dst_ptr, self.ptr, size, self.stream)
         self.busy = True
 
+    def copy_from_device_async(self, src_ptr: int, size: int) -> None:
+        cuda_utils.cuda_memcpy_d2h_async(self.ptr, src_ptr, size, self.stream)
+        self.busy = True
+
     def wait(self) -> None:
         if not self.busy:
             return

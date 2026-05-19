@@ -12,26 +12,18 @@ import os
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     SHARDED_SSD_ROOTS_CONFIG_KEY,
 )
-from gpu_memory_service.snapshot.disk import (  # noqa: F401  re-exported for external callers
-    ShardWriter as _ShardWriter,
-)
+from gpu_memory_service.snapshot.disk import DeviceToFileWriter
 from gpu_memory_service.snapshot.disk import decode_metadata as _decode_metadata_impl
-from gpu_memory_service.snapshot.disk import (
-    group_entries_by_shard as _group_entries_by_shard_impl,
-)
 from gpu_memory_service.snapshot.disk import (
     load_manifest_and_metadata as _load_manifest_and_metadata_impl,
 )
 from gpu_memory_service.snapshot.disk import (
     plan_shard_layout as _plan_shard_layout_impl,
-)
-from gpu_memory_service.snapshot.disk import (
-    read_shard_sequential as _read_shard_sequential_impl,
 )
 from gpu_memory_service.snapshot.model import CURRENT_VERSION as _CURRENT_VERSION
 from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
@@ -47,9 +39,6 @@ from gpu_memory_service.snapshot.transfer import (
 
 logger = logging.getLogger(__name__)
 
-if TYPE_CHECKING:
-    import torch
-
 try:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
     from gpu_memory_service.common.locks import RequestedLockType
@@ -61,49 +50,9 @@ except ImportError:
     RequestedLockType = None  # type: ignore[assignment]
 
 
-def _load_torch_snapshot_runtime() -> Tuple[Any, Any, Any]:
-    try:
-        import numpy as np_module
-        import torch as torch_module
-        from gpu_memory_service.client.torch.tensor import (
-            _tensor_from_pointer as tensor_from_pointer,
-        )
-    except ImportError as exc:
-        raise RuntimeError(
-            "numpy, PyTorch, and GMS tensor imports are required for this operation"
-        ) from exc
-    return np_module, torch_module, tensor_from_pointer
-
-
-def _read_shard_sequential(
-    abs_path: str,
-    sorted_entries: List[AllocationEntry],
-    device: int,
-    pin_memory: bool = False,
-) -> Dict[str, "torch.Tensor"]:
-    """Facade wrapper kept for test patchability and backwards compatibility."""
-    np_module, torch_module, _ = _load_torch_snapshot_runtime()
-    return _read_shard_sequential_impl(
-        abs_path,
-        sorted_entries,
-        device,
-        pin_memory=pin_memory,
-        os_module=os,
-        np_module=np_module,
-        torch_module=torch_module,
-        logger=logger,
-    )
-
-
 def _decode_metadata(raw_meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     # Re-exported for external callers (e.g. multi_ssd_bench.py).
     return _decode_metadata_impl(raw_meta)
-
-
-def _group_entries_by_shard(
-    allocations: List[AllocationEntry],
-) -> Dict[str, List[AllocationEntry]]:
-    return _group_entries_by_shard_impl(allocations)
 
 
 def _allocation_record(alloc: Any) -> Dict[str, Any]:
@@ -213,7 +162,6 @@ class GMSStorageClient:
     def _validate_save_request(self) -> None:
         if not _GMS_CORE_IMPORTS_AVAILABLE:
             raise RuntimeError("GMS client imports unavailable (missing cuda-python)")
-        _load_torch_snapshot_runtime()
         if self.output_dir is None:
             raise ValueError(
                 "output_dir must be set to call save(); pass it to GMSStorageClient()"
@@ -252,7 +200,6 @@ class GMSStorageClient:
         max_workers: int,
         use_absolute_shard_paths: bool = False,
     ) -> List[AllocationEntry]:
-        _, torch_module, tensor_from_pointer = _load_torch_snapshot_runtime()
         layout = _plan_shard_layout(allocations_info, self._shard_size)
         shard_groups: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
         for index, (shard_idx, byte_offset) in enumerate(layout):
@@ -268,18 +215,11 @@ class GMSStorageClient:
             abs_path = os.path.join(shards_dir, filename)
             rel_path = os.path.join("shards", filename)
             tensor_file = abs_path if use_absolute_shard_paths else rel_path
-            with open(abs_path, "wb") as handle:
+            with DeviceToFileWriter(abs_path, device=self.device) as writer:
                 for index, byte_offset in alloc_pairs:
                     alloc = allocations_info[index]
                     aligned_size = int(alloc["aligned_size"])
-                    tensor = tensor_from_pointer(
-                        va_list[index],
-                        [aligned_size],
-                        [1],
-                        torch_module.uint8,
-                        self.device,
-                    )
-                    tensor.cpu().numpy().tofile(handle)
+                    writer.write_device(va_list[index], aligned_size)
                     entries[index] = AllocationEntry(
                         allocation_id=alloc["allocation_id"],
                         size=int(alloc["size"]),
@@ -410,39 +350,6 @@ class GMSStorageClient:
                 raise RuntimeError(f"Failed to write metadata key={key!r}")
             logger.debug("Restored metadata key=%s -> alloc=%s", key, new_alloc_id)
         logger.info("Restored %d metadata keys; committing", len(saved_metadata))
-
-    @staticmethod
-    def load_tensors(
-        input_dir: str,
-        device: int = 0,
-        *,
-        max_workers: int = 4,
-    ) -> Tuple[Dict[str, "torch.Tensor"], Dict[str, Dict[str, Any]]]:
-        manifest, metadata = _load_manifest_and_metadata(input_dir)
-        groups = _group_entries_by_shard(manifest.allocations)
-        tensors: Dict[str, "torch.Tensor"] = {}
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(
-                    _read_shard_sequential,
-                    os.path.join(input_dir, rel_path),
-                    sorted_entries,
-                    device,
-                ): rel_path
-                for rel_path, sorted_entries in groups.items()
-            }
-            for future in as_completed(futures):
-                rel_path = futures[future]
-                try:
-                    tensors.update(future.result())
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Failed to load shard {rel_path}: {exc}"
-                    ) from exc
-
-        logger.info("Loaded %d allocations from %s", len(tensors), input_dir)
-        return tensors, metadata
 
     def _save_metadata(self, mm: Any) -> Dict[str, Any]:
         result: Dict[str, Any] = {}

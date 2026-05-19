@@ -4,187 +4,133 @@
 from __future__ import annotations
 
 import base64
-import errno
 import json
 import os
-from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-if TYPE_CHECKING:
-    import torch
+from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.snapshot.backends.pinned_host import (
+    PINNED_COPY_CHUNK_SIZE,
+    close_pinned_copy_slots,
+    make_pinned_copy_slots,
+)
+from gpu_memory_service.snapshot.model import SaveManifest
 
-from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
+_SAVE_COPY_BUFFERS = 1
 
 
-class ShardWriter:
-    """Packs allocation bytes sequentially into large binary shard files.
+class _NullLogger:
+    def warning(self, *_: Any, **__: Any) -> None:
+        return None
 
-    This is a single-threaded utility for streaming writes.  The parallel save
-    path in GMSStorageClient._write_shards assigns allocations to shards via
-    plan_shard_layout and writes each shard file concurrently, so it does not
-    use ShardWriter directly.  ShardWriter is kept as a public utility for
-    callers that want a simple sequential writer.
+
+_NULL_LOGGER = _NullLogger()
+
+
+def _write_all_from_view(fd: int, view: memoryview, file_path: str) -> None:
+    """Write a memoryview to a file descriptor, retrying partial writes."""
+    total = len(view)
+    done = 0
+    while done < total:
+        written = os.write(fd, view[done:])
+        if written == 0:
+            raise RuntimeError(
+                f"Short write to {file_path}: expected "
+                f"{total - done} more bytes, wrote 0"
+            )
+        done += written
+
+
+class DeviceToFileWriter:
+    """Stream bytes from CUDA device pointers into a raw shard file.
+
+    The writer stages through reusable page-aligned, pinned host buffers.  This
+    keeps the save path independent from PyTorch/NumPy while preserving the raw
+    shard layout consumed by the restore backends.
     """
 
-    def __init__(self, shards_dir: str, shard_size_bytes: int = 4 * 1024**3) -> None:
-        self._shards_dir = shards_dir
-        self._shard_size = shard_size_bytes
-        self._shard_idx = -1
-        self._current_offset = 0
-        self._current_file: Optional[Any] = None
-        self._current_rel_path: str = ""
-        os.makedirs(shards_dir, exist_ok=True)
+    def __init__(
+        self,
+        file_path: str,
+        *,
+        device: Optional[int] = None,
+        buffers: int = _SAVE_COPY_BUFFERS,
+        chunk_size: int = PINNED_COPY_CHUNK_SIZE,
+    ) -> None:
+        self._file_path = file_path
+        buffers = int(buffers)
+        chunk_size = int(chunk_size)
+        if buffers <= 0:
+            raise ValueError("buffers must be positive")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if device is not None:
+            cuda_utils.cuda_runtime_set_device(device)
+        self._slots = make_pinned_copy_slots(buffers)
+        self._slot_index = 0
+        self._closed = False
+        try:
+            self._fd = os.open(
+                file_path,
+                os.O_CREAT | os.O_TRUNC | os.O_WRONLY,
+                0o666,
+            )
+        except Exception:
+            close_pinned_copy_slots(
+                self._slots,
+                _NULL_LOGGER,
+                "failed to close pinned save slot for %s",
+                file_path,
+            )
+            raise
+        self._chunk_size = chunk_size
 
-    def _roll_shard(self) -> None:
-        if self._current_file is not None:
-            self._current_file.close()
-        self._shard_idx += 1
-        filename = f"shard_{self._shard_idx:04d}.bin"
-        abs_path = os.path.join(self._shards_dir, filename)
-        self._current_file = open(abs_path, "wb")
-        self._current_rel_path = os.path.join("shards", filename)
-        self._current_offset = 0
-
-    def write(self, tensor: torch.Tensor) -> Tuple[str, int]:
-        cpu = tensor.cpu() if hasattr(tensor, "is_cuda") and tensor.is_cuda else tensor
-        if hasattr(cpu, "is_contiguous") and not cpu.is_contiguous():
-            cpu = cpu.contiguous()
-        arr = cpu.numpy()
-        size = arr.nbytes
-        if self._current_file is None or (
-            self._current_offset > 0 and self._current_offset + size > self._shard_size
-        ):
-            self._roll_shard()
-
-        offset = self._current_offset
-        arr.tofile(self._current_file)
-        self._current_offset += size
-        return self._current_rel_path, offset
+    def write_device(self, src_ptr: int, byte_count: int) -> None:
+        """Copy ``byte_count`` bytes from ``src_ptr`` and append them to the file."""
+        done = 0
+        while done < byte_count:
+            chunk_size = min(self._chunk_size, byte_count - done)
+            slot = self._slots[self._slot_index]
+            slot.wait()
+            slot.copy_from_device_async(src_ptr + done, chunk_size)
+            slot.wait()
+            chunk_view = slot.view[:chunk_size]
+            try:
+                _write_all_from_view(self._fd, chunk_view, self._file_path)
+            finally:
+                chunk_view.release()
+            done += chunk_size
+            self._slot_index = (self._slot_index + 1) % len(self._slots)
 
     def close(self) -> None:
-        if self._current_file is not None:
-            self._current_file.close()
-            self._current_file = None
+        if self._closed:
+            return
+        error = None
+        try:
+            for slot in self._slots:
+                slot.wait()
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+        try:
+            os.close(self._fd)
+        except OSError as exc:
+            if error is None:
+                error = exc
+        close_pinned_copy_slots(
+            self._slots,
+            _NULL_LOGGER,
+            "failed to close pinned save slot for %s",
+            self._file_path,
+        )
+        self._closed = True
+        if error is not None:
+            raise error
 
-    def __enter__(self) -> "ShardWriter":
+    def __enter__(self) -> "DeviceToFileWriter":
         return self
 
     def __exit__(self, *_: Any) -> None:
         self.close()
-
-
-def read_shard_sequential(
-    abs_path: str,
-    sorted_entries: List[AllocationEntry],
-    device: int,
-    *,
-    pin_memory: bool = False,
-    os_module=os,
-    np_module=None,
-    torch_module=None,
-    logger=None,
-) -> Dict[str, torch.Tensor]:
-    """Read one shard file front-to-back without seeking."""
-    if np_module is None or torch_module is None:
-        raise RuntimeError("numpy and torch modules are required to read shards")
-
-    result: Dict[str, torch.Tensor] = {}
-    device_str = f"cuda:{device}" if device >= 0 else "cpu"
-
-    if abs_path.endswith(".pt"):
-        if len(sorted_entries) != 1:
-            raise RuntimeError(
-                f"Expected exactly 1 entry for legacy .pt file, got "
-                f"{len(sorted_entries)}: {abs_path}"
-            )
-        entry = sorted_entries[0]
-        result[entry.allocation_id] = torch_module.load(
-            abs_path,
-            weights_only=True,
-            map_location=device_str,
-        )
-        return result
-
-    odirect_flag = getattr(os_module, "O_DIRECT", None)
-    if odirect_flag is not None:
-        fd: Optional[int] = None
-        done = 0
-        try:
-            total_size = sum(entry.aligned_size for entry in sorted_entries)
-            # Avoid torch.empty(pin_memory=True): cudaHostAlloc is ~1-3 s/GiB
-            # and dominates wall time.  Plain numpy gives good throughput since
-            # PCIe H2D bandwidth far exceeds network disk bandwidth.
-            shard_t = None
-            arr = np_module.empty(total_size, dtype=np_module.uint8)
-
-            fd = os_module.open(abs_path, os_module.O_RDONLY | odirect_flag)
-            try:
-                mv = memoryview(arr)
-                try:
-                    while done < total_size:
-                        read = os_module.readv(fd, [mv[done:]])
-                        if read == 0:
-                            raise RuntimeError(
-                                f"Unexpected EOF in O_DIRECT read from {abs_path}: "
-                                f"got {done} of {total_size} bytes"
-                            )
-                        done += read
-                finally:
-                    mv.release()
-            finally:
-                os_module.close(fd)
-
-            offset = 0
-            for entry in sorted_entries:
-                size = entry.aligned_size
-                if shard_t is not None:
-                    tensor = shard_t[offset : offset + size]
-                else:
-                    tensor = torch_module.from_numpy(arr[offset : offset + size])
-                if device >= 0:
-                    tensor = tensor.to(device_str)
-                result[entry.allocation_id] = tensor
-                offset += size
-            return result
-        except OSError as exc:
-            fallback_errnos = {errno.EINVAL, errno.EOPNOTSUPP}
-            if fd is not None and exc.errno not in fallback_errnos:
-                raise
-            result.clear()
-            if logger is not None:
-                if fd is None:
-                    logger.debug(
-                        "O_DIRECT unsupported on %s (errno %s); using buffered reads",
-                        abs_path,
-                        exc.errno,
-                    )
-                else:
-                    logger.debug(
-                        "O_DIRECT read on %s hit EINVAL after %d/%d bytes; using buffered reads",
-                        abs_path,
-                        done,
-                        total_size,
-                    )
-
-    if sorted_entries and sorted_entries[0].tensor_offset != 0:
-        raise RuntimeError(
-            f"Buffered shard read requires entries starting at offset 0, "
-            f"got {sorted_entries[0].tensor_offset} in {abs_path}"
-        )
-    with open(abs_path, "rb") as handle:
-        for entry in sorted_entries:
-            raw = handle.read(entry.aligned_size)
-            if len(raw) != entry.aligned_size:
-                raise RuntimeError(
-                    f"Short read from {abs_path} at offset {entry.tensor_offset}: "
-                    f"expected {entry.aligned_size} bytes, got {len(raw)}"
-                )
-            arr = np_module.frombuffer(raw, dtype=np_module.uint8).copy()
-            tensor = torch_module.from_numpy(arr)
-            if device >= 0:
-                tensor = tensor.to(device_str)
-            result[entry.allocation_id] = tensor
-    return result
 
 
 def decode_metadata(raw_meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -196,17 +142,6 @@ def decode_metadata(raw_meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         }
         for key, entry in raw_meta.items()
     }
-
-
-def group_entries_by_shard(
-    allocations: List[AllocationEntry],
-) -> Dict[str, List[AllocationEntry]]:
-    groups: Dict[str, List[AllocationEntry]] = defaultdict(list)
-    for entry in allocations:
-        groups[entry.tensor_file].append(entry)
-    for entries in groups.values():
-        entries.sort(key=lambda entry: entry.tensor_offset)
-    return dict(groups)
 
 
 def plan_shard_layout(

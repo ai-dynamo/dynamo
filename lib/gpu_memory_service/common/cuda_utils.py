@@ -275,3 +275,21 @@ def cuda_memcpy_h2d_async(
         ),
         "cudaMemcpyAsync",
     )
+
+
+def cuda_memcpy_d2h_async(
+    dst_ptr: int,
+    src_ptr: int,
+    size: int,
+    stream,
+) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaMemcpyAsync(
+            dst_ptr,
+            src_ptr,
+            size,
+            cuda_runtime.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+            stream,
+        ),
+        "cudaMemcpyAsync",
+    )
