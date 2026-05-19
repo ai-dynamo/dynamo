@@ -6,8 +6,8 @@
 When ``GMS_DIAG=1`` is set, this module wraps
 ``modelexpress.load_strategy.register_tensors`` so that every call
 site (initial load in ``_load_*_mode`` and each wake via
-``mx_bringup``) dumps two snapshots of the model tree just before the
-walker runs:
+``modelexpress.lifecycle.resume_serving``) dumps two snapshots of the
+model tree just before the walker runs:
 
 - ``rank{R}_{phase}.txt``  — flat, sorted, diff-friendly tuple list
 - ``rank{R}_{phase}.tree`` — human-readable indented tree
@@ -218,7 +218,7 @@ def install_register_tensors_snapshot() -> None:
 
     def wrapped(model, ctx, *args, **kwargs):
         # Pass through any future/existing kwargs (e.g. reuse_discovered=True
-        # from mx_bringup) so we don't break the wrapped signature. We still
+        # from resume_serving) so we don't break the wrapped signature. We still
         # snapshot the model state at every call site regardless of flags —
         # the snapshot's value is comparing initial vs wake trees, whether
         # or not the walker actually runs inside register_tensors.
