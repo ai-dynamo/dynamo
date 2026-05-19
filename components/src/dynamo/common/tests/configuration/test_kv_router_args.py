@@ -535,7 +535,14 @@ def test_admission_control_default_none_with_explicit_threshold_auto_switches(
 ) -> None:
     """Pre-v1.1.2 launch-config compatibility: passing a threshold flag
     without --admission-control auto-promotes mode from the new 'none'
-    default to 'token-capacity' so the threshold actually fires."""
+    default to 'token-capacity' so the threshold actually fires.
+
+    User-set thresholds keep their values; unset thresholds receive
+    production defaults — same as passing --admission-control token-capacity
+    explicitly. This matches the v1.0.x/v1.1.x contract where setting any
+    threshold flag implicitly activated admission control with defaults
+    filling in the rest.
+    """
     _clear_admission_control_env(monkeypatch)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
@@ -555,8 +562,9 @@ def test_admission_control_default_none_with_explicit_threshold_auto_switches(
     assert config.admission_control == "token-capacity"
     assert config.active_decode_blocks_threshold == 0.85
     assert config.active_prefill_tokens_threshold == 10000
-    # _frac was not passed → remains None (auto-switch doesn't fabricate defaults)
-    assert config.active_prefill_tokens_threshold_frac is None
+    # _frac was not passed → filled in with production default 64.0
+    # (auto-switch matches --admission-control token-capacity).
+    assert config.active_prefill_tokens_threshold_frac == 64.0
 
 
 def test_admission_control_default_none_with_no_thresholds_stays_none(
