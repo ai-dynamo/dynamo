@@ -15,7 +15,12 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    nullable_float,
+    nullable_int,
+)
 
 # Fields forwarded verbatim as kwargs to RouterConfig.__init__.
 _ROUTER_FIELDS: tuple[str, ...] = (
@@ -24,20 +29,6 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold_frac",
     "enforce_disagg",
 )
-
-
-def _nullable_float(value: str) -> Optional[float]:
-    """Parse a float, or return None for the literal 'None'."""
-    if value is None or value == "None":
-        return None
-    return float(value)
-
-
-def _nullable_int(value: str) -> Optional[int]:
-    """Parse an int, or return None for the literal 'None'."""
-    if value is None or value == "None":
-        return None
-    return int(value)
 
 
 class RouterConfigBase(ConfigBase):
@@ -129,7 +120,7 @@ class RouterArgGroup(ArgGroup):
                 "Threshold fraction (0.0-1.0) of KV cache block utilization above which a worker "
                 "is considered busy. Pass 'None' on the CLI to disable this check. Default: 1.0."
             ),
-            arg_type=_nullable_float,
+            arg_type=nullable_float,
         )
         add_argument(
             g,
@@ -142,7 +133,7 @@ class RouterArgGroup(ArgGroup):
                 "threshold, the worker is marked as busy. Pass 'None' on the CLI to disable this "
                 "check. Uses OR logic with --active-prefill-tokens-threshold-frac. Default: 10000000."
             ),
-            arg_type=_nullable_int,
+            arg_type=nullable_int,
         )
         add_argument(
             g,
@@ -154,7 +145,7 @@ class RouterArgGroup(ArgGroup):
                 "active_prefill_tokens > frac * max_num_batched_tokens. Pass 'None' on the CLI to "
                 "disable this check. Uses OR logic with --active-prefill-tokens-threshold. Default: 64.0."
             ),
-            arg_type=_nullable_float,
+            arg_type=nullable_float,
         )
         add_argument(
             g,

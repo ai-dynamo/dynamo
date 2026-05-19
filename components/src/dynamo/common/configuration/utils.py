@@ -54,6 +54,20 @@ def env_or_default(
     return target_type(value) if callable(target_type) else value  # type: ignore
 
 
+def nullable_float(value: str) -> Optional[float]:
+    """Parse a float, or return None for empty/'None' values."""
+    if value is None or value == "" or value == "None":
+        return None
+    return float(value)
+
+
+def nullable_int(value: str) -> Optional[int]:
+    """Parse an int, or return None for empty/'None' values."""
+    if value is None or value == "" or value == "None":
+        return None
+    return int(value)
+
+
 def add_argument(
     parser: argparse.ArgumentParser | argparse._ArgumentGroup,
     *,
