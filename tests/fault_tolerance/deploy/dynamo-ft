@@ -22,6 +22,11 @@
 #                                   own default applies — currently vllm-runtime:1.1.1)
 #   -s / --storage-class <sc>      (default $DYNAMO_FT_STORAGE_CLASS)
 #   -l / --log <file>              (tee output to <file>; otherwise stdout)
+#       --log-pvc <name>           (RWX PVC reused across runs; default
+#                                   dynamo-ft-logs. Override with $DYNAMO_FT_LOG_PVC
+#                                   or --no-log-pvc for fresh per-test PVC.)
+#       --no-log-pvc               (disable reuse — fresh PVC per run, auto-deleted)
+#       --recreate-log-pvc         (delete + recreate the reused PVC first)
 #       --no-prefetch-model        (skip prefetch; default is to prefetch)
 #       --no-skip-service-restart  (do restart NATS/etcd; default skips)
 #       --bg                       (run in background, write PID + log path)
@@ -40,6 +45,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAMESPACE="${DYNAMO_FT_NAMESPACE:-neelays-test}"
 IMAGE="${DYNAMO_FT_IMAGE:-}"
 STORAGE_CLASS="${DYNAMO_FT_STORAGE_CLASS:-}"
+# Default to a stable, reused log PVC so we don't pay FSx provisioning on
+# every run. The harness creates it on first use and never deletes it
+# unless --recreate-log-pvc is passed explicitly.
+LOG_PVC="${DYNAMO_FT_LOG_PVC:-dynamo-ft-logs}"
+RECREATE_LOG_PVC=0
 LOG_FILE=""
 PREFETCH_MODEL=1
 SKIP_SERVICE_RESTART=1
@@ -71,6 +81,9 @@ while (($# > 0)); do
         -i | --image) IMAGE="$2"; shift 2 ;;
         -s | --storage-class) STORAGE_CLASS="$2"; shift 2 ;;
         -l | --log) LOG_FILE="$2"; shift 2 ;;
+        --log-pvc) LOG_PVC="$2"; shift 2 ;;
+        --no-log-pvc) LOG_PVC=""; shift ;;
+        --recreate-log-pvc) RECREATE_LOG_PVC=1; shift ;;
         --no-prefetch-model) PREFETCH_MODEL=0; shift ;;
         --no-skip-service-restart) SKIP_SERVICE_RESTART=0; shift ;;
         --bg) BG=1; shift ;;
@@ -107,6 +120,8 @@ fi
 ARGS=( "$NODEID" --namespace "$NAMESPACE" -s -v )
 [[ -n "$IMAGE" ]]              && ARGS+=( --image "$IMAGE" )
 [[ -n "$STORAGE_CLASS" ]]      && ARGS+=( --storage-class "$STORAGE_CLASS" )
+[[ -n "$LOG_PVC" ]]            && ARGS+=( --log-pvc "$LOG_PVC" )
+((RECREATE_LOG_PVC))           && ARGS+=( --recreate-log-pvc )
 ((PREFETCH_MODEL))             && ARGS+=( --prefetch-model )
 ((SKIP_SERVICE_RESTART))       && ARGS+=( --skip-service-restart )
 ARGS+=( "${EXTRA[@]}" )
