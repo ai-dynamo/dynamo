@@ -122,9 +122,7 @@ def check_grpc_server_live(
                 logger.debug(f"gRPC server not live on attempt {attempt + 1}: {e}")
                 time.sleep(retry_delay)
             else:
-                logger.error(
-                    f"gRPC server not live after {max_attempts} attempts: {e}"
-                )
+                logger.error(f"gRPC server not live after {max_attempts} attempts: {e}")
                 raise
     return False
 
