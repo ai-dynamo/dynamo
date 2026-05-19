@@ -70,3 +70,6 @@ cases:
     description: Nested-arguments test 7.d — not yet authored for this family
     reason: |-
       Nested-arguments test 7.d not yet authored for minimax_m2; see 7.a / 7.b for simpler argument shapes.
+  PARSER.batch.7.e:
+    description: Large / deep JSON-edge payload test 7.e — not yet authored for this family
+    reason: Large/deep JSON-edge payload test 7.e not yet authored for minimax_m2; existing batch.7 coverage remains in 7.a-d.
