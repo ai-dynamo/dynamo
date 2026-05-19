@@ -40,176 +40,301 @@ import (
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
-type nonEPPWorkerIdentityLabels struct {
-	name             string
-	labels           map[string]string
-	subComponentType string
-}
+type upgradeCase struct {
+	name string
 
-type nonEPPWorkerIdentityRender struct {
-	labelSets       []nonEPPWorkerIdentityLabels
-	serviceSelector map[string]string
-	existingObject  client.Object
-	desiredObject   client.Object
-	existingHash    string
-	desiredHash     string
+	// parent is the persisted pre-upgrade v1alpha1 DCD/DGD.
+	parent client.Object
+
+	// child is the workload object created by the old controller.
+	child client.Object
+
+	convertParent       func(*testing.T, client.Object) client.Object
+	renderChild         func(context.Context, *testing.T, client.Object, client.Object) client.Object
+	serviceSelector     func(context.Context, *testing.T, client.Object, client.Object) map[string]string
+	childPodLabels      func(*testing.T, client.Object) map[string]map[string]string
+	expectedWorkerSites map[string]string
 }
 
 func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 	ctx := context.Background()
-	tests := []struct {
-		name   string
-		render func(context.Context, *testing.T) nonEPPWorkerIdentityRender
-	}{
-		{name: "Deployment", render: renderNonEPPDeploymentWorkerIdentity},
-		{name: "LeaderWorkerSet", render: renderNonEPPLeaderWorkerSetWorkerIdentity},
-		{name: "Grove PodCliqueSet", render: renderNonEPPGroveWorkerIdentity},
+	convertDCD := func(t *testing.T, obj client.Object) client.Object {
+		t.Helper()
+		return betaDCD(t, obj.(*v1alpha1.DynamoComponentDeployment))
+	}
+	convertDGD := func(t *testing.T, obj client.Object) client.Object {
+		t.Helper()
+		return betaDGD(t, obj.(*v1alpha1.DynamoGraphDeployment))
+	}
+	renderDCDServiceSelector := func(ctx context.Context, t *testing.T, parent, child client.Object) map[string]string {
+		t.Helper()
+		dcd := parent.(*v1beta1.DynamoComponentDeployment)
+		service, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd, child).generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+		require.NoError(t, err)
+		require.False(t, toDelete)
+		return service.Spec.Selector
+	}
+	tests := []upgradeCase{
+		func() upgradeCase {
+			dynamoNamespace := "default"
+			parent := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "qwen-decode-db6b6891",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoComponent:           "decode",
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+						commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+						commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+						commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+					},
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:      "decode",
+						ComponentType:    commonconsts.ComponentTypeWorker,
+						SubComponentType: commonconsts.ComponentTypeDecode,
+						DynamoNamespace:  &dynamoNamespace,
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Name:    commonconsts.MainContainerName,
+								Image:   "test-image:latest",
+								Command: []string{"python3"},
+								Args:    []string{"-m", "dynamo.vllm"},
+								Resources: corev1.ResourceRequirements{
+									Limits: corev1.ResourceList{
+										corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			dcd := betaDCD(t, parent)
+			child, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.False(t, toDelete)
+			child.Spec.Template.Labels = setLegacyWorkerLabels(child.Spec.Template.Labels, commonconsts.ComponentTypeDecode)
+			return upgradeCase{
+				name:          "Deployment",
+				parent:        parent,
+				child:         child,
+				convertParent: convertDCD,
+				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
+					t.Helper()
+					dcd := parent.(*v1beta1.DynamoComponentDeployment)
+					deployment, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd, child).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+					require.NoError(t, err)
+					require.False(t, toDelete)
+					return deployment
+				},
+				serviceSelector: renderDCDServiceSelector,
+				childPodLabels: func(t *testing.T, obj client.Object) map[string]map[string]string {
+					t.Helper()
+					deployment := obj.(*appsv1.Deployment)
+					return map[string]map[string]string{"pod template": deployment.Spec.Template.Labels}
+				},
+				expectedWorkerSites: map[string]string{"pod template": commonconsts.ComponentTypeDecode},
+			}
+		}(),
+		func() upgradeCase {
+			dynamoNamespace := "default"
+			parent := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "qwen-decode-db6b6891",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoComponent:           "decode",
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+						commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+						commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+						commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+					},
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:      "decode",
+						ComponentType:    commonconsts.ComponentTypeWorker,
+						SubComponentType: commonconsts.ComponentTypeDecode,
+						DynamoNamespace:  &dynamoNamespace,
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Name:    commonconsts.MainContainerName,
+								Image:   "test-image:latest",
+								Command: []string{"python3"},
+								Args:    []string{"-m", "dynamo.vllm"},
+								Resources: corev1.ResourceRequirements{
+									Limits: corev1.ResourceList{
+										corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			parent.Spec.Multinode = &v1alpha1.MultinodeSpec{NodeCount: 2}
+			dcd := betaDCD(t, parent)
+			child, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.False(t, toDelete)
+			child.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels = setLegacyWorkerLabels(child.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels, commonconsts.ComponentTypeDecode)
+			child.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels = setLegacyWorkerLabels(child.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels, commonconsts.ComponentTypeDecode)
+			return upgradeCase{
+				name:          "LeaderWorkerSet",
+				parent:        parent,
+				child:         child,
+				convertParent: convertDCD,
+				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
+					t.Helper()
+					dcd := parent.(*v1beta1.DynamoComponentDeployment)
+					lws, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd, child).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+					require.NoError(t, err)
+					require.False(t, toDelete)
+					return lws
+				},
+				serviceSelector: renderDCDServiceSelector,
+				childPodLabels: func(t *testing.T, obj client.Object) map[string]map[string]string {
+					t.Helper()
+					lws := obj.(*leaderworkersetv1.LeaderWorkerSet)
+					return map[string]map[string]string{
+						"leader": lws.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels,
+						"worker": lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels,
+					}
+				},
+				expectedWorkerSites: map[string]string{
+					"leader": commonconsts.ComponentTypeDecode,
+					"worker": commonconsts.ComponentTypeDecode,
+				},
+			}
+		}(),
+		func() upgradeCase {
+			parent := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "vllm-disagg-planner",
+					Namespace: "jsm",
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
+					},
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {
+							ComponentType: commonconsts.ComponentTypeFrontend,
+							Replicas:      ptr.To(int32(1)),
+						},
+						"Planner": {
+							ComponentType: commonconsts.ComponentTypePlanner,
+							Replicas:      ptr.To(int32(1)),
+						},
+						"VllmDecodeWorker": {
+							ComponentType:    commonconsts.ComponentTypeWorker,
+							SubComponentType: commonconsts.ComponentTypeDecode,
+							Replicas:         ptr.To(int32(1)),
+						},
+						"VllmPrefillWorker": {
+							ComponentType:    commonconsts.ComponentTypeWorker,
+							SubComponentType: commonconsts.ComponentTypePrefill,
+							Replicas:         ptr.To(int32(1)),
+						},
+					},
+				},
+			}
+			dgd := betaDGD(t, parent)
+			_, child := renderGrovePodCliqueSetFromExisting(ctx, t, dgd, &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "vllm-disagg-planner", Namespace: "jsm"},
+				Spec: grovev1alpha1.PodCliqueSetSpec{
+					Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+							{
+								Name: "vllmprefillworker",
+								Labels: map[string]string{
+									commonconsts.KubeLabelDynamoComponent:        "VllmPrefillWorker",
+									commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypePrefill,
+								},
+								Annotations: map[string]string{
+									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
+								},
+							},
+							{Name: "frontend"},
+							{
+								Name: "vllmdecodeworker",
+								Labels: map[string]string{
+									commonconsts.KubeLabelDynamoComponent:        "VllmDecodeWorker",
+									commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
+									commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypeDecode,
+								},
+							},
+						},
+					},
+				},
+			})
+			return upgradeCase{
+				name:          "Grove PodCliqueSet",
+				parent:        parent,
+				child:         child,
+				convertParent: convertDGD,
+				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
+					t.Helper()
+					_, pcs := renderGrovePodCliqueSetFromExisting(ctx, t, parent.(*v1beta1.DynamoGraphDeployment), child.(*grovev1alpha1.PodCliqueSet))
+					return pcs
+				},
+				serviceSelector: renderGroveDecodeServiceSelector,
+				childPodLabels: func(t *testing.T, obj client.Object) map[string]map[string]string {
+					t.Helper()
+					pcs := obj.(*grovev1alpha1.PodCliqueSet)
+					return map[string]map[string]string{
+						"prefill": requireGroveClique(t, pcs, "vllmprefillworker").Labels,
+						"decode":  requireGroveClique(t, pcs, "vllmdecodeworker").Labels,
+					}
+				},
+				expectedWorkerSites: map[string]string{
+					"prefill": commonconsts.ComponentTypePrefill,
+					"decode":  commonconsts.ComponentTypeDecode,
+				},
+			}
+		}(),
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.render(ctx, t)
-			require.NotNil(t, got.existingObject, "existing downstream object")
-			require.NotNil(t, got.desiredObject, "desired downstream object")
-			require.NotEmpty(t, got.existingHash, "existing downstream object hash")
-			require.NotEmpty(t, got.desiredHash, "desired downstream object hash")
-			require.Equal(t, got.existingHash, got.desiredHash, "upgrade should not change the downstream spec hash")
+			parent := tt.convertParent(t, tt.parent)
+			oldChild := tt.child.DeepCopyObject().(client.Object)
+			newChild := tt.renderChild(ctx, t, parent, oldChild)
+			oldPodLabels := tt.childPodLabels(t, oldChild)
+			newPodLabels := tt.childPodLabels(t, newChild)
 
-			for _, labelSet := range got.labelSets {
-				require.Equal(t, commonconsts.ComponentTypeWorker, labelSet.labels[commonconsts.KubeLabelDynamoComponentType], labelSet.name)
-				require.Equal(t, labelSet.subComponentType, labelSet.labels[commonconsts.KubeLabelDynamoSubComponentType], labelSet.name)
-				require.NotContains(t, labelSet.labels, commonconsts.KubeLabelDynamoComponentClass, labelSet.name)
+			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should not change the child spec hash")
+
+			for site, subComponentType := range tt.expectedWorkerSites {
+				oldLabels, ok := oldPodLabels[site]
+				require.True(t, ok, "pre-upgrade child labels for %s", site)
+				newLabels, ok := newPodLabels[site]
+				require.True(t, ok, "post-upgrade child labels for %s", site)
+
+				require.Equal(t, commonconsts.ComponentTypeWorker, oldLabels[commonconsts.KubeLabelDynamoComponentType], "pre-upgrade %s component type", site)
+				require.Equal(t, subComponentType, oldLabels[commonconsts.KubeLabelDynamoSubComponentType], "pre-upgrade %s sub-component type", site)
+				require.NotContains(t, oldLabels, commonconsts.KubeLabelDynamoComponentClass, "pre-upgrade %s component class", site)
+				require.Equal(t, oldLabels[commonconsts.KubeLabelDynamoComponentType], newLabels[commonconsts.KubeLabelDynamoComponentType], "post-upgrade %s component type", site)
+				require.Equal(t, oldLabels[commonconsts.KubeLabelDynamoSubComponentType], newLabels[commonconsts.KubeLabelDynamoSubComponentType], "post-upgrade %s sub-component type", site)
+				require.NotContains(t, newLabels, commonconsts.KubeLabelDynamoComponentClass, "post-upgrade %s component class", site)
 			}
 
-			require.NotNil(t, got.serviceSelector, "service selector")
-			require.Equal(t, commonconsts.ComponentTypeWorker, got.serviceSelector[commonconsts.KubeLabelDynamoComponentType])
+			selector := tt.serviceSelector(ctx, t, parent, newChild)
+			require.NotNil(t, selector, "service selector")
+			require.Equal(t, commonconsts.ComponentTypeWorker, selector[commonconsts.KubeLabelDynamoComponentType])
 		})
 	}
 }
 
-func renderNonEPPDeploymentWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWorkerIdentityRender {
+func renderGroveDecodeServiceSelector(ctx context.Context, t *testing.T, parent, child client.Object) map[string]string {
 	t.Helper()
-	s := newNonEPPWorkerIdentityScheme(t)
-	dcd := convertedLegacyDecodeDCD(t, false)
-	preUpgradeDeployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: dcd.Name, Namespace: dcd.Namespace},
-		Spec: appsv1.DeploymentSpec{
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: newLegacyWorkerLabels(commonconsts.ComponentTypeDecode)},
-			},
-		},
-	}
-
-	existing, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, preUpgradeDeployment).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-	require.NoError(t, err)
-	require.False(t, toDelete)
-	desired, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, existing).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-	require.NoError(t, err)
-	require.False(t, toDelete)
-	service, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, desired).generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-	require.NoError(t, err)
-	require.False(t, toDelete)
-
-	return nonEPPWorkerIdentityRender{
-		labelSets: []nonEPPWorkerIdentityLabels{{
-			name:             "deployment pod template",
-			labels:           desired.Spec.Template.Labels,
-			subComponentType: commonconsts.ComponentTypeDecode,
-		}},
-		serviceSelector: service.Spec.Selector,
-		existingObject:  existing,
-		desiredObject:   desired,
-		existingHash:    specHash(t, existing),
-		desiredHash:     specHash(t, desired),
-	}
-}
-
-func renderNonEPPLeaderWorkerSetWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWorkerIdentityRender {
-	t.Helper()
-	s := newNonEPPWorkerIdentityScheme(t)
-	dcd := convertedLegacyDecodeDCD(t, true)
-	preUpgradeLWS := &leaderworkersetv1.LeaderWorkerSet{
-		ObjectMeta: metav1.ObjectMeta{Name: leaderWorkerSetName(dcd), Namespace: dcd.Namespace},
-		Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-			LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
-				LeaderTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: newLegacyWorkerLabels(commonconsts.ComponentTypeDecode)},
-				},
-				WorkerTemplate: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: newLegacyWorkerLabels(commonconsts.ComponentTypeDecode)},
-				},
-			},
-		},
-	}
-
-	existing, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, preUpgradeLWS).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-	require.NoError(t, err)
-	require.False(t, toDelete)
-	desired, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, existing).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-	require.NoError(t, err)
-	require.False(t, toDelete)
-	service, toDelete, err := newNonEPPDCDReconciler(t, s, dcd, desired).generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-	require.NoError(t, err)
-	require.False(t, toDelete)
-
-	return nonEPPWorkerIdentityRender{
-		labelSets: []nonEPPWorkerIdentityLabels{
-			{
-				name:             "leaderworkerset leader pod template",
-				labels:           desired.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels,
-				subComponentType: commonconsts.ComponentTypeDecode,
-			},
-			{
-				name:             "leaderworkerset worker pod template",
-				labels:           desired.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels,
-				subComponentType: commonconsts.ComponentTypeDecode,
-			},
-		},
-		serviceSelector: service.Spec.Selector,
-		existingObject:  existing,
-		desiredObject:   desired,
-		existingHash:    specHash(t, existing),
-		desiredHash:     specHash(t, desired),
-	}
-}
-
-func renderNonEPPGroveWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWorkerIdentityRender {
-	t.Helper()
-	dgd := convertedLegacyGroveDGD(t)
-	preUpgradePCS := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace},
-		Spec: grovev1alpha1.PodCliqueSetSpec{
-			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
-				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
-					{
-						Name: "vllmprefillworker",
-						Labels: map[string]string{
-							commonconsts.KubeLabelDynamoComponent: "VllmPrefillWorker",
-						},
-						Annotations: map[string]string{
-							commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
-						},
-					},
-					{Name: "frontend"},
-					{
-						Name: "vllmdecodeworker",
-						Labels: map[string]string{
-							commonconsts.KubeLabelDynamoComponent: "VllmDecodeWorker",
-						},
-					},
-				},
-			},
-		},
-	}
-	preUpgradePCS.Spec.Template.Cliques[0].Labels = mergeStringMaps(preUpgradePCS.Spec.Template.Cliques[0].Labels, newLegacyWorkerLabels(commonconsts.ComponentTypePrefill))
-	preUpgradePCS.Spec.Template.Cliques[2].Labels = mergeStringMaps(preUpgradePCS.Spec.Template.Cliques[2].Labels, newLegacyWorkerLabels(commonconsts.ComponentTypeDecode))
-
-	renderDGD, existing := renderGrovePodCliqueSetFromExisting(ctx, t, dgd, preUpgradePCS)
-	renderDGD, desired := renderGrovePodCliqueSetFromExisting(ctx, t, dgd, existing.DeepCopy())
-	prefill := requireGroveClique(t, desired, "vllmprefillworker")
-	decode := requireGroveClique(t, desired, "vllmdecodeworker")
-	require.Equal(t, "1.1.0", prefill.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion])
-
+	renderDGD, _ := renderGrovePodCliqueSetFromExisting(ctx, t, parent.(*v1beta1.DynamoGraphDeployment), child.(*grovev1alpha1.PodCliqueSet))
 	decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
 	require.NotNil(t, decodeComponent)
 	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
@@ -222,26 +347,17 @@ func renderNonEPPGroveWorkerIdentity(ctx context.Context, t *testing.T) nonEPPWo
 		IsK8sDiscovery:  true,
 	})
 	require.NoError(t, err)
+	return service.Spec.Selector
+}
 
-	return nonEPPWorkerIdentityRender{
-		labelSets: []nonEPPWorkerIdentityLabels{
-			{
-				name:             "grove prefill clique",
-				labels:           prefill.Labels,
-				subComponentType: commonconsts.ComponentTypePrefill,
-			},
-			{
-				name:             "grove decode clique",
-				labels:           decode.Labels,
-				subComponentType: commonconsts.ComponentTypeDecode,
-			},
-		},
-		serviceSelector: service.Spec.Selector,
-		existingObject:  existing,
-		desiredObject:   desired,
-		existingHash:    specHash(t, existing),
-		desiredHash:     specHash(t, desired),
+func setLegacyWorkerLabels(labels map[string]string, subComponentType string) map[string]string {
+	if labels == nil {
+		labels = map[string]string{}
 	}
+	labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.ComponentTypeWorker
+	labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
+	delete(labels, commonconsts.KubeLabelDynamoComponentClass)
+	return labels
 }
 
 func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
@@ -325,93 +441,6 @@ func newNonEPPDCDReconciler(
 	}
 }
 
-func convertedLegacyDecodeDCD(t *testing.T, multinode bool) *v1beta1.DynamoComponentDeployment {
-	t.Helper()
-	dynamoNamespace := "default"
-	alpha := &v1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "qwen-decode-db6b6891",
-			Namespace: "default",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoComponent:           "decode",
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
-				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
-				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
-				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
-			},
-		},
-		Spec: v1alpha1.DynamoComponentDeploymentSpec{
-			BackendFramework: string(dynamo.BackendFrameworkVLLM),
-			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-				ServiceName:      "decode",
-				ComponentType:    commonconsts.ComponentTypeWorker,
-				SubComponentType: commonconsts.ComponentTypeDecode,
-				DynamoNamespace:  &dynamoNamespace,
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{
-						Name:    commonconsts.MainContainerName,
-						Image:   "test-image:latest",
-						Command: []string{"python3"},
-						Args:    []string{"-m", "dynamo.vllm"},
-						Resources: corev1.ResourceRequirements{
-							Limits: corev1.ResourceList{
-								corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	if multinode {
-		alpha.Spec.Multinode = &v1alpha1.MultinodeSpec{NodeCount: 2}
-	}
-	dcd := betaDCD(t, alpha)
-	require.Equal(t, v1beta1.ComponentTypeDecode, dcd.Spec.ComponentType)
-	require.Equal(t, commonconsts.ComponentTypeWorker, dcd.Labels[commonconsts.KubeLabelDynamoComponentType])
-	return dcd
-}
-
-func convertedLegacyGroveDGD(t *testing.T) *v1beta1.DynamoGraphDeployment {
-	t.Helper()
-	alpha := &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vllm-disagg-planner",
-			Namespace: "jsm",
-			Annotations: map[string]string{
-				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
-			},
-		},
-		Spec: v1alpha1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-				"Frontend": {
-					ComponentType: commonconsts.ComponentTypeFrontend,
-					Replicas:      ptr.To(int32(1)),
-				},
-				"Planner": {
-					ComponentType: commonconsts.ComponentTypePlanner,
-					Replicas:      ptr.To(int32(1)),
-				},
-				"VllmDecodeWorker": {
-					ComponentType:    commonconsts.ComponentTypeWorker,
-					SubComponentType: commonconsts.ComponentTypeDecode,
-					Replicas:         ptr.To(int32(1)),
-				},
-				"VllmPrefillWorker": {
-					ComponentType:    commonconsts.ComponentTypeWorker,
-					SubComponentType: commonconsts.ComponentTypePrefill,
-					Replicas:         ptr.To(int32(1)),
-				},
-			},
-		},
-	}
-	dgd := betaDGD(t, alpha)
-	require.Equal(t, v1beta1.ComponentTypeDecode, dgd.GetComponentByName("VllmDecodeWorker").ComponentType)
-	require.Equal(t, v1beta1.ComponentTypePrefill, dgd.GetComponentByName("VllmPrefillWorker").ComponentType)
-	return dgd
-}
-
 func newNonEPPWorkerIdentityScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -425,24 +454,6 @@ func newNonEPPWorkerIdentityScheme(t *testing.T) *runtime.Scheme {
 		require.NoError(t, addToScheme(s))
 	}
 	return s
-}
-
-func newLegacyWorkerLabels(subComponentType string) map[string]string {
-	return map[string]string{
-		commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
-		commonconsts.KubeLabelDynamoSubComponentType: subComponentType,
-	}
-}
-
-func mergeStringMaps(dst map[string]string, src map[string]string) map[string]string {
-	out := map[string]string{}
-	for k, v := range dst {
-		out[k] = v
-	}
-	for k, v := range src {
-		out[k] = v
-	}
-	return out
 }
 
 func requireGroveClique(t *testing.T, pcs *grovev1alpha1.PodCliqueSet, name string) *grovev1alpha1.PodCliqueTemplateSpec {
