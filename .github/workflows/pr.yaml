@@ -27,7 +27,6 @@ jobs:
       - name: Test
         run: |
           echo $KUBECONFIG_B64 > kubeconfig
-          KUBECONFIG=kubeconfig kubectl get nodes
           sleep 1000
   # ============================================================================
   # SETUP & DETECTION JOBS
