@@ -30,11 +30,11 @@ use rustc_hash::{FxBuildHasher, FxHashSet};
 
 #[cfg(feature = "bench")]
 use super::ShardedIndexerMetrics;
+use super::shard_handle::AsyncShardHandle;
 use super::{
     AnchorCapableSyncIndexer, AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError,
     ShardSizeSnapshot, ThreadPoolIndexer,
 };
-use super::shard_handle::AsyncShardHandle;
 use crate::protocols::*;
 
 type WorkerRoutingLookup = DashMap<ExternalSequenceBlockHash, BlockRoutingEntry, FxBuildHasher>;

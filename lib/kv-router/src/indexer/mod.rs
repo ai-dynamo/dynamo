@@ -63,12 +63,12 @@ mod tests;
 
 // Re-export everything that was public in the old single-file module.
 pub use branch_sharded::*;
-pub use shard_handle::AsyncShardHandle;
 pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
 pub use metrics::*;
+pub use shard_handle::AsyncShardHandle;
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;
