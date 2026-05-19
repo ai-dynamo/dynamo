@@ -185,7 +185,7 @@ class RealtimeVideoWorkerHandler(BaseGenerativeHandler):
                     )
                     break
 
-                chunk_mp4_path = await self._generate_chunk(session, chunk_idx)
+                chunk_mp4_path = await self._generate_chunk(session)
 
                 if response_format == "url":
                     # Hand the local chunk file to fsspec directly. fs.put is
@@ -235,8 +235,14 @@ class RealtimeVideoWorkerHandler(BaseGenerativeHandler):
                 logger.warning(f"Failed to release realtime session {session.id}: {e}")
             session.dispose()
 
-    async def _generate_chunk(self, session: Any, chunk_idx: int) -> str:
-        """Drive one chunk through the antgroup scheduler. Returns MP4 path."""
+    async def _generate_chunk(self, session: Any) -> str:
+        """Drive one chunk through the antgroup scheduler. Returns MP4 path.
+
+        Mirrors `_generate_loop` from sglang's realtime_video_api.py: bump the
+        per-chunk request id, build sampling params from session state, then
+        send the batch via the async scheduler client. Path A overrides only
+        `input_video` (no v2v action stream).
+        """
         session.new_request()
         sampling_params = session.build_sampling_params()
         batch = self._rt.prepare_request(
@@ -245,7 +251,7 @@ class RealtimeVideoWorkerHandler(BaseGenerativeHandler):
         )
         batch.session = session.realtime_session
         batch.extra["realtime_session_id"] = session.id
-        batch.block_idx = chunk_idx
+        batch.block_idx = session.generate_chunk_cnt
         # Modified Path A: t2v only — input_video would carry V2V frames from
         # the mid-flight WebSocket action stream that this handler intentionally
         # does not consume.
