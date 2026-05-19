@@ -124,10 +124,7 @@ impl KvbmRuntimeBuilder {
     /// implements `PeerDiscovery`) and passes it here so velo's standard
     /// `messenger.discover_and_register_peer` lookup goes through the
     /// hub instead of a static filesystem dir.
-    pub fn with_discovery(
-        mut self,
-        discovery: Arc<dyn velo::discovery::PeerDiscovery>,
-    ) -> Self {
+    pub fn with_discovery(mut self, discovery: Arc<dyn velo::discovery::PeerDiscovery>) -> Self {
         self.discovery_override = Some(discovery);
         self
     }

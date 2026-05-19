@@ -125,7 +125,8 @@ impl PyKvbmRuntime {
         // their cross-instance data path uses NIXL, not velo.
         let runtime = handle
             .block_on(async {
-                let mut builder = KvbmRuntimeBuilder::new(config.clone()).with_runtime(rt_for_builder);
+                let mut builder =
+                    KvbmRuntimeBuilder::new(config.clone()).with_runtime(rt_for_builder);
                 builder = kvbm_connector::seed_leader_builder_with_hub_discovery(&config, builder)?;
                 builder.build_leader().await
             })

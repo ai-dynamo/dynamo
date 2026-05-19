@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod accessor;
+pub mod consolidator;
 pub mod control;
 mod describe_map;
 pub mod dispatch;
@@ -16,8 +17,10 @@ mod types;
 pub mod velo;
 
 pub use accessor::{BlockAccessor, PolicyContext, TieredBlock};
+pub use consolidator::ConsolidatorParams;
 pub use control::{ControlModule, ControlPlane, ControlPlaneBuilder};
 pub use instance::InstanceLeader;
+pub use kvbm_consolidator::{ConsolidatorHandle, EventSource};
 pub use onboarding::*;
 pub use session::{
     ControllableSessionOptions, ControllableSessionResult, InitiatorSession, ResponderSession,

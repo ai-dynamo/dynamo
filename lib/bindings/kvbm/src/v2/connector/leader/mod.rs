@@ -14,8 +14,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use kvbm_connector::connector::leader::disagg::ConnectorLeaderApi;
-use kvbm_connector::connector::leader::{ConnectorLeader, FinishedStatus, Request};
-use kvbm_connector::{BlockId, InstanceId, WorkerAddress};
+use kvbm_connector::connector::leader::{
+    ConnectorLeader, ConsolidatorEndpoints, FinishedStatus, Request,
+};
+use kvbm_connector::{BlockId, EventSource, InstanceId, WorkerAddress};
 
 use crate::to_pyerr;
 use crate::v2::runtime::PyKvbmRuntime;
@@ -115,12 +117,14 @@ impl<'a> ApiRoute<'a> {
             ApiRoute::Cd(api) => {
                 api.update_state_after_alloc(request_id, block_ids, num_external_tokens)
             }
-            ApiRoute::Direct(leader) => kvbm_connector::connector::leader::ConnectorLeader::update_state_after_alloc(
-                leader,
-                request_id,
-                block_ids,
-                num_external_tokens,
-            ),
+            ApiRoute::Direct(leader) => {
+                kvbm_connector::connector::leader::ConnectorLeader::update_state_after_alloc(
+                    leader,
+                    request_id,
+                    block_ids,
+                    num_external_tokens,
+                )
+            }
         }
     }
     fn build_connector_meta(
@@ -158,13 +162,44 @@ impl PyConnectorLeader {
     ///
     /// Args:
     ///     runtime: The KvbmRuntime instance to use for Velo RPC communication
+    ///     block_size: KV cache block size in tokens
+    ///     consolidator_endpoints: Optional 3-tuple
+    ///         ``(vllm_zmq_endpoint: str | None, egress_endpoint: str, engine_source: str)``
+    ///         where ``engine_source`` is one of ``"vllm"``, ``"trtllm"``, or ``"kvbm"``.
+    ///         When provided the connector will spawn an in-process kv-router consolidator
+    ///         during ``initialize_workers()``.
     ///
     /// Raises:
     ///     RuntimeError: If the runtime doesn't have a Velo instance
+    ///     ValueError: If ``engine_source`` is not a recognised variant
     #[new]
-    pub fn new(runtime: &PyKvbmRuntime, block_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (runtime, block_size, consolidator_endpoints = None))]
+    pub fn new(
+        runtime: &PyKvbmRuntime,
+        block_size: usize,
+        consolidator_endpoints: Option<(Option<String>, String, String)>,
+    ) -> PyResult<Self> {
         let runtime = runtime.inner();
-        let leader = Arc::new(ConnectorLeader::new(runtime, block_size));
+        let endpoints = consolidator_endpoints
+            .map(
+                |(vllm_zmq, egress, source_str)| -> PyResult<ConsolidatorEndpoints> {
+                    let engine_source = source_str.parse::<EventSource>().map_err(|e| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "invalid engine_source {:?}: {}",
+                            source_str, e
+                        ))
+                    })?;
+                    Ok(ConsolidatorEndpoints {
+                        vllm_zmq_endpoint: vllm_zmq,
+                        egress_endpoint: egress,
+                        engine_source,
+                    })
+                },
+            )
+            .transpose()?;
+        let leader = Arc::new(ConnectorLeader::new_with_consolidator(
+            runtime, block_size, endpoints,
+        ));
         Ok(Self { inner: leader })
     }
 

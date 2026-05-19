@@ -49,6 +49,7 @@ use super::{
     SessionId,
     StagingMode,
     accessor::{BlockAccessor, PolicyContext},
+    consolidator::{ConsolidatorCell, ConsolidatorParams, new_cell, spawn_into_cell},
     dispatch::{PullRef, WirePullOptions, plan_pull},
     parallelism::{ParallelismTemplate, stamp_parallelism_descriptors},
     session::{
@@ -216,6 +217,18 @@ pub struct InstanceLeader {
     /// G3 blocks for G3→G1 transfer instead of staging through G2. Driven by
     /// `kvbm_config::CacheConfig::bypass_host_cache()` at init time.
     pub(crate) bypass_host: bool,
+
+    // ========================================================================
+    // In-process consolidator (optional)
+    // ========================================================================
+    /// Live in-process consolidator, owned by this leader.
+    ///
+    /// Populated post-construction via [`Self::with_consolidator`];  starts
+    /// empty.  Backed by `Arc<OnceLock<…>>` so the first call wins and the
+    /// guard is kept alive until the last `InstanceLeader` clone is dropped
+    /// (at which point the guard's `Drop` fires and shuts the background tasks
+    /// down without blocking the caller).
+    consolidator: ConsolidatorCell,
 }
 
 /// Builder for InstanceLeader.
@@ -455,6 +468,7 @@ impl InstanceLeaderBuilder {
             modules: Arc::new(OnceLock::new()),
             observability: self.observability,
             bypass_host: self.bypass_host,
+            consolidator: new_cell(),
         })
     }
 }
@@ -684,6 +698,70 @@ impl InstanceLeader {
     /// returns. First-write-wins. Surfaced via [`Self::describe`].
     pub fn set_modules(&self, modules: Vec<ModuleId>) -> bool {
         self.modules.set(modules).is_ok()
+    }
+
+    // ========================================================================
+    // In-process consolidator
+    // ========================================================================
+
+    /// Spawn an in-process kvbm-consolidator and attach it to this leader.
+    ///
+    /// The consolidator subscribes to:
+    /// - The `vllm_zmq_endpoint` from `params` for G1 (GPU-side) events, if
+    ///   supplied.  Pass `None` to disable ZMQ ingress.
+    /// - The `EventsManager` from `params` for G2/G3 KVBM events.
+    ///
+    /// It publishes deduplicated, kv-router-compatible events (u64 wire
+    /// format) on `params.egress_endpoint`.
+    ///
+    /// The engine owns the resulting [`Consolidator`] for its entire lifetime.
+    /// Background tasks are cancelled and joined when the last clone of this
+    /// `InstanceLeader` is dropped, without blocking the caller's thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `with_consolidator` has already been called on this leader
+    ///   (idempotency guard).
+    /// - The ZMQ publisher or subscriber socket cannot be bound/connected.
+    ///
+    /// # Why async?
+    ///
+    /// `ConsolidatorBuilder::build()` internally awaits the ZMQ socket
+    /// bind/connect operations.  There is no sync path available.
+    pub async fn with_consolidator(&self, params: ConsolidatorParams) -> anyhow::Result<()> {
+        spawn_into_cell(&self.consolidator, params).await
+    }
+
+    /// Return a handle for direct event injection into the consolidator.
+    ///
+    /// Returns `None` if `with_consolidator` has not been called yet or if
+    /// the consolidator has already been shut down.
+    pub fn consolidator_handle(&self) -> Option<kvbm_consolidator::ConsolidatorHandle> {
+        self.consolidator.get()?.handle()
+    }
+
+    /// Explicitly shut down the consolidator and await background tasks.
+    ///
+    /// This is the deterministic counterpart to `ConsolidatorGuard::Drop`.
+    /// Callers who need to know shutdown has completed (ZMQ sockets unbound,
+    /// background tasks exited) before proceeding should call this and await
+    /// its completion. Subsequent calls — and any later `Drop` — are no-ops.
+    ///
+    /// Returns `true` if a consolidator was running and was shut down;
+    /// `false` if no consolidator was ever started, or it was already
+    /// shut down by a prior call.
+    pub async fn shutdown_consolidator(&self) -> bool {
+        let Some(guard) = self.consolidator.get() else {
+            return false;
+        };
+        match guard.take() {
+            Some(c) => {
+                c.shutdown().await;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Get the disaggregation role this leader plays, if any.

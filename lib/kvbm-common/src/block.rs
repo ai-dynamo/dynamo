@@ -302,9 +302,8 @@ mod tests {
     #[test]
     fn variant_discriminants_are_wire_stable() {
         let cfg = bincode::config::standard();
-        let first_byte = |k: KvBlockLayout| -> u8 {
-            bincode::serde::encode_to_vec(k, cfg).unwrap()[0]
-        };
+        let first_byte =
+            |k: KvBlockLayout| -> u8 { bincode::serde::encode_to_vec(k, cfg).unwrap()[0] };
         assert_eq!(first_byte(KvBlockLayout::Universal), 0);
         assert_eq!(first_byte(KvBlockLayout::OperationalHND), 1);
         assert_eq!(first_byte(KvBlockLayout::OperationalNHD), 2);

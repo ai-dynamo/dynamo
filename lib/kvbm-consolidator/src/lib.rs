@@ -198,6 +198,18 @@ impl Consolidator {
         }
     }
 
+    /// Return a clone of the cancellation token used by all background tasks.
+    ///
+    /// Use this when you need to signal cancellation from a synchronous
+    /// context (e.g. from `Drop` when no tokio runtime is available to drive
+    /// the async `shutdown()`). Cancelling via this token causes each task
+    /// to exit on its next poll; the task's `JoinHandle` will not be awaited
+    /// here, so the caller is responsible for ensuring the tasks' owning
+    /// runtime is still alive to actually drive that next poll.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
     /// Cancel all tasks and wait for them to finish.
     pub async fn shutdown(self) {
         self.cancel.cancel();

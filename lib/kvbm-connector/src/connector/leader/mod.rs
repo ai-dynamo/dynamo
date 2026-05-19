@@ -10,7 +10,7 @@ use super::worker::ConnectorWorkerClient;
 use crate::{BlockId, G2, InstanceId, KvbmRuntime};
 use kvbm_config::OnboardMode;
 use kvbm_engine::leader::InstanceLeader;
-use kvbm_engine::leader::{FindMatchesOptions, Leader, StagingMode};
+use kvbm_engine::leader::{EventSource, FindMatchesOptions, Leader, StagingMode};
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
 use kvbm_engine::worker::VeloWorkerClient;
@@ -38,6 +38,22 @@ pub use slot::{CdOnboardingPayload, FinishedStatus};
 
 pub trait ConnectorLeaderInterface: Send + Sync {}
 
+/// Parameters for the in-process kv-router consolidator.
+///
+/// Supplied at construction time via [`ConnectorLeader::new`] and forwarded to
+/// [`InstanceLeader::with_consolidator`] inside `initialize_async`.  All three
+/// fields must be non-empty strings; `vllm_zmq_endpoint` is optional and when
+/// `None` the consolidator runs in KVBM-only mode (no ZMQ ingress).
+pub struct ConsolidatorEndpoints {
+    /// ZMQ endpoint vLLM publishes G1 events on (e.g. `"tcp://127.0.0.1:5557"`).
+    /// `None` disables ZMQ ingress.
+    pub vllm_zmq_endpoint: Option<String>,
+    /// ZMQ endpoint the consolidator binds for egress (e.g. `"tcp://0.0.0.0:57001"`).
+    pub egress_endpoint: String,
+    /// Origin tag for ZMQ-ingress events (`Vllm`, `Trtllm`, or `Kvbm`).
+    pub engine_source: EventSource,
+}
+
 pub struct ConnectorLeader {
     pub(crate) runtime: Arc<KvbmRuntime>,
     block_size: usize,
@@ -47,6 +63,10 @@ pub struct ConnectorLeader {
     slots: DashMap<String, Arc<Mutex<RequestSlot>>>,
     #[allow(dead_code)] // Will be used for scheduling decisions
     oracle: Arc<dyn Oracle>,
+    /// Optional consolidator endpoints.  When `Some`, `initialize_async` will
+    /// create an `EventsManager`, wire it to the `BlockRegistry`, and spawn an
+    /// in-process consolidator via `InstanceLeader::with_consolidator`.
+    consolidator_endpoints: Option<ConsolidatorEndpoints>,
     /// Offload engine for G1→G2→G3 transfers (initialized in initialize_async)
     offload_engine: OnceLock<OffloadEngine>,
     /// Accumulated G2 blocks for intra-pass onboarding.
@@ -102,6 +122,14 @@ pub mod scheduler;
 
 impl ConnectorLeader {
     pub fn new(runtime: Arc<KvbmRuntime>, block_size: usize) -> Self {
+        Self::new_with_consolidator(runtime, block_size, None)
+    }
+
+    pub fn new_with_consolidator(
+        runtime: Arc<KvbmRuntime>,
+        block_size: usize,
+        consolidator_endpoints: Option<ConsolidatorEndpoints>,
+    ) -> Self {
         // Pull onboard mode from runtime config
         let onboard_mode = runtime.config().onboard.mode;
         tracing::info!(
@@ -117,6 +145,7 @@ impl ConnectorLeader {
             ),
             runtime,
             block_size,
+            consolidator_endpoints,
             init: Arc::new(Mutex::new(WorkerClients::default())),
             workers: OnceLock::new(),
             instance_leader: OnceLock::new(),

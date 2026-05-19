@@ -27,6 +27,33 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tracker::Tracker;
 
+/// Emit an audit log for a single KVBM event.
+///
+/// Called once per event, before the tracker write. `KvCacheEvent` has no `ClearAll`
+/// variant (KVBM only emits Create/Remove), so `num_blocks = 1` for every arm.
+pub fn audit_kvbm_event(event: &KvCacheEvent) {
+    match event {
+        KvCacheEvent::Create(seq_hash) => {
+            tracing::info!(
+                target: "kvbm_consolidator_audit",
+                event = "ingress_kvbm",
+                kind = "store",
+                seq_hash = format!("{:032x}", seq_hash.as_u128()),
+                num_blocks = 1usize,
+            );
+        }
+        KvCacheEvent::Remove(seq_hash) => {
+            tracing::info!(
+                target: "kvbm_consolidator_audit",
+                event = "ingress_kvbm",
+                kind = "remove",
+                seq_hash = format!("{:032x}", seq_hash.as_u128()),
+                num_blocks = 1usize,
+            );
+        }
+    }
+}
+
 /// Spawn the bridge task. Returns a `JoinHandle` that completes when `cancel` fires or
 /// the upstream stream ends.
 pub fn spawn<S>(
@@ -47,9 +74,11 @@ where
 
                 next = stream.next() => match next {
                     Some(KvCacheEvent::Create(seq_hash)) => {
+                        audit_kvbm_event(&KvCacheEvent::Create(seq_hash));
                         tracker.write().await.handle_kvbm_store(seq_hash, Vec::new(), 0, None);
                     }
                     Some(KvCacheEvent::Remove(seq_hash)) => {
+                        audit_kvbm_event(&KvCacheEvent::Remove(seq_hash));
                         tracker.write().await.handle_kvbm_remove(seq_hash);
                     }
                     None => break,

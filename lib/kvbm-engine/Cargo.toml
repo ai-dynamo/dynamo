@@ -13,6 +13,7 @@ description = "Distributed coordination primitives for KVBM"
 [dependencies]
 kvbm-common = { workspace = true }
 kvbm-config = { workspace = true }
+kvbm-consolidator = { workspace = true }
 kvbm-logical = { workspace = true }
 kvbm-observability = { workspace = true }
 kvbm-physical = { workspace = true }
@@ -33,6 +34,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
@@ -63,6 +65,11 @@ nvtx = { version = "1.3", optional = true }
 [dev-dependencies]
 # Control-plane tests exercise the public velo client.
 kvbm-protocols = { workspace = true, features = ["client"] }
+
+# Consolidator integration tests subscribe to the egress ZMQ PUB socket.
+kvbm-consolidator = { workspace = true }
+tmq = { workspace = true }
+portpicker = "0.1"
 
 [features]
 default = ["s3", "testing"]

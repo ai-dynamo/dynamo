@@ -26,6 +26,8 @@ pub use kvbm_engine::{G1, G2, G3, G4, InstanceId, KvbmRuntime};
 // Re-exports for bindings — runtime construction
 pub use kvbm_config::KvbmConfig;
 pub use kvbm_engine::{KvbmRuntimeBuilder, PeerInfo, WorkerAddress};
+// Re-export for bindings — consolidator source tagging
+pub use kvbm_engine::leader::EventSource;
 
 /// If the config carries `disagg.hub_url`, construct a [`kvbm_hub::HubClient`]
 /// and pre-seed the runtime builder so velo uses it as its peer-discovery

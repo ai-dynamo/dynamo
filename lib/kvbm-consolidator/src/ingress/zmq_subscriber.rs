@@ -28,6 +28,57 @@ use crate::tracker::Tracker;
 use crate::wire::vllm_in::{KvEventBatch, RawKvEvent};
 use crate::zmq_util::{connect_sub_socket, multipart_message};
 
+/// Decode a msgpack payload and emit an audit log if the batch is non-empty.
+///
+/// Returns `None` on deserialization error (the caller should continue the loop).
+/// `seq` is the 8-byte BE sequence number from frame[1] when available (0 for 2-frame).
+pub fn decode_and_audit(payload: &[u8], seq: u64) -> Option<KvEventBatch> {
+    let batch: KvEventBatch = match rmp_serde::from_slice(payload) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Failed to deserialize event batch: {e}");
+            return None;
+        }
+    };
+
+    if !batch.events.is_empty() {
+        let dp_rank = batch.data_parallel_rank.unwrap_or(0);
+        let num_events = batch.events.len();
+
+        // Extract first_block_hash from the first BlockStored event, if any.
+        let first_block_hash: Option<String> = batch.events.iter().find_map(|ev| {
+            if let RawKvEvent::BlockStored { block_hashes, .. } = ev {
+                block_hashes
+                    .first()
+                    .map(|h| format!("{:016x}", h.into_u64()))
+            } else {
+                None
+            }
+        });
+
+        if let Some(fbh) = first_block_hash {
+            tracing::info!(
+                target: "kvbm_consolidator_audit",
+                event = "ingress_zmq",
+                dp_rank,
+                num_events,
+                seq,
+                first_block_hash = fbh,
+            );
+        } else {
+            tracing::info!(
+                target: "kvbm_consolidator_audit",
+                event = "ingress_zmq",
+                dp_rank,
+                num_events,
+                seq,
+            );
+        }
+    }
+
+    Some(batch)
+}
+
 /// Spawn the ZMQ listener. Returns immediately with a [`JoinHandle`] for the task.
 pub async fn spawn(
     endpoint: String,
@@ -54,21 +105,26 @@ pub async fn spawn(
                         None => break,
                     };
 
-                    let payload = match frames.len() {
-                        2 => &frames[1],
-                        3 => &frames[2],
+                    let (payload, seq) = match frames.len() {
+                        2 => (&frames[1], 0u64),
+                        3 => {
+                            let seq = {
+                                let mut arr = [0u8; 8];
+                                let src = &frames[1];
+                                arr[..src.len().min(8)].copy_from_slice(&src[..src.len().min(8)]);
+                                u64::from_be_bytes(arr)
+                            };
+                            (&frames[2], seq)
+                        }
                         n => {
                             tracing::warn!("Unexpected frame count: {}", n);
                             continue;
                         }
                     };
 
-                    let batch: KvEventBatch = match rmp_serde::from_slice(payload) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            tracing::warn!("Failed to deserialize event batch: {e}");
-                            continue;
-                        }
+                    let batch: KvEventBatch = match decode_and_audit(payload, seq) {
+                        Some(b) => b,
+                        None => continue,
                     };
 
                     // Acquire the write lock per event rather than per batch so the

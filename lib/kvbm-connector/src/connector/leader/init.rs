@@ -8,6 +8,7 @@ use super::ConnectorLeader;
 
 use crate::connector::worker::ConnectorWorkerClient;
 use crate::{G1, G2, G3, InstanceId};
+use kvbm_engine::leader::ConsolidatorParams;
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::object::{ObjectLockManager, create_lock_manager, create_object_client};
 use kvbm_engine::offload::{
@@ -16,6 +17,7 @@ use kvbm_engine::offload::{
 };
 use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerClient, Worker};
 use kvbm_logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
+use kvbm_logical::events::EventsManager;
 use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -357,10 +359,23 @@ impl ConnectorLeader {
         }
         tracing::debug!("Lock released, configured layout handles for all workers");
 
+        // Create an EventsManager when the consolidator is configured so it can
+        // subscribe to G2/G3 block registration events.  The same Arc is wired
+        // into the BlockRegistry (so events are emitted on register/evict) and
+        // into ConsolidatorParams (so the consolidator can subscribe).
+        let events_manager: Option<std::sync::Arc<EventsManager>> =
+            self.consolidator_endpoints.as_ref().map(|_| {
+                tracing::debug!("Creating EventsManager for consolidator");
+                std::sync::Arc::new(EventsManager::builder().build())
+            });
+
         tracing::debug!("Creating block registry");
-        let registry = BlockRegistry::builder()
-            .frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker())
-            .build();
+        let mut registry_builder = BlockRegistry::builder()
+            .frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker());
+        if let Some(em) = events_manager.clone() {
+            registry_builder = registry_builder.event_manager(em);
+        }
+        let registry = registry_builder.build();
         tracing::debug!("Block registry created");
 
         tracing::debug!(
@@ -500,6 +515,31 @@ impl ConnectorLeader {
         tracing::debug!("Registering handlers on InstanceLeader");
         leader.register_handlers()?;
         tracing::debug!("Handlers registered");
+
+        // Start the in-process consolidator if endpoints were provided.
+        // Hard-fail: a consolidator config error is a mis-configuration that
+        // must surface immediately rather than silently degrade.
+        if let Some(endpoints) = self.consolidator_endpoints.as_ref() {
+            let em = events_manager
+                .clone()
+                .expect("events_manager must be Some when consolidator_endpoints is Some");
+            let params = ConsolidatorParams {
+                vllm_zmq_endpoint: endpoints.vllm_zmq_endpoint.clone(),
+                egress_endpoint: endpoints.egress_endpoint.clone(),
+                engine_source: endpoints.engine_source,
+                events_manager: em,
+            };
+            tracing::info!(
+                egress_endpoint = %endpoints.egress_endpoint,
+                has_vllm_zmq = endpoints.vllm_zmq_endpoint.is_some(),
+                "Starting in-process consolidator"
+            );
+            leader
+                .with_consolidator(params)
+                .await
+                .context("failed to start in-process consolidator")?;
+            tracing::info!("In-process consolidator started");
+        }
 
         tracing::debug!("Setting instance leader");
         // Clone for the OnceLock storage, we'll wrap in Arc below for the engine

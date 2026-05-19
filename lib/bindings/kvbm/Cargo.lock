@@ -2016,6 +2016,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kv-hashing"
+version = "1.2.0"
+dependencies = [
+ "derive_builder",
+ "dynamo-tokens",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-kv-router"
 version = "1.2.0"
 dependencies = [
@@ -3981,6 +3992,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kvbm-consolidator"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "dynamo-kv-hashing",
+ "dynamo-kv-router",
+ "dynamo-tokens",
+ "futures",
+ "kvbm-logical",
+ "rmp-serde",
+ "serde",
+ "tmq",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "kvbm-engine"
 version = "1.2.0"
 dependencies = [
@@ -3997,6 +4027,7 @@ dependencies = [
  "futures",
  "kvbm-common",
  "kvbm-config",
+ "kvbm-consolidator",
  "kvbm-logical",
  "kvbm-observability",
  "kvbm-physical",
@@ -4012,6 +4043,7 @@ dependencies = [
  "tokio",
  "tokio-rayon",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "uuid",
  "velo",

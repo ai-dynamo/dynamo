@@ -61,12 +61,26 @@ def test_legacy_connector_secondary_exports():
 
 @requires_vllm
 def test_legacy_consolidator_config_shim():
-    from kvbm.v1.vllm_integration.consolidator_config import (
+    """Stage 2 (2026-05-19): the canonical consolidator config moved from
+    v1 to v2 alongside the v2 connector spawning the in-process
+    consolidator. The legacy shim at
+    ``kvbm.vllm_integration.consolidator_config`` now resolves to
+    ``kvbm.v2.vllm_integration.consolidator_config``. v1 is dead.
+
+    The signature, return shape (Optional[Tuple[str, str, str]]), env-var
+    contract (DYN_KVBM_KV_EVENTS_ENABLE_CONSOLIDATOR opt-out, default-on),
+    and port-derivation (DYN_KVBM_LEADER_ZMQ_PUB_PORT + 1000) are
+    unchanged — only the implementation moved.
+    """
+    from kvbm.v2.vllm_integration.consolidator_config import (
         get_consolidator_endpoints as canonical,
     )
     from kvbm.vllm_integration.consolidator_config import get_consolidator_endpoints
 
     assert get_consolidator_endpoints is canonical
+    assert get_consolidator_endpoints.__module__ == (
+        "kvbm.v2.vllm_integration.consolidator_config"
+    )
 
 
 @requires_trtllm
