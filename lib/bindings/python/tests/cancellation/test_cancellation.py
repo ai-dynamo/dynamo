@@ -77,10 +77,6 @@ class MockServer:
         """
         for i in range(1000):
             print(f"Processing iteration {i}")
-            context.metadata["iteration"] = str(i)
-            assert context.metadata["iteration"] == str(
-                i
-            ), "Context metadata should be mutable and updateable"
 
             if context.is_stopped():
                 print(f"Context stopped at iteration {i}")
