@@ -156,6 +156,14 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="If set, publish events and metrics to Dynamo components.",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--publish-metrics",
+            env_var="DYN_TRTLLM_PUBLISH_METRICS",
+            default=False,
+            help="If set, publish Prometheus metrics without enabling KV-cache event "
+            "routing. Safe to use with approximate KV routing (--no-router-kv-events).",
+        )
         add_argument(
             g,
             flag_name="--load-format",
@@ -489,6 +497,7 @@ class DynamoTrtllmConfig(ConfigBase):
     extra_engine_args: str
     override_engine_args: str
     publish_events_and_metrics: bool
+    publish_metrics: bool
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None

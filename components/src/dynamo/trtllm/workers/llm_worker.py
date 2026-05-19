@@ -253,11 +253,11 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
-        "return_perf_metrics": config.publish_events_and_metrics,
+        "return_perf_metrics": config.publish_events_and_metrics or config.publish_metrics,
         # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
         # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
         # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
-        "enable_iter_perf_stats": config.publish_events_and_metrics,
+        "enable_iter_perf_stats": config.publish_events_and_metrics or config.publish_metrics,
         "kv_connector_config": kv_connector_config,
     }
 
@@ -523,7 +523,7 @@ async def init_llm_worker(
         # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
         metrics_collector = None
         additional_metrics = None
-        if config.publish_events_and_metrics:
+        if config.publish_events_and_metrics or config.publish_metrics:
             try:
                 model_name_for_metrics = config.served_model_name or config.model
                 metrics_collector = MetricsCollector(

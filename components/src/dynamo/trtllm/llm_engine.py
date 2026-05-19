@@ -112,6 +112,7 @@ class TrtllmLLMEngine(LLMEngine):
         kv_block_size: int = 32,
         disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
         publish_events_and_metrics: bool = False,
+        publish_metrics: bool = False,
     ):
         self.engine_args = engine_args
         self.model_name = model_name
@@ -125,6 +126,7 @@ class TrtllmLLMEngine(LLMEngine):
         # Gates the metrics-poll thread and the kv_event/metrics source
         # publishers. See `_kv_routing_enabled`.
         self.publish_events_and_metrics = publish_events_and_metrics
+        self.publish_metrics = publish_metrics
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
         # Per-request GenerationResult handles for `abort()` lookup. TRT-LLM's
@@ -196,11 +198,11 @@ class TrtllmLLMEngine(LLMEngine):
             "max_seq_len": config.max_seq_len,
             "max_beam_width": config.max_beam_width,
             "max_batch_size": config.max_batch_size,
-            "return_perf_metrics": config.publish_events_and_metrics,
+            "return_perf_metrics": config.publish_events_and_metrics or config.publish_metrics,
             # enable_iter_perf_stats is required by the PyTorch backend to
             # compute iteration-level stats (KV cache utilization, hit rate).
             # See TRT-LLM PR #11243.
-            "enable_iter_perf_stats": config.publish_events_and_metrics,
+            "enable_iter_perf_stats": config.publish_events_and_metrics or config.publish_metrics,
         }
 
         # Apply --extra-engine-args / --override-engine-args. Match the
@@ -250,6 +252,7 @@ class TrtllmLLMEngine(LLMEngine):
             kv_block_size=config.kv_block_size,
             disaggregation_mode=config.disaggregation_mode,
             publish_events_and_metrics=config.publish_events_and_metrics,
+            publish_metrics=config.publish_metrics,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -275,12 +278,15 @@ class TrtllmLLMEngine(LLMEngine):
         await self._engine.initialize()
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
-        if self._kv_routing_enabled():
+        if self._metrics_enabled():
             # Mirrors `workers/llm_worker.py:529` for the unified path.
             # The legacy `engine_args` already sets `enable_iter_perf_stats`
             # and `return_perf_metrics` to `publish_events_and_metrics`,
             # so the engine is producing iteration snapshots; this collector
             # is what turns those snapshots into Prometheus gauges.
+            # TODO: register_engine_metrics_callback (HTTP exposure) needs a dynamo
+            # endpoint handle that start() does not receive, so metrics are not yet
+            # served over HTTP in the unified path.
             try:
                 self._metrics_collector = MetricsCollector(
                     {
@@ -317,6 +323,10 @@ class TrtllmLLMEngine(LLMEngine):
         # Matches the legacy `workers/llm_worker.py` gate. Decode workers
         # publish too — legacy only flips `enable_local_indexer` off.
         return self.publish_events_and_metrics
+
+    def _metrics_enabled(self) -> bool:
+        # MetricsCollector gate: either publish flag enables Prometheus metrics.
+        return self.publish_events_and_metrics or self.publish_metrics
 
     async def kv_event_sources(self) -> list[KvEventSource]:
         if not self._kv_routing_enabled():
