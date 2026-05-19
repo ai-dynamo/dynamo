@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Downloads zai-org/GLM-5.1-FP8 into the model-cache PVC (~760 GiB, expect 20-60 min).
+#
+# Prerequisites:
+#   kubectl apply -f model-cache.yaml
+#   kubectl create secret generic hf-token-secret \
+#     --from-literal=HF_TOKEN=<your-token> -n <namespace>
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: model-download
+          image: python:3.12-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          command: [sh, -c]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - { name: MODEL_NAME,                 value: zai-org/GLM-5.1-FP8 }
+            - { name: HF_HOME,                    value: /models }
+            - { name: HF_HUB_ENABLE_HF_TRANSFER,  value: "1" }
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir "huggingface_hub[hf_transfer]>=0.23"
+              hf download "$MODEL_NAME"
+              echo "Download complete."
+          resources:
+            requests: { cpu: "4", memory: 8Gi }
+            limits:   { cpu: "8", memory: 16Gi }
+          volumeMounts:
+            - { name: model-cache, mountPath: /models }
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
