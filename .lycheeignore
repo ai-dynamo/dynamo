@@ -7,3 +7,6 @@
 # Ignore placeholder URLs in docs templates
 ^https://\.\.\./
 ^https://github\.com/\.\.\.
+
+# Private repos referenced in docs (404 to unauthenticated lychee)
+^https://github\.com/ai-dynamo/pi-dynamo-provider

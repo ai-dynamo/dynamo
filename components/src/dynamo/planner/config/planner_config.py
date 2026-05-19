@@ -30,6 +30,14 @@ from dynamo.planner.config.defaults import SLAPlannerDefaults
 logger = logging.getLogger(__name__)
 
 
+def _prometheus_ssl_verify_default() -> bool:
+    return os.environ.get("PROMETHEUS_SSL_VERIFY", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 class PlannerPreDeploymentSweepMode(str, Enum):
     None_ = "none"
     Rapid = "rapid"
@@ -139,6 +147,26 @@ class PlannerConfig(BaseModel):
             "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
         ),
         exclude=True,
+    )
+    metric_pulling_prometheus_token: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN"),
+        exclude=True,
+        description=(
+            "Optional bearer token sent as `Authorization: Bearer <token>` on "
+            "every PromQL request. Useful for hardened monitoring stacks "
+            "(OpenShift thanos-querier, OAuth-proxied Prometheus). Token is "
+            "read once at startup."
+        ),
+    )
+    metric_pulling_prometheus_ssl_verify: bool = Field(
+        default_factory=_prometheus_ssl_verify_default,
+        exclude=True,
+        description=(
+            "Verify the upstream Prometheus TLS certificate. Default False "
+            "preserves the previous PrometheusConnect(disable_ssl=True) "
+            "behavior. Set True for hardened monitoring stacks; pair with "
+            "an injected CA bundle if the upstream uses a private CA."
+        ),
     )
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))

@@ -95,7 +95,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                   multiple routing targets within a single TRT-LLM worker process.
             num_workers: Number of TRT-LLM worker processes
             single_gpu: If True, all workers share GPU 0
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
 

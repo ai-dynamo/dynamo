@@ -48,8 +48,7 @@ pub struct RuntimeConfig {
     /// Discovery backend selector — e.g. `"etcd"`, `"kubernetes"`, `"file"`,
     /// `"mem"`. Maps to `DYN_DISCOVERY_BACKEND`.
     pub discovery_backend: Option<String>,
-    /// Request-plane transport — e.g. `"tcp"`, `"nats"`, `"http"`. Maps to
-    /// `DYN_REQUEST_PLANE`.
+    /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
     pub request_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
     /// derives a default from the discovery backend. Maps to `DYN_EVENT_PLANE`.
@@ -819,6 +818,7 @@ async fn build_local_model(
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
         enable_local_indexer,
         disaggregated_endpoint,
+        runtime_data: engine_config.runtime_data.clone(),
         ..ModelRuntimeConfig::default()
     };
 
@@ -947,6 +947,11 @@ mod tests {
             total_kv_blocks: Some(100),
             max_num_seqs: Some(16),
             max_num_batched_tokens: Some(8192),
+            runtime_data: [(
+                "sglang_worker_group_id".to_string(),
+                serde_json::json!("group-a"),
+            )]
+            .into(),
             ..EngineConfig::default()
         };
 
@@ -960,6 +965,13 @@ mod tests {
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
         assert!(!runtime_config.enable_local_indexer);
+        assert_eq!(
+            runtime_config
+                .runtime_data
+                .get("sglang_worker_group_id")
+                .and_then(|value| value.as_str()),
+            Some("group-a")
+        );
     }
 
     #[test]

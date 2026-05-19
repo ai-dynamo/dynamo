@@ -24,6 +24,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     metric_payload_default,
     multimodal_payload_default,
+    router_selection_chat_payload_default,
 )
 from tests.utils.payloads import ImageGenerationPayload, VideoGenerationPayload
 
@@ -204,12 +205,12 @@ trtllm_configs = {
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            chat_payload_default(
+            router_selection_chat_payload_default(
                 expected_log=[
                     r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
-            )
+            ),
         ],
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",

@@ -2038,6 +2038,7 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2048,6 +2049,18 @@ name = "dynamo-config"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-data-gen"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "dynamo-tokens",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2197,6 +2210,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
@@ -2212,6 +2226,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "slotmap",
  "tokio",
  "tokio-timerfd",
@@ -2314,7 +2329,6 @@ dependencies = [
  "figment",
  "futures",
  "humantime",
- "hyper-util",
  "k8s-openapi",
  "kube",
  "libc",

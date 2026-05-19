@@ -12,22 +12,22 @@ This document describes how LMCache is integrated into Dynamo's vLLM backend to 
 
 ## Installation Notes
 
-The Dynamo vLLM runtime expects LMCache to come from the underlying vLLM container or Python environment. As of vLLM `v0.19.1`, the upstream `vllm/vllm-openai` CUDA 12 x86_64 image includes a working LMCache wheel. The CUDA 13 x86_64 image includes `lmcache`, but its compiled `lmcache.c_ops` extension is linked against `libcudart.so.12`, while the image provides CUDA 13. LMCache also does not currently publish aarch64 wheels, so a wheel install is not enough for arm64/aarch64 containers.
+The Dynamo vLLM runtime expects LMCache to come from the underlying vLLM container or Python environment. As of vLLM `v0.21.0`, the upstream `vllm/vllm-openai` CUDA 13 x86_64 image includes a working LMCache wheel. The CUDA 12.9 x86_64 image includes `lmcache`, but its compiled `lmcache.c_ops` extension is linked against `libcudart.so.13`, while the image provides CUDA 12.9. LMCache also does not currently publish aarch64 wheels, so a wheel install is not enough for arm64/aarch64 containers.
 
-For CUDA 13 or arm64/aarch64 images, build LMCache from source in a dev image or temporary builder stage that matches the runtime image's Python, PyTorch, and CUDA stack, then install the resulting wheel into the runtime image. Follow the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html), and keep build isolation disabled so the build does not pull a different torch stack:
+For CUDA 12.9 or arm64/aarch64 images, build LMCache from source in a dev image or temporary builder stage that matches the runtime image's Python, PyTorch, and CUDA stack, then install the resulting wheel into the runtime image. Follow the official [LMCache installation guide](https://docs.lmcache.ai/getting_started/installation.html), and keep build isolation disabled so the build does not pull a different torch stack:
 
 ```bash
 git clone --depth 1 --branch v0.4.3 https://github.com/LMCache/LMCache.git /tmp/lmcache
 cd /tmp/lmcache
 
 # In the dev/builder image, install matching CUDA development headers first.
-# Example Debian package names for CUDA 13.0 images:
+# Example Debian package names for CUDA 12.9 images:
 apt-get update
 apt-get install -y --no-install-recommends \
   build-essential \
-  libcublas-dev-13-0 \
-  libcusolver-dev-13-0 \
-  libcusparse-dev-13-0
+  libcublas-dev-12-9 \
+  libcusolver-dev-12-9 \
+  libcusparse-dev-12-9
 
 uv pip install --system --requirement requirements/build.txt
 
@@ -40,7 +40,7 @@ uv build --wheel --no-build-isolation --out-dir /tmp/lmcache-wheel
 uv pip install --system --no-deps --force-reinstall /tmp/lmcache-wheel/lmcache-*.whl
 ```
 
-Once LMCache publishes compatible CUDA 13 and/or aarch64 wheels, prefer those wheels over a source build.
+Once LMCache publishes compatible CUDA 12.9 and/or aarch64 wheels, prefer those wheels over a source build.
 
 ## Aggregated Serving
 
