@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Power Agent — per-node NVML power-cap enforcement DaemonSet.
+# See deploy/helm/charts/power-agent/README.md for usage and
+# docs/design-docs/power-agent-helm-chart-plan.md for the design rationale.
+
+image:
+  repository: nvcr.io/nvidia/dynamo/power-agent
+  # REQUIRED. Pin to a release tag or sha256 digest. No default to avoid the
+  # `:latest` reproducibility footgun CodeRabbit flagged on PR #9682.
+  # `helm install` will fail fast at template time if this is empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# Example for NGC:
+#   - name: ngc-secret
+
+agent:
+  # Per-SKU safety floor. The agent falls back to this when:
+  #   - A multi-pod-per-GPU conflict cannot agree on a single cap.
+  #   - A pod is missing the dynamo.nvidia.com/gpu-power-limit annotation
+  #     but is running on a GPU the agent previously managed.
+  # Recommended: ~70% of the SKU's TDP.
+  #   H200 SXM → 500    H100 SXM → 490    A100 SXM (80GB) → 280
+  safeDefaultWatts: 500
+  # NOTE: the agent's reconcile interval is currently a hardcoded module
+  # constant (RECONCILE_INTERVAL_S = 15 in power_agent.py). It is NOT
+  # exposed as a CLI flag, so plumbing it through values.yaml would create
+  # a dead knob. If a future power_agent.py revision adds a
+  # --reconcile-interval flag, add the matching key here at that time.
+  prometheusPort: 9100
+
+# NVIDIA container toolkit needs both runtimeClassName: nvidia AND
+# NVIDIA_VISIBLE_DEVICES=all to inject libnvidia-ml.so AND expose every GPU
+# WITHOUT consuming a nvidia.com/gpu resource claim. Same pattern DCGM
+# Exporter uses. Privileged container bypasses the unprivileged-visibility
+# edge case (accept-nvidia-visible-devices-envvar-when-unprivileged=false).
+runtimeClassName: nvidia
+env:
+  NVIDIA_VISIBLE_DEVICES: "all"
+  NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+
+nodeSelector:
+  nvidia.com/gpu.present: "true"
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "128Mi"
+
+# Persisted UUID-gated cold-start state (managed_gpus.json).
+state:
+  hostPath: /var/lib/dynamo-power-agent
+
+serviceAccount:
+  create: true
+  name: ""            # auto-generated from fullname if empty
+  annotations: {}
+
+rbac:
+  create: true
+  # true  → Role + RoleBinding; agent only sees pods in {{ .Release.Namespace }}.
+  # false → ClusterRole + ClusterRoleBinding; agent sees all pods on its node.
+  # Default matches today's raw-YAML behaviour (cluster-scoped). Dev mode
+  # overrides this to true automatically — see dev.namespaceRestrictedOverride.
+  namespaceRestricted: false
+
+# Production DaemonSet mode. Mutually exclusive with dev.enabled.
+daemonset:
+  enabled: true
+
+  # Conservative default by design: when a Power Agent restarts, the GPUs
+  # on its node have no NVML cap enforcement until it comes back. If the
+  # planner just emitted new annotations expecting them to apply, that
+  # propagation stalls. `maxUnavailable: 1` ensures only one node's worth
+  # of GPUs ever loses enforcement at a time.
+  #
+  # Override for large fleets: on clusters with hundreds of GPU nodes,
+  # a 1-at-a-time rollout (~30s/pod × N nodes) gets slow. Operators can
+  # opt into faster rollouts with:
+  #   --set daemonset.updateStrategy.rollingUpdate.maxUnavailable=10%
+  # (or any percentage / integer). The trade-off is more concurrent
+  # enforcement gaps during a rollout; safe when the planner's reconcile
+  # interval (15s) is much shorter than the rollout duration anyway.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  podLabels: {}
+  podAnnotations: {}
+  affinity: {}
+
+# In-cluster dev-iteration mode. Renders a single Pod (not a DaemonSet)
+# that mounts power_agent.py from a ConfigMap. The caller is responsible
+# for creating the ConfigMap separately BEFORE `helm install`:
+#
+#   kubectl create configmap dynamo-power-agent-script \
+#     --from-file=power_agent.py=components/power_agent/power_agent.py \
+#     -n $NAMESPACE
+#
+# Without this ConfigMap the dev pod will stay Pending with a
+# `MountVolume.SetUp failed for volume "script"` event.
+#
+# Mutually exclusive with daemonset.enabled (chart fails to render if both
+# are true). dev.nodeName is required when dev.enabled=true.
+dev:
+  enabled: false
+  # Required when enabled=true. Pin to the GPU node hosting the workload pod
+  # being annotated. Find a candidate with:
+  #   kubectl get pods -n $NAMESPACE -l nvidia.com/dynamo-component-type=worker \
+  #     -o jsonpath='{.items[*].spec.nodeName}'
+  nodeName: ""
+  # Name of an externally-created ConfigMap holding power_agent.py at
+  # key "power_agent.py". See top-of-section recipe.
+  scriptConfigMap: dynamo-power-agent-script
+  # The dev pod uses vllm-runtime (already cached on every GPU node by
+  # the quickstart DGDs) which ships with pynvml; the agent pip-installs
+  # kubernetes + prometheus-client at container start.
+  image:
+    repository: nvcr.io/nvidia/ai-dynamo/vllm-runtime
+    tag: "1.0.1"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  # Set to true ONLY if you genuinely need cluster-wide pod-listing RBAC
+  # while iterating on power_agent.py (e.g., testing cross-namespace
+  # multi-pod conflict resolution). Default: false — dev mode forces
+  # namespace-scoped RBAC for principle of least privilege.
+  namespaceRestrictedOverride: false
