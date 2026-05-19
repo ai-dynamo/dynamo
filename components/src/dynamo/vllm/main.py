@@ -493,6 +493,32 @@ def setup_vllm_engine(
         engine_args.create_model_config().get_diff_sampling_param()
     )
 
+    # Install Dynamo's thinking-budget logits processor when a Dynamo-side
+    # reasoning parser is selected. This delivers per-request budget
+    # enforcement via ``nvext.max_thinking_tokens`` without requiring vLLM's
+    # ``--reasoning-parser`` CLI flag — keeping ``vllm_config.reasoning_config``
+    # at ``None`` and avoiding the sampling-pipeline side effects that
+    # destabilize ``tool_choice=required`` on Qwen3 family models.
+    # See ``dyn_thinking_budget_logits_processor.py`` for the rationale.
+    if config.dyn_reasoning_parser:
+        from dynamo.vllm.dyn_thinking_budget_logits_processor import (
+            PARSER_ENV,
+            DynThinkingBudgetLogitsProcessor,
+        )
+
+        os.environ[PARSER_ENV] = config.dyn_reasoning_parser
+        existing_lps = list(engine_args.logits_processors or [])
+        if not any(
+            lp is DynThinkingBudgetLogitsProcessor
+            or (
+                isinstance(lp, str)
+                and lp.endswith(":DynThinkingBudgetLogitsProcessor")
+            )
+            for lp in existing_lps
+        ):
+            existing_lps.append(DynThinkingBudgetLogitsProcessor)
+            engine_args.logits_processors = existing_lps
+
     # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
     # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
     if (
