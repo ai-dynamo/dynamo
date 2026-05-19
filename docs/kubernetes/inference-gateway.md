@@ -367,7 +367,8 @@ use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE use the namespace where the Gateway service was created, for example my-model
+kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE}
+# for NAMESPACE use the namespace where the Gateway service was created, for example agentgateway-system
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
