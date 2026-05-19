@@ -71,12 +71,6 @@ def main() -> None:
 
     fig = go.Figure()
 
-    # Sweet-spot band 5-10 s (where the planner sees signal without thrashing).
-    fig.add_vrect(
-        x0=SWEET_LO_S, x1=SWEET_HI_S,
-        fillcolor=rgba(NV_GREEN, 0.10),
-        line_width=0, layer="below",
-    )
     # Tufte band label sitting in the margin gap above the plot, horizontally
     # centered on the band's log-axis midpoint. Pulling it out of the plot
     # area keeps the data line and event-count labels clean while still
