@@ -172,7 +172,10 @@ pub struct RouterQueueDepthByMissingIslTier {
 /// - Floors are strictly ascending
 /// - All `max_queue_depth > 0`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Vec<RouterQueueDepthByMissingIslTier>", into = "Vec<RouterQueueDepthByMissingIslTier>")]
+#[serde(
+    try_from = "Vec<RouterQueueDepthByMissingIslTier>",
+    into = "Vec<RouterQueueDepthByMissingIslTier>"
+)]
 pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
 
 impl RouterQueueDepthTiers {
@@ -183,17 +186,17 @@ impl RouterQueueDepthTiers {
             max_queue_depth: 1024,
         }])
     }
-    
+
     /// Disable capping entirely.
     pub fn disabled() -> Self {
         Self(Vec::new())
     }
-    
+
     /// Check if capping is disabled (empty tiers).
     pub fn is_disabled(&self) -> bool {
         self.0.is_empty()
     }
-    
+
     /// Get effective cap for a request's cache-miss tokens, scaled by worker count.
     /// Returns None if capping is disabled.
     pub fn cap_for(&self, cache_miss_tokens: usize, worker_count: usize) -> Option<usize> {
@@ -206,22 +209,22 @@ impl RouterQueueDepthTiers {
             .find(|tier| cache_miss_tokens >= tier.missing_cache_tokens_floor)
             .map(|tier| tier.max_queue_depth.saturating_mul(worker_count))
     }
-    
+
     /// Get the inner tiers slice.
     pub fn as_slice(&self) -> &[RouterQueueDepthByMissingIslTier] {
         &self.0
     }
-    
+
     /// Create from tuples `[(floor, cap), ...]`.
     pub fn from_tuples(tuples: Vec<(usize, usize)>) -> Result<Self, String> {
         let tiers: Vec<RouterQueueDepthByMissingIslTier> = tuples
             .into_iter()
-            .map(|(missing_cache_tokens_floor, max_queue_depth)| {
-                RouterQueueDepthByMissingIslTier {
+            .map(
+                |(missing_cache_tokens_floor, max_queue_depth)| RouterQueueDepthByMissingIslTier {
                     missing_cache_tokens_floor,
                     max_queue_depth,
-                }
-            })
+                },
+            )
             .collect();
         Self::try_from(tiers)
     }
@@ -235,31 +238,36 @@ impl Default for RouterQueueDepthTiers {
 
 impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
     type Error = String;
-    
+
     fn try_from(tiers: Vec<RouterQueueDepthByMissingIslTier>) -> Result<Self, Self::Error> {
         if tiers.is_empty() {
             return Ok(Self::disabled());
         }
-        
+
         // Must start with floor 0
         if tiers[0].missing_cache_tokens_floor != 0 {
             return Err("router_queue_depth_by_missing_isl: first tier must have missing_cache_tokens_floor == 0".to_string());
         }
-        
+
         // Floors must be strictly ascending
         for window in tiers.windows(2) {
             if window[1].missing_cache_tokens_floor <= window[0].missing_cache_tokens_floor {
-                return Err("router_queue_depth_by_missing_isl: floors must be strictly ascending".to_string());
+                return Err(
+                    "router_queue_depth_by_missing_isl: floors must be strictly ascending"
+                        .to_string(),
+                );
             }
         }
-        
+
         // max_queue_depth must be > 0
         for tier in &tiers {
             if tier.max_queue_depth == 0 {
-                return Err("router_queue_depth_by_missing_isl: max_queue_depth must be > 0".to_string());
+                return Err(
+                    "router_queue_depth_by_missing_isl: max_queue_depth must be > 0".to_string(),
+                );
             }
         }
-        
+
         Ok(Self(tiers))
     }
 }
@@ -272,7 +280,7 @@ impl From<RouterQueueDepthTiers> for Vec<RouterQueueDepthByMissingIslTier> {
 
 impl TryFrom<Vec<(usize, usize)>> for RouterQueueDepthTiers {
     type Error = String;
-    
+
     fn try_from(tuples: Vec<(usize, usize)>) -> Result<Self, Self::Error> {
         Self::from_tuples(tuples)
     }
@@ -696,7 +704,9 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
-            router_queue_depth_by_missing_isl: RouterQueueDepthTiers::try_from(compat.router_queue_depth_by_missing_isl)?,
+            router_queue_depth_by_missing_isl: RouterQueueDepthTiers::try_from(
+                compat.router_queue_depth_by_missing_isl,
+            )?,
             router_event_threads: compat.router_event_threads,
             skip_initial_worker_wait: compat.skip_initial_worker_wait,
             router_queue_policy: compat.router_queue_policy,

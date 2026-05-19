@@ -380,7 +380,8 @@ impl<
         let ctx = SchedulingContext::new(request, &workers);
         let cache_miss_tokens = ctx.best_effective_prefill_tokens();
         let worker_count = workers.len();
-        self.queue_depth_tiers.cap_for(cache_miss_tokens, worker_count)
+        self.queue_depth_tiers
+            .cap_for(cache_miss_tokens, worker_count)
     }
 
     /// Check if all eligible workers are busy based on threshold.
@@ -900,7 +901,8 @@ mod tests {
         let tiers = RouterQueueDepthTiers::try_from(vec![RouterQueueDepthByMissingIslTier {
             missing_cache_tokens_floor: 0,
             max_queue_depth: 1,
-        }]).unwrap();
+        }])
+        .unwrap();
         let (queue, _slots, _cfg_tx) =
             make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
 
@@ -949,7 +951,8 @@ mod tests {
                 missing_cache_tokens_floor: 256,
                 max_queue_depth: 1,
             },
-        ]).unwrap();
+        ])
+        .unwrap();
         let (queue, _slots, _cfg_tx) =
             make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
 
