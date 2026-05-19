@@ -166,6 +166,10 @@ class LLMEngine(ABC):
         Called by Worker when the client disconnects or
         the request is cancelled.  Override to release engine resources
         (KV cache, scheduler slots, etc.).
+
+        ``context.metadata`` in this callback reflects the original
+        propagated request metadata snapshot. Mutations made to
+        ``context.metadata`` during :meth:`generate` are not visible here.
         """
 
     async def drain(self) -> None:
