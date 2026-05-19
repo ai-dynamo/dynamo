@@ -5,6 +5,10 @@ import argparse
 
 import pytest
 
+from dynamo.common.configuration.groups.aic_perf_args import (
+    AicPerfArgGroup,
+    AicPerfConfigBase,
+)
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
@@ -23,6 +27,63 @@ def _clear_admission_control_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_ROUTER_QUEUE_THRESHOLD",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_aic_perf_moe_cli_flows_to_binding_kwargs() -> None:
+    parser = argparse.ArgumentParser()
+    AicPerfArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--aic-backend",
+            "vllm",
+            "--aic-system",
+            "h200_sxm",
+            "--aic-model-path",
+            "moonshotai/Kimi-K2-Instruct",
+            "--aic-tp-size",
+            "2",
+            "--aic-moe-tp-size",
+            "2",
+            "--aic-moe-ep-size",
+            "1",
+            "--aic-attention-dp-size",
+            "1",
+        ]
+    )
+
+    config = AicPerfConfigBase.from_cli_args(args)
+
+    assert config.aic_perf_kwargs() == {
+        "aic_backend": "vllm",
+        "aic_system": "h200_sxm",
+        "aic_backend_version": None,
+        "aic_tp_size": 2,
+        "aic_model_path": "moonshotai/Kimi-K2-Instruct",
+        "aic_moe_tp_size": 2,
+        "aic_moe_ep_size": 1,
+        "aic_attention_dp_size": 1,
+    }
+
+
+def test_aic_perf_moe_env_flows_to_binding_kwargs(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_AIC_BACKEND", "vllm")
+    monkeypatch.setenv("DYN_AIC_SYSTEM", "h200_sxm")
+    monkeypatch.setenv("DYN_AIC_MODEL_PATH", "moonshotai/Kimi-K2-Instruct")
+    monkeypatch.setenv("DYN_AIC_TP_SIZE", "2")
+    monkeypatch.setenv("DYN_AIC_MOE_TP_SIZE", "2")
+    monkeypatch.setenv("DYN_AIC_MOE_EP_SIZE", "1")
+    monkeypatch.setenv("DYN_AIC_ATTENTION_DP_SIZE", "1")
+
+    parser = argparse.ArgumentParser()
+    AicPerfArgGroup().add_arguments(parser)
+    args = parser.parse_args([])
+
+    config = AicPerfConfigBase.from_cli_args(args)
+
+    assert config.aic_perf_kwargs()["aic_moe_tp_size"] == 2
+    assert config.aic_perf_kwargs()["aic_moe_ep_size"] == 1
+    assert config.aic_perf_kwargs()["aic_attention_dp_size"] == 1
 
 
 def test_overlap_score_credit_cli_uses_kv_router_config_field() -> None:
