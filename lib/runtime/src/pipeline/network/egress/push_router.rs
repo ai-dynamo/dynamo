@@ -489,14 +489,14 @@ where
 
         let instance_id = {
             let routing_instances = self.client.routing_instances();
-            let count = routing_instances.routable_ids().len();
+            let count = routing_instances.free_ids().len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {}",
                     self.client.endpoint.id()
                 ));
             }
-            routing_instances.routable_ids()[counter % count]
+            routing_instances.free_ids()[counter % count]
         };
         tracing::trace!("round robin router selected {instance_id}");
 
@@ -508,7 +508,7 @@ where
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
             let routing_instances = self.client.routing_instances();
-            let count = routing_instances.routable_ids().len();
+            let count = routing_instances.free_ids().len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {}",
@@ -516,7 +516,7 @@ where
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
-            routing_instances.routable_ids()[counter % count]
+            routing_instances.free_ids()[counter % count]
         };
         tracing::trace!("random router selected {instance_id}");
 
@@ -530,13 +530,13 @@ where
         let state = self.occupancy_state()?;
         let instance_id = {
             let routing_instances = self.client.routing_instances();
-            if routing_instances.routable_ids().is_empty() {
+            if routing_instances.free_ids().is_empty() {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {}",
                     self.client.endpoint.id()
                 ));
             }
-            p2c_select_from(state.as_ref(), routing_instances.routable_ids())
+            p2c_select_from(state.as_ref(), routing_instances.free_ids())
         };
         state.increment(instance_id);
         let permit = OccupancyPermit::new(state, instance_id);
@@ -589,7 +589,7 @@ where
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self.client.routing_instances().routable_ids().to_vec();
+        let instance_ids = self.client.routing_instances().free_ids().to_vec();
 
         if instance_ids.is_empty() {
             return Err(anyhow::anyhow!(
@@ -655,7 +655,7 @@ where
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self.client.routing_instances().routable_ids().to_vec();
+        let instance_ids = self.client.routing_instances().free_ids().to_vec();
         let instance_id = state
             .select_exact_min_and_increment(&instance_ids)
             .await

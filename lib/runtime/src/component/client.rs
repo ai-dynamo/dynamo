@@ -172,7 +172,7 @@ impl RoutingInstances {
         routable_ids: Vec<u64>,
         overloaded_ids: HashSet<u64>,
     ) -> Self {
-        let free_ids = Self::derive_free_ids(&discovered_ids, &overloaded_ids);
+        let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
         Self {
             discovered_ids,
             routable_ids,
@@ -187,6 +187,10 @@ impl RoutingInstances {
 
     pub(crate) fn routable_ids(&self) -> &[u64] {
         &self.routable_ids
+    }
+
+    pub(crate) fn free_ids(&self) -> &[u64] {
+        &self.free_ids
     }
 
     pub(crate) fn counts(&self) -> RoutingInstanceCounts {
@@ -221,19 +225,18 @@ impl RoutingInstances {
     }
 
     fn report_instance_down(&self, instance_id: u64) -> Self {
-        let routable_ids = self
+        let routable_ids: Vec<u64> = self
             .routable_ids
             .iter()
             .copied()
             .filter(|id| *id != instance_id)
             .collect();
 
-        Self {
-            discovered_ids: self.discovered_ids.clone(),
+        Self::from_parts(
+            self.discovered_ids.clone(),
             routable_ids,
-            overloaded_ids: self.overloaded_ids.clone(),
-            free_ids: self.free_ids.clone(),
-        }
+            self.overloaded_ids.clone(),
+        )
     }
 
     #[cfg(test)]
@@ -264,12 +267,12 @@ impl RoutingInstances {
         )
     }
 
-    fn derive_free_ids(discovered_ids: &[u64], overloaded_ids: &HashSet<u64>) -> Vec<u64> {
+    fn derive_free_ids(routable_ids: &[u64], overloaded_ids: &HashSet<u64>) -> Vec<u64> {
         if overloaded_ids.is_empty() {
-            return discovered_ids.to_vec();
+            return routable_ids.to_vec();
         }
 
-        discovered_ids
+        routable_ids
             .iter()
             .copied()
             .filter(|id| !overloaded_ids.contains(id))
