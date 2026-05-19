@@ -258,6 +258,7 @@ struct TraceRequestStats {
     input_length: usize,
     output_length: usize,
     reused_input_tokens: usize,
+    first_admission_reused_input_tokens: usize,
     /// Index of the prefill worker that handled this request, if any.
     /// `None` in two situations:
     ///   - Aggregated replay (no separate prefill pool) — meaningless field.
@@ -306,7 +307,6 @@ pub struct PerRequestRecord {
     pub reused_input_tokens: usize,
     pub prefill_worker_idx: Option<usize>,
     pub decode_worker_idx: Option<usize>,
-    first_admission_reused_input_tokens: usize,
 }
 
 #[cfg(test)]
@@ -920,6 +920,8 @@ mod tests {
         assert_eq!(parsed["prefill_worker_idx"], 0);
         assert_eq!(parsed["decode_worker_idx"], 1);
         assert!(parsed["itl_ms"].is_number());
+    }
+
     #[test]
     fn first_admission_reuse_ignores_later_readmission_self_reuse() {
         let uuid = Uuid::from_u128(1);

@@ -574,6 +574,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=8,
         help="number of sweep points for synthetic perf model benchmark (default: 8, matching profiler)",
     )
+    parser.add_argument(
+        "--max-sim-time-seconds",
+        type=float,
+        default=None,
+        help="optional cap on simulated wall-clock duration for offline replay (disagg and agg); when set, replay stops once the simulated clock would exceed this many seconds, leaving in-flight requests as incomplete in the report",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     using_trace_file = args.trace_file is not None
@@ -611,6 +617,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("--report-jsonl is not supported with --planner-config")
         if not using_trace_file:
             parser.error("--report-jsonl currently only supports trace-file replay")
+    if args.max_sim_time_seconds is not None:
+        if args.planner_config is not None:
+            parser.error(
+                "--max-sim-time-seconds is not supported with --planner-config"
+            )
+        if not using_trace_file:
+            parser.error(
+                "--max-sim-time-seconds currently only supports trace-file replay"
+            )
 
     extra_engine_args = _load_engine_args(args.extra_engine_args)
     prefill_engine_args = _load_engine_args(args.prefill_engine_args)
@@ -668,6 +683,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if using_trace_file:
+        max_sim_time_ms = (
+            args.max_sim_time_seconds * 1_000.0
+            if args.max_sim_time_seconds is not None
+            else None
+        )
         report = run_trace_replay(
             args.trace_file,
             extra_engine_args=extra_engine_args,
@@ -687,6 +707,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace_shared_prefix_ratio=args.trace_shared_prefix_ratio,
             trace_num_prefix_groups=args.trace_num_prefix_groups,
             report_jsonl_path=args.report_jsonl,
+            max_sim_time_ms=max_sim_time_ms,
         )
     else:
         report = run_synthetic_trace_replay(

@@ -614,7 +614,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -636,6 +636,7 @@ pub fn run_mocker_trace_replay(
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
     report_jsonl_path: Option<PathBuf>,
+    max_sim_time_ms: Option<f64>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -663,6 +664,18 @@ pub fn run_mocker_trace_replay(
     }
     let jsonl_path_for_emit = report_jsonl_path.clone();
     let record_per_request = report_jsonl_path.is_some();
+    if let Some(ms) = max_sim_time_ms {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(PyValueError::new_err(
+                "max_sim_time_ms must be a finite, non-negative value",
+            ));
+        }
+        if replay_mode != "offline" {
+            return Err(PyValueError::new_err(
+                "max_sim_time_ms only supports replay_mode='offline'",
+            ));
+        }
+    }
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
@@ -689,7 +702,7 @@ pub fn run_mocker_trace_replay(
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
-                            record_per_request,
+                            record_per_request, max_sim_time_ms,
                         )
                     }
                     ("offline", None) => {
@@ -705,7 +718,7 @@ pub fn run_mocker_trace_replay(
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
-                            record_per_request,
+                            record_per_request, max_sim_time_ms,
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -758,7 +771,7 @@ pub fn run_mocker_trace_replay(
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
-                        record_per_request,
+                        record_per_request, max_sim_time_ms,
                     )
                 }
                 ("offline", None) => {
@@ -773,7 +786,7 @@ pub fn run_mocker_trace_replay(
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
-                        record_per_request,
+                        record_per_request, max_sim_time_ms,
                     )
                 }
                 ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),

@@ -80,6 +80,10 @@ pub(in crate::replay) struct DisaggRuntime {
     decode_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
     /// Traffic statistics accumulated between planner ticks.
     traffic: TrafficAccumulator,
+    /// Optional cap on simulated wall-clock time. When set, `run()` exits
+    /// gracefully once the next scheduled timestamp exceeds this cap, leaving
+    /// any in-flight requests as incomplete in the report.
+    max_sim_time_ms: Option<f64>,
 }
 
 impl DisaggRuntime {
@@ -203,6 +207,7 @@ impl DisaggRuntime {
             prefill_fpm_buffer: Vec::new(),
             decode_fpm_buffer: Vec::new(),
             traffic: TrafficAccumulator::new(),
+            max_sim_time_ms: None,
         })
     }
 
@@ -211,6 +216,25 @@ impl DisaggRuntime {
     /// have `per_request` populated. Default `false` (cheap).
     pub(in crate::replay) fn with_per_request_records(mut self, capture: bool) -> Self {
         self.collector.set_capture_per_request(capture);
+        self
+    }
+
+    /// Cap the simulated wall-clock duration. After construction, call this to
+    /// have `run()` stop gracefully once the simulated clock would exceed
+    /// `ms`. Pass `None` to run to natural completion (the default).
+    ///
+    /// max_sim_time_ms is a **soft cap** on the scheduling loop, not a hard truncation
+    /// of recorded work. When the next scheduled simulated timestamp would
+    /// exceed the cap, the loop exits, but worker passes already in flight
+    /// complete normally — even if their token timestamps land past `ms`.
+    /// Requests that hadn't received their first token before the cap fired
+    /// stay in the report as incomplete (`first_token_ms = None`,
+    /// `e2e_latency_ms = None`). `report.duration_ms` may exceed `ms` by up
+    /// to one in-flight pass's duration. Enforcing a precise cap would
+    /// require plumbing a deadline into the worker / engine core; not worth
+    /// it for the calibration use case this exists to serve.
+    pub(in crate::replay) fn with_max_sim_time_ms(mut self, ms: Option<f64>) -> Self {
+        self.max_sim_time_ms = ms;
         self
     }
 
@@ -992,7 +1016,15 @@ impl DisaggRuntime {
     }
 
     /// Run the staged offline replay until both prefill and decode pipelines are drained.
+    /// If `max_sim_time_ms` is set, exits gracefully when the next scheduled
+    /// timestamp would exceed that cap; in-flight requests at that point are
+    /// reported as incomplete.
     pub(super) fn run(mut self) -> Result<(TraceCollector, DisaggRuntimeStats)> {
+        if let Some(cap_ms) = self.max_sim_time_ms
+            && (!cap_ms.is_finite() || cap_ms < 0.0)
+        {
+            bail!("max_sim_time_ms must be a finite, non-negative value; got {cap_ms}");
+        }
         self.drain_current_timestamp()?;
 
         while !self.is_done() {
@@ -1002,6 +1034,11 @@ impl DisaggRuntime {
                     self.cluster_in_flight()
                 );
             };
+            if let Some(cap_ms) = self.max_sim_time_ms
+                && next_timestamp_ms > cap_ms
+            {
+                break;
+            }
             self.now_ms = next_timestamp_ms;
             self.drain_current_timestamp()?;
         }
@@ -1468,6 +1505,85 @@ mod tests {
             DisaggPhase::RunningPrefill
         );
         assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
+    }
+
+    /// Setting `max_sim_time_ms` causes `run()` to break before scheduled
+    /// arrivals past the cap. This test verifies the cap operates on
+    /// **simulated** time (`now_ms`), not real wall-clock time: with
+    /// staggered arrivals at 0/1/2/3/4 seconds of sim time and a 2.5s cap,
+    /// the simulated duration must stay ≤ cap, while the cap-less variant
+    /// (next test) reaches ≥ 4s of sim duration. Real wall-clock runtime
+    /// is microseconds in both cases (speedup_ratio=1000).
+    #[test]
+    fn test_disagg_max_sim_time_truncates_run() {
+        let config = disagg_config();
+        let submitted = 5;
+        let cap_ms = 2500.0;
+        let requests = VecDeque::from([
+            request(1, 64, 2, 0.0),
+            request(2, 64, 2, 1000.0),
+            request(3, 64, 2, 2000.0),
+            request(4, 64, 2, 3000.0),
+            request(5, 64, 2, 4000.0),
+        ]);
+        let (collector, _) = DisaggRuntime::new(
+            &config,
+            None,
+            None,
+            requests,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_max_sim_time_ms(Some(cap_ms))
+        .run()
+        .unwrap();
+        let report = collector.finish();
+        assert!(
+            report.request_counts.num_requests < submitted,
+            "cap should admit fewer than {} requests; got num_requests={}",
+            submitted,
+            report.request_counts.num_requests
+        );
+        assert!(
+            report.throughput.duration_ms <= cap_ms,
+            "simulated duration must respect cap; got duration_ms={} cap_ms={}",
+            report.throughput.duration_ms,
+            cap_ms
+        );
+    }
+
+    /// Sanity: without a cap, the same setup admits all submitted requests
+    /// and the simulated duration extends past the last arrival timestamp.
+    #[test]
+    fn test_disagg_no_cap_completes_everything() {
+        let config = disagg_config();
+        let requests = VecDeque::from([
+            request(1, 64, 2, 0.0),
+            request(2, 64, 2, 1000.0),
+            request(3, 64, 2, 2000.0),
+            request(4, 64, 2, 3000.0),
+            request(5, 64, 2, 4000.0),
+        ]);
+        let (collector, _) = DisaggRuntime::new(
+            &config,
+            None,
+            None,
+            requests,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .run()
+        .unwrap();
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 5);
+        assert_eq!(report.request_counts.num_requests, 5);
+        assert!(
+            report.throughput.duration_ms >= 4000.0,
+            "uncapped sim duration should extend past last arrival; got {}",
+            report.throughput.duration_ms
+        );
     }
 
     #[test]
