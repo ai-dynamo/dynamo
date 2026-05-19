@@ -87,12 +87,13 @@ USER dynamo
 # not look like a fully-expanded generic image.
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/trtllm /workspace/components/src/dynamo/trtllm
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 lib /workspace/lib
-COPY --chmod=775 --chown=dynamo:0 deploy/sanity_check.py /workspace/deploy/sanity_check.py
 
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen

@@ -150,6 +150,7 @@ class NativePlannerBase:
             metrics_source=config.throughput_metrics_source,
             bearer_token=config.metric_pulling_prometheus_token,
             ssl_verify=config.metric_pulling_prometheus_ssl_verify,
+            extra_query_params=config.metric_pulling_prometheus_extra_query_params,
         )
         if config.throughput_metrics_source == "router":
             self.prometheus_traffic_client.warn_if_router_not_scraped()
