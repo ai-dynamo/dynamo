@@ -83,6 +83,14 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
 					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent:           "decode",
+							commonconsts.KubeLabelDynamoNamespace:           dynamoNamespace,
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+							commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+							commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+							commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+						},
 						ServiceName:      "decode",
 						ComponentType:    commonconsts.ComponentTypeWorker,
 						SubComponentType: commonconsts.ComponentTypeDecode,
@@ -108,7 +116,18 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 			child, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 			require.NoError(t, err)
 			require.False(t, toDelete)
-			child.Spec.Template.Labels = setLegacyWorkerLabels(child.Spec.Template.Labels, commonconsts.ComponentTypeDecode)
+			child.Spec.Template.Labels = map[string]string{
+				commonconsts.KubeLabelDynamoComponent:           "decode",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+				commonconsts.KubeLabelDynamoDiscoveryBackend:    commonconsts.DiscoveryBackendKubernetes,
+				commonconsts.KubeLabelDynamoDiscoveryEnabled:    commonconsts.KubeLabelValueTrue,
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+				commonconsts.KubeLabelDynamoNamespace:           dynamoNamespace,
+				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+				commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
+				commonconsts.KubeLabelDynamoSelector:            "qwen-decode-db6b6891",
+			}
 			return upgradeCase{
 				name:   "Deployment",
 				parent: parent,
@@ -147,6 +166,14 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
 					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent:           "decode",
+							commonconsts.KubeLabelDynamoNamespace:           dynamoNamespace,
+							commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+							commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+							commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+							commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+						},
 						ServiceName:      "decode",
 						ComponentType:    commonconsts.ComponentTypeWorker,
 						SubComponentType: commonconsts.ComponentTypeDecode,
@@ -173,8 +200,30 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 			child, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 			require.NoError(t, err)
 			require.False(t, toDelete)
-			child.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels = setLegacyWorkerLabels(child.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels, commonconsts.ComponentTypeDecode)
-			child.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels = setLegacyWorkerLabels(child.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels, commonconsts.ComponentTypeDecode)
+			child.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels = map[string]string{
+				commonconsts.KubeLabelDynamoComponent:           "decode",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+				commonconsts.KubeLabelDynamoDiscoveryBackend:    commonconsts.DiscoveryBackendKubernetes,
+				commonconsts.KubeLabelDynamoDiscoveryEnabled:    commonconsts.KubeLabelValueTrue,
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+				commonconsts.KubeLabelDynamoNamespace:           dynamoNamespace,
+				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+				commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
+				"role":                                          "leader",
+			}
+			child.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels = map[string]string{
+				commonconsts.KubeLabelDynamoComponent:           "decode",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+				commonconsts.KubeLabelDynamoDiscoveryBackend:    commonconsts.DiscoveryBackendKubernetes,
+				commonconsts.KubeLabelDynamoDiscoveryEnabled:    commonconsts.KubeLabelValueTrue,
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+				commonconsts.KubeLabelDynamoNamespace:           dynamoNamespace,
+				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
+				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+				commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
+				"role":                                          "worker",
+			}
 			return upgradeCase{
 				name:   "LeaderWorkerSet",
 				parent: parent,
@@ -352,16 +401,6 @@ func renderGroveDecodeServiceSelector(ctx context.Context, t *testing.T, parent,
 	})
 	require.NoError(t, err)
 	return service.Spec.Selector
-}
-
-func setLegacyWorkerLabels(labels map[string]string, subComponentType string) map[string]string {
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.ComponentTypeWorker
-	labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
-	delete(labels, commonconsts.KubeLabelDynamoComponentClass)
-	return labels
 }
 
 func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
