@@ -552,29 +552,36 @@ impl TraceCollector {
     /// Used by the `--report-jsonl` CLI path to emit one JSON object per
     /// request to the JSONL file, mirroring AIPerf's per-request output shape.
     ///
-    /// Requests that never received their first token (incomplete, or
-    /// truncated by a sim-time cap) are still emitted with `None` for the
-    /// timing fields, so downstream tooling can count them.
+    /// Only fully-completed requests (admitted, first token observed, last
+    /// token observed) are emitted, so the JSONL row count matches the
+    /// completed-request count in the aggregate report. Incomplete requests
+    /// (e.g. truncated by a sim-time cap) appear in the summary's incomplete
+    /// counters but not here.
     pub fn per_request_records(&self) -> Vec<PerRequestRecord> {
         let mut records = Vec::with_capacity(self.requests.len());
         for (uuid, stats) in &self.requests {
-            let first_token_ms = stats.first_token_ms();
-            let last_token_ms = stats.last_token_ms();
-            let ttft_ms =
-                first_token_ms.map(|t| (t - stats.arrival_time_ms).max(0.0));
-            let e2e_latency_ms =
-                last_token_ms.map(|t| (t - stats.arrival_time_ms).max(0.0));
+            let Some(first_admit_ms) = stats.first_admit_ms else {
+                continue;
+            };
+            let Some(first_token_ms) = stats.first_token_ms() else {
+                continue;
+            };
+            let Some(last_token_ms) = stats.last_token_ms() else {
+                continue;
+            };
+            let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
+            let e2e_latency_ms = (last_token_ms - stats.arrival_time_ms).max(0.0);
             records.push(PerRequestRecord {
                 session_id: stats.session_id.clone(),
                 turn_index: stats.turn_index,
                 uuid: uuid.to_string(),
                 arrival_time_ms: stats.arrival_time_ms,
-                first_admit_ms: stats.first_admit_ms,
-                first_token_ms,
-                last_token_ms,
-                ttft_ms,
+                first_admit_ms: Some(first_admit_ms),
+                first_token_ms: Some(first_token_ms),
+                last_token_ms: Some(last_token_ms),
+                ttft_ms: Some(ttft_ms),
                 ttst_ms: stats.ttst_ms(),
-                e2e_latency_ms,
+                e2e_latency_ms: Some(e2e_latency_ms),
                 itl_ms: stats.mean_tpot_ms(),
                 input_length: stats.input_length,
                 output_length: stats.output_length,

@@ -573,6 +573,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--trace-format=applied_compute_agentic requires --replay-concurrency because the source traces do not include first-turn timestamps"
         )
 
+    if args.report_jsonl is not None:
+        if args.replay_mode != "offline":
+            parser.error("--report-jsonl only supports --replay-mode=offline")
+        if args.planner_config is not None:
+            parser.error("--report-jsonl is not supported with --planner-config")
+        if not using_trace_file:
+            parser.error("--report-jsonl currently only supports trace-file replay")
+
     extra_engine_args = _load_engine_args(args.extra_engine_args)
     prefill_engine_args = _load_engine_args(args.prefill_engine_args)
     decode_engine_args = _load_engine_args(args.decode_engine_args)

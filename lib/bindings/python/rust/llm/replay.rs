@@ -602,11 +602,13 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config);
     let replay_mode = replay_mode.to_owned();
-    // Capture whether per-request emission was requested before `move` consumes
-    // `report_jsonl_path` into the closure; we still need the path after the
-    // closure returns to write the JSONL file.
+    if report_jsonl_path.is_some() && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "report_jsonl_path is only supported for replay_mode='offline'",
+        ));
+    }
     let jsonl_path_for_emit = report_jsonl_path.clone();
-    let want_per_request = report_jsonl_path.is_some();
+    let record_per_request = report_jsonl_path.is_some();
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
@@ -633,6 +635,7 @@ pub fn run_mocker_trace_replay(
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
+                            record_per_request,
                         )
                     }
                     ("offline", None) => {
@@ -648,6 +651,7 @@ pub fn run_mocker_trace_replay(
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
+                            record_per_request,
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -700,7 +704,7 @@ pub fn run_mocker_trace_replay(
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
-                        want_per_request,
+                        record_per_request,
                     )
                 }
                 ("offline", None) => {
@@ -715,7 +719,7 @@ pub fn run_mocker_trace_replay(
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
-                        want_per_request,
+                        record_per_request,
                     )
                 }
                 ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
@@ -731,7 +735,8 @@ pub fn run_mocker_trace_replay(
     // potentially-large round trip through pyo3 / pythonize. Each line is one
     // JSON object (matching AIPerf's profile_export.jsonl convention).
     if let Some(path) = jsonl_path_for_emit.as_ref() {
-        write_per_request_jsonl(path, &report.per_request).map_err(to_pyerr)?;
+        py.allow_threads(|| write_per_request_jsonl(path, &report.per_request))
+            .map_err(to_pyerr)?;
     }
     pythonize(py, &report)
         .map_err(to_pyerr)
