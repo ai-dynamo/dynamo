@@ -43,6 +43,16 @@ ADMISSION_CONTROL_CHOICES: tuple[str, ...] = ("token-capacity", "none")
 # Not in ADMISSION_CONTROL_CHOICES so argparse never accepts it from input.
 _ADMISSION_CONTROL_AUTO: str = "_auto_"
 
+# Production defaults for the busy thresholds, applied only when
+# admission-control resolves to "token-capacity". The CLI/env defaults are
+# `None` (sentinel for "user did not set this") so apply_admission_control
+# can distinguish "user explicitly passed a threshold" from "argparse
+# filled in a default" — and so explicit `--admission-control none` does
+# not raise the contradiction error against defaults the user never set.
+_DEFAULT_ACTIVE_DECODE_BLOCKS_THRESHOLD: float = 1.0
+_DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD: int = 10_000_000
+_DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC: float = 64.0
+
 
 def _nullable_float(value: str) -> Optional[float]:
     """Parse a float, or return None for the literal 'None'."""
@@ -114,20 +124,36 @@ class RouterConfigBase(ConfigBase):
                     ", ".join(explicit_thresholds),
                 )
                 self.admission_control = "token-capacity"
-                return
-            self.admission_control = "none"
-            # no thresholds set; nothing to clear
-            return
+            else:
+                self.admission_control = "none"
 
         if self.admission_control not in ADMISSION_CONTROL_CHOICES:
             raise ValueError(
                 f"--admission-control must be one of "
                 f"{ADMISSION_CONTROL_CHOICES}, got {self.admission_control!r}"
             )
+
         if self.admission_control == "token-capacity":
+            # Fill in production defaults for any threshold the user did not
+            # explicitly set. Until now the threshold fields default to None
+            # so the explicit-user check above stays accurate.
+            if self.active_decode_blocks_threshold is None:
+                self.active_decode_blocks_threshold = (
+                    _DEFAULT_ACTIVE_DECODE_BLOCKS_THRESHOLD
+                )
+            if self.active_prefill_tokens_threshold is None:
+                self.active_prefill_tokens_threshold = (
+                    _DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD
+                )
+            if self.active_prefill_tokens_threshold_frac is None:
+                self.active_prefill_tokens_threshold_frac = (
+                    _DEFAULT_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC
+                )
             return
-        # admission_control == "none" (explicit). Contradiction with any
-        # explicit threshold flag — raise rather than silently overriding.
+
+        # admission_control == "none" (explicit or auto-resolved). Contradiction
+        # with any explicit threshold flag — raise rather than silently
+        # overriding.
         if explicit_thresholds:
             raise ValueError(
                 "--admission-control none cannot be combined with explicit "
@@ -135,9 +161,7 @@ class RouterConfigBase(ConfigBase):
                 "to keep admission disabled, or pass --admission-control "
                 "token-capacity to activate the threshold(s)."
             )
-        self.active_decode_blocks_threshold = None
-        self.active_prefill_tokens_threshold = None
-        self.active_prefill_tokens_threshold_frac = None
+        # All thresholds remain None (their argparse default) — nothing to clear.
 
 
 class RouterArgGroup(ArgGroup):
@@ -200,10 +224,12 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-decode-blocks-threshold",
             env_var="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-            default=1.0,
+            default=None,
             help=(
                 "Threshold fraction (0.0-1.0) of KV cache block utilization above which a worker "
-                "is considered busy. Pass 'None' on the CLI to disable this check. Default: 1.0."
+                "is considered busy. Setting this implies --admission-control token-capacity. "
+                "Pass 'None' on the CLI to disable this check. "
+                "Token-capacity default: 1.0."
             ),
             arg_type=_nullable_float,
         )
@@ -211,12 +237,14 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-prefill-tokens-threshold",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            default=10_000_000,
+            default=None,
             help=(
                 "Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
-                "threshold, the worker is marked as busy. Pass 'None' on the CLI to disable this "
-                "check. Uses OR logic with --active-prefill-tokens-threshold-frac. Default: 10000000."
+                "threshold, the worker is marked as busy. Setting this implies "
+                "--admission-control token-capacity. Pass 'None' on the CLI to disable this "
+                "check. Uses OR logic with --active-prefill-tokens-threshold-frac. "
+                "Token-capacity default: 10000000."
             ),
             arg_type=_nullable_int,
         )
@@ -224,11 +252,13 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-prefill-tokens-threshold-frac",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-            default=64.0,
+            default=None,
             help=(
                 "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
-                "active_prefill_tokens > frac * max_num_batched_tokens. Pass 'None' on the CLI to "
-                "disable this check. Uses OR logic with --active-prefill-tokens-threshold. Default: 64.0."
+                "active_prefill_tokens > frac * max_num_batched_tokens. Setting this implies "
+                "--admission-control token-capacity. Pass 'None' on the CLI to disable this "
+                "check. Uses OR logic with --active-prefill-tokens-threshold. "
+                "Token-capacity default: 64.0."
             ),
             arg_type=_nullable_float,
         )
