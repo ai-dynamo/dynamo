@@ -56,12 +56,26 @@ go test ./test/e2e/dgdr/ -v -ginkgo.v \
   -dgdr-image=$IMAGE \
   -dgdr-no-mocker
 
-# Validation only (fastest — no profiling jobs)
+# Validation only (fastest — no profiling jobs, webhook dry-run)
 go test ./test/e2e/dgdr/ -v -ginkgo.v \
   -dgdr-namespace=default \
   -dgdr-image=$IMAGE \
-  -ginkgo.label-filter="gpu_0"
+  -ginkgo.label-filter="validation"
 ```
+
+### Ginkgo labels
+
+Each Describe is tagged with one or more labels you can filter on via
+`-ginkgo.label-filter`:
+
+| Label | Applies to | Meaning |
+|---|---|---|
+| `validation` | `validation_test.go` only | Webhook dry-run; no resources persisted, no GPUs needed. |
+| `gpu_0` | all suites | Can run on a node with 0 GPUs (validation, plus mocker-mode lifecycle/profiling). |
+| `integration`, `k8s`, `nightly` | all suites | Categorical tags used by CI scheduling. |
+
+Use `validation` (not `gpu_0`) when you only want the webhook validation
+suite — `gpu_0` matches every Describe in this directory.
 
 ## CLI Flags
 

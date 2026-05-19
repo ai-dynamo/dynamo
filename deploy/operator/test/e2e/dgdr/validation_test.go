@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var _ = Describe("DGDR Validation", Label("gpu_0", "nightly", "integration", "k8s"), func() {
+var _ = Describe("DGDR Validation", Label("validation", "gpu_0", "nightly", "integration", "k8s"), func() {
 
 	// -----------------------------------------------------------------------
 	// Webhook validation (server-side dry-run — no resources persisted)

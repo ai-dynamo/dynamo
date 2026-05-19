@@ -20,6 +20,7 @@ package dgdr
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os/exec"
 	"strings"
 	"time"
@@ -202,18 +203,16 @@ func injectMockerConfig(d *v1beta1.DynamoGraphDeploymentRequest) {
 
 // uniqueName generates a K8s-safe test name with a timestamp suffix.
 // If --dgdr-name-prefix is set on the CLI, the prefix is combined with
-// a short per-test suffix derived from the It's prefix arg so multiple
-// tests in one suite invocation get distinct DGDR names while staying
-// under the 45-char pod naming limit (see profile_sla.py).
+// a 6-hex-char FNV-1a hash of the per-test prefix so multiple tests in
+// one suite invocation get distinct DGDR names while staying under the
+// 45-char pod naming limit (see profile_sla.py). The hash avoids the
+// collisions that a first-N-chars suffix would produce (e.g. "vllm-rapid"
+// and "sglang-rapid" both collapsing to "rapi").
 func uniqueName(prefix string) string {
 	if flagNamePrefix != "" {
-		short := prefix
-		if i := strings.LastIndex(prefix, "-"); i >= 0 && i+1 < len(prefix) {
-			short = prefix[i+1:]
-		}
-		if len(short) > 4 {
-			short = short[:4]
-		}
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(prefix))
+		short := fmt.Sprintf("%08x", h.Sum32())[:6]
 		return fmt.Sprintf("%s-%s", flagNamePrefix, short)
 	}
 	return fmt.Sprintf("dgdr-test-%s-%d", prefix, time.Now().UnixMilli()%100000)
