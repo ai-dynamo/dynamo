@@ -1,0 +1,5 @@
+exp_name: run_benchx_1ctx1gen_dynamo_kvrouter_hcoff_c48
+job_id: 173458
+timestamp: 20260518_212941
+container_image: /lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-989902-with-trace
+concurrency: 48
