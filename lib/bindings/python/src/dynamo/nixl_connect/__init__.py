@@ -115,6 +115,23 @@ class AbstractOperation(ABC):
         remote_descriptors: Optional[Descriptor | list[Descriptor]],
         notification_key: Optional[str],
     ) -> None:
+        """
+        Initialises an abstract NIXL RDMA operation.
+
+        Parameters
+        ----------
+        connection : Connection
+            The local NIXL connection to use for the operation.
+        operation_kind : OperationKind
+            The kind of operation (READ or WRITE).
+        local_descriptors : Descriptor | list[Descriptor]
+            One or more local memory descriptors for the operation.
+        remote_descriptors : Descriptor | list[Descriptor] | None
+            One or more remote memory descriptors, or None for passive operations.
+        notification_key : str | None
+            Completion-notification key; a random UUID is generated when None.
+        """
+
         if not isinstance(connection, Connection):
             raise TypeError(
                 "Argument `connection` must be `dynamo.nixl_connect.Connection`."
@@ -991,9 +1008,7 @@ class Descriptor:
             if data.device.type == "cpu":
                 self._data_device = Device("cpu")
             else:
-                self._data_device = Device(
-                    f"{data.device.type}:{data.get_device()}"
-                )
+                self._data_device = Device(f"{data.device.type}:{data.get_device()}")
             self._data_ref = data
 
             logger.debug(
@@ -1210,9 +1225,7 @@ class Descriptor:
             self._nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
             mem_type = self._data_device.mem_type.value
-            reg_list = [
-                (self._data_ptr, self._data_size, self._data_device.id, "")
-            ]
+            reg_list = [(self._data_ptr, self._data_size, self._data_device.id, "")]
             self._nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
         self._connection = connection
 
@@ -1278,6 +1291,24 @@ class Device:
         self,
         metadata: str | tuple[DeviceMemType, int],
     ) -> None:
+        """
+        Creates a Device from a framework device string or a (DeviceMemType, id) tuple.
+
+        Parameters
+        ----------
+        metadata : str | tuple[DeviceMemType, int]
+            Either a framework device string such as "cpu" or "cuda:0", or
+            a (DeviceMemType, device_id) tuple.  The strings "host" and "gpu"
+            are accepted as aliases for "cpu" and "cuda", respectively.
+
+        Raises
+        ------
+        ValueError
+            When *metadata* is ``None``.
+        TypeError
+            When *metadata* is not a recognised string or ``(DeviceMemType, int)`` tuple.
+        """
+
         if metadata is None:
             raise ValueError("Argument `metadata` cannot be `None`.")
 
@@ -1350,6 +1381,7 @@ class DeviceMemType(str, Enum):
     """Device (GPU/XPU) memory."""
 
     def __str__(self) -> str:
+        """Returns the canonical NIXL segment name ("DRAM" or "VRAM")."""
         return self.value
 
 
