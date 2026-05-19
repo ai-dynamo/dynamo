@@ -64,6 +64,7 @@ mod registry;
 pub mod service;
 
 pub(crate) use client::EndpointDiscoverySource;
+pub(crate) use client::RoutingInstances;
 pub(crate) use client::RoutingOccupancyState;
 pub(crate) use client::get_or_create_routing_occupancy_state;
 pub use client::{Client, RoutingInstanceCounts};

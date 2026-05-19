@@ -5,7 +5,7 @@ use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
     component::{
-        Client, DeviceType, Endpoint, Instance, RoutingOccupancyState,
+        Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
         get_or_create_routing_occupancy_state,
     },
     discovery::EndpointInstanceId,
@@ -483,6 +483,29 @@ where
         Ok(router)
     }
 
+    /// Empty-pool error for non-KV selectors. Distinguishes the
+    /// "fleet is overloaded" case (`ResourceExhausted` / 503 retry-later,
+    /// matching the post-selection check in `route()` and the KV scheduler's
+    /// `AllEligibleWorkersOverloaded`) from "no workers registered at all"
+    /// (generic 5xx "no instances found").
+    fn empty_free_pool_error(&self, routing_instances: &RoutingInstances) -> anyhow::Error {
+        if !routing_instances.discovered_ids().is_empty() {
+            let cause = PipelineError::ServiceOverloaded(
+                "All workers are busy, please retry later".to_string(),
+            );
+            return DynamoError::builder()
+                .error_type(ErrorType::ResourceExhausted)
+                .message("All workers are busy, please retry later")
+                .cause(cause)
+                .build()
+                .into();
+        }
+        anyhow::anyhow!(
+            "no instances found for endpoint {}",
+            self.client.endpoint.id()
+        )
+    }
+
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
@@ -491,10 +514,7 @@ where
             let routing_instances = self.client.routing_instances();
             let count = routing_instances.free_ids().len();
             if count == 0 {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
+                return Err(self.empty_free_pool_error(&routing_instances));
             }
             routing_instances.free_ids()[counter % count]
         };
@@ -510,10 +530,7 @@ where
             let routing_instances = self.client.routing_instances();
             let count = routing_instances.free_ids().len();
             if count == 0 {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
+                return Err(self.empty_free_pool_error(&routing_instances));
             }
             let counter = rand::rng().random::<u64>() as usize;
             routing_instances.free_ids()[counter % count]
@@ -531,10 +548,7 @@ where
         let instance_id = {
             let routing_instances = self.client.routing_instances();
             if routing_instances.free_ids().is_empty() {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
+                return Err(self.empty_free_pool_error(&routing_instances));
             }
             p2c_select_from(state.as_ref(), routing_instances.free_ids())
         };
@@ -589,13 +603,11 @@ where
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self.client.routing_instances().free_ids().to_vec();
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids().to_vec();
 
         if instance_ids.is_empty() {
-            return Err(anyhow::anyhow!(
-                "no instances found for endpoint {}",
-                self.client.endpoint.id()
-            ));
+            return Err(self.empty_free_pool_error(&routing_instances));
         }
 
         // Apply a unified policy for all endpoints.
@@ -621,16 +633,13 @@ where
             cuda_to_cpu_ratio,
         );
 
-        // Select least-loaded within the chosen group
+        // Select least-loaded within the chosen group. An empty group means
+        // free workers exist but the budget-selected device class has none —
+        // same retry-later semantic as the empty-free-pool case.
         let instance_id = state
             .select_exact_min_and_increment(&candidates)
             .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no instances in selected device group for endpoint {}",
-                    endpoint_id
-                )
-            })?;
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         let permit = OccupancyPermit::new(state.clone(), instance_id);
         let is_cpu = matches!(
             device_type_map.get(&instance_id),
@@ -655,16 +664,12 @@ where
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self.client.routing_instances().free_ids().to_vec();
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids().to_vec();
         let instance_id = state
             .select_exact_min_and_increment(&instance_ids)
             .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                )
-            })?;
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         let permit = OccupancyPermit::new(state.clone(), instance_id);
         tracing::trace!(
             "least loaded router selected {instance_id} (connections: {})",
