@@ -295,9 +295,9 @@ type OverridesSpec struct {
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
 
-	// DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment
-	// to use as the base for the generated deployment. Fields from profiling results
-	// are merged on top. Use this to override backend worker images.
+	// DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment.
+	// Fields set here are merged into the profiler-generated deployment and take
+	// precedence. Use this to override backend worker images.
 	//
 	// The field is stored as a raw embedded resource rather than a typed
 	// *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already
