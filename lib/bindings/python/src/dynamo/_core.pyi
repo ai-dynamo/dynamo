@@ -1339,10 +1339,10 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
-        router_queue_depth_by_missing_isl: list[tuple[int, int]] = [(0, 1024)],
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
+        router_queue_depth_by_missing_isl: list[tuple[int, int]] = [(0, 1024)],
     ) -> None:
         """
         Create a KV router configuration.
