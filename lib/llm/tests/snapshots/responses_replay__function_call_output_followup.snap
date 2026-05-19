@@ -46,7 +46,8 @@ expression: redacted_events(&text)
         "safety_identifier": null,
         "usage": null,
         "presence_penalty": 0.0,
-        "frequency_penalty": 0.0
+        "frequency_penalty": 0.0,
+        "store": false
       }
     }
   },
@@ -93,7 +94,8 @@ expression: redacted_events(&text)
         "safety_identifier": null,
         "usage": null,
         "presence_penalty": 0.0,
-        "frequency_penalty": 0.0
+        "frequency_penalty": 0.0,
+        "store": false
       }
     }
   },
