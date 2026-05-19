@@ -12,10 +12,10 @@ use rmp_serde::Serializer;
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use super::tracker::{CacheStatusTracker, ConsolidatedEvent};
+use super::SharedCacheStatusTracker;
+use super::tracker::ConsolidatedEvent;
 use crate::utils::zmq::{bind_pub_socket, send_multipart};
 
 /// Event batch structure matching vLLM's format (array_like=True)
@@ -70,6 +70,7 @@ impl Event {
                 block_size,
                 lora_name,
                 source: _,
+                tier,
             } => {
                 let parsed_hash = block_hash
                     .parse::<u64>()
@@ -106,12 +107,13 @@ impl Event {
                     token_ids: token_ids_i32,
                     block_size: block_size_i32,
                     lora_name,
-                    medium: None,
+                    medium: tier.map(|t| t.to_vllm_medium().to_string()),
                 })
             }
             ConsolidatedEvent::Remove {
                 block_hash,
                 source: _,
+                tier,
             } => {
                 // Parse block hash - fail if invalid to prevent corruption
                 let parsed_hash = block_hash.parse::<u64>().with_context(|| {
@@ -120,7 +122,7 @@ impl Event {
 
                 Ok(Event::BlockRemoved {
                     block_hashes: vec![parsed_hash],
-                    medium: None, // Not provided by ConsolidatedEvent
+                    medium: tier.map(|t| t.to_vllm_medium().to_string()),
                 })
             }
             ConsolidatedEvent::ClearAll => Ok(Event::AllBlocksCleared {}),
@@ -131,14 +133,14 @@ impl Event {
 /// ZMQ Publisher for consolidated events
 pub struct KvEventConsolidatorPublisher {
     endpoint: String,
-    tracker: Arc<RwLock<CacheStatusTracker>>,
+    tracker: SharedCacheStatusTracker,
     sequence: Arc<AtomicU64>,
     task_handle: Option<JoinHandle<()>>,
 }
 
 impl KvEventConsolidatorPublisher {
     /// Create a new publisher
-    pub fn new(endpoint: &str, tracker: Arc<RwLock<CacheStatusTracker>>) -> Result<Self> {
+    pub fn new(endpoint: &str, tracker: SharedCacheStatusTracker) -> Result<Self> {
         let endpoint = endpoint.to_string();
         let sequence = Arc::new(AtomicU64::new(0));
 
@@ -177,7 +179,7 @@ impl KvEventConsolidatorPublisher {
     /// Main publisher loop
     async fn run_publisher_loop(
         endpoint: String,
-        tracker: Arc<RwLock<CacheStatusTracker>>,
+        tracker: SharedCacheStatusTracker,
         sequence: Arc<AtomicU64>,
     ) -> Result<()> {
         tracing::info!("Starting consolidated event publisher on {}", endpoint);
@@ -239,10 +241,13 @@ impl KvEventConsolidatorPublisher {
                 Some(0),     // data_parallel_rank (default)
             );
 
-            // Serialize to msgpack
+            // Serialize to msgpack.
+            // Keep the outer batch as a tuple [ts, events, dp_rank], but force
+            // inner struct-like events to use named fields so RawKvEvent's map
+            // deserializer can safely decode optional fields like `medium`.
             let mut payload = Vec::new();
             batch
-                .serialize(&mut Serializer::new(&mut payload))
+                .serialize(&mut Serializer::new(&mut payload).with_struct_map())
                 .context("Failed to serialize event batch")?;
 
             // Get sequence number
@@ -268,5 +273,57 @@ impl KvEventConsolidatorPublisher {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_kv_router::zmq_wire::{KvEventBatch, RawKvEvent};
+    use rmp_serde as rmps;
+
+    #[test]
+    fn test_block_stored_with_medium_and_no_lora_name_decodes() {
+        let batch = EventBatch(
+            0.0,
+            vec![Event::BlockStored {
+                block_hashes: vec![42],
+                parent_block_hash: Some(7),
+                token_ids: vec![1, 2, 3, 4],
+                block_size: 4,
+                lora_name: None,
+                medium: Some("CPU_TIER1".to_string()),
+            }],
+            Some(0),
+        );
+
+        let mut payload = Vec::new();
+        batch
+            .serialize(&mut Serializer::new(&mut payload).with_struct_map())
+            .unwrap();
+
+        let decoded: KvEventBatch = rmps::from_slice(&payload).unwrap();
+        assert_eq!(decoded.events.len(), 1);
+        assert_eq!(decoded.data_parallel_rank, Some(0));
+
+        let RawKvEvent::BlockStored {
+            block_hashes,
+            parent_block_hash,
+            token_ids,
+            block_size,
+            medium,
+            lora_name,
+            ..
+        } = &decoded.events[0]
+        else {
+            panic!("expected BlockStored");
+        };
+
+        assert_eq!(block_hashes.len(), 1);
+        assert!(parent_block_hash.is_some());
+        assert_eq!(token_ids, &vec![1, 2, 3, 4]);
+        assert_eq!(*block_size, 4);
+        assert_eq!(medium.as_deref(), Some("CPU_TIER1"));
+        assert_eq!(lora_name.as_deref(), None);
     }
 }

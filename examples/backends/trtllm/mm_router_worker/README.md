@@ -50,7 +50,7 @@ Frontend (standard)      MM Router Worker (this)        TRT-LLM Worker (standard
 
 ```bash
 # 1. Start etcd and NATS
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 
 # 2. Start TRT-LLM worker(s)
 python -m dynamo.trtllm \

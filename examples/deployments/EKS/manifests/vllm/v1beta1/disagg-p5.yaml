@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-component-type: worker
+                  nvidia.com/dynamo-graph-deployment-name: vllm-disagg
+              topologyKey: topology.kubernetes.io/zone
+        containers:
+        - command:
+          - /bin/bash
+          - -c
+          - |
+            exec python3 -m dynamo.frontend --router-mode kv --router-reset-states
+          env:
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          name: main
+          resources:
+            limits:
+              cpu: "8"
+            requests:
+              cpu: "8"
+          volumeMounts:
+          - mountPath: /home/dynamo/.cache/huggingface
+            name: model-cache
+          workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+    replicas: 1
+    type: frontend
+  - compilationCache:
+      mountPath: /home/dynamo/.cache/vllm
+      pvcName: compilation-cache
+    name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-graph-deployment-name: vllm-disagg
+              topologyKey: topology.kubernetes.io/zone
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-component: VllmPrefillWorker
+                topologyKey: kubernetes.io/hostname
+              weight: 100
+        containers:
+        - command:
+          - /bin/bash
+          - -c
+          - |
+            exec python3 -m dynamo.vllm \
+             --model Qwen/Qwen3-32B \
+             --tensor-parallel-size 2 \
+             --disaggregation-mode decode \
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+          env:
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+              vpc.amazonaws.com/efa: "8"
+            requests:
+              nvidia.com/gpu: "2"
+              vpc.amazonaws.com/efa: "8"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - mountPath: /home/dynamo/.cache/huggingface
+            name: model-cache
+          workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        nodeSelector:
+          karpenter.sh/capacity-type: reserved
+          node.kubernetes.io/instance-type: p5.48xlarge
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+    replicas: 2
+    type: decode
+  - compilationCache:
+      mountPath: /home/dynamo/.cache/vllm
+      pvcName: compilation-cache
+    name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-graph-deployment-name: vllm-disagg
+              topologyKey: topology.kubernetes.io/zone
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-component: VllmPrefillWorker
+                topologyKey: kubernetes.io/hostname
+              weight: 100
+        containers:
+        - command:
+          - /bin/bash
+          - -c
+          - |-
+            exec python3 -m dynamo.vllm \
+             --model Qwen/Qwen3-32B \
+             --tensor-parallel-size 2 \
+             --disaggregation-mode prefill \
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+          env:
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+              vpc.amazonaws.com/efa: "8"
+            requests:
+              nvidia.com/gpu: "2"
+              vpc.amazonaws.com/efa: "8"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - mountPath: /home/dynamo/.cache/huggingface
+            name: model-cache
+          workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        nodeSelector:
+          karpenter.sh/capacity-type: reserved
+          node.kubernetes.io/instance-type: p5.48xlarge
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+    replicas: 6
+    type: prefill

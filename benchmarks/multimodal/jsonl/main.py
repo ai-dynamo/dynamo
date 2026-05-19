@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from args import parse_args
 from generate_images import (
+    compute_image_uuid,
     generate_image_pool_base64,
     generate_image_pool_http,
     sample_slots,
@@ -64,10 +65,10 @@ def run_single_turn(
             user_text = generate_filler(py_rng, args.user_text_tokens)
             start = i * images_per_request
             images = slot_refs[start : start + images_per_request]
-            line = json.dumps(
-                {"text": user_text, "images": images}, separators=(",", ":")
-            )
-            f.write(line + "\n")
+            row: dict = {"text": user_text, "images": images}
+            if args.uuid:
+                row["image_uuids"] = [compute_image_uuid(ref) for ref in images]
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
 
     print(f"Wrote {num_requests} requests to {output_path}")
 
@@ -103,11 +104,13 @@ def run_sliding_window(
             for user_idx in range(num_users):
                 offset = user_idx * images_per_user + turn_idx
                 window = pool[offset : offset + window_size]
-                entry = {
+                entry: dict = {
                     "session_id": f"user_{user_idx}",
                     "text": generate_filler(py_rng, args.user_text_tokens),
                     "images": window,
                 }
+                if args.uuid:
+                    entry["image_uuids"] = [compute_image_uuid(ref) for ref in window]
                 f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
     print(f"Wrote {total_requests} requests ({num_users} sessions) to {output_path}")

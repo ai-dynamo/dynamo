@@ -21,6 +21,13 @@ global:
     # When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd.
     install: false
 
+  nats:
+    # -- Whether this chart should install the bundled NATS subchart.
+    # When true, deploys NATS and auto-configures the operator with its address.
+    # When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS.
+    # Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes).
+    install: true
+
   kai-scheduler:
     # -- Whether this chart should install the bundled kai-scheduler subchart.
     # When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled.
@@ -62,10 +69,6 @@ dynamo-operator:
 
   # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port"
   etcdAddr: ""
-
-  nats:
-    # -- Whether the NATS is enabled
-    enabled: true
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
@@ -167,6 +170,21 @@ dynamo-operator:
     # -- Whether VirtualServices should support HTTPS routing
     virtualServiceSupportsHTTPS: false
 
+    # Service mesh integration for EPP components.
+    # When enabled, the operator generates mesh-specific resources (e.g., Istio
+    # DestinationRules) so sidecar proxies connect correctly to EPP.
+    serviceMesh:
+      # -- Whether to enable service mesh resource generation for EPP
+      enabled: false
+      # -- Service mesh provider. Supported: "istio"
+      provider: "istio"
+      # -- Istio-specific settings (only used when provider is "istio")
+      istio:
+        # -- TLS mode for DestinationRules: "SIMPLE", "DISABLE", "ISTIO_MUTUAL", "MUTUAL"
+        tlsMode: "SIMPLE"
+        # -- Skip TLS certificate verification (for self-signed EPP certs)
+        insecureSkipVerify: true
+
     # Metrics configuration
     metrics:
       # -- Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables
@@ -221,12 +239,20 @@ dynamo-operator:
           # -- Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued.
           renewBefore: "720h"
 
-  # Checkpoint configuration for fast pod restore using CRIU/cuda-checkpoint
-  # NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
-  # using the snapshot Helm chart in each namespace where checkpointing is needed.
+  # Checkpoint configuration for fast pod restore using CRIU/cuda-checkpoint.
+  # In legacy agentMount mode, install the snapshot chart in each workload
+  # namespace. In podMount mode, install one shared snapshot-agent DaemonSet and
+  # configure storage below so the operator mounts/ensures namespace-local PVCs.
   checkpoint:
     # -- Whether to enable checkpoint/restore functionality
     enabled: false
+    # -- Optional PVC storage used when the snapshot-agent is installed outside
+    # workload namespaces with snapshot.storage.accessMode=podMount. Set
+    # create=true for operator-managed namespace PVCs, or omit/create=false to
+    # require an already-present PVC with the configured name. ReadWriteOnce
+    # can be used with podMount for sequential checkpoint/restore on suitable
+    # storage backends; use ReadWriteMany for concurrent multi-node access.
+    storage: {}
 
 # Grove component - distributed inference orchestration
 # Installation is controlled by global.grove.install above.
@@ -301,10 +327,8 @@ etcd:
   affinity: {}
 
 # NATS configuration - messaging system for operator communication
+# Installation is controlled by global.nats.install above.
 nats:
-  # -- Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats."
-  enabled: true
-
   # TLS Certificate Authority configuration for secure communication
   # Reference a common CA Certificate or Bundle in all nats config `tls` blocks and nats-box contexts
   # Note: `tls.verify` still must be set in the appropriate nats config `tls` blocks to require mTLS

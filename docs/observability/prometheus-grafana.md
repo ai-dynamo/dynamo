@@ -58,6 +58,8 @@ After sending a few requests, the Prometheus Exposition Format text metrics are 
 - Frontend: `http://localhost:8000/metrics`
 - Backend worker: `http://localhost:8081/metrics`
 
+**Note:** Labeled series (e.g., `...{model="..."}`) only appear after the first matching request is served. See [Available Metrics](metrics.md#available-metrics) for details.
+
 ### Access Web Interfaces
 
 Once Dynamo components are running:
@@ -78,7 +80,7 @@ Other interfaces:
 
 ### Prometheus
 
-The Prometheus configuration is specified in [prometheus.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
+The Prometheus configuration is specified in [prometheus.yml](../../dev/observability/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
 
 Please be aware that you might need to modify the target settings to align with your specific host configuration and network environment.
 

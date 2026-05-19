@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen
+spec:
+  backendFramework: vllm
+  components:
+  - eppConfig:
+      config:
+        plugins:
+        - type: disagg-profile-handler
+        - name: decode-filter
+          parameters:
+            allowsNoLabel: true
+            label: nvidia.com/dynamo-component-type
+            validValues:
+            - decode
+          type: label-filter
+        - name: picker
+          type: max-score-picker
+        - name: dyn-decode
+          type: dyn-decode-scorer
+        schedulingProfiles:
+        - name: decode
+          plugins:
+          - pluginRef: decode-filter
+            weight: 1
+          - pluginRef: dyn-decode
+            weight: 1
+          - pluginRef: picker
+            weight: 1
+    name: Epp
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_KV_CACHE_BLOCK_SIZE
+            value: "128"
+          - name: DYN_MODEL_NAME
+            value: Qwen/Qwen3-0.6B
+          - name: DYN_ENFORCE_DISAGG
+            value: "false"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          name: main
+    replicas: 1
+    type: epp
+  - frontendSidecar: sidecar-frontend
+    name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME
+            --tensor-parallel-size 1 --data-parallel-size 1 --gpu-memory-utilization
+            0.90 --enable-prefix-caching --block-size 128 --kv-events-config '{"enable_kv_cache_events":true}'
+          command:
+          - /bin/sh
+          - -c
+          env:
+          - name: SERVED_MODEL_NAME
+            value: Qwen/Qwen3-0.6B
+          - name: MODEL_PATH
+            value: Qwen/Qwen3-0.6B
+          - name: DYN_STORE_KV
+            value: mem
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+        - args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: sidecar-frontend
+    replicas: 1
+    sharedMemorySize: 2Gi
+    type: decode

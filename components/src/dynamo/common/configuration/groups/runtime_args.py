@@ -21,7 +21,7 @@ class DynamoRuntimeConfig(ConfigBase):
     endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
-    event_plane: str
+    event_plane: Optional[str] = None
     connector: list[str]
     enable_local_indexer: bool
     durable_kv_events: bool
@@ -98,14 +98,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_REQUEST_PLANE",
             default="tcp",
             help="Determines how requests are distributed from routers to workers. 'tcp' is fastest.",
-            choices=["tcp", "nats", "http"],
+            choices=["tcp", "nats"],
         )
         add_argument(
             g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
-            default="nats",
-            help="Determines how events are published.",
+            default=None,
+            help="Determines how events are published. If unset, auto-detected from "
+            "--discovery-backend: 'zmq' for file/mem (no external services), 'nats' "
+            "for etcd/kubernetes.",
             choices=["nats", "zmq"],
         )
         add_argument(
