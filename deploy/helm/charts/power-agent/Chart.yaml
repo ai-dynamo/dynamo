@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v2
+name: power-agent
+description: |
+  Per-node NVML power-cap enforcement DaemonSet for Dynamo. Watches worker
+  pods for the dynamo.nvidia.com/gpu-power-limit annotation, parses
+  /proc/{pid}/cgroup to recover pod UIDs, and calls
+  nvmlDeviceSetPowerManagementLimit per physical GPU.
+
+  Supersedes the raw deploy/power_agent/{daemonset,rbac,dev-pod}.yaml
+  manifests; see docs/design-docs/power-agent-helm-chart-plan.md for the
+  design rationale.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - nvidia
+  - dynamo
+  - power
+  - nvml
+  - gpu
+home: https://github.com/ai-dynamo/dynamo
+sources:
+  - https://github.com/ai-dynamo/dynamo
+maintainers:
+  - name: NVIDIA

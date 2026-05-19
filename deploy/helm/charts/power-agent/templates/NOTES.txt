@@ -1,0 +1,60 @@
+Power Agent {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+{{- if .Values.daemonset.enabled }}
+
+Verify the DaemonSet is rolling out on every GPU node:
+
+  kubectl rollout status daemonset/{{ include "power-agent.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name=power-agent -o wide
+
+Tail logs:
+
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name=power-agent --tail=50
+
+Check Prometheus metrics (port {{ .Values.agent.prometheusPort }} on each pod):
+
+  - dynamo_power_agent_applied_limit_watts{gpu="N"}             # cap applied per GPU
+  - dynamo_power_agent_multi_pod_gpu_total{disposition=...}      # multi-pod conflict counts
+  - dynamo_power_agent_safe_default_applied_total                # safe-default fallbacks
+  - dynamo_power_agent_apply_failures_total                      # NVML apply failures
+
+RBAC scope: {{ if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}namespace-scoped (Role + RoleBinding in {{ .Release.Namespace }}){{ else }}cluster-wide (ClusterRole + ClusterRoleBinding){{ end }}.
+
+{{- end }}
+
+{{- if .Values.dev.enabled }}
+
+DEV MODE: a single Pod (not a DaemonSet) was created, pinned to node "{{ .Values.dev.nodeName }}".
+
+╭─ PREREQUISITE — the script ConfigMap MUST exist before this Pod can start ─╮
+│                                                                            │
+│   If you have not done so already, create it from your local checkout:     │
+│                                                                            │
+│     kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
+│       --from-file=power_agent.py=components/power_agent/power_agent.py \
+│       -n {{ .Release.Namespace }}
+│                                                                            │
+│   Update flow (after editing power_agent.py locally):                      │
+│                                                                            │
+│     kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
+│       --from-file=power_agent.py=components/power_agent/power_agent.py \
+│       -n {{ .Release.Namespace }} --dry-run=client -o yaml \
+│       | kubectl apply -f -                                                 │
+│     kubectl delete pod {{ include "power-agent.fullname" . }}-dev -n {{ .Release.Namespace }}
+│                                                                            │
+│   Without this ConfigMap the Pod stays Pending with                        │
+│   `MountVolume.SetUp failed for volume "script"`.                          │
+│                                                                            │
+╰────────────────────────────────────────────────────────────────────────────╯
+
+Verify:
+
+  kubectl get pod {{ include "power-agent.fullname" . }}-dev -n {{ .Release.Namespace }} -o wide
+  kubectl logs -f {{ include "power-agent.fullname" . }}-dev -n {{ .Release.Namespace }}
+
+Dev mode forced namespace-scoped RBAC ({{ if .Values.dev.namespaceRestrictedOverride }}overridden via dev.namespaceRestrictedOverride=true → cluster-wide{{ else }}Role + RoleBinding in {{ .Release.Namespace }}; agent runs with --namespace={{ .Release.Namespace }}{{ end }}).
+
+{{- end }}
+
+For full usage, values reference, and uninstall instructions see:
+  deploy/helm/charts/power-agent/README.md

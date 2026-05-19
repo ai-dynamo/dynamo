@@ -1,0 +1,110 @@
+{{- include "power-agent.validateImageTag" . -}}
+{{- include "power-agent.validateMutex" . -}}
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.daemonset.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "power-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "power-agent.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "power-agent.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.daemonset.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "power-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: power-agent
+        {{- with .Values.daemonset.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.daemonset.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "power-agent.serviceAccountName" . }}
+      # hostPID is required to read /proc/{pid}/cgroup for the host PIDs
+      # returned by nvmlDeviceGetComputeRunningProcesses. See power_agent.py
+      # _extract_pod_uid_from_cgroup.
+      hostPID: true
+      # SIGTERM handler restores default TGP on managed GPUs before exit.
+      terminationGracePeriodSeconds: 30
+      # NVIDIA Container Toolkit injects libnvidia-ml.so via the `nvidia`
+      # runtime class. Pairing with NVIDIA_VISIBLE_DEVICES=all in the
+      # container env exposes every GPU on the node WITHOUT consuming a
+      # `nvidia.com/gpu` resource claim — the same pattern DCGM Exporter
+      # uses. Required for nvmlInit() to succeed.
+      runtimeClassName: {{ .Values.runtimeClassName | quote }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemonset.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: power-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - /app/power_agent.py
+            - --safe-default-watts=$(SAFE_DEFAULT_WATTS)
+            - --node-name=$(NODE_NAME)
+            - --prometheus-port={{ .Values.agent.prometheusPort }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SAFE_DEFAULT_WATTS
+              value: {{ .Values.agent.safeDefaultWatts | quote }}
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          securityContext:
+            # NVML power-cap writes require root, and the agent persists
+            # managed-GPU UUID state to a hostPath — non-root images cannot
+            # write there. See plan §1.2 / power_agent.py:apply_cap.
+            privileged: true
+            readOnlyRootFilesystem: false
+            runAsUser: 0
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.agent.prometheusPort }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/dynamo-power-agent
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: state
+          hostPath:
+            path: {{ .Values.state.hostPath | quote }}
+            type: DirectoryOrCreate
+{{- end }}

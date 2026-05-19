@@ -1,0 +1,102 @@
+{{- include "power-agent.validateImageTag" . -}}
+{{- include "power-agent.validateMutex" . -}}
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# In-cluster dev-iteration harness. Renders a single Pod that mounts
+# power_agent.py from an externally-created ConfigMap, pinned to one GPU
+# node (dev.nodeName) and one namespace (Release.Namespace).
+#
+# PREREQUISITE (verified by validateMutex; failure mode is a Pending Pod
+# with `MountVolume.SetUp failed`):
+#
+#   kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
+#     --from-file=power_agent.py=components/power_agent/power_agent.py \
+#     -n {{ .Release.Namespace }}
+
+{{- if .Values.dev.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "power-agent.fullname" . }}-dev
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "power-agent.labels" . | nindent 4 }}
+    role: dev
+spec:
+  serviceAccountName: {{ include "power-agent.serviceAccountName" . }}
+  hostPID: true                          # /proc/{pid}/cgroup readback
+  restartPolicy: Never                   # let it stay Failed if it crashes so we can read logs
+  terminationGracePeriodSeconds: 30      # SIGTERM handler restores TGP
+  runtimeClassName: {{ .Values.runtimeClassName | quote }}
+  nodeName: {{ .Values.dev.nodeName | quote }}
+  {{- with .Values.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: power-agent
+      image: "{{ .Values.dev.image.repository }}:{{ .Values.dev.image.tag }}"
+      imagePullPolicy: {{ .Values.dev.image.pullPolicy }}
+      command: ["bash", "-c"]
+      args:
+        - |
+          set -euo pipefail
+          echo "[dev-pod] Installing python deps (kubernetes, prometheus-client)…"
+          pip install --quiet --no-input kubernetes prometheus-client
+          echo "[dev-pod] Starting Power Agent on node=$NODE_NAME, namespace=$POD_NAMESPACE…"
+          # --namespace=$POD_NAMESPACE constrains agent pod-list to this
+          # namespace; matches the namespace-scoped RBAC dev mode installs.
+          exec python3 /scripts/power_agent.py \
+            --safe-default-watts=$SAFE_DEFAULT_WATTS \
+            --node-name=$NODE_NAME \
+            --namespace=$POD_NAMESPACE \
+            --prometheus-port={{ .Values.agent.prometheusPort }}
+      env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: SAFE_DEFAULT_WATTS
+          value: {{ .Values.agent.safeDefaultWatts | quote }}
+        {{- range $k, $v := .Values.env }}
+        - name: {{ $k }}
+          value: {{ $v | quote }}
+        {{- end }}
+      securityContext:
+        privileged: true
+        readOnlyRootFilesystem: false
+        runAsUser: 0
+      ports:
+        - name: metrics
+          containerPort: {{ .Values.agent.prometheusPort }}
+          protocol: TCP
+      resources:
+        {{- toYaml .Values.dev.resources | nindent 8 }}
+      volumeMounts:
+        - name: script
+          mountPath: /scripts
+          readOnly: true
+        - name: state
+          mountPath: /var/lib/dynamo-power-agent
+  volumes:
+    - name: script
+      configMap:
+        name: {{ .Values.dev.scriptConfigMap }}
+        items:
+          - key: power_agent.py
+            path: power_agent.py
+            mode: 0o755
+    - name: state
+      hostPath:
+        path: {{ .Values.state.hostPath | quote }}
+        type: DirectoryOrCreate
+{{- end }}

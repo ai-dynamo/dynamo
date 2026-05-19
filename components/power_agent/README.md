@@ -12,10 +12,21 @@ Privileged DaemonSet that enforces per-GPU NVML power caps on Dynamo worker pods
 
 ## Deployment
 
+The Power Agent ships as a Helm chart at
+[`deploy/helm/charts/power-agent/`](../../deploy/helm/charts/power-agent/).
+Pin a release tag (the chart rejects `:latest`):
+
 ```bash
-kubectl apply -f deploy/power_agent/rbac.yaml
-kubectl apply -f deploy/power_agent/daemonset.yaml
+helm install power-agent ./deploy/helm/charts/power-agent \
+  --namespace dynamo-system \
+  --create-namespace \
+  --set image.tag=v1.0.0 \
+  --set agent.safeDefaultWatts=500
 ```
+
+See the [chart README](../../deploy/helm/charts/power-agent/README.md) for
+per-SKU `safeDefaultWatts` recommendations, the in-cluster dev-iteration
+mode (`dev.enabled=true`), and rollout strategy tuning for large fleets.
 
 ## Troubleshooting
 
@@ -29,7 +40,7 @@ kubectl get pods -l nvidia.com/dynamo-graph-deployment=<dgd-name> \
 Check Power Agent logs:
 
 ```bash
-kubectl logs -l app=dynamo-power-agent -n <namespace> --tail=100
+kubectl logs -l app.kubernetes.io/name=power-agent -n <namespace> --tail=100
 ```
 
 Key Prometheus metrics:

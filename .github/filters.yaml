@@ -140,7 +140,7 @@ planner:
   - 'components/src/dynamo/global_router/**'
   # Power-aware planner (PR #9369): per-node power agent component
   - 'components/power_agent/**'
-  - 'deploy/power_agent/**'
+  - 'deploy/helm/charts/power-agent/**'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
