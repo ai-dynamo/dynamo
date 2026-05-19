@@ -419,6 +419,138 @@ mod core_behavior {
         assert_eq!(r2_state.status, RequestStatus::Running);
     }
 
+    /// Regression for the inactive-overlap branch of the admission gate.
+    /// When prefix caching is enabled and a completed request leaves
+    /// cached blocks in the inactive pool, a later waiting request that
+    /// reuses those blocks must count them as demand — promoting them
+    /// from inactive→active still consumes free-pool capacity. Without
+    /// this accounting the gate would over-admit and trigger preemption.
+    #[test]
+    fn test_full_isl_gate_counts_inactive_overlap_blocks() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(6)
+            .max_num_batched_tokens(Some(24))
+            .max_num_seqs(Some(3))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .preemption_mode(PreemptionMode::Lifo)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+
+        // Phase 1: run r1 (16 tokens = 4 full prefix blocks, 1 decode
+        // token) to completion. Its prefix blocks should land in the
+        // inactive pool with prefix-caching enabled.
+        let r1 = Uuid::from_u128(1);
+        core.receive(DirectRequest {
+            tokens: (0u32..16).collect(),
+            max_output_tokens: 1,
+            uuid: Some(r1),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut now_ms = 0.0;
+        // Drive a small number of passes until r1 leaves the engine.
+        for _ in 0..10 {
+            if !core.state.requests.contains_key(&r1) {
+                break;
+            }
+            let pass = core.execute_pass(&mut collector, now_ms);
+            now_ms = pass.end_ms;
+        }
+        assert!(
+            !core.state.requests.contains_key(&r1),
+            "r1 must complete before phase 2"
+        );
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            0,
+            "no active blocks after r1 completes"
+        );
+        let inactive_after_r1 = core.kv_manager.num_inactive_blocks();
+        assert!(
+            inactive_after_r1 >= 3,
+            "expected r1's prefix blocks to land in inactive pool; got {inactive_after_r1}"
+        );
+
+        // Phase 2: pin two blocks with r_pin. A 4-token prompt + 1
+        // decode token round up to two blocks; large `max_output_tokens`
+        // keeps the sequence resident across the next pass.
+        let r_pin = Uuid::from_u128(2);
+        core.receive(DirectRequest {
+            tokens: (1000u32..1004).collect(),
+            max_output_tokens: 16,
+            uuid: Some(r_pin),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+        let pass = core.execute_pass(&mut collector, now_ms);
+        now_ms = pass.end_ms;
+        assert_eq!(
+            core.state.requests.get(&r_pin).unwrap().status,
+            RequestStatus::Running,
+            "r_pin should be admitted on the first pass"
+        );
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            2,
+            "r_pin pins 2 blocks (4-token prompt + 1 decode rounded up to 2 blocks)"
+        );
+
+        // Phase 3: r2 shares the first 12 tokens with r1 (3 cached blocks
+        // still in inactive) plus 8 fresh tokens (2 new blocks). Demand =
+        // 2 new + 3 inactive_overlap = 5. Free = 6 - 2 = 4. Without
+        // counting inactive_overlap, demand would be 2 and r2 would be
+        // admitted, then partial-allocate and preempt r_pin.
+        let r2 = Uuid::from_u128(3);
+        let mut r2_tokens: Vec<u32> = (0u32..12).collect();
+        r2_tokens.extend(200u32..208);
+        core.receive(DirectRequest {
+            tokens: r2_tokens,
+            max_output_tokens: 1,
+            uuid: Some(r2),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+        });
+
+        // Sanity-check the prefill_cost surface before exercising the
+        // gate. The split into new vs inactive overlap is what the gate
+        // relies on.
+        let cost = {
+            let req = core.state.requests.get(&r2).unwrap();
+            core.kv_manager.get_prefill_cost(&req.sequence)
+        };
+        assert_eq!(
+            cost.inactive_overlap_blocks, 3,
+            "r2 should have 3 inactive-overlap blocks (12 cached tokens)"
+        );
+        assert_eq!(
+            cost.new_blocks, 2,
+            "r2 should have 2 new blocks for its uncached suffix"
+        );
+
+        let _pass = core.execute_pass(&mut collector, now_ms);
+
+        // Gate should refuse to admit r2 (5 > 4) and leave r_pin running
+        // untouched.
+        assert!(
+            core.state.waiting.contains(&r2),
+            "r2 must stay in waiting when full demand (new + inactive_overlap) > free"
+        );
+        let r2_state = core.state.requests.get(&r2).unwrap();
+        assert_eq!(r2_state.num_preemptions, 0);
+        assert_eq!(r2_state.num_computed_tokens, 0);
+        let r_pin_state = core.state.requests.get(&r_pin).unwrap();
+        assert_eq!(
+            r_pin_state.num_preemptions, 0,
+            "r_pin must not be preempted when the gate correctly accounts for inactive_overlap"
+        );
+        assert_eq!(r_pin_state.status, RequestStatus::Running);
+    }
+
     /// Opt-out: when `scheduler_reserve_full_isl=false` the legacy
     /// chunk-fits-then-preempt behavior is preserved.
     #[test]
