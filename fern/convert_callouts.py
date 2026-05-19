@@ -84,8 +84,8 @@ GITHUB_TO_FERN_MAPPING = {
 # > Content line 2
 # (ends at a blank line or non-blockquote line)
 GITHUB_ADMONITION_PATTERN = re.compile(
-    r"^(?P<indent>[ \t]*)>[ \t]*\[!(?P<type>NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*\n"
-    r"(?P<content>(?:(?P=indent)>[ \t]*.*\n?)+)",
+    r"^(?P<indent>[ \t]*)>[ \t]*\[!(?P<type>NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*(?P<inline>[^\n]*)\n"
+    r"(?P<content>(?:(?P=indent)>[ \t]*.*\n?)*)",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -136,6 +136,7 @@ def convert_single_admonition(match: re.Match) -> str:
     """
     indent = match.group("indent")
     alert_type = match.group("type").upper()
+    inline_content = match.group("inline").strip()
     raw_content = match.group("content")
 
     # Get the Fern tag for this alert type
@@ -143,6 +144,8 @@ def convert_single_admonition(match: re.Match) -> str:
 
     # Extract the actual content from blockquote lines
     content = extract_blockquote_content(raw_content, indent)
+    if inline_content:
+        content = f"{inline_content}\n{content}" if content else inline_content
 
     # Handle multi-line content
     # For Fern, we can either:
@@ -366,6 +369,20 @@ def run_tests():
         "Multi-line ending at blank line",
         "> [!NOTE]\n> Line one.\n> Line two.\n\nAfter.\n",
         "<Note>\nLine one.\nLine two.\n</Note>\n\nAfter.\n",
+    )
+
+    # Test 19: GitHub also accepts alert content on the marker line
+    test(
+        "Inline alert content",
+        "> [!NOTE] Inline note.\n",
+        "<Note>Inline note.</Note>\n",
+    )
+
+    # Test 20: Inline alert content plus blockquote continuation
+    test(
+        "Inline alert content with continuation",
+        "> [!NOTE] First line.\n> Second line.\n",
+        "<Note>\nFirst line.\nSecond line.\n</Note>\n",
     )
 
     print(f"\n{'='*50}")

@@ -123,6 +123,9 @@ jobs:
       - name: Install Fern CLI
         run: npm install -g fern-api
 
+      - name: Convert GitHub callouts to Fern format
+        run: python3 fern/convert_callouts.py --dir docs
+
       - name: Check for broken links
         run: fern docs broken-links
 
