@@ -483,11 +483,12 @@ class TestAudioFormatterOutputFormat:
 
         f = self._make_formatter()
         mm = self._make_mm_output()
-        with patch.object(
-            f, "_encode_audio", return_value=(b"bytes", "audio/ogg")
-        ), _patch(
-            "dynamo.vllm.omni.output_formatter.upload_to_fs",
-            return_value="http://x/a.ogg",
+        with (
+            patch.object(f, "_encode_audio", return_value=(b"bytes", "audio/ogg")),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.upload_to_fs",
+                return_value="http://x/a.ogg",
+            ),
         ):
             result = await f.format(
                 mm, "r4", response_format="url", output_format="opus"

@@ -643,9 +643,9 @@ def parse_and_validate_tool_call(
 
 
 def assert_finish_reason(result: StreamResult, allowed: set[str]) -> None:
-    assert result.finish_reason in allowed, (
-        f"unexpected finish_reason={result.finish_reason!r}, allowed={sorted(allowed)}"
-    )
+    assert (
+        result.finish_reason in allowed
+    ), f"unexpected finish_reason={result.finish_reason!r}, allowed={sorted(allowed)}"
 
 
 def assistant_tool_message_from_result(result: StreamResult) -> dict[str, Any]:
@@ -738,9 +738,9 @@ class TestToolCallingProtocol:
             args = json.loads(tc["function"]["arguments"])
             assert isinstance(args, dict)
             for required_field in schema[fn_name].get("required", []):
-                assert required_field in args, (
-                    f"{fn_name} missing required field {required_field!r}"
-                )
+                assert (
+                    required_field in args
+                ), f"{fn_name} missing required field {required_field!r}"
 
     def test_tool_choice_none_suppresses_tool_calls(self, client: OpenAI, model: str):
         result = stream_chat(
@@ -1119,8 +1119,6 @@ def _run_with_assertion_reruns(func, *args, attempts: int = 3):
 
 
 @pytest.mark.pre_merge
-@pytest.mark.profiled_vram_gib(3.7)
-@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(420)
 def test_tool_calling_sglang_all(client: OpenAI, model: str):
     """Run the pre-merge tool-calling scenarios under one SGLang worker startup."""

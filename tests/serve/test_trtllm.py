@@ -575,9 +575,9 @@ def test_deployment(
     """
     Test dynamo deployments with different configurations.
     """
-    assert num_system_ports >= 2, (
-        "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
-    )
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     # Use per-test ports so tests can run safely under pytest-xdist.
     config = dataclasses.replace(
         trtllm_config_test,

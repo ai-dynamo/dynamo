@@ -335,8 +335,6 @@ def test_sglang_kv_router_basic(
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.profiled_vram_gib(7.4)
-@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
