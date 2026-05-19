@@ -409,6 +409,12 @@ impl<
         let workers = self.workers_with_configs.borrow();
         let ctx = SchedulingContext::new(request, &workers);
         let cache_miss_tokens = ctx.best_effective_prefill_tokens();
+        // Scale against the total registered worker count instead of projecting
+        // the existing global queue onto only this request's eligible workers.
+        // For narrowed requests (for example pinned or allow-listed routing),
+        // shrinking the cap to the eligible subset would make the global queue
+        // look like it must all be drained by that subset, which overstates the
+        // backlog pressure on those workers.
         let worker_count = workers.len();
         self.queue_depth_tiers
             .cap_for(cache_miss_tokens, worker_count)
