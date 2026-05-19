@@ -49,7 +49,6 @@ type upgradeCase struct {
 	// child is the workload object created by the old controller.
 	child client.Object
 
-	convertParent       func(*testing.T, client.Object) client.Object
 	renderChild         func(context.Context, *testing.T, client.Object, client.Object) client.Object
 	serviceSelector     func(context.Context, *testing.T, client.Object, client.Object) map[string]string
 	childPodLabels      func(*testing.T, client.Object) map[string]map[string]string
@@ -58,14 +57,6 @@ type upgradeCase struct {
 
 func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 	ctx := context.Background()
-	convertDCD := func(t *testing.T, obj client.Object) client.Object {
-		t.Helper()
-		return betaDCD(t, obj.(*v1alpha1.DynamoComponentDeployment))
-	}
-	convertDGD := func(t *testing.T, obj client.Object) client.Object {
-		t.Helper()
-		return betaDGD(t, obj.(*v1alpha1.DynamoGraphDeployment))
-	}
 	renderDCDServiceSelector := func(ctx context.Context, t *testing.T, parent, child client.Object) map[string]string {
 		t.Helper()
 		dcd := parent.(*v1beta1.DynamoComponentDeployment)
@@ -112,16 +103,16 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 					},
 				},
 			}
-			dcd := betaDCD(t, parent)
+			dcd := &v1beta1.DynamoComponentDeployment{}
+			require.NoError(t, parent.ConvertTo(dcd))
 			child, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 			require.NoError(t, err)
 			require.False(t, toDelete)
 			child.Spec.Template.Labels = setLegacyWorkerLabels(child.Spec.Template.Labels, commonconsts.ComponentTypeDecode)
 			return upgradeCase{
-				name:          "Deployment",
-				parent:        parent,
-				child:         child,
-				convertParent: convertDCD,
+				name:   "Deployment",
+				parent: parent,
+				child:  child,
 				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
 					t.Helper()
 					dcd := parent.(*v1beta1.DynamoComponentDeployment)
@@ -177,17 +168,17 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 				},
 			}
 			parent.Spec.Multinode = &v1alpha1.MultinodeSpec{NodeCount: 2}
-			dcd := betaDCD(t, parent)
+			dcd := &v1beta1.DynamoComponentDeployment{}
+			require.NoError(t, parent.ConvertTo(dcd))
 			child, toDelete, err := newNonEPPDCDReconciler(t, newNonEPPWorkerIdentityScheme(t), dcd).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 			require.NoError(t, err)
 			require.False(t, toDelete)
 			child.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels = setLegacyWorkerLabels(child.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels, commonconsts.ComponentTypeDecode)
 			child.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels = setLegacyWorkerLabels(child.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels, commonconsts.ComponentTypeDecode)
 			return upgradeCase{
-				name:          "LeaderWorkerSet",
-				parent:        parent,
-				child:         child,
-				convertParent: convertDCD,
+				name:   "LeaderWorkerSet",
+				parent: parent,
+				child:  child,
 				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
 					t.Helper()
 					dcd := parent.(*v1beta1.DynamoComponentDeployment)
@@ -244,7 +235,8 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 					},
 				},
 			}
-			dgd := betaDGD(t, parent)
+			dgd := &v1beta1.DynamoGraphDeployment{}
+			require.NoError(t, parent.ConvertTo(dgd))
 			_, child := renderGrovePodCliqueSetFromExisting(ctx, t, dgd, &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "vllm-disagg-planner", Namespace: "jsm"},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
@@ -275,10 +267,9 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 				},
 			})
 			return upgradeCase{
-				name:          "Grove PodCliqueSet",
-				parent:        parent,
-				child:         child,
-				convertParent: convertDGD,
+				name:   "Grove PodCliqueSet",
+				parent: parent,
+				child:  child,
 				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
 					t.Helper()
 					_, pcs := renderGrovePodCliqueSetFromExisting(ctx, t, parent.(*v1beta1.DynamoGraphDeployment), child.(*grovev1alpha1.PodCliqueSet))
@@ -303,7 +294,20 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parent := tt.convertParent(t, tt.parent)
+			var parent client.Object
+			switch alpha := tt.parent.DeepCopyObject().(type) {
+			case *v1alpha1.DynamoComponentDeployment:
+				dcd := &v1beta1.DynamoComponentDeployment{}
+				require.NoError(t, alpha.ConvertTo(dcd))
+				parent = dcd
+			case *v1alpha1.DynamoGraphDeployment:
+				dgd := &v1beta1.DynamoGraphDeployment{}
+				require.NoError(t, alpha.ConvertTo(dgd))
+				parent = dgd
+			default:
+				t.Fatalf("unexpected parent type %T", tt.parent)
+			}
+
 			oldChild := tt.child.DeepCopyObject().(client.Object)
 			newChild := tt.renderChild(ctx, t, parent, oldChild)
 			oldPodLabels := tt.childPodLabels(t, oldChild)
