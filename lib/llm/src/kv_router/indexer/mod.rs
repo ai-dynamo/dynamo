@@ -12,7 +12,10 @@ use dynamo_kv_router::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
         ThreadPoolIndexer,
     },
-    protocols::{DpRank, RouterEvent, WorkerId},
+    protocols::{
+        DpRank, ExternalSequenceBlockHash, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+        WorkerWithDpRank,
+    },
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -176,6 +179,26 @@ impl Indexer {
             approx,
             primary_records_routing_decisions: false,
         })
+    }
+
+    /// Walk the host-pinned chain for `source` starting from `parent_hash`,
+    /// returning each step's TRT-LLM-side block hash.
+    pub fn chain_block_hashes_for_host_pinned(
+        &self,
+        source: WorkerWithDpRank,
+        parent_hash: Option<ExternalSequenceBlockHash>,
+        tokens_hashes: &[LocalBlockHash],
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let lower_tier = match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => lower_tier,
+            Self::Remote { .. } | Self::None => return Vec::new(),
+        };
+        let Some(indexer) = lower_tier.get(StorageTier::HostPinned) else {
+            return Vec::new();
+        };
+        indexer
+            .backend()
+            .chain_block_hashes_for_worker(source, parent_hash, tokens_hashes)
     }
 
     pub(crate) async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {

@@ -333,6 +333,43 @@ impl LowerTierIndexer {
             .unwrap_or_default()
     }
 
+    /// Walk the edge chain owned by `worker` starting from `parent_hash`,
+    /// returning each step's child block hash in plan order. Stops at the
+    /// first edge missing from the index or not owned by `worker`, so the
+    /// returned chain may be shorter than `tokens_hashes`.
+    ///
+    /// Used by the remote-G2 planner after it picks a source worker, to
+    /// extract the chain of TRT-LLM-side `block_hash` values the source
+    /// will need for `find_block_by_hash`. Best-effort: between successive
+    /// edge lookups, other threads may insert or remove edges. Callers
+    /// should treat the returned chain length as authoritative for the
+    /// current view and shrink or reject their plan accordingly.
+    pub fn chain_block_hashes_for_worker(
+        &self,
+        worker: WorkerWithDpRank,
+        parent_hash: Option<ExternalSequenceBlockHash>,
+        tokens_hashes: &[LocalBlockHash],
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let mut chain = Vec::with_capacity(tokens_hashes.len());
+        let mut current_parent = parent_hash;
+        for &tokens_hash in tokens_hashes {
+            let key = TransitionKey {
+                parent_hash: current_parent,
+                local_hash: tokens_hash,
+            };
+            let Some(edge) = self.edges.get(&key) else {
+                break;
+            };
+            if !edge.contains(&worker) {
+                break;
+            }
+            let child_hash = edge.child_hash();
+            chain.push(child_hash);
+            current_parent = Some(child_hash);
+        }
+        chain
+    }
+
     /// Reconstruct store events from the per-worker block index. Each block
     /// becomes a single-block `Stored` event with the correct parent hash,
     /// suitable for replaying into a fresh indexer to recreate the same state.
@@ -877,6 +914,47 @@ mod tests {
 
         let hits = index.query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
         assert_eq!(hits.get(&WorkerWithDpRank::new(7, 0)), Some(&3));
+    }
+
+    #[test]
+    fn chain_block_hashes_returns_external_hashes_for_full_match() {
+        // chain walk on a fully-owned 3-block chain returns the
+        // external (TRT-LLM splitmix) block_hash at each step in order.
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(7, 0, 0, None, &[11, 12, 13], &[101, 102, 103]))
+            .unwrap();
+
+        let chain = index.index.chain_block_hashes_for_worker(
+            WorkerWithDpRank::new(7, 0),
+            None,
+            &local_hashes(&[11, 12, 13]),
+        );
+
+        assert_eq!(
+            chain,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+                ExternalSequenceBlockHash(103),
+            ],
+        );
+    }
+
+    #[test]
+    fn chain_block_hashes_returns_empty_when_worker_not_owner() {
+        // worker 8 does not own these edges; chain comes back empty.
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event(7, 0, 0, None, &[11, 12, 13], &[101, 102, 103]))
+            .unwrap();
+
+        let chain = index.index.chain_block_hashes_for_worker(
+            WorkerWithDpRank::new(8, 0),
+            None,
+            &local_hashes(&[11, 12, 13]),
+        );
+        assert!(chain.is_empty());
     }
 
     #[test]
