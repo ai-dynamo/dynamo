@@ -250,7 +250,10 @@ spec:
                           default: required
                           description: |-
                             Enforcement controls how the selected prefill worker's topology is
-                            applied to decode routing. Defaults to "required".
+                            applied to decode routing. "required" only allows decode workers in the
+                            same topology domain as the selected prefill worker. "preferred" keeps
+                            all decode workers eligible, but biases selection toward workers in the
+                            same topology domain. Defaults to "required".
                           type: string
                         labelKey:
                           description: |-
@@ -263,9 +266,11 @@ spec:
                           type: string
                         preferredWeight:
                           description: |-
-                            PreferredWeight is used when enforcement is "preferred". It maps to the
-                            RoutingConstraints preferred_taints weight for the generated topology
-                            taint.
+                            PreferredWeight is used only when enforcement is "preferred". Higher
+                            values create a stronger same-domain routing preference, but do not
+                            guarantee same-domain selection. The value is not a probability; worker
+                            selection still depends on load and other routing inputs. A value of 0
+                            disables the topology preference; 1 is the strongest supported preference.
                           maximum: 1
                           minimum: 0
                           type: number
@@ -20639,7 +20644,10 @@ spec:
                           default: required
                           description: |-
                             enforcement controls how the selected prefill worker's topology is
-                            applied to decode routing. Defaults to "required".
+                            applied to decode routing. "required" only allows decode workers in the
+                            same topology domain as the selected prefill worker. "preferred" keeps
+                            all decode workers eligible, but biases selection toward workers in the
+                            same topology domain. Defaults to "required".
                           type: string
                         labelKey:
                           description: |-
@@ -20652,9 +20660,11 @@ spec:
                           type: string
                         preferredWeight:
                           description: |-
-                            preferredWeight is used when enforcement is "preferred". It maps to the
-                            RoutingConstraints preferred_taints weight for the generated topology
-                            taint.
+                            preferredWeight is used only when enforcement is "preferred". Higher
+                            values create a stronger same-domain routing preference, but do not
+                            guarantee same-domain selection. The value is not a probability; worker
+                            selection still depends on load and other routing inputs. A value of 0
+                            disables the topology preference; 1 is the strongest supported preference.
                           maximum: 1
                           minimum: 0
                           type: number

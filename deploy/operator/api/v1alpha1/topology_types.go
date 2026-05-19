@@ -85,11 +85,11 @@ func IsValidTopologyDomainFormat(d TopologyDomain) bool {
 type KvTransferEnforcement string
 
 const (
-	// KvTransferEnforcementRequired maps the generated topology taint to a
-	// required RoutingConstraints entry.
+	// KvTransferEnforcementRequired enforces same-domain decode worker
+	// selection.
 	KvTransferEnforcementRequired KvTransferEnforcement = "required"
-	// KvTransferEnforcementPreferred maps the generated topology taint to a
-	// preferred RoutingConstraints entry.
+	// KvTransferEnforcementPreferred biases decode worker selection toward the
+	// same domain.
 	KvTransferEnforcementPreferred KvTransferEnforcement = "preferred"
 )
 
@@ -111,15 +111,20 @@ type KvTransferPolicy struct {
 	Domain TopologyDomain `json:"domain"`
 
 	// Enforcement controls how the selected prefill worker's topology is
-	// applied to decode routing. Defaults to "required".
+	// applied to decode routing. "required" only allows decode workers in the
+	// same topology domain as the selected prefill worker. "preferred" keeps
+	// all decode workers eligible, but biases selection toward workers in the
+	// same topology domain. Defaults to "required".
 	// +optional
 	// +kubebuilder:default=required
 	// +kubebuilder:validation:Enum=required;preferred
 	Enforcement KvTransferEnforcement `json:"enforcement,omitempty"`
 
-	// PreferredWeight is used when enforcement is "preferred". It maps to the
-	// RoutingConstraints preferred_taints weight for the generated topology
-	// taint.
+	// PreferredWeight is used only when enforcement is "preferred". Higher
+	// values create a stronger same-domain routing preference, but do not
+	// guarantee same-domain selection. The value is not a probability; worker
+	// selection still depends on load and other routing inputs. A value of 0
+	// disables the topology preference; 1 is the strongest supported preference.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1
