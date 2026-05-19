@@ -187,44 +187,108 @@ class ServiceSpec:
             return
         self._spec["envs"] = value
 
-    def _get_args(self) -> list[str]:
-        """Return the container args list, normalising scalar strings to a list in-place.
-
-        Always returns the same list object that is stored in the spec, so
-        in-place mutations (append / index assignment) are reflected immediately
-        without an explicit writeback.
-
-        In v1beta1, manifests sometimes invoke the worker via a shell:
-        ``command: [/bin/sh, -c]`` plus ``args: ["python3 -m ... --foo bar"]``
-        — i.e. a single multi-word string element. We split that element so
-        callers can read/modify individual flags consistently.
-        """
+    def _get_main_container_for_args(self, create: bool = False) -> Optional[dict]:
+        """Locate the main container dict for argv access in either schema."""
         if self._schema == SCHEMA_V1BETA1:
-            container = self._main_container(create=True)
-            if container is None:
-                return []
-        else:
-            try:
-                container = self._spec["extraPodSpec"]["mainContainer"]
-            except KeyError:
-                return []
+            return self._main_container(create=create)
+        if "extraPodSpec" not in self._spec:
+            if not create:
+                return None
+            self._spec["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in self._spec["extraPodSpec"]:
+            if not create:
+                return None
+            self._spec["extraPodSpec"]["mainContainer"] = {}
+        return self._spec["extraPodSpec"]["mainContainer"]
+
+    @staticmethod
+    def _is_shell_style(container: dict) -> bool:
+        """Detect ``command: [..., "-c"]`` + ``args: ["<shell-string>"]``.
+
+        v1beta1 manifests frequently invoke workers via a shell so that
+        ``$VAR`` references in the args expand at pod start. Mutating those
+        args naively (e.g. shlex-splitting and writing back as argv tokens)
+        breaks the shell's contract — ``sh -c`` takes exactly one command
+        string; everything after it becomes ``$0``/``$1``/…, so the rest of
+        the flags would be silently dropped at runtime.
+        """
+        cmd = container.get("command")
+        if not isinstance(cmd, list) or len(cmd) < 2 or cmd[-1] != "-c":
+            return False
+        args = container.get("args", [])
+        return (
+            isinstance(args, list)
+            and len(args) == 1
+            and isinstance(args[0], str)
+            and " " in args[0]
+        )
+
+    def _get_args(self) -> list[str]:
+        """Return parsed argv tokens for the main container.
+
+        - Argv-style args (already a list of tokens, or a single-string scalar
+          that's whitespace-separable) return the **live** list stored in the
+          spec, so in-place mutations propagate immediately.
+        - Shell-style args (``command: [/bin/sh, -c]`` + a single args string)
+          return a **detached** parsed copy. Callers that mutate must persist
+          changes via :meth:`_set_args` so the shell command remains a single
+          ``args[0]`` string when the manifest is serialised back.
+        """
+        container = self._get_main_container_for_args(create=True)
+        if container is None:
+            return []
         if "args" not in container:
             container["args"] = []
         args = container["args"]
         if isinstance(args, str):
             args = args.split()
             container["args"] = args
-        elif (
-            self._schema == SCHEMA_V1BETA1
-            and len(args) == 1
-            and isinstance(args[0], str)
-            and " " in args[0]
-        ):
+            return args
+        if self._is_shell_style(container):
             import shlex
 
-            args = shlex.split(args[0])
-            container["args"] = args
+            return shlex.split(args[0]) if args[0].strip() else []
         return args
+
+    # Bare-safe characters for re-joining shell-style argv tokens. Includes ``$``
+    # so that ``$MODEL_PATH``-style references survive the round-trip without
+    # being single-quoted (which would suppress runtime expansion under
+    # ``/bin/sh -c``). Compare with ``shlex.quote`` which is purely literal.
+    _SHELL_BARE_SAFE = re.compile(r"^[A-Za-z0-9_./:=,@%+\-$]+$")
+
+    @classmethod
+    def _shell_quote_preserving_vars(cls, tok: str) -> str:
+        """Quote ``tok`` for inclusion in a shell command while preserving
+        ``$VAR`` expansion when the variable name uses safe characters.
+
+        Tokens that are entirely composed of safe characters (alnum, ``-_./
+        :=,@%+`` and ``$``) are left bare; everything else is wrapped in
+        single quotes (with embedded single quotes escaped via the standard
+        ``'\\''`` trick) to preserve literal contents.
+        """
+        if not tok:
+            return "''"
+        if cls._SHELL_BARE_SAFE.match(tok):
+            return tok
+        return "'" + tok.replace("'", "'\\''") + "'"
+
+    def _set_args(self, tokens: list[str]) -> None:
+        """Write argv ``tokens`` back into the main container.
+
+        For shell-style invocations the tokens are re-joined into a single
+        shell-quoted string and stored as ``args[0]`` so the original
+        ``/bin/sh -c`` contract is preserved. ``$VAR`` references are left
+        bare so the shell still expands them at pod start.
+        """
+        container = self._get_main_container_for_args(create=True)
+        if container is None:
+            return
+        if self._is_shell_style(container):
+            container["args"] = [
+                " ".join(self._shell_quote_preserving_vars(t) for t in tokens)
+            ]
+        else:
+            container["args"] = list(tokens)
 
     # ----- Replicas -----
     @property
@@ -252,6 +316,7 @@ class ServiceSpec:
             if arg in ["--model", "--model-path"]:
                 if i + 1 < len(args) and not args[i + 1].startswith("-"):
                     args[i + 1] = value
+                self._set_args(args)
                 return
 
     # ----- GPUs -----
@@ -275,17 +340,21 @@ class ServiceSpec:
 
     @gpus.setter
     def gpus(self, value: int):
+        # Kubernetes requires ``requests == limits`` for extended resources
+        # like ``nvidia.com/gpu``; the GAIE fixture and other v1beta1
+        # manifests declare both fields explicitly. Update them in lockstep
+        # so callers like ``set_tensor_parallel`` can't produce a spec the
+        # operator (or kube-scheduler) will reject.
         if self._schema == SCHEMA_V1BETA1:
             container = self._main_container(create=True)
             assert container is not None
-            limits = container.setdefault("resources", {}).setdefault("limits", {})
-            limits["nvidia.com/gpu"] = str(value)
+            resources = container.setdefault("resources", {})
+            resources.setdefault("limits", {})["nvidia.com/gpu"] = str(value)
+            resources.setdefault("requests", {})["nvidia.com/gpu"] = str(value)
             return
-        if "resources" not in self._spec:
-            self._spec["resources"] = {}
-        if "limits" not in self._spec["resources"]:
-            self._spec["resources"]["limits"] = {}
-        self._spec["resources"]["limits"]["gpu"] = str(value)
+        resources = self._spec.setdefault("resources", {})
+        resources.setdefault("limits", {})["gpu"] = str(value)
+        resources.setdefault("requests", {})["gpu"] = str(value)
 
     @property
     def tensor_parallel_size(self) -> int:
@@ -307,9 +376,11 @@ class ServiceSpec:
                     args[i + 1] = str(value)
                 else:
                     args.append(str(value))
+                self._set_args(args)
                 self.gpus = value
                 return
         args.extend(["--tensor-parallel-size", str(value)])
+        self._set_args(args)
         self.gpus = value
 
 
@@ -552,20 +623,12 @@ class DeploymentSpec:
             arg_value: Argument value (e.g., "1024")
         """
         service = self.get_service(service_name)
-        # _get_args is schema-aware and returns the live list stored in the
-        # spec, normalising scalar strings via shlex-equivalent splitting.
+        # _get_args() returns parsed argv tokens. The list it returns may be
+        # the live spec list (argv-style args) OR a detached parsed copy
+        # (shell-style ``command: [/bin/sh, -c]``); always persist via
+        # ``_set_args`` so the latter case is re-joined into a single string
+        # rather than written back as argv tokens (which the shell would drop).
         args_list = service._get_args()
-
-        if isinstance(args_list, str):
-            import shlex
-
-            args_list = shlex.split(args_list)
-            if self._schema == SCHEMA_V1BETA1:
-                container = service._main_container(create=True)
-                assert container is not None
-                container["args"] = args_list
-            else:
-                service._spec["extraPodSpec"]["mainContainer"]["args"] = args_list
 
         arg_index = None
         for i, arg in enumerate(args_list):
@@ -582,6 +645,8 @@ class DeploymentSpec:
                 args_list.insert(arg_index + 1, arg_value)
         else:
             args_list.extend([arg_name, arg_value])
+
+        service._set_args(args_list)
 
     def get_service(self, service_name: str) -> ServiceSpec:
         """
