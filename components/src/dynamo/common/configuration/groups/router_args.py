@@ -11,6 +11,7 @@ returns a dict that can be unpacked into
 ``RouterConfig(mode, kv_config, **config.router_kwargs())``.
 """
 
+import logging
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -21,6 +22,8 @@ from dynamo.common.configuration.utils import (
     nullable_float,
     nullable_int,
 )
+
+logger = logging.getLogger(__name__)
 
 # Fields forwarded verbatim as kwargs to RouterConfig.__init__.
 _ROUTER_FIELDS: tuple[str, ...] = (
@@ -62,6 +65,14 @@ class RouterConfigBase(ConfigBase):
         - "token-capacity": keep the configured busy thresholds as-is.
         - "none": clear all busy thresholds; router queueing remains controlled
           by --router-queue-threshold.
+
+        Compatibility auto-switch: if mode is "none" (the default) AND any
+        of the threshold flags was explicitly set to a non-None value, the
+        mode auto-promotes to "token-capacity" so the thresholds take
+        effect. This preserves the v1.0.x / v1.1.x launch-config contract
+        where passing a threshold flag implicitly activated admission
+        control. The auto-switch is logged at INFO so operators can see
+        it in startup output.
         """
         if self.admission_control not in ADMISSION_CONTROL_CHOICES:
             raise ValueError(
@@ -70,7 +81,25 @@ class RouterConfigBase(ConfigBase):
             )
         if self.admission_control == "token-capacity":
             return
-        # "none" — disable admission checks.
+        # mode is "none"
+        explicit_thresholds: list[str] = []
+        if self.active_decode_blocks_threshold is not None:
+            explicit_thresholds.append("--active-decode-blocks-threshold")
+        if self.active_prefill_tokens_threshold is not None:
+            explicit_thresholds.append("--active-prefill-tokens-threshold")
+        if self.active_prefill_tokens_threshold_frac is not None:
+            explicit_thresholds.append("--active-prefill-tokens-threshold-frac")
+        if explicit_thresholds:
+            logger.info(
+                "admission-control: auto-switching mode 'none' -> 'token-capacity' "
+                "because %s was explicitly set. Pass --admission-control token-capacity "
+                "to make this explicit, or unset the threshold(s) to keep mode='none'.",
+                ", ".join(explicit_thresholds),
+            )
+            self.admission_control = "token-capacity"
+            return
+        # "none" with no thresholds explicitly set — clear (no-op, but
+        # keep the assignment for symmetry with future fields).
         self.active_decode_blocks_threshold = None
         self.active_prefill_tokens_threshold = None
         self.active_prefill_tokens_threshold_frac = None

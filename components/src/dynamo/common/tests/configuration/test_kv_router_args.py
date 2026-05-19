@@ -476,9 +476,13 @@ def test_admission_control_token_capacity_with_custom_thresholds(
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
 
-def test_admission_control_none_clears_busy_thresholds_but_keeps_queue(
+def test_admission_control_none_with_threshold_auto_switches_to_token_capacity(
     monkeypatch,
 ) -> None:
+    """Explicit --admission-control none combined with an explicit threshold
+    flag auto-promotes mode to 'token-capacity' so the threshold takes
+    effect — preserves the v1.0.x/v1.1.x launch-config contract where
+    setting a threshold flag implicitly activated admission control."""
     _clear_admission_control_env(monkeypatch)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
@@ -501,18 +505,63 @@ def test_admission_control_none_clears_busy_thresholds_but_keeps_queue(
     config = FrontendConfig.from_cli_args(args)
     config.validate()
 
+    assert config.admission_control == "token-capacity"
+    assert config.active_decode_blocks_threshold == 0.5
+    assert config.active_prefill_tokens_threshold == 1000
+    assert config.active_prefill_tokens_threshold_frac == 2.0
+    assert config.router_queue_threshold == 32.0
+
+
+def test_admission_control_default_none_with_explicit_threshold_auto_switches(
+    monkeypatch,
+) -> None:
+    """Pre-v1.1.2 launch-config compatibility: passing a threshold flag
+    without --admission-control auto-promotes mode from the new 'none'
+    default to 'token-capacity' so the threshold actually fires."""
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--active-decode-blocks-threshold",
+            "0.85",
+            "--active-prefill-tokens-threshold",
+            "10000",
+        ]
+    )
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.admission_control == "token-capacity"
+    assert config.active_decode_blocks_threshold == 0.85
+    assert config.active_prefill_tokens_threshold == 10000
+    # _frac was not passed → remains None (auto-switch doesn't fabricate defaults)
+    assert config.active_prefill_tokens_threshold_frac is None
+
+
+def test_admission_control_default_none_with_no_thresholds_stays_none(
+    monkeypatch,
+) -> None:
+    """When no threshold flag is explicitly set, the default 'none' is
+    preserved (no auto-switch). Already covered by
+    test_frontend_admission_control_defaults_to_none — this is the
+    explicit symmetry check next to the auto-switch tests above."""
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-queue-threshold", "32.0"])
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
     assert config.admission_control == "none"
     assert config.active_decode_blocks_threshold is None
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
     assert config.router_queue_threshold == 32.0
-    assert config.router_kwargs() == {
-        "active_decode_blocks_threshold": None,
-        "active_prefill_tokens_threshold": None,
-        "active_prefill_tokens_threshold_frac": None,
-        "enforce_disagg": False,
-    }
-    assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
 
 def test_admission_control_env_var(monkeypatch) -> None:
