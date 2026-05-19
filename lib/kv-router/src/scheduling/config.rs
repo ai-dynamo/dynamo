@@ -356,7 +356,8 @@ impl Default for KvRouterConfigSerde {
             conditional_prefill_enabled: config.conditional_prefill_enabled,
             conditional_prefill_max_new_tokens: config.conditional_prefill_max_new_tokens,
             conditional_prefill_policy: config.conditional_prefill_policy,
-            conditional_prefill_transfer_cost_blocks: config.conditional_prefill_transfer_cost_blocks,
+            conditional_prefill_transfer_cost_blocks: config
+                .conditional_prefill_transfer_cost_blocks,
             conditional_prefill_joint_sigmoid_load_threshold: config
                 .conditional_prefill_joint_sigmoid_load_threshold,
             conditional_prefill_joint_sigmoid_load_scale: config
@@ -624,8 +625,8 @@ impl Default for KvRouterConfig {
             conditional_prefill_max_new_tokens: DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS,
             conditional_prefill_policy: ConditionalPrefillPolicyKind::default(),
             conditional_prefill_transfer_cost_blocks: 0,
-            conditional_prefill_joint_sigmoid_load_threshold:
-                default_joint_sigmoid_load_threshold(),
+            conditional_prefill_joint_sigmoid_load_threshold: default_joint_sigmoid_load_threshold(
+            ),
             conditional_prefill_joint_sigmoid_load_scale: default_joint_sigmoid_load_scale(),
             conditional_prefill_joint_sigmoid_isl_threshold: default_joint_sigmoid_isl_threshold(),
             conditional_prefill_joint_sigmoid_isl_scale: default_joint_sigmoid_isl_scale(),
