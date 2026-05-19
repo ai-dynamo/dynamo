@@ -8,11 +8,18 @@ pub(crate) mod components;
 pub(crate) mod core;
 pub(crate) mod disagg;
 mod entrypoints;
+pub(crate) mod event_sink;
 pub(crate) mod events;
 mod progress;
 pub(crate) mod runtime_utils;
 pub(crate) mod single;
 pub(crate) mod state;
+pub use event_sink::CompositeEventSink;
+pub use event_sink::EventSink;
+
+pub use agg::AggRuntime;
+pub use components::{AdmissionQueue, ReplayMode, StreamingAdmission};
+pub use disagg::DisaggRuntime;
 
 pub(crate) use entrypoints::{
     generate_trace_worker_artifacts, simulate_concurrency, simulate_concurrency_disagg,

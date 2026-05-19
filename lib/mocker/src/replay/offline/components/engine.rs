@@ -12,7 +12,7 @@ use super::super::state::OfflineWorkerSnapshot;
 use super::super::state::OfflineWorkerState;
 use super::{EngineEffects, EnginePassMode, ScheduledWorkerCompletion};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::replay::TraceCollector;
+use crate::replay::offline::EventSink;
 use crate::scheduler::RouterEventVisibility;
 
 pub(in crate::replay::offline) struct EngineComponent {
@@ -196,7 +196,7 @@ impl EngineComponent {
     pub(in crate::replay::offline) fn drive_ready(
         &mut self,
         now_ms: f64,
-        mut collector: Option<&mut TraceCollector>,
+        mut sink: Option<&mut dyn EventSink>,
     ) -> anyhow::Result<EngineEffects> {
         // Collect worker IDs first to avoid borrow issues.
         let worker_ids: Vec<usize> = self.workers.keys().copied().collect();
@@ -208,13 +208,13 @@ impl EngineComponent {
 
             let executed = match self.pass_mode {
                 EnginePassMode::Visible => {
-                    let Some(collector) = collector.as_deref_mut() else {
-                        bail!("offline replay visible engine pass requires a collector");
+                    let Some(sink) = sink.as_deref_mut() else {
+                        bail!("offline replay visible engine pass requires an event sink");
                     };
                     self.workers
                         .get_mut(&worker_id)
                         .unwrap()
-                        .execute_pass(collector, now_ms)
+                        .execute_pass(sink, now_ms)
                 }
                 EnginePassMode::Hidden => self
                     .workers

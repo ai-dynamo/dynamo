@@ -23,7 +23,7 @@ use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
-use crate::replay::TraceCollector;
+use crate::replay::offline::EventSink;
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
     RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
@@ -355,10 +355,10 @@ impl VllmCore {
 
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut TraceCollector,
+        sink: &mut dyn EventSink,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.execute_pass_internal(Some(collector), now_ms, None)
+        self.execute_pass_internal(Some(sink), now_ms, None)
     }
 
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
@@ -523,7 +523,7 @@ impl VllmCore {
     #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn execute_pass_internal(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
+        mut sink: Option<&mut dyn EventSink>,
         now_ms: f64,
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> EnginePassResult {
@@ -560,12 +560,8 @@ impl VllmCore {
             ) {
                 ScheduleOutcome::Scheduled { admission, .. } => {
                     if let Some(admission) = admission {
-                        if let Some(collector) = collector.as_deref_mut() {
-                            collector.on_admit(
-                                admission.uuid,
-                                now_ms,
-                                admission.reused_input_tokens,
-                            );
+                        if let Some(sink) = sink.as_deref_mut() {
+                            sink.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
                         }
                         if let Some(admission_tx) = admission_tx {
                             let _ = admission_tx.send(admission.clone());
@@ -605,12 +601,8 @@ impl VllmCore {
                     tokens_used,
                 } => {
                     if let Some(admission) = admission {
-                        if let Some(collector) = collector.as_deref_mut() {
-                            collector.on_admit(
-                                admission.uuid,
-                                now_ms,
-                                admission.reused_input_tokens,
-                            );
+                        if let Some(sink) = sink.as_deref_mut() {
+                            sink.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
                         }
                         if let Some(admission_tx) = admission_tx {
                             let _ = admission_tx.send(admission.clone());
@@ -628,7 +620,7 @@ impl VllmCore {
         let prefill_time =
             predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args);
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
-        let (decode_time, output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
+        let (decode_time, output_signals) = self.emit_ready_tokens(sink, decode_start_ms);
         #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
         let mut end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
 
@@ -904,7 +896,7 @@ impl VllmCore {
     #[cfg_attr(feature = "profile", inline(never))]
     fn emit_ready_tokens(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
+        mut sink: Option<&mut dyn EventSink>,
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
         let mut ready = Vec::with_capacity(self.state.running.len());
@@ -981,8 +973,8 @@ impl VllmCore {
                 continue;
             }
 
-            if let Some(collector) = collector.as_deref_mut() {
-                collector.on_token(uuid, decode_end_ms);
+            if let Some(sink) = sink.as_deref_mut() {
+                sink.on_token(uuid, decode_end_ms);
             }
             if let Some(request) = self.state.requests.get(&uuid) {
                 debug_assert_vllm_request_progress(uuid, request);

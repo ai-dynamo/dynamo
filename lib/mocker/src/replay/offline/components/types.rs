@@ -10,7 +10,7 @@ use crate::loadgen::ReplayRequestHashes;
 use crate::scheduler::AdmissionEvent;
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::replay) enum ReplayMode {
+pub enum ReplayMode {
     Trace,
     Concurrency { max_in_flight: usize },
 }

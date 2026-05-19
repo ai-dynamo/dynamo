@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::EventSink as _;
 #[cfg(test)]
 use super::components::OfflineRouterSnapshot;
 pub(super) use super::components::ReplayMode;
+use super::event_sink::CompositeEventSink;
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -35,7 +37,7 @@ use uuid::Uuid;
 
 #[cfg(test)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) struct AggRuntimeStats {
+pub struct AggRuntimeStats {
     dispatch_history: Vec<usize>,
     dispatch_order: Vec<Uuid>,
     assigned_worker_by_uuid: HashMap<Uuid, usize>,
@@ -58,16 +60,16 @@ struct AggRuntimeSnapshot {
 
 #[cfg(not(test))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) struct AggRuntimeStats;
+pub struct AggRuntimeStats;
 
-pub(in crate::replay) struct AggRuntime {
+pub struct AggRuntime {
     now_ms: f64,
     next_worker_idx: usize,
     next_event_seq: u64,
     admission: AdmissionQueue,
     requests: FxHashMap<Uuid, AggRequestState>,
     engine: EngineComponent,
-    collector: TraceCollector,
+    collector: CompositeEventSink,
     events: BinaryHeap<SimulationEvent>,
     router: Option<OfflineReplayRouter>,
     progress: ReplayProgress,
@@ -123,6 +125,28 @@ impl AggRuntime {
         )
     }
 
+    /// Create an aggregated offline runtime fed by a streaming admission queue
+    /// (e.g. a tokio mpsc channel from an embedded producer). The caller constructs
+    /// the `AdmissionQueue::new_streaming(...)` and hands it over; `run_async`
+    /// is the corresponding entrypoint.
+    pub fn new_streaming(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        admission: AdmissionQueue,
+        num_workers: usize,
+        router_mode: ReplayRouterMode,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_source(
+            args,
+            router_config,
+            prefill_load_estimator,
+            admission,
+            num_workers,
+            router_mode,
+        )
+    }
+
     /// Shared constructor for both raw-request and workload-driven admissions.
     fn new_with_source(
         args: &MockEngineArgs,
@@ -166,7 +190,7 @@ impl AggRuntime {
             admission,
             requests: FxHashMap::default(),
             engine,
-            collector: TraceCollector::default(),
+            collector: CompositeEventSink::default(),
             events: BinaryHeap::new(),
             router,
             progress,
@@ -290,7 +314,7 @@ impl AggRuntime {
             request.arrival_timestamp_ms = Some(arrival_time_ms);
         }
 
-        self.collector.on_arrival(
+        self.collector.primary.on_arrival(
             uuid,
             arrival_time_ms,
             request.tokens.len(),
@@ -387,11 +411,28 @@ impl AggRuntime {
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
-            let latencies = self.collector.request_latencies(signal.uuid);
+            let latencies = self.collector.primary.request_latencies(signal.uuid);
             self.traffic.on_request(
                 removed_state.input_tokens,
                 removed_state.output_tokens,
                 latencies,
+            );
+            // Emit terminal event to any secondary EventSink installed on
+            // the composite. Native callers' primary TraceCollector ignores
+            // this via the trait's default no-op impl — completion stats
+            // are derived from accumulated tokens at finish() time.
+            let tokens_emitted = self.collector.primary.tokens_emitted(signal.uuid);
+            let finish_reason = if tokens_emitted >= removed_state.output_tokens {
+                "length"
+            } else {
+                "stop"
+            };
+            self.collector.on_completion(
+                signal.uuid,
+                self.now_ms,
+                removed_state.input_tokens,
+                tokens_emitted,
+                finish_reason,
             );
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
@@ -497,9 +538,8 @@ impl AggRuntime {
     fn drive_ready_workers(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
         loop {
-            let effects = self
-                .engine
-                .drive_ready(self.now_ms, Some(&mut self.collector))?;
+            let sink: &mut dyn super::EventSink = &mut self.collector;
+            let effects = self.engine.drive_ready(self.now_ms, Some(sink))?;
             if effects.is_empty() {
                 return Ok(changed);
             }
@@ -671,7 +711,16 @@ impl AggRuntime {
     /// Finalize the replay: finish progress bar, return collector and stats.
     pub(in crate::replay::offline) fn finalize(self) -> (TraceCollector, AggRuntimeStats) {
         self.progress.finish();
-        (self.collector, self.stats)
+        (self.collector.into_primary(), self.stats)
+    }
+
+    /// Install (or replace) the secondary `EventSink` on the runtime's
+    /// composite collector. The primary `TraceCollector` is unaffected;
+    /// engine events fan out to both sinks. Use this to route events to
+    /// an external pipeline while keeping the in-runtime accumulator
+    /// intact for native callers.
+    pub fn set_secondary_sink(&mut self, sink: Box<dyn super::EventSink>) {
+        self.collector.set_secondary(sink);
     }
 
     /// Finalize the replay and return the simulation report directly.
@@ -699,7 +748,174 @@ impl AggRuntime {
         }
 
         self.progress.finish();
-        Ok((self.collector, self.stats))
+        Ok((self.collector.into_primary(), self.stats))
+    }
+
+    /// Run the aggregated offline replay against a streaming admission source.
+    ///
+    /// Identical to `run` for non-streaming inputs. For streaming inputs, when
+    /// the runtime exhausts every locally-known event but the upstream channel
+    /// is still open, it awaits `admission.recv_next()` on the tokio runtime
+    /// rather than treating the empty state as a dead end. Sim time freezes
+    /// during the wait: no wall-time park, no thread spin.
+    ///
+    /// **Lockstep mode** (opt-in via
+    /// [`AdmissionQueue::new_streaming_lockstep`]): after any drain that
+    /// completes one or more requests AND while cluster work remains in
+    /// flight, the runtime gates the next sim-time advance on receipt of one
+    /// `StreamingAdmission::DrainBarrier` from the producer. This lets a
+    /// closed-loop producer (e.g. a benchmark harness issuing replacement
+    /// requests when completions land) react to each completion batch before
+    /// the runtime advances past the next scheduled event. The default
+    /// (non-lockstep) streaming behavior is unchanged.
+    pub async fn run_async(mut self) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
+        // Pull any already-queued streaming submissions into `pending` before
+        // the first drain so they participate in timestamp selection.
+        let _ = self.admission.poll_pending();
+        let mut requests_before_drain = self.requests.len();
+        self.drain_current_timestamp()?;
+
+        loop {
+            // Refresh streaming pending each iteration — producers may have
+            // pushed more requests while we were draining the current ts.
+            let _ = self.admission.poll_pending();
+
+            if self.is_done() {
+                break;
+            }
+
+            // Lockstep drain barrier: if the previous drain completed one or
+            // more requests AND there is still cluster work in flight AND
+            // admission has nothing locally ready AND there's no queued
+            // reaction the runtime needs to admit first, await a
+            // drain-barrier ack from the producer before advancing. This
+            // is the deterministic replacement for a wall-clock grace
+            // window. The `has_queued_admission_work` short-circuit
+            // prevents a deadlock when the producer's reaction has
+            // landed in `pending` / `staged` but the cluster is at
+            // concurrency cap (so `next_ready_time_ms` is `None`) — in
+            // that case we fall through to `next_timestamp` so a
+            // scheduled engine event can free capacity and the runtime's
+            // normal drain path admits the queued work at the current
+            // sim time.
+            let requests_now = self.requests.len();
+            let completions_happened = requests_before_drain > requests_now;
+            if completions_happened
+                && self.admission.is_lockstep()
+                && self.cluster_in_flight() > 0
+                && self
+                    .admission
+                    .next_ready_time_ms(self.cluster_in_flight())
+                    .is_none()
+                && !self.admission.has_queued_admission_work()
+                && !self.admission.consume_drain_barrier()
+            {
+                // No credit yet — block until one arrives.
+                while let Some(()) = self.admission.recv_next().await {
+                    // Applied a Submit / FlushBurst / DrainBarrier. If
+                    // it was a barrier, consume it and proceed.
+                    if self.admission.consume_drain_barrier() {
+                        break;
+                    }
+                    // Otherwise drain any further queued events
+                    // (which may include the barrier) and re-check.
+                    let _ = self.admission.poll_pending();
+                    if self.admission.consume_drain_barrier() {
+                        break;
+                    }
+                    // Still no barrier — keep awaiting. A producer
+                    // emitting Submits without an eventual barrier
+                    // will hang here; that is the documented
+                    // contract violation for lockstep mode.
+                }
+                // If `recv_next` returned None, the channel closed mid-
+                // flight while we were waiting for the barrier. Treat
+                // this as a graceful end-of-session: the producer has
+                // signalled "no more submits coming", which releases the
+                // lockstep contract for the remainder of in-flight work.
+                // We break out of the gate and let `next_timestamp` drive
+                // the already-scheduled engine events to natural
+                // completion. Any pending `drain_barrier` credit is
+                // intentionally discarded — there is no submit that can
+                // race past it once the channel is closed, so the
+                // determinism guarantee that the gate protects
+                // (admit-at-current-tick) is vacuously satisfied.
+            }
+
+            match self.next_timestamp() {
+                Some(next_timestamp_ms) => {
+                    requests_before_drain = self.requests.len();
+                    self.now_ms = next_timestamp_ms;
+                    self.drain_current_timestamp()?;
+                }
+                None => {
+                    // No arrival, no scheduled event, but cluster may still be
+                    // in flight — that is a true dead end and mirrors the sync
+                    // `run`'s bail.
+                    if self.cluster_in_flight() != 0 {
+                        bail!(
+                            "offline replay reached a dead end with {} in-flight requests remaining",
+                            self.cluster_in_flight()
+                        );
+                    }
+
+                    // Nothing in flight, nothing scheduled. If the source is a
+                    // streaming channel that hasn't been closed yet, await the
+                    // next submit. For non-streaming sources `recv_next` is a
+                    // no-op returning `None`, which falls through to break.
+                    if self.admission.is_drained() {
+                        break;
+                    }
+                    match self.admission.recv_next().await {
+                        Some(()) => {
+                            // The event was applied to internal admission
+                            // state. If it was an untagged Submit or a
+                            // FlushBurst with staged work, the next loop
+                            // iteration's drain_ready will pick it up; if it
+                            // was a tagged Submit awaiting flush, we'll wait
+                            // again on the next iteration. A bare
+                            // DrainBarrier with no in-flight work is
+                            // discarded by the barrier counter but doesn't
+                            // produce a deadlock — the next iteration sees
+                            // no completions to gate.
+
+                            // Streaming-burst batch coalesce: when an external
+                            // producer drives the runtime over an async pipeline,
+                            // its initial concurrency burst of N submits arrives at the
+                            // mpsc channel over a wall window of several ms
+                            // (3-17ms measured at concurrency=8) rather than
+                            // in one tight push. Without coalescing, each
+                            // submit triggers its own loop iteration and
+                            // gets admitted at its own sim timestamp, so
+                            // the engine batches them differently across
+                            // reruns -- producing per-request perf_ns drift
+                            // even though native run_synthetic_trace_replay
+                            // is bit-identical. After accepting the first
+                            // submit on this idle resume, pause briefly so
+                            // co-arriving siblings land in the same
+                            // poll_pending sweep and admit at the same
+                            // sim timestamp. The lockstep gate above
+                            // protects post-completion ordering; this
+                            // coalesce protects cold-start ordering before
+                            // the first completion fires.
+                            const STREAMING_BURST_COALESCE_US: u64 = 5_000;
+                            tokio::time::sleep(std::time::Duration::from_micros(
+                                STREAMING_BURST_COALESCE_US,
+                            ))
+                            .await;
+                            let _ = self.admission.poll_pending();
+                        }
+                        None => {
+                            // Channel closed or non-streaming source.
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.progress.finish();
+        Ok((self.collector.into_primary(), self.stats))
     }
 
     #[cfg(test)]
@@ -2092,6 +2308,288 @@ mod tests {
         assert!(
             done,
             "advance_to should report done when workload is complete"
+        );
+    }
+
+    // --------------------------------------------------------------
+    // Streaming admission + run_async
+    // --------------------------------------------------------------
+
+    fn streaming_direct_request(arrival_ms: f64, isl: usize, max_out: usize) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1u32; isl],
+            max_output_tokens: max_out,
+            uuid: Some(Uuid::new_v4()),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(arrival_ms),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_async_processes_three_requests_streamed_with_delay() {
+        let args = fast_router_args();
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::replay::offline::StreamingAdmission>();
+        let admission = AdmissionQueue::new_streaming(rx, ReplayMode::Trace);
+        let rt = AggRuntime::new_streaming(
+            &args,
+            None,
+            None,
+            admission,
+            /*num_workers=*/ 2,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        // Send three requests in two waves so the runtime must await between
+        // them at least once. We can't `tokio::spawn` AggRuntime (Rc inside),
+        // so the producer future runs alongside via `tokio::join!` on the
+        // current task — both make progress between `.await` points.
+        tx.send(streaming_direct_request(0.0, 32, 2).into())
+            .unwrap();
+
+        let producer = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tx.send(streaming_direct_request(10.0, 32, 2).into())
+                .unwrap();
+            tx.send(streaming_direct_request(20.0, 32, 2).into())
+                .unwrap();
+            drop(tx);
+        };
+        let driver = rt.run_async();
+
+        let (_, drive_res) = tokio::join!(producer, driver);
+        let (collector, _stats) = drive_res.expect("run_async ok");
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 3);
+    }
+
+    #[tokio::test]
+    async fn run_async_returns_immediately_when_channel_closed_empty() {
+        let args = fast_router_args();
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::replay::offline::StreamingAdmission>();
+        drop(tx);
+        let admission = AdmissionQueue::new_streaming(rx, ReplayMode::Trace);
+        let rt = AggRuntime::new_streaming(
+            &args,
+            None,
+            None,
+            admission,
+            /*num_workers=*/ 1,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        let (collector, _stats) = rt.run_async().await.expect("run_async ok");
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 0);
+    }
+
+    // --------------------------------------------------------------
+    // Lockstep streaming admission — drain barrier protocol
+    // --------------------------------------------------------------
+
+    /// Test-only EventSink that forwards each `on_completion` callback as a
+    /// uuid + completion-time pair through a tokio mpsc channel. Lets the
+    /// producer side of a lockstep test observe completions exactly as a
+    /// real bridge would observe them through its event ring.
+    struct CompletionForwarder {
+        tx: tokio::sync::mpsc::UnboundedSender<(Uuid, f64)>,
+    }
+
+    impl crate::replay::offline::EventSink for CompletionForwarder {
+        fn on_arrival(&mut self, _uuid: Uuid, _arrival_time_ms: f64, _isl: usize, _osl: usize) {}
+        fn on_admit(&mut self, _uuid: Uuid, _admit_time_ms: f64, _reused: usize) {}
+        fn on_token(&mut self, _uuid: Uuid, _token_time_ms: f64) {}
+        fn on_completion(
+            &mut self,
+            uuid: Uuid,
+            completion_time_ms: f64,
+            _input_tokens: usize,
+            _output_tokens: usize,
+            _finish_reason: &str,
+        ) {
+            let _ = self.tx.send((uuid, completion_time_ms));
+        }
+    }
+
+    /// One pass of a closed-loop concurrency-mode workload: keep a fixed
+    /// pool of `concurrency` requests in flight; each time a completion
+    /// lands, push one replacement and then send a `DrainBarrier`. Returns
+    /// the sequence of `(uuid, completion_time_ms)` observed, in observation
+    /// order.
+    async fn run_lockstep_closed_loop(
+        concurrency: usize,
+        total_requests: usize,
+    ) -> Vec<(Uuid, f64)> {
+        let args = fast_router_args();
+        let (tx_admit, rx_admit) =
+            tokio::sync::mpsc::unbounded_channel::<crate::replay::offline::StreamingAdmission>();
+        let (tx_compl, mut rx_compl) = tokio::sync::mpsc::unbounded_channel::<(Uuid, f64)>();
+
+        let admission = AdmissionQueue::new_streaming_lockstep(rx_admit, ReplayMode::Trace);
+        let mut rt = AggRuntime::new_streaming(
+            &args,
+            None,
+            None,
+            admission,
+            /*num_workers=*/ 1,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+        rt.set_secondary_sink(Box::new(CompletionForwarder { tx: tx_compl }));
+
+        // Seed: submit `concurrency` requests at arrival time 0.
+        for _ in 0..concurrency {
+            tx_admit
+                .send(streaming_direct_request(0.0, 32, 4).into())
+                .unwrap();
+        }
+        let mut completions_remaining = total_requests;
+        let mut submits_remaining = total_requests - concurrency;
+
+        let producer = async move {
+            let mut observed: Vec<(Uuid, f64)> = Vec::with_capacity(total_requests);
+            while completions_remaining > 0 {
+                let Some((uuid, completion_time_ms)) = rx_compl.recv().await else {
+                    break;
+                };
+                observed.push((uuid, completion_time_ms));
+                completions_remaining -= 1;
+
+                // React: push a replacement submit at the COMPLETION time
+                // so that arrival timestamps are deterministic across reruns
+                // (they depend only on simulated time, never wall time).
+                if submits_remaining > 0 {
+                    submits_remaining -= 1;
+                    tx_admit
+                        .send(streaming_direct_request(completion_time_ms, 32, 4).into())
+                        .unwrap();
+                }
+
+                // Drain-barrier ack: producer has committed its reaction.
+                tx_admit
+                    .send(crate::replay::offline::StreamingAdmission::DrainBarrier)
+                    .unwrap();
+            }
+            drop(tx_admit);
+            observed
+        };
+        let driver = rt.run_async();
+        let (observed, drive_res) = tokio::join!(producer, driver);
+        let (_collector, _stats) = drive_res.expect("run_async ok");
+        observed
+    }
+
+    #[tokio::test]
+    async fn lockstep_closed_loop_is_bit_identical_across_runs() {
+        // Same workload, same seed, run twice — observed completion order and
+        // sim times must match exactly. This is the headline determinism
+        // guarantee the drain barrier replaces the wall-clock grace window
+        // with.
+        let run_a = run_lockstep_closed_loop(4, 16).await;
+        let run_b = run_lockstep_closed_loop(4, 16).await;
+        assert_eq!(run_a.len(), 16);
+        assert_eq!(run_b.len(), 16);
+        // Per-request sim times: deterministic.
+        let times_a: Vec<f64> = run_a.iter().map(|(_, t)| *t).collect();
+        let times_b: Vec<f64> = run_b.iter().map(|(_, t)| *t).collect();
+        assert_eq!(
+            times_a, times_b,
+            "lockstep mode must produce bit-identical completion sim times across reruns"
+        );
+    }
+
+    #[tokio::test]
+    async fn lockstep_closed_loop_completes_all_requests() {
+        // Smoke test: 24 requests with concurrency 6 all complete via the
+        // lockstep protocol.
+        let observed = run_lockstep_closed_loop(6, 24).await;
+        assert_eq!(observed.len(), 24);
+    }
+
+    #[tokio::test]
+    async fn non_lockstep_streaming_unchanged_by_drain_barriers() {
+        // A producer using the non-lockstep streaming source: barriers on
+        // the channel are silently ignored, behavior matches the existing
+        // streaming test.
+        let args = fast_router_args();
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::replay::offline::StreamingAdmission>();
+        let admission = AdmissionQueue::new_streaming(rx, ReplayMode::Trace);
+        let rt = AggRuntime::new_streaming(
+            &args,
+            None,
+            None,
+            admission,
+            /*num_workers=*/ 1,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        tx.send(streaming_direct_request(0.0, 32, 2).into())
+            .unwrap();
+        tx.send(crate::replay::offline::StreamingAdmission::DrainBarrier)
+            .unwrap();
+        tx.send(streaming_direct_request(10.0, 32, 2).into())
+            .unwrap();
+        tx.send(crate::replay::offline::StreamingAdmission::DrainBarrier)
+            .unwrap();
+        drop(tx);
+
+        let (collector, _stats) = rt.run_async().await.expect("run_async ok");
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 2);
+    }
+
+    #[tokio::test]
+    async fn lockstep_channel_close_mid_flight_drains_gracefully() {
+        // Producer drops its end of the channel while completions are
+        // outstanding and before sending an ack. The lockstep gate must
+        // treat channel-close as "producer has finished — release the
+        // lockstep contract for in-flight work" and let the runtime
+        // drain to natural completion, NOT bail.
+        //
+        // Setup: concurrency-mode with max_in_flight=2 and two requests of
+        // different output lengths. Both admit at t=0; the shorter one
+        // completes first while the longer is still in flight, triggering
+        // the lockstep gate. With no barrier and the channel closed, the
+        // runtime breaks out of the gate and drains to completion via
+        // `next_timestamp()`.
+        let args = fast_router_args();
+        let (tx_admit, rx_admit) =
+            tokio::sync::mpsc::unbounded_channel::<crate::replay::offline::StreamingAdmission>();
+        let admission = AdmissionQueue::new_streaming_lockstep(
+            rx_admit,
+            ReplayMode::Concurrency { max_in_flight: 2 },
+        );
+        let rt = AggRuntime::new_streaming(
+            &args,
+            None,
+            None,
+            admission,
+            /*num_workers=*/ 1,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        tx_admit
+            .send(streaming_direct_request(0.0, 32, 2).into())
+            .unwrap();
+        tx_admit
+            .send(streaming_direct_request(0.0, 32, 64).into())
+            .unwrap();
+        drop(tx_admit);
+
+        let (collector, _stats) = rt
+            .run_async()
+            .await
+            .expect("graceful channel close must let in-flight work drain");
+        let report = collector.finish();
+        assert_eq!(
+            report.request_counts.completed_requests, 2,
+            "both in-flight requests must complete after channel close"
         );
     }
 }

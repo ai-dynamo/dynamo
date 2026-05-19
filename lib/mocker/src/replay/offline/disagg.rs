@@ -13,6 +13,7 @@ use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
     ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
 };
+use super::event_sink::{CompositeEventSink, EventSink};
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
@@ -43,7 +44,7 @@ pub(crate) enum DisaggTransition {
 
 #[cfg(test)]
 #[derive(Debug, Default, Clone, PartialEq)]
-pub(super) struct DisaggRuntimeStats {
+pub struct DisaggRuntimeStats {
     request_snapshots: HashMap<Uuid, DisaggRequestSnapshot>,
     prefill_assignments: HashMap<Uuid, usize>,
     decode_assignments: HashMap<Uuid, usize>,
@@ -58,9 +59,9 @@ pub(super) struct DisaggRuntimeStats {
 
 #[cfg(not(test))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) struct DisaggRuntimeStats;
+pub struct DisaggRuntimeStats;
 
-pub(in crate::replay) struct DisaggRuntime {
+pub struct DisaggRuntime {
     now_ms: f64,
     next_prefill_worker_idx: usize,
     next_decode_worker_idx: usize,
@@ -71,7 +72,7 @@ pub(in crate::replay) struct DisaggRuntime {
     prefill_router: Option<OfflineReplayRouter>,
     decode_router: Option<OfflineReplayRouter>,
     requests: HashMap<Uuid, DisaggRequestState>,
-    collector: TraceCollector,
+    collector: CompositeEventSink,
     events: BinaryHeap<SimulationEvent>,
     progress: ReplayProgress,
     stats: DisaggRuntimeStats,
@@ -115,6 +116,26 @@ impl DisaggRuntime {
             router_config,
             prefill_load_estimator,
             AdmissionQueue::new_workload(driver, mode),
+            router_mode,
+        )
+    }
+
+    /// Create a disaggregated offline runtime fed by a streaming admission queue
+    /// (e.g. a tokio mpsc channel from an embedded producer). The caller constructs
+    /// the `AdmissionQueue::new_streaming(...)` and hands it over; `run_async`
+    /// is the corresponding entrypoint.
+    pub fn new_streaming(
+        config: &OfflineDisaggReplayConfig,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        admission: AdmissionQueue,
+        router_mode: ReplayRouterMode,
+    ) -> Result<Self> {
+        Self::new_with_source(
+            config,
+            router_config,
+            prefill_load_estimator,
+            admission,
             router_mode,
         )
     }
@@ -193,7 +214,7 @@ impl DisaggRuntime {
             prefill_router,
             decode_router,
             requests: HashMap::new(),
-            collector: TraceCollector::default(),
+            collector: CompositeEventSink::default(),
             events: BinaryHeap::new(),
             progress,
             #[cfg(test)]
@@ -383,7 +404,7 @@ impl DisaggRuntime {
         request.uuid = Some(uuid);
         request.arrival_timestamp_ms = Some(arrival_time_ms);
 
-        self.collector.on_arrival(
+        self.collector.primary.on_arrival(
             uuid,
             arrival_time_ms,
             request.tokens.len(),
@@ -534,9 +555,25 @@ impl DisaggRuntime {
         let original = state.original_request()?;
         let input_tokens = original.tokens.len();
         let output_tokens = original.max_output_tokens;
-        let latencies = self.collector.request_latencies(signal.uuid);
+        let latencies = self.collector.primary.request_latencies(signal.uuid);
         self.traffic
             .on_request(input_tokens, output_tokens, latencies);
+        // Emit terminal event to any secondary EventSink installed on the
+        // composite. Native callers' TraceCollector ignores this via the
+        // trait's default no-op impl.
+        let tokens_emitted = self.collector.primary.tokens_emitted(signal.uuid);
+        let finish_reason = if tokens_emitted >= output_tokens {
+            "length"
+        } else {
+            "stop"
+        };
+        self.collector.on_completion(
+            signal.uuid,
+            self.now_ms,
+            input_tokens,
+            tokens_emitted,
+            finish_reason,
+        );
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {
@@ -934,7 +971,16 @@ impl DisaggRuntime {
     /// Finalize the replay and return the simulation report directly.
     pub(in crate::replay) fn finalize_report(self) -> crate::replay::TraceSimulationReport {
         self.progress.finish();
-        self.collector.finish()
+        self.collector.into_primary().finish()
+    }
+
+    /// Install (or replace) the secondary `EventSink` on the runtime's
+    /// composite collector. The primary `TraceCollector` is unaffected;
+    /// engine events fan out to both sinks. Use this to route events to
+    /// an external pipeline while keeping the in-runtime accumulator
+    /// intact for native callers.
+    pub fn set_secondary_sink(&mut self, sink: Box<dyn super::EventSink>) {
+        self.collector.set_secondary(sink);
     }
 
     /// Run the staged offline replay until both prefill and decode pipelines are drained.
@@ -954,7 +1000,135 @@ impl DisaggRuntime {
 
         self.progress.finish();
         self.finish_test_stats();
-        Ok((self.collector, self.stats))
+        Ok((self.collector.into_primary(), self.stats))
+    }
+
+    /// Run the staged offline replay against a streaming admission source.
+    ///
+    /// Identical to `run` for non-streaming inputs. For streaming inputs, when
+    /// the runtime exhausts every locally-known event but the upstream channel
+    /// is still open, it awaits `admission.recv_next()` on the tokio runtime
+    /// rather than treating the empty state as a dead end. Sim time freezes
+    /// during the wait: no wall-time park, no thread spin. Pending decode
+    /// handoff events live on `self.events` and so contribute to
+    /// `next_timestamp()` — the await branch is only reached when there is
+    /// truly no scheduled work and the cluster is empty.
+    ///
+    /// **Lockstep mode** (opt-in via
+    /// [`super::components::AdmissionQueue::new_streaming_lockstep`]): after
+    /// any drain that completes one or more requests AND while cluster work
+    /// remains in flight, the runtime gates the next sim-time advance on
+    /// receipt of one `StreamingAdmission::DrainBarrier` from the producer.
+    /// Mirrors [`super::agg::AggRuntime::run_async`].
+    pub async fn run_async(mut self) -> Result<(TraceCollector, DisaggRuntimeStats)> {
+        // Pull any already-queued streaming submissions into `pending` before
+        // the first drain so they participate in timestamp selection.
+        let _ = self.admission.poll_pending();
+        let mut requests_before_drain = self.requests.len();
+        self.drain_current_timestamp()?;
+
+        loop {
+            // Refresh streaming pending each iteration — producers may have
+            // pushed more requests while we were draining the current ts.
+            let _ = self.admission.poll_pending();
+
+            if self.is_done() {
+                break;
+            }
+
+            // Lockstep drain barrier: see AggRuntime::run_async for the
+            // protocol contract. Non-lockstep streaming and non-streaming
+            // sources skip this gate entirely. The
+            // `has_queued_admission_work` short-circuit prevents the
+            // gate from waiting on a barrier while there's queued
+            // admission work the runtime must drain first — see
+            // AggRuntime::run_async for the full rationale.
+            let requests_now = self.requests.len();
+            let completions_happened = requests_before_drain > requests_now;
+            if completions_happened
+                && self.admission.is_lockstep()
+                && self.cluster_in_flight() > 0
+                && self
+                    .admission
+                    .next_ready_time_ms(self.cluster_in_flight())
+                    .is_none()
+                && !self.admission.has_queued_admission_work()
+                && !self.admission.consume_drain_barrier()
+            {
+                while let Some(()) = self.admission.recv_next().await {
+                    if self.admission.consume_drain_barrier() {
+                        break;
+                    }
+                    let _ = self.admission.poll_pending();
+                    if self.admission.consume_drain_barrier() {
+                        break;
+                    }
+                }
+                // If `recv_next` returned None the channel closed mid-flight:
+                // graceful end-of-session. See `agg.rs` for the full rationale
+                // — the producer has signalled "no more submits", releasing the
+                // lockstep contract for the rest of in-flight work.
+            }
+
+            match self.next_timestamp() {
+                Some(next_timestamp_ms) => {
+                    requests_before_drain = self.requests.len();
+                    self.now_ms = next_timestamp_ms;
+                    self.drain_current_timestamp()?;
+                }
+                None => {
+                    // No arrival, no scheduled event, but cluster may still be
+                    // in flight — that is a true dead end and mirrors the sync
+                    // `run`'s bail.
+                    if self.cluster_in_flight() != 0 {
+                        bail!(
+                            "offline disagg replay reached a dead end with {} in-flight requests remaining",
+                            self.cluster_in_flight()
+                        );
+                    }
+
+                    // Nothing in flight, nothing scheduled. If the source is a
+                    // streaming channel that hasn't been closed yet, await the
+                    // next submit. For non-streaming sources `recv_next` is a
+                    // no-op returning `None`, which falls through to break.
+                    if self.admission.is_drained() {
+                        break;
+                    }
+                    match self.admission.recv_next().await {
+                        Some(()) => {
+                            // The event was applied to internal admission
+                            // state; the next loop iteration's drain_ready
+                            // will pick up any newly-pending work, or we
+                            // await again if the event was a tagged Submit
+                            // still awaiting its flush.
+
+                            // Streaming-burst batch coalesce: see
+                            // AggRuntime::run_async for full rationale.
+                            // After accepting the first submit on this idle
+                            // resume, pause briefly so co-arriving siblings
+                            // land in the same poll_pending sweep and admit
+                            // at the same sim timestamp. The lockstep gate
+                            // above protects post-completion ordering; this
+                            // coalesce protects cold-start ordering.
+                            const STREAMING_BURST_COALESCE_US: u64 = 5_000;
+                            tokio::time::sleep(std::time::Duration::from_micros(
+                                STREAMING_BURST_COALESCE_US,
+                            ))
+                            .await;
+                            let _ = self.admission.poll_pending();
+                        }
+                        None => {
+                            // Channel closed or non-streaming source.
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.progress.finish();
+        self.finish_test_stats();
+        Ok((self.collector.into_primary(), self.stats))
     }
 }
 
@@ -1469,5 +1643,76 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![64, 128, 192]
         );
+    }
+
+    // --------------------------------------------------------------
+    // Streaming admission + run_async
+    // --------------------------------------------------------------
+
+    fn streaming_direct_request(arrival_ms: f64, isl: usize, max_out: usize) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1u32; isl],
+            max_output_tokens: max_out,
+            uuid: Some(Uuid::new_v4()),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(arrival_ms),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_async_disagg_processes_three_requests_streamed() {
+        let config = disagg_config();
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::replay::offline::StreamingAdmission>();
+        let admission = AdmissionQueue::new_streaming(rx, ReplayMode::Trace);
+        let rt = DisaggRuntime::new_streaming(
+            &config,
+            None,
+            None,
+            admission,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        // Send one request immediately, then a second wave from a future to
+        // force the runtime to await between submissions at least once.
+        tx.send(streaming_direct_request(0.0, 32, 2).into())
+            .unwrap();
+
+        let producer = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tx.send(streaming_direct_request(10.0, 32, 2).into())
+                .unwrap();
+            tx.send(streaming_direct_request(20.0, 32, 2).into())
+                .unwrap();
+            drop(tx);
+        };
+        let driver = rt.run_async();
+
+        let (_, drive_res) = tokio::join!(producer, driver);
+        let (collector, _stats) = drive_res.expect("run_async ok");
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 3);
+    }
+
+    #[tokio::test]
+    async fn run_async_disagg_returns_immediately_when_channel_closed_empty() {
+        let config = disagg_config();
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::replay::offline::StreamingAdmission>();
+        drop(tx);
+        let admission = AdmissionQueue::new_streaming(rx, ReplayMode::Trace);
+        let rt = DisaggRuntime::new_streaming(
+            &config,
+            None,
+            None,
+            admission,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        let (collector, _stats) = rt.run_async().await.expect("run_async ok");
+        let report = collector.finish();
+        assert_eq!(report.request_counts.completed_requests, 0);
     }
 }

@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
-use crate::replay::TraceCollector;
+use crate::replay::offline::EventSink;
 use crate::scheduler::{EngineCore, EnginePassResult};
 use uuid::Uuid;
 
@@ -226,10 +226,10 @@ impl OfflineWorkerState {
 
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut TraceCollector,
+        sink: &mut dyn EventSink,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.core.execute_pass(collector, now_ms)
+        self.core.execute_pass(sink, now_ms)
     }
 
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
