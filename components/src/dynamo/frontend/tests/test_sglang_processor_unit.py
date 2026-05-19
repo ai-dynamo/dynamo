@@ -1298,6 +1298,10 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert len(with_system.prompt_token_ids) > len(without_system.prompt_token_ids)
 
+    @pytest.mark.skip(
+        reason="DYN-3049: deepseek_v4 dispatch path requires sglang 0.5.12 support; "
+        "Dynamo is pinned to sglang 0.5.11. Unskip after the 0.5.12 bump lands."
+    )
     def test_deepseek_v4_uses_sglang_encoder_when_chat_template_missing(
         self, monkeypatch
     ):

@@ -52,7 +52,6 @@ python -m dynamo.frontend &
 # run worker
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    ZE_AFFINITY_MASK=$ZE_AFFINITY_MASK \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

@@ -32,6 +32,8 @@ dynamo:
   nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
   nixl_libfabric_ref: v2.3.0
+  # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
+  hwloc_version: 2.12.2
   enable_kvbm: "true"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
@@ -41,22 +43,22 @@ dynamo:
 vllm:
   cuda12.9:
     base_image: nvcr.io/nvidia/cuda-dl-base
-    runtime_image: nvcr.io/nvidia/cuda
+    runtime_image: vllm/vllm-openai
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: 12.9.1-runtime-ubuntu24.04
+    runtime_image_tag: v0.20.1-cu129
     vllm_ref: v0.20.1
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
-    runtime_image: nvcr.io/nvidia/cuda
+    runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: 13.0.2-runtime-ubuntu24.04
+    runtime_image_tag: v0.20.1
     vllm_ref: v0.20.1
   xpu:
-    base_image: intel/deep-learning-essentials
-    runtime_image: intel/deep-learning-essentials
-    base_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    vllm_ref: v0.17.1
+    base_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
+    runtime_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
+    base_image_tag: 132765e3560659ff63ebd236203672e991b70e08-xpu
+    runtime_image_tag: 132765e3560659ff63ebd236203672e991b70e08-xpu
+    vllm_ref: v0.20.1
   cpu:
     base_image: ubuntu
     runtime_image: ubuntu
@@ -64,7 +66,6 @@ vllm:
     runtime_image_tag: 24.04
     vllm_ref: v0.16.0
   flashinf_ref: v0.6.8.post1
-  lmcache_ref: 0.4.4
   vllm_omni_ref: "v0.20.0"
   nixl_ref: 0.10.1
   max_jobs: "10"
