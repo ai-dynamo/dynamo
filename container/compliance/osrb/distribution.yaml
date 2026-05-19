@@ -18,4 +18,4 @@ sglang-runtime:        public
 trtllm-runtime:        public
 planner:               public
 kubernetes-operator:   public
-snapshot-agent:        internal      # internal-only deployment as of 2026-Q2
+snapshot-agent:        public
