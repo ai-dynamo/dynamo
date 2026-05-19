@@ -1131,12 +1131,17 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
 
 /// Completions variant of [`is_empty_stream_response`].
 fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
+    use dynamo_protocols::types::Choice;
     resp.inner.usage.is_none()
-        && resp
-            .inner
-            .choices
-            .iter()
-            .all(|c| c.text.is_empty() && c.finish_reason.is_none() && c.logprobs.is_none())
+        && resp.inner.choices.iter().all(|c| {
+            let Choice {
+                text,
+                index: _,
+                logprobs,
+                finish_reason,
+            } = c;
+            text.is_empty() && finish_reason.is_none() && logprobs.is_none()
+        })
 }
 
 /// Emits early `event: tool_call_dispatch` SSE events for any complete tool calls found in a
@@ -4368,6 +4373,7 @@ mod tests {
     }
 
     /// Build a single-choice `NvCreateChatCompletionStreamResponse`.
+    #[allow(clippy::too_many_arguments)]
     fn make_delta(
         content: Option<&str>,
         reasoning: Option<&str>,
