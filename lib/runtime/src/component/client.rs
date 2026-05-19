@@ -367,6 +367,14 @@ impl Client {
         self.instance_avail.store(Arc::new(ids));
     }
 
+    /// Override `instance_free` for testing. Mirrors `override_instance_avail`
+    /// so cross-module tests can seed the busy-filtered set without touching
+    /// the private field directly.
+    #[cfg(test)]
+    pub(crate) fn override_instance_free(&self, ids: Vec<u64>) {
+        self.instance_free.store(Arc::new(ids));
+    }
+
     async fn get_or_create_dynamic_instance_source(
         endpoint: &Endpoint,
     ) -> Result<Arc<tokio::sync::watch::Receiver<Vec<Instance>>>> {
