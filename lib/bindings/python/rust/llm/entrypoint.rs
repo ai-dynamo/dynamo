@@ -202,15 +202,10 @@ impl KvRouterConfig {
             router_reset_states,
             router_ttl_secs,
             router_queue_threshold,
-            router_queue_depth_by_missing_isl: router_queue_depth_by_missing_isl
-                .into_iter()
-                .map(|(missing_isl_floor, max_queue_depth)| {
-                    dynamo_kv_router::scheduling::config::RouterQueueDepthByMissingIslTier {
-                        missing_isl_floor,
-                        max_queue_depth,
-                    }
-                })
-                .collect(),
+            router_queue_depth_by_missing_isl: dynamo_kv_router::scheduling::config::RouterQueueDepthTiers::try_from(
+                router_queue_depth_by_missing_isl
+            )
+            .map_err(PyValueError::new_err)?,
             router_event_threads,
             skip_initial_worker_wait: false,
             router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,

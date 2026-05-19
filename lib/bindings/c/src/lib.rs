@@ -696,7 +696,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_track_prefill_tokens = cfg.router_track_prefill_tokens,
         router_queue_threshold = ?cfg.router_queue_threshold,
         router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
-        queue_depth_tier_count = cfg.router_queue_depth_by_missing_isl.len(),
+        queue_depth_tier_count = cfg.router_queue_depth_by_missing_isl.as_slice().len(),
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 

@@ -143,31 +143,139 @@ impl FromStr for SharedCacheType {
     }
 }
 
-/// One row of the missing-ISL-keyed queue-depth table.
+/// One row of the cache-miss-keyed queue-depth table.
 ///
-/// Requests whose best-case missing prefill tokens meet `missing_isl_floor`
-/// are subject to this tier's `max_queue_depth` cap. A request matches every
-/// tier whose floor it clears; the tier with the highest matched floor wins
-/// (i.e. the most expensive bucket the request falls into determines the
-/// cap).
-///
-/// When configured, the tier vec must:
-/// - contain at least one element,
-/// - start with `missing_isl_floor == 0` so every request matches a tier,
-/// - be strictly ascending in `missing_isl_floor`,
-/// - have `max_queue_depth > 0`.
+/// Requests whose best-case cache-miss tokens (ISL minus best cached tokens
+/// across eligible workers) meet `missing_cache_tokens_floor` are subject to
+/// this tier's `max_queue_depth` cap. A request matches every tier whose
+/// floor it clears; the tier with the highest matched floor wins (i.e. the
+/// most expensive bucket the request falls into determines the cap).
 ///
 /// `max_queue_depth` is a per-worker queue depth cap — the effective cap
 /// is `max_queue_depth * worker_count` where worker_count is the total
 /// number of registered workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Validate)]
 pub struct RouterQueueDepthByMissingIslTier {
-    /// Minimum best-case missing prefill tokens (ISL minus best cached tokens
-    /// across eligible workers) for this tier to apply.
-    pub missing_isl_floor: usize,
+    /// Minimum cache-miss tokens (ISL minus best cached tokens across eligible
+    /// workers) for this tier to apply. Tier 0 matches all requests.
+    pub missing_cache_tokens_floor: usize,
     /// Per-worker queue depth cap. Effective cap is `max_queue_depth * worker_count`.
     #[validate(range(min = 1, message = "max_queue_depth must be > 0"))]
     pub max_queue_depth: usize,
+}
+
+/// Validated, sorted queue-depth tiers keyed by cache-miss tokens.
+///
+/// Guarantees:
+/// - Empty vec means capping is disabled
+/// - Non-empty vec starts with `missing_cache_tokens_floor == 0`
+/// - Floors are strictly ascending
+/// - All `max_queue_depth > 0`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<RouterQueueDepthByMissingIslTier>", into = "Vec<RouterQueueDepthByMissingIslTier>")]
+pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
+
+impl RouterQueueDepthTiers {
+    /// Default: 1024 slots per worker (high ceiling for bursty traffic).
+    pub fn default_per_worker() -> Self {
+        Self(vec![RouterQueueDepthByMissingIslTier {
+            missing_cache_tokens_floor: 0,
+            max_queue_depth: 1024,
+        }])
+    }
+    
+    /// Disable capping entirely.
+    pub fn disabled() -> Self {
+        Self(Vec::new())
+    }
+    
+    /// Check if capping is disabled (empty tiers).
+    pub fn is_disabled(&self) -> bool {
+        self.0.is_empty()
+    }
+    
+    /// Get effective cap for a request's cache-miss tokens, scaled by worker count.
+    /// Returns None if capping is disabled.
+    pub fn cap_for(&self, cache_miss_tokens: usize, worker_count: usize) -> Option<usize> {
+        if self.0.is_empty() {
+            return None;
+        }
+        self.0
+            .iter()
+            .rev()
+            .find(|tier| cache_miss_tokens >= tier.missing_cache_tokens_floor)
+            .map(|tier| tier.max_queue_depth.saturating_mul(worker_count))
+    }
+    
+    /// Get the inner tiers slice.
+    pub fn as_slice(&self) -> &[RouterQueueDepthByMissingIslTier] {
+        &self.0
+    }
+    
+    /// Create from tuples `[(floor, cap), ...]`.
+    pub fn from_tuples(tuples: Vec<(usize, usize)>) -> Result<Self, String> {
+        let tiers: Vec<RouterQueueDepthByMissingIslTier> = tuples
+            .into_iter()
+            .map(|(missing_cache_tokens_floor, max_queue_depth)| {
+                RouterQueueDepthByMissingIslTier {
+                    missing_cache_tokens_floor,
+                    max_queue_depth,
+                }
+            })
+            .collect();
+        Self::try_from(tiers)
+    }
+}
+
+impl Default for RouterQueueDepthTiers {
+    fn default() -> Self {
+        Self::default_per_worker()
+    }
+}
+
+impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
+    type Error = String;
+    
+    fn try_from(tiers: Vec<RouterQueueDepthByMissingIslTier>) -> Result<Self, Self::Error> {
+        if tiers.is_empty() {
+            return Ok(Self::disabled());
+        }
+        
+        // Must start with floor 0
+        if tiers[0].missing_cache_tokens_floor != 0 {
+            return Err("router_queue_depth_by_missing_isl: first tier must have missing_cache_tokens_floor == 0".to_string());
+        }
+        
+        // Floors must be strictly ascending
+        for window in tiers.windows(2) {
+            if window[1].missing_cache_tokens_floor <= window[0].missing_cache_tokens_floor {
+                return Err("router_queue_depth_by_missing_isl: floors must be strictly ascending".to_string());
+            }
+        }
+        
+        // max_queue_depth must be > 0
+        for tier in &tiers {
+            if tier.max_queue_depth == 0 {
+                return Err("router_queue_depth_by_missing_isl: max_queue_depth must be > 0".to_string());
+            }
+        }
+        
+        Ok(Self(tiers))
+    }
+}
+
+impl From<RouterQueueDepthTiers> for Vec<RouterQueueDepthByMissingIslTier> {
+    fn from(tiers: RouterQueueDepthTiers) -> Self {
+        tiers.0
+    }
+}
+
+impl TryFrom<Vec<(usize, usize)>> for RouterQueueDepthTiers {
+    type Error = String;
+    
+    fn try_from(tuples: Vec<(usize, usize)>) -> Result<Self, Self::Error> {
+        Self::from_tuples(tuples)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,7 +473,7 @@ impl Default for KvRouterConfigSerde {
             router_reset_states: config.router_reset_states,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
-            router_queue_depth_by_missing_isl: config.router_queue_depth_by_missing_isl.clone(),
+            router_queue_depth_by_missing_isl: config.router_queue_depth_by_missing_isl.into(),
             router_event_threads: config.router_event_threads,
             skip_initial_worker_wait: config.skip_initial_worker_wait,
             router_queue_policy: config.router_queue_policy,
@@ -467,11 +575,7 @@ pub struct KvRouterConfig {
     /// Default: `[(0, 1024)]` — 1024 slots per worker, a high ceiling that
     /// won't trigger false backpressure under normal bursty traffic. Operators
     /// can tune down (e.g., 64 or 128 per worker) for tighter memory bounds.
-    ///
-    /// When configured, the vec must start with `missing_isl_floor = 0` and
-    /// be strictly ascending in floor. The first tier therefore matches
-    /// every request, so admission always has a cap. Empty vec disables
-    /// queue-depth capping entirely. See [`RouterQueueDepthByMissingIslTier`].
+    /// Empty vec disables queue-depth capping entirely.
     ///
     /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
     /// buffers. The TCP request plane has a fixed 1024-slot buffer per
@@ -479,7 +583,7 @@ pub struct KvRouterConfig {
     /// may accumulate there before reaching the scheduler, so the effective
     /// end-to-end backlog can exceed the tier caps.
     #[serde(default)]
-    pub router_queue_depth_by_missing_isl: Vec<RouterQueueDepthByMissingIslTier>,
+    pub router_queue_depth_by_missing_isl: RouterQueueDepthTiers,
 
     /// Number of KV indexer worker threads.
     /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
@@ -546,10 +650,7 @@ impl Default for KvRouterConfig {
             router_reset_states: false,
             router_ttl_secs: 120.0,
             router_queue_threshold: Some(16.0),
-            router_queue_depth_by_missing_isl: vec![RouterQueueDepthByMissingIslTier {
-                missing_isl_floor: 0,
-                max_queue_depth: 1024,
-            }],
+            router_queue_depth_by_missing_isl: RouterQueueDepthTiers::default_per_worker(),
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
@@ -595,7 +696,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
-            router_queue_depth_by_missing_isl: compat.router_queue_depth_by_missing_isl,
+            router_queue_depth_by_missing_isl: RouterQueueDepthTiers::try_from(compat.router_queue_depth_by_missing_isl)?,
             router_event_threads: compat.router_event_threads,
             skip_initial_worker_wait: compat.skip_initial_worker_wait,
             router_queue_policy: compat.router_queue_policy,
@@ -652,28 +753,7 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "router_predicted_ttl_secs requires use_kv_events=true",
         ));
     }
-    let tiers = &config.router_queue_depth_by_missing_isl;
-    if !tiers.is_empty() {
-        if tiers[0].missing_isl_floor != 0 {
-            return Err(ValidationError::new(
-                "router_queue_depth_by_missing_isl: first tier must have missing_isl_floor == 0",
-            ));
-        }
-        for window in tiers.windows(2) {
-            if window[1].missing_isl_floor <= window[0].missing_isl_floor {
-                return Err(ValidationError::new(
-                    "router_queue_depth_by_missing_isl: floors must be strictly ascending",
-                ));
-            }
-        }
-        for tier in tiers {
-            if tier.max_queue_depth == 0 {
-                return Err(ValidationError::new(
-                    "router_queue_depth_by_missing_isl: max_queue_depth must be > 0",
-                ));
-            }
-        }
-    }
+    // Validation for router_queue_depth_by_missing_isl is handled by RouterQueueDepthTiers::try_from
     Ok(())
 }
 

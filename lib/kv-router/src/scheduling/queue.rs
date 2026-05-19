@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::config::RouterQueueDepthByMissingIslTier;
+use super::config::RouterQueueDepthTiers;
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
@@ -75,9 +75,9 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
-    /// Per-tier absolute queue depth caps keyed on best-case missing-ISL
-    /// tokens. Empty means no admission cap.
-    queue_depth_tiers: Vec<RouterQueueDepthByMissingIslTier>,
+    /// Per-tier queue depth caps keyed on cache-miss tokens.
+    /// Empty means no admission cap.
+    queue_depth_tiers: RouterQueueDepthTiers,
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
@@ -98,7 +98,7 @@ impl<
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
-        queue_depth_tiers: Vec<RouterQueueDepthByMissingIslTier>,
+        queue_depth_tiers: RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         policy: S,
@@ -107,11 +107,11 @@ impl<
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
         }
-        if !queue_depth_tiers.is_empty() {
+        if !queue_depth_tiers.is_disabled() {
             tracing::info!(
-                tier_count = queue_depth_tiers.len(),
-                "Router queue depth tiered by missing-ISL: {} tier(s) configured",
-                queue_depth_tiers.len()
+                tier_count = queue_depth_tiers.as_slice().len(),
+                "Router queue depth tiered by cache-miss: {} tier(s) configured",
+                queue_depth_tiers.as_slice().len()
             );
         }
         Self {
@@ -372,26 +372,15 @@ impl<
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
 
-    /// Resolve the admission cap for `request` from the missing-ISL tier table.
+    /// Resolve the admission cap for `request` from the cache-miss tier table.
     ///
-    /// The tier vec is guaranteed (by config validation) to be sorted strictly
-    /// ascending by `missing_isl_floor` and to start with floor 0 when
-    /// non-empty, so the last tier whose floor the request clears is the one
-    /// with the tightest cap that still applies. Returns `None` when the tier
-    /// table is empty (queue is uncapped).
+    /// Returns `None` when capping is disabled (empty tiers).
     fn tier_cap_for_request(&self, request: &SchedulingRequest) -> Option<usize> {
-        if self.queue_depth_tiers.is_empty() {
-            return None;
-        }
         let workers = self.workers_with_configs.borrow();
         let ctx = SchedulingContext::new(request, &workers);
-        let missing_isl = ctx.best_effective_prefill_tokens();
+        let cache_miss_tokens = ctx.best_effective_prefill_tokens();
         let worker_count = workers.len();
-        self.queue_depth_tiers
-            .iter()
-            .rev()
-            .find(|tier| missing_isl >= tier.missing_isl_floor)
-            .map(|tier| tier.max_queue_depth * worker_count)
+        self.queue_depth_tiers.cap_for(cache_miss_tokens, worker_count)
     }
 
     /// Check if all eligible workers are busy based on threshold.
@@ -458,6 +447,7 @@ mod tests {
     use tokio::sync::{Barrier, watch};
 
     use super::*;
+    use crate::config::RouterQueueDepthByMissingIslTier;
     use crate::protocols::{RouterBackpressureReason, WorkerSelectionResult, WorkerWithDpRank};
     use crate::scheduling::types::KvSchedulerError;
     use crate::sequences::ActiveSequencesMultiWorker;
@@ -565,7 +555,7 @@ mod tests {
             block_size,
             isl,
             threshold_frac,
-            Vec::new(),
+            RouterQueueDepthTiers::disabled(),
             None,
         );
         (queue, slots)
@@ -609,7 +599,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
-            Vec::new(),
+            RouterQueueDepthTiers::disabled(),
             block_size,
             selector,
             FcfsPolicy,
@@ -636,7 +626,7 @@ mod tests {
             block_size,
             isl,
             threshold_frac,
-            Vec::new(),
+            RouterQueueDepthTiers::disabled(),
             prefill_load_estimator,
         )
     }
@@ -647,7 +637,7 @@ mod tests {
         block_size: u32,
         isl: usize,
         threshold_frac: Option<f64>,
-        queue_depth_tiers: Vec<RouterQueueDepthByMissingIslTier>,
+        queue_depth_tiers: RouterQueueDepthTiers,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
@@ -907,10 +897,10 @@ mod tests {
 
         // Single tier at floor=0 with cap=1 — every request matches, queue
         // capped at 1 pending.
-        let tiers = vec![RouterQueueDepthByMissingIslTier {
-            missing_isl_floor: 0,
+        let tiers = RouterQueueDepthTiers::try_from(vec![RouterQueueDepthByMissingIslTier {
+            missing_cache_tokens_floor: 0,
             max_queue_depth: 1,
-        }];
+        }]).unwrap();
         let (queue, _slots, _cfg_tx) =
             make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
 
@@ -943,23 +933,23 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_missing_isl_tiers_shed_expensive_first() {
         let block_size = 16;
-        let isl = 512; // every test request has 512 missing-ISL tokens (no cache).
+        let isl = 512; // every test request has 512 cache-miss tokens (no cache).
 
         // Two tiers:
         //   (floor=0,   cap=4)  applies to cheap requests
-        //   (floor=256, cap=1)  applies to expensive (>=256 missing) requests
-        // All test requests are 512 missing → they match the expensive tier
+        //   (floor=256, cap=1)  applies to expensive (>=256 cache-miss) requests
+        // All test requests are 512 cache-miss → they match the expensive tier
         // and should backpressure once queue_depth reaches 1.
-        let tiers = vec![
+        let tiers = RouterQueueDepthTiers::try_from(vec![
             RouterQueueDepthByMissingIslTier {
-                missing_isl_floor: 0,
+                missing_cache_tokens_floor: 0,
                 max_queue_depth: 4,
             },
             RouterQueueDepthByMissingIslTier {
-                missing_isl_floor: 256,
+                missing_cache_tokens_floor: 256,
                 max_queue_depth: 1,
             },
-        ];
+        ]).unwrap();
         let (queue, _slots, _cfg_tx) =
             make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
 
