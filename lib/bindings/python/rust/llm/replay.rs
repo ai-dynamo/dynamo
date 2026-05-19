@@ -1147,6 +1147,9 @@ fn load_replay_prefill_load_estimator(
         aic_perf_config.model_path(),
         aic_perf_config.tp_size(),
         aic_perf_config.backend_version(),
+        aic_perf_config.moe_tp_size(),
+        aic_perf_config.moe_ep_size(),
+        aic_perf_config.attention_dp_size(),
     )
     .map(Some)
 }
