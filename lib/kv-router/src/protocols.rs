@@ -382,14 +382,14 @@ pub struct ActiveLoad {
 
 /// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,
 /// and optional LoRA adapter name of a block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct LocalBlockHash(pub u64);
 
 /// A sequence-aware hash of a block computed by the engine from token IDs, optional metadata,
 /// and the hash of the parent block.
 ///
 /// In this case, the hashing function is external and unknown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ExternalSequenceBlockHash(pub u64);
 
 // Implement From trait for convenient conversion

@@ -1,11 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Branch-based prefix sharding over `ThreadPoolIndexer<T>`.
+//! Branch-based prefix sharding over [`AsyncShardHandle`] implementations.
 //!
-//! [`BranchShardedIndexer`] owns a bounded routing prefix tree. It can answer
+//! [`BranchShardedIndexer`] owns a bounded routing prefix tree.  It can answer
 //! shallow drained reads and route depth-boundary suffixes through explicit
 //! backend anchors, while keeping the public branch-sharded indexer API.
+//!
+//! The indexer is generic over `S: AsyncShardHandle` so it can dispatch to
+//! either in-process `ThreadPoolIndexer<T>` shards (the default single-host
+//! case) or remote velo-backed `VeloShardClient` shards (the multi-process
+//! case, feature-gated behind `velo-runtime`).
 
 use std::{
     collections::VecDeque,
@@ -28,6 +33,7 @@ use super::{
     AnchorCapableSyncIndexer, AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError,
     ShardSizeSnapshot, ThreadPoolIndexer,
 };
+use super::shard_handle::AsyncShardHandle;
 use crate::protocols::*;
 
 type WorkerRoutingLookup = DashMap<ExternalSequenceBlockHash, BlockRoutingEntry, FxBuildHasher>;
@@ -94,9 +100,14 @@ struct StoreRouteDecision {
     skip_backend: bool,
 }
 
-/// Branch-sharded wrapper over N [`ThreadPoolIndexer<T>`] instances.
-pub struct BranchShardedIndexer<T: AnchorCapableSyncIndexer> {
-    shards: Vec<Arc<ThreadPoolIndexer<T>>>,
+/// Branch-sharded wrapper over N [`AsyncShardHandle`] shard backends.
+///
+/// For the common in-process case use `BranchShardedIndexer<ThreadPoolIndexer<T>>`
+/// (constructed via [`BranchShardedIndexer::new`]).  For the multi-process
+/// velo-backed case use `BranchShardedIndexer<VeloShardClient>` (feature-gated
+/// behind `velo-runtime`).
+pub struct BranchShardedIndexer<S: AsyncShardHandle> {
+    shards: Vec<Arc<S>>,
     num_shards: usize,
     max_routing_depth: usize,
     kv_block_size: u32,
@@ -108,12 +119,12 @@ pub struct BranchShardedIndexer<T: AnchorCapableSyncIndexer> {
 }
 
 /// Compatibility alias for the previous implementation name.
-#[deprecated(note = "use BranchShardedIndexer instead")]
-pub type AnchorAwareBranchShardedIndexer<T> = BranchShardedIndexer<T>;
+#[deprecated(note = "use BranchShardedIndexer<ThreadPoolIndexer<T>> instead")]
+pub type AnchorAwareBranchShardedIndexer<T> = BranchShardedIndexer<ThreadPoolIndexer<T>>;
 
-impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
-    /// Create a branch-sharded indexer from pre-built shards.
-    pub fn new(shards: Vec<ThreadPoolIndexer<T>>, prefix_depth: usize, kv_block_size: u32) -> Self {
+impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
+    /// Create a branch-sharded indexer from pre-built shard handles.
+    pub fn new(shards: Vec<S>, prefix_depth: usize, kv_block_size: u32) -> Self {
         assert!(!shards.is_empty(), "Must provide at least one shard");
         let num_shards = shards.len();
         let shards = shards.into_iter().map(Arc::new).collect();
@@ -132,11 +143,7 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
     }
 
     /// Alias for [`BranchShardedIndexer::new`].
-    pub fn new_with_options(
-        shards: Vec<ThreadPoolIndexer<T>>,
-        prefix_depth: usize,
-        kv_block_size: u32,
-    ) -> Self {
+    pub fn new_with_options(shards: Vec<S>, prefix_depth: usize, kv_block_size: u32) -> Self {
         Self::new(shards, prefix_depth, kv_block_size)
     }
 
@@ -346,11 +353,7 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
             Vec::new()
         };
         let shard = Arc::clone(&self.shards[shard_idx]);
-        let mut shard_scores = tokio::task::spawn_blocking(move || {
-            shard.backend().find_matches_from_anchor(anchor, &suffix)
-        })
-        .await
-        .map_err(|_| KvRouterError::IndexerOffline)??;
+        let mut shard_scores = shard.find_matches_from_anchor(anchor, suffix).await?;
         for (worker, shard_score) in shard_scores.scores.drain() {
             if !active.contains(&worker) {
                 continue;
@@ -654,7 +657,7 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
 }
 
 #[async_trait]
-impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
+impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
     async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
@@ -819,7 +822,7 @@ impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for BranchShardedIndexer<T>
     async fn flush(&self) -> usize {
         let mut total = 0;
         for shard in &self.shards {
-            total += <ThreadPoolIndexer<T> as KvIndexerInterface>::flush(shard).await;
+            total += shard.flush().await;
         }
         total
     }
@@ -827,21 +830,17 @@ impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for BranchShardedIndexer<T>
     async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
         let mut sizes = Vec::new();
         for (idx, shard) in self.shards.iter().enumerate() {
-            sizes.extend(
-                shard
-                    .shard_sizes()
-                    .await
-                    .into_iter()
-                    .map(move |mut snapshot| {
-                        snapshot.shard_idx = idx;
-                        snapshot
-                    }),
-            );
+            let mut snapshot = shard.shard_sizes().await;
+            snapshot.shard_idx = idx;
+            sizes.push(snapshot);
         }
         sizes
     }
 
     fn node_edge_lengths(&self) -> Vec<usize> {
+        // Collect per-node edge lengths from each shard backend.
+        // In-process `ThreadPoolIndexer` shards delegate to the underlying
+        // trie; remote shard handles return an empty `Vec` for this call.
         self.shards
             .iter()
             .flat_map(|shard| shard.node_edge_lengths())
@@ -917,10 +916,10 @@ mod tests {
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
     use tokio::sync::Barrier as AsyncBarrier;
 
-    fn make_indexer(
-        num_shards: usize,
-        depth: usize,
-    ) -> BranchShardedIndexer<ConcurrentRadixTreeCompressed> {
+    // Convenience alias for tests: the standard in-process BSI backed by CRTC.
+    type TestBSI = BranchShardedIndexer<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>;
+
+    fn make_indexer(num_shards: usize, depth: usize) -> TestBSI {
         let shards = (0..num_shards)
             .map(|_| ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 32))
             .collect();
@@ -1016,20 +1015,14 @@ mod tests {
         scores.scores.get(&worker).copied()
     }
 
-    fn has_anchor_for_worker(
-        index: &BranchShardedIndexer<ConcurrentRadixTreeCompressed>,
-        worker: WorkerWithDpRank,
-    ) -> bool {
+    fn has_anchor_for_worker(index: &TestBSI, worker: WorkerWithDpRank) -> bool {
         index
             .installed_worker_anchors
             .iter()
             .any(|entry| entry.key().1 == worker)
     }
 
-    async fn normalized_scores(
-        index: &BranchShardedIndexer<ConcurrentRadixTreeCompressed>,
-        query: &[u64],
-    ) -> Vec<(WorkerWithDpRank, u32)> {
+    async fn normalized_scores(index: &TestBSI, query: &[u64]) -> Vec<(WorkerWithDpRank, u32)> {
         let mut scores: Vec<_> = index
             .find_matches(local_hashes(query))
             .await
@@ -1284,8 +1277,8 @@ mod tests {
         index.flush().await;
 
         let scores = index.shards[shard_idx]
-            .backend()
-            .find_matches_from_anchor(anchor, &local_hashes(&[7]))
+            .find_matches_from_anchor(anchor, local_hashes(&[7]))
+            .await
             .unwrap();
         assert_eq!(score(&scores, worker(2)), Some(4));
     }
@@ -1540,6 +1533,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(score(&scores, dp0), Some(4));
+    }
+
+    /// Regression: `remove_worker_dp_rank` must call
+    /// `shard.remove_worker_dp_rank(worker_id, dp_rank)` — not the broader
+    /// `shard.remove_worker(worker_id)` — so that sibling dp_ranks that share
+    /// the same worker_id are preserved in the backend shards.
+    ///
+    /// This test uses a depth cap that forces suffix blocks into the backend
+    /// shards (depth=2, sequence length=4), so the bug manifests as missing
+    /// scores for the surviving dp_rank when querying the shard.
+    #[tokio::test]
+    async fn remove_worker_dp_rank_does_not_remove_sibling_dp_ranks_from_shards() {
+        // depth cap = 2 → first 2 blocks live in the routing trie; blocks 3+
+        // are forwarded to a backend shard.
+        let index = make_indexer(2, 2);
+
+        index
+            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3, 4]))
+            .await;
+        index
+            .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 5, 6]))
+            .await;
+        index.flush().await;
+
+        let dp0 = WorkerWithDpRank::new(0, 0);
+        let dp1 = WorkerWithDpRank::new(0, 1);
+
+        // Both dp_ranks should be reachable before removal.
+        let before0 = normalized_scores(&index, &[1, 2, 3, 4]).await;
+        let before1 = normalized_scores(&index, &[1, 2, 5, 6]).await;
+        assert!(
+            before0.iter().any(|(w, _)| *w == dp0),
+            "dp0 should score before removal: {before0:?}"
+        );
+        assert!(
+            before1.iter().any(|(w, _)| *w == dp1),
+            "dp1 should score before removal: {before1:?}"
+        );
+
+        // Remove only dp_rank=0.
+        index.remove_worker_dp_rank(0, 0).await;
+        index.flush().await;
+
+        // dp_rank=0 must be gone.
+        let after0 = normalized_scores(&index, &[1, 2, 3, 4]).await;
+        assert!(
+            !after0.iter().any(|(w, _)| *w == dp0),
+            "dp0 should have no score after remove_worker_dp_rank(0, 0): {after0:?}"
+        );
+
+        // dp_rank=1 must still be reachable at full depth (not just router
+        // depth).  If the shard bug is present dp1 will have a max score of
+        // 2 (router only); the correct answer is 4.
+        let after1 = normalized_scores(&index, &[1, 2, 5, 6]).await;
+        let dp1_score = after1.iter().find(|(w, _)| *w == dp1).map(|(_, s)| *s);
+        assert_eq!(
+            dp1_score,
+            Some(4),
+            "dp1 should still score 4 (full depth) after removing dp0 only: {after1:?}"
+        );
     }
 
     #[tokio::test]
