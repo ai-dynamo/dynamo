@@ -8,9 +8,12 @@
 # pods; the Power Agent DaemonSet reads them and calls NVML SetPowerManagementLimit.
 #
 # REQUIRED before deploying:
-#   1. Deploy the Power Agent DaemonSet:
-#        kubectl apply -f deploy/power_agent/rbac.yaml
-#        kubectl apply -f deploy/power_agent/daemonset.yaml
+#   1. Deploy the Power Agent via Helm chart:
+#        helm install power-agent ./deploy/helm/charts/power-agent \
+#          --namespace dynamo-system --create-namespace \
+#          --set image.tag=<release-tag> \
+#          --set agent.safeDefaultWatts=500
+#      (chart at deploy/helm/charts/power-agent/ — see its README for SKU-specific values)
 #   2. Set total_gpu_power_limit: (rack_capacity_W × headroom_factor) − non_gpu_overhead
 #      Example: 8-GPU H200 SXM rack: (32 × 700 × 0.85) − 1000 ≈ 18920 W → round down to 18000 W
 #   3. Set power_agent_safe_default_watts: ~70% of SKU TDP

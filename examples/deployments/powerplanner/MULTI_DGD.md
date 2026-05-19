@@ -266,4 +266,4 @@ All coefficients are EMA-smoothed toward live measurements within 2–3
 - `verify_poweraware.bash` — smoke-test script for a running deployment
 - `tools/integrate_aic_power_data.py` — integrate measured power data into AIC
 - `components/power_agent/README.md` — Power Agent DaemonSet guide
-- `deploy/power_agent/rbac.yaml` and `daemonset.yaml` — K8s manifests
+- `deploy/helm/charts/power-agent/` — Helm chart (production DaemonSet + dev Pod modes)

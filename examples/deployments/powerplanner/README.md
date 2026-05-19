@@ -11,15 +11,19 @@ This directory contains example configurations for deploying Dynamo with power-a
 
 ## Prerequisites
 
-1. Deploy the Power Agent DaemonSet on all GPU nodes:
+1. Deploy the Power Agent via the Helm chart at [`deploy/helm/charts/power-agent/`](../../../deploy/helm/charts/power-agent/):
    ```bash
-   kubectl apply -f deploy/power_agent/rbac.yaml
-   kubectl apply -f deploy/power_agent/daemonset.yaml
+   helm install power-agent ./deploy/helm/charts/power-agent \
+     --namespace dynamo-system --create-namespace \
+     --set image.tag=<release-tag> \
+     --set agent.safeDefaultWatts=500
    ```
+   See the chart README for SKU-specific `safeDefaultWatts` values and the
+   dev-iteration mode (`dev.enabled=true`).
 
 2. Verify the Power Agent is running:
    ```bash
-   kubectl get pods -l app=dynamo-power-agent -o wide
+   kubectl get pods -n dynamo-system -l app.kubernetes.io/name=power-agent -o wide
    ```
 
 ## Quick start (Phase 1+2 — static caps)
