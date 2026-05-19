@@ -25,6 +25,7 @@ import (
 	"maps"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -1757,18 +1758,25 @@ func applyDGDTemplateDefaults(
 	// Bake KV transfer policy env vars into worker pod templates so they
 	// survive DGD → DCD materialization (the DCD controller lacks the parent DGD).
 	// Workers publish these in their MDC so the router reads policy per-worker.
-	if dynamoDeployment.Spec.KvTransferPolicy != nil &&
+	if dynamoDeployment.Spec.Experimental != nil &&
+		dynamoDeployment.Spec.Experimental.KvTransferPolicy != nil &&
 		IsWorkerComponent(string(component.ComponentType)) {
-		kvt := dynamoDeployment.Spec.KvTransferPolicy
+		kvt := dynamoDeployment.Spec.Experimental.KvTransferPolicy
 		podTemplate := ensurePodTemplate(component)
 		main := ensureMainContainer(podTemplate)
-		noMatchPolicy := string(kvt.NoMatchPolicy)
-		if noMatchPolicy == "" {
-			noMatchPolicy = string(v1beta1.NoMatchPolicyFail)
+		enforcement := string(kvt.Enforcement)
+		if enforcement == "" {
+			enforcement = string(v1beta1.KvTransferEnforcementRequired)
 		}
 		policyEnvs := []corev1.EnvVar{
 			{Name: commonconsts.EnvKvTransferDomain, Value: string(kvt.Domain)},
-			{Name: commonconsts.EnvKvTransferNoMatchPolicy, Value: noMatchPolicy},
+			{Name: commonconsts.EnvKvTransferEnforcement, Value: enforcement},
+		}
+		if kvt.PreferredWeight != nil {
+			policyEnvs = append(policyEnvs, corev1.EnvVar{
+				Name:  commonconsts.EnvKvTransferPreferredWeight,
+				Value: strconv.FormatFloat(float64(*kvt.PreferredWeight), 'f', -1, 32),
+			})
 		}
 		main.Env = MergeEnvs(policyEnvs, main.Env)
 	}

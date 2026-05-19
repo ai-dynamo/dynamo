@@ -69,10 +69,19 @@ type DynamoGraphDeploymentSpec struct {
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
 
+	// experimental groups graph-level preview features whose API shape and
+	// behavior may change in breaking ways between v1beta1 releases.
+	// +optional
+	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+// features whose API shape and behavior may change in breaking ways between
+// v1beta1 releases. Component-level experimental features live under
+// `spec.components[*].experimental`.
+type DynamoGraphDeploymentExperimentalSpec struct {
 	// kvTransferPolicy configures topology-aware routing for KV-cache
-	// transfers between prefill and decode workers. When set, the frontend
-	// router receives domain and no-match-policy env vars, and workers
-	// publish their topology metadata.
+	// transfers between prefill and decode workers.
 	// +optional
 	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }

@@ -9010,7 +9010,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
-	t.Run("worker gets transfer policy env vars when kvTransferPolicy is set", func(t *testing.T) {
+	t.Run("worker gets required transfer policy env vars when experimental kvTransferPolicy is set", func(t *testing.T) {
 		dgd := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -9018,10 +9018,12 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
 				},
-				KvTransferPolicy: &v1beta1.KvTransferPolicy{
-					LabelKey:      "topology.kubernetes.io/zone",
-					Domain:        "zone",
-					NoMatchPolicy: v1beta1.NoMatchPolicyFail,
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:    "topology.kubernetes.io/zone",
+						Domain:      "zone",
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
 				},
 			},
 		}
@@ -9036,11 +9038,12 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		envMap := envVarsToMap(podSpec.Containers[0].Env)
 		assert.Equal(t, "zone", envMap[commonconsts.EnvKvTransferDomain],
 			"worker should have DYN_KV_TRANSFER_DOMAIN")
-		assert.Equal(t, "fail", envMap[commonconsts.EnvKvTransferNoMatchPolicy],
-			"worker should have DYN_KV_TRANSFER_NO_MATCH_POLICY")
+		assert.Equal(t, "required", envMap[commonconsts.EnvKvTransferEnforcement],
+			"worker should have DYN_KV_TRANSFER_ENFORCEMENT")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight)
 	})
 
-	t.Run("worker gets fallback noMatchPolicy", func(t *testing.T) {
+	t.Run("worker gets preferred transfer policy env vars", func(t *testing.T) {
 		dgd := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -9048,10 +9051,13 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
 				},
-				KvTransferPolicy: &v1beta1.KvTransferPolicy{
-					LabelKey:      "nvidia.com/rack",
-					Domain:        "rack",
-					NoMatchPolicy: v1beta1.NoMatchPolicyFallback,
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:        "nvidia.com/rack",
+						Domain:          "rack",
+						Enforcement:     v1beta1.KvTransferEnforcementPreferred,
+						PreferredWeight: ptr.To[float32](0.85),
+					},
 				},
 			},
 		}
@@ -9064,7 +9070,8 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 
 		envMap := envVarsToMap(podSpec.Containers[0].Env)
 		assert.Equal(t, "rack", envMap[commonconsts.EnvKvTransferDomain])
-		assert.Equal(t, "fallback", envMap[commonconsts.EnvKvTransferNoMatchPolicy])
+		assert.Equal(t, "preferred", envMap[commonconsts.EnvKvTransferEnforcement])
+		assert.Equal(t, "0.85", envMap[commonconsts.EnvKvTransferPreferredWeight])
 	})
 
 	t.Run("frontend does NOT get transfer policy env vars", func(t *testing.T) {
@@ -9075,10 +9082,12 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 				},
-				KvTransferPolicy: &v1beta1.KvTransferPolicy{
-					LabelKey:      "topology.kubernetes.io/zone",
-					Domain:        "zone",
-					NoMatchPolicy: v1beta1.NoMatchPolicyFail,
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:    "topology.kubernetes.io/zone",
+						Domain:      "zone",
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
 				},
 			},
 		}
@@ -9092,7 +9101,9 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		envMap := envVarsToMap(podSpec.Containers[0].Env)
 		assert.NotContains(t, envMap, commonconsts.EnvKvTransferDomain,
 			"frontend should NOT have transfer policy env vars")
-		assert.NotContains(t, envMap, commonconsts.EnvKvTransferNoMatchPolicy,
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferEnforcement,
+			"frontend should NOT have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight,
 			"frontend should NOT have transfer policy env vars")
 	})
 
@@ -9116,11 +9127,13 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		envMap := envVarsToMap(podSpec.Containers[0].Env)
 		assert.NotContains(t, envMap, commonconsts.EnvKvTransferDomain,
 			"worker without policy should not have transfer policy env vars")
-		assert.NotContains(t, envMap, commonconsts.EnvKvTransferNoMatchPolicy,
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferEnforcement,
+			"worker without policy should not have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight,
 			"worker without policy should not have transfer policy env vars")
 	})
 
-	t.Run("worker defaults noMatchPolicy to fail when omitted", func(t *testing.T) {
+	t.Run("worker with experimental but without policy has no transfer policy env vars", func(t *testing.T) {
 		dgd := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -9128,10 +9141,39 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
 				},
-				KvTransferPolicy: &v1beta1.KvTransferPolicy{
-					LabelKey: "topology.kubernetes.io/zone",
-					Domain:   "zone",
-					// NoMatchPolicy omitted (zero value)
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{},
+			},
+		}
+		component := dgd.Spec.Components[0].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferDomain,
+			"worker without policy should not have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferEnforcement,
+			"worker without policy should not have transfer policy env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvKvTransferPreferredWeight,
+			"worker without policy should not have transfer policy env vars")
+	})
+
+	t.Run("worker defaults enforcement to required when omitted", func(t *testing.T) {
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey: "topology.kubernetes.io/zone",
+						Domain:   "zone",
+						// Enforcement omitted (zero value)
+					},
 				},
 			},
 		}
@@ -9143,7 +9185,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		require.NoError(t, err)
 
 		envMap := envVarsToMap(podSpec.Containers[0].Env)
-		assert.Equal(t, "fail", envMap[commonconsts.EnvKvTransferNoMatchPolicy],
-			"omitted noMatchPolicy should default to fail")
+		assert.Equal(t, "required", envMap[commonconsts.EnvKvTransferEnforcement],
+			"omitted enforcement should default to required")
 	})
 }

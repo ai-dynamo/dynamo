@@ -222,39 +222,57 @@ spec:
                       - name
                     type: object
                   type: array
-                kvTransferPolicy:
+                experimental:
                   description: |-
-                    KvTransferPolicy constrains KV-cache transfers between prefill and
-                    decode workers to the same topology domain.
+                    Experimental groups graph-level preview features whose API shape and
+                    behavior may change in breaking ways between releases.
                   properties:
-                    domain:
+                    kvTransferPolicy:
                       description: |-
-                        Domain is the topology domain to enforce for KV-cache transfers
-                        (e.g. "zone", "rack").
-                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
-                      type: string
-                    labelKey:
-                      description: |-
-                        LabelKey is a raw pod label key (e.g. "topology.kubernetes.io/zone")
-                        used to identify the topology domain of each worker pod.
-                      minLength: 1
-                      type: string
-                    noMatchPolicy:
-                      allOf:
-                        - enum:
-                            - fail
-                            - fallback
-                        - enum:
-                            - fail
-                            - fallback
-                      default: fail
-                      description: |-
-                        NoMatchPolicy controls behavior when no same-domain decode workers
-                        exist. Defaults to "fail".
-                      type: string
-                  required:
-                    - domain
-                    - labelKey
+                        KvTransferPolicy configures topology-aware routing for KV-cache
+                        transfers between prefill and decode workers.
+                      properties:
+                        domain:
+                          description: |-
+                            Domain is the logical name for the topology level to enforce
+                            (e.g. "zone", "rack"). The router uses this to match workers that
+                            share the same value for the label identified by `labelKey`.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        enforcement:
+                          allOf:
+                            - enum:
+                                - required
+                                - preferred
+                            - enum:
+                                - required
+                                - preferred
+                          default: required
+                          description: |-
+                            Enforcement controls how the selected prefill worker's topology is
+                            applied to decode routing. Defaults to "required".
+                          type: string
+                        labelKey:
+                          description: |-
+                            LabelKey is a Kubernetes node label key (e.g.
+                            "topology.kubernetes.io/zone") whose value identifies the topology
+                            domain for each worker. The operator copies the node label onto worker
+                            pods so the runtime can publish it as worker metadata. The label
+                            should correspond to the topology level named in `domain`.
+                          minLength: 1
+                          type: string
+                        preferredWeight:
+                          description: |-
+                            PreferredWeight is used when enforcement is "preferred". It maps to the
+                            RoutingConstraints preferred_taints weight for the generated topology
+                            taint.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                      required:
+                        - domain
+                        - labelKey
+                      type: object
                   type: object
                 labels:
                   additionalProperties:
@@ -20593,45 +20611,57 @@ spec:
                       - name
                     type: object
                   type: array
-                kvTransferPolicy:
+                experimental:
                   description: |-
-                    kvTransferPolicy constrains KV-cache transfers between prefill and
-                    decode workers to the same topology domain. When set, the frontend
-                    router receives domain and no-match-policy env vars, and workers
-                    publish their topology metadata. Only the `labelKey` path is supported
-                    in this release; `clusterTopologyName` support will be added in a
-                    future release.
+                    experimental groups graph-level preview features whose API shape and
+                    behavior may change in breaking ways between v1beta1 releases.
                   properties:
-                    domain:
+                    kvTransferPolicy:
                       description: |-
-                        domain is the topology domain to enforce for KV-cache transfers
-                        (e.g. "zone", "rack"). Must be a valid topology domain name.
-                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
-                      type: string
-                    labelKey:
-                      description: |-
-                        labelKey is a raw pod label key (e.g. "topology.kubernetes.io/zone")
-                        used to identify the topology domain of each worker pod. When set, the
-                        operator copies the specified node label onto worker pods and projects
-                        it as a DYN_TOPOLOGY_* env var. This path does not require Grove.
-                      minLength: 1
-                      type: string
-                    noMatchPolicy:
-                      allOf:
-                        - enum:
-                            - fail
-                            - fallback
-                        - enum:
-                            - fail
-                            - fallback
-                      default: fail
-                      description: |-
-                        noMatchPolicy controls behavior when no same-domain decode workers
-                        exist. Defaults to "fail".
-                      type: string
-                  required:
-                    - domain
-                    - labelKey
+                        kvTransferPolicy configures topology-aware routing for KV-cache
+                        transfers between prefill and decode workers.
+                      properties:
+                        domain:
+                          description: |-
+                            domain is the logical name for the topology level to enforce
+                            (e.g. "zone", "rack"). The router uses this to match workers that
+                            share the same value for the label identified by `labelKey`.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        enforcement:
+                          allOf:
+                            - enum:
+                                - required
+                                - preferred
+                            - enum:
+                                - required
+                                - preferred
+                          default: required
+                          description: |-
+                            enforcement controls how the selected prefill worker's topology is
+                            applied to decode routing. Defaults to "required".
+                          type: string
+                        labelKey:
+                          description: |-
+                            labelKey is a Kubernetes node label key (e.g.
+                            "topology.kubernetes.io/zone") whose value identifies the topology
+                            domain for each worker. The operator copies the node label onto worker
+                            pods so the runtime can publish it as worker metadata. The label
+                            should correspond to the topology level named in `domain`.
+                          minLength: 1
+                          type: string
+                        preferredWeight:
+                          description: |-
+                            preferredWeight is used when enforcement is "preferred". It maps to the
+                            RoutingConstraints preferred_taints weight for the generated topology
+                            taint.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                      required:
+                        - domain
+                        - labelKey
+                      type: object
                   type: object
                 labels:
                   additionalProperties:
