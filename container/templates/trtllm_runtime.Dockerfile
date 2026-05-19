@@ -78,10 +78,12 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then \
-            uv pip install --no-deps "$KVBM_WHEEL"; \
-            uv pip install --no-deps nixl==0.10.1 nixl-cu13==0.10.1; \
+        if [ -z "$KVBM_WHEEL" ]; then \
+            echo "ERROR: ENABLE_KVBM=true but no kvbm*.whl found in /opt/dynamo/wheelhouse" >&2; \
+            exit 1; \
         fi; \
+        uv pip install --no-deps "$KVBM_WHEEL"; \
+        uv pip install --no-deps nixl==0.10.1 nixl-cu13==0.10.1; \
     fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
