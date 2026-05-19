@@ -56,7 +56,7 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
     DYN_REQUEST_PLANE=nats python -m dynamo.trtllm \
         --model-path "$MODEL" \
         --served-model-name "${MODEL}__internal" \
-        --endpoint "dyn://${NAMESPACE}.trtllm.generate" \
+        --endpoint "dyn://${NAMESPACE}.backend.generate" \
         --modality multimodal \
         --publish-events-and-metrics \
         --kv-block-size "$BLOCK_SIZE" \
