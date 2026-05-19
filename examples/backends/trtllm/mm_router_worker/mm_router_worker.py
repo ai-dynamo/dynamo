@@ -15,7 +15,7 @@ Usage:
         --namespace default \
         --component mm_router \
         --endpoint generate \
-        --downstream-component trtllm \
+        --downstream-component backend \
         --downstream-endpoint generate
 """
 

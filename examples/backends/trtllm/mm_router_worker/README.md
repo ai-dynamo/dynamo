@@ -68,7 +68,7 @@ python -m examples.backends.trtllm.mm_router_worker \
     --namespace default \
     --component mm_router \
     --endpoint generate \
-    --downstream-component trtllm \
+    --downstream-component backend \
     --downstream-endpoint generate &
 
 # 4. Start Frontend

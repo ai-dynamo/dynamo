@@ -136,7 +136,7 @@ pub mod labels {
     /// When a metric already has a label, injection does not overwrite it (original is preserved).
     pub const MODEL_NAME: &str = "model_name";
 
-    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
     /// Label for router instance (discovery.instance_id() of the frontend)

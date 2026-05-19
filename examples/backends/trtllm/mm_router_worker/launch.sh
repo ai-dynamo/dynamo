@@ -78,7 +78,7 @@ DYN_REQUEST_PLANE=nats python -m examples.backends.trtllm.mm_router_worker \
     --namespace "$NAMESPACE" \
     --component mm_router \
     --endpoint generate \
-    --downstream-component trtllm \
+    --downstream-component backend \
     --downstream-endpoint generate \
     --block-size "$BLOCK_SIZE" \
     2>&1 | sed "s/^/[mm_router] /" &
