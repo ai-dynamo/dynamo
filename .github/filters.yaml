@@ -160,6 +160,7 @@ sglang:
   - '!**/*.rst'
 
 trtllm:
+  - 'container/deps/requirements.trtllm.txt'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'

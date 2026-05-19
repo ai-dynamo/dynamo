@@ -54,27 +54,17 @@ RUN python3 -m venv --system-site-packages /opt/dynamo/venv \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:${PATH}
 
-# With KVBM, install matching `nixl-cu13==0.10.1` from PyPI so libnixl.so (loaded
-# via the wheel's DT_RPATH on `import nixl`) matches KVBM's `nixl-sys=0.10.1`
-# ABI. Upstream's NIXL 0.9.0 at /opt/nvidia/nvda_nixl coexists unused because
-# Dynamo's --connector kvbm bypasses TRT-LLM's native NIXL transceiver.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
     export UV_CACHE_DIR=/root/.cache/uv && \
     \
     # Dynamo's own wheels — --no-deps preserves upstream's solve.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     \
-    # Deps Dynamo wheels declare but upstream tensorrt-llm/release lacks.
-    # (vllm/vllm-openai ships these by default, which is why DYN-2204's vllm
-    # path does not need this step.)
-    uv pip install --no-deps 'uvloop>=0.21.0' 'msgspec>=0.19.0' && \
-    \
-    # Lock huggingface-hub to upstream transformers's <1.0 constraint. Without
-    # this pin, Dockerfile.test's `uv pip install --requirement requirements.test.txt`
-    # later upgrades the venv copy to 1.x (datasets allows it) and breaks
-    # `import transformers` against upstream's compiled stack.
-    uv pip install --no-deps 'huggingface-hub<1.0,>=0.34.0' && \
+    # Third-party deps Dynamo wheels declare but upstream lacks, plus the
+    # huggingface-hub pin and KVBM-matching nixl-cu13. See the file for context.
+    uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
     \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
@@ -83,7 +73,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
             exit 1; \
         fi; \
         uv pip install --no-deps "$KVBM_WHEEL"; \
-        uv pip install --no-deps nixl==0.10.1 nixl-cu13==0.10.1; \
     fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
