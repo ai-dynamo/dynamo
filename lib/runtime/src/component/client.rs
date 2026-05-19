@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -110,6 +111,14 @@ pub struct Client {
     // on every discovery refresh as `discovered \ busy` so the filter
     // survives reconciliation.
     instance_busy: Arc<ArcSwap<Option<Vec<u64>>>>,
+    // Serializes the WRITE sides of update_free_instances and the
+    // reconcile re-derivation of instance_free. Readers
+    // (instance_ids_routable, instance_ids_free) stay lock-free against
+    // the ArcSwaps. Required because the reconcile path does
+    // load(busy) → compute → store(free) in three non-atomic steps; a
+    // concurrent update could interleave between the load and the store
+    // and leave instance_free stale relative to the latest busy snapshot.
+    instance_state_write_lock: Arc<StdMutex<()>>,
     // Watch sender for available instance IDs (for sending updates)
     instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
     // Watch receiver for available instance IDs (for cloning to external subscribers)
@@ -154,6 +163,7 @@ impl Client {
             instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
             instance_busy: Arc::new(ArcSwap::from(Arc::new(None))),
+            instance_state_write_lock: Arc::new(StdMutex::new(())),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,
@@ -250,16 +260,24 @@ impl Client {
     ///
     /// Persists the busy set on the client so subsequent discovery
     /// reconciliations can re-derive `instance_free` instead of leaving
-    /// a stale snapshot from this call.
+    /// a stale snapshot from this call. Serialized against
+    /// `monitor_instance_source`'s reconcile recompute via
+    /// `instance_state_write_lock` so the busy + free pair are updated
+    /// from a single synchronized snapshot.
     pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
         let busy_vec: Vec<u64> = busy_instance_ids.to_vec();
+        let _guard = self.instance_state_write_lock.lock().unwrap();
+        // Publish busy first; reconcile re-derives instance_free from
+        // instance_busy on every discovery refresh, so an interleaved
+        // reconcile that observes the new busy will compute the same
+        // instance_free we are about to store (idempotent).
+        self.instance_busy.store(Arc::new(Some(busy_vec.clone())));
         let all_instance_ids = self.instance_ids();
         let free_ids: Vec<u64> = all_instance_ids
             .into_iter()
             .filter(|id| !busy_vec.contains(id))
             .collect();
         self.instance_free.store(Arc::new(free_ids));
-        self.instance_busy.store(Arc::new(Some(busy_vec)));
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -289,15 +307,27 @@ impl Client {
                 // the busy filter. If no monitor has ever pushed busy
                 // state (None), instance_free mirrors discovery — that's
                 // the from_client / no-monitor baseline.
-                let free_ids: Vec<u64> = match &**client.instance_busy.load() {
-                    Some(busy) => instance_ids
-                        .iter()
-                        .copied()
-                        .filter(|id| !busy.contains(id))
-                        .collect(),
-                    None => instance_ids.clone(),
-                };
-                client.instance_free.store(Arc::new(free_ids));
+                //
+                // Take the write lock so update_free_instances cannot
+                // interleave between our load(busy) and our store(free).
+                // Without this, a concurrent update could install a new
+                // busy AND store a new free after we have loaded the old
+                // busy but before we store our stale free — leaving the
+                // stale instance_free as the winner. The guard is dropped
+                // before the await below (std::sync::MutexGuard is not
+                // Send and cannot be held across await points).
+                {
+                    let _guard = client.instance_state_write_lock.lock().unwrap();
+                    let free_ids: Vec<u64> = match &**client.instance_busy.load() {
+                        Some(busy) => instance_ids
+                            .iter()
+                            .copied()
+                            .filter(|id| !busy.contains(id))
+                            .collect(),
+                        None => instance_ids.clone(),
+                    };
+                    client.instance_free.store(Arc::new(free_ids));
+                }
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 let registry = client.endpoint.drt().routing_occupancy_states();
