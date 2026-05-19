@@ -525,6 +525,10 @@ mod test_event_processing {
 #[cfg(test)]
 mod tests_startup_helpers {
     use super::*;
+    use crate::kv_router::metrics::{
+        KV_PUBLISHER_EVENT_SOURCE_ZMQ, KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+        KV_PUBLISHER_EVENT_STAGE_RECEIVED, KV_PUBLISHER_EVENT_TYPE_STORED, KvPublisherMetrics,
+    };
     use crate::utils::zmq::{bind_pub_socket, send_multipart};
     use bytes::Bytes;
     use dynamo_kv_router::indexer::{
@@ -572,6 +576,29 @@ mod tests_startup_helpers {
 
     fn local_gpu_event(worker_id: WorkerId, event: KvCacheEvent) -> PlacementEvent {
         PlacementEvent::local_gpu(worker_id, event)
+    }
+
+    fn generic_event_metric_value(
+        metrics: &KvPublisherMetrics,
+        stage: &'static str,
+        event_type: &'static str,
+        source: &'static str,
+    ) -> u64 {
+        metrics
+            .events_total
+            .with_label_values(&[stage, event_type, source])
+            .get()
+    }
+
+    fn legacy_zmq_event_metric_value(
+        metrics: &KvPublisherMetrics,
+        stage: &'static str,
+        event_type: &'static str,
+    ) -> u64 {
+        metrics
+            .zmq_events_total
+            .with_label_values(&[stage, event_type])
+            .get()
     }
 
     //--------------------------------------------------------------------
@@ -937,6 +964,30 @@ mod tests_startup_helpers {
             kv_cache_spec_kind: Option<&'static str>,
         }
 
+        let metrics = KvPublisherMetrics::init_for_tests();
+        let legacy_received_before = legacy_zmq_event_metric_value(
+            &metrics,
+            KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+            KV_PUBLISHER_EVENT_TYPE_STORED,
+        );
+        let legacy_accepted_before = legacy_zmq_event_metric_value(
+            &metrics,
+            KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+            KV_PUBLISHER_EVENT_TYPE_STORED,
+        );
+        let generic_received_before = generic_event_metric_value(
+            &metrics,
+            KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+            KV_PUBLISHER_EVENT_TYPE_STORED,
+            KV_PUBLISHER_EVENT_SOURCE_ZMQ,
+        );
+        let generic_accepted_before = generic_event_metric_value(
+            &metrics,
+            KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+            KV_PUBLISHER_EVENT_TYPE_STORED,
+            KV_PUBLISHER_EVENT_SOURCE_ZMQ,
+        );
+
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
@@ -1026,6 +1077,37 @@ mod tests_startup_helpers {
         assert!(start_position.is_none());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_hash.0, 42);
+
+        assert!(
+            legacy_zmq_event_metric_value(
+                &metrics,
+                KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+                KV_PUBLISHER_EVENT_TYPE_STORED,
+            ) >= legacy_received_before + 1
+        );
+        assert!(
+            legacy_zmq_event_metric_value(
+                &metrics,
+                KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+                KV_PUBLISHER_EVENT_TYPE_STORED,
+            ) >= legacy_accepted_before + 1
+        );
+        assert!(
+            generic_event_metric_value(
+                &metrics,
+                KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+                KV_PUBLISHER_EVENT_TYPE_STORED,
+                KV_PUBLISHER_EVENT_SOURCE_ZMQ,
+            ) >= generic_received_before + 1
+        );
+        assert!(
+            generic_event_metric_value(
+                &metrics,
+                KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+                KV_PUBLISHER_EVENT_TYPE_STORED,
+                KV_PUBLISHER_EVENT_SOURCE_ZMQ,
+            ) >= generic_accepted_before + 1
+        );
 
         // Stop the listener
         token.cancel();
@@ -1745,6 +1827,10 @@ mod batching_state_tests {
 #[cfg(test)]
 mod event_processor_tests {
     use super::*;
+    use crate::kv_router::metrics::{
+        KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE, KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+        KV_PUBLISHER_EVENT_STAGE_RECEIVED, KV_PUBLISHER_EVENT_TYPE_STORED, KvPublisherMetrics,
+    };
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
@@ -1782,6 +1868,87 @@ mod event_processor_tests {
             Placement::local_worker(1, event.dp_rank, StorageTier::HostPinned),
             event,
         )
+    }
+
+    fn event_metric_value(
+        metrics: &KvPublisherMetrics,
+        stage: &'static str,
+        event_type: &'static str,
+        source: &'static str,
+    ) -> u64 {
+        metrics
+            .events_total
+            .with_label_values(&[stage, event_type, source])
+            .get()
+    }
+
+    #[tokio::test]
+    async fn test_run_event_processor_loop_records_event_plane_metrics() {
+        let metrics = KvPublisherMetrics::init_for_tests();
+        let received_before = event_metric_value(
+            &metrics,
+            KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+            KV_PUBLISHER_EVENT_TYPE_STORED,
+            KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
+        );
+        let accepted_before = event_metric_value(
+            &metrics,
+            KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+            KV_PUBLISHER_EVENT_TYPE_STORED,
+            KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
+        );
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                Some(100),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(1),
+                    tokens_hash: LocalBlockHash(100),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        assert!(
+            event_metric_value(
+                &metrics,
+                KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+                KV_PUBLISHER_EVENT_TYPE_STORED,
+                KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
+            ) >= received_before + 1
+        );
+        assert!(
+            event_metric_value(
+                &metrics,
+                KV_PUBLISHER_EVENT_STAGE_ACCEPTED,
+                KV_PUBLISHER_EVENT_TYPE_STORED,
+                KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE,
+            ) >= accepted_before + 1
+        );
     }
 
     /// Test that pushing N removed events results in batched output

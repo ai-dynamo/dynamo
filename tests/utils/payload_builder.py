@@ -315,6 +315,7 @@ def metric_payload_default(
 def kv_events_metrics_payload(
     *,
     event_type: str = "stored",
+    source: str = "zmq",
     min_received: int = 1,
     min_accepted: int = 1,
     port: int = DefaultPort.SYSTEM1.value,
@@ -328,6 +329,7 @@ def kv_events_metrics_payload(
         port=port,
         system_ports=system_ports or [],
         event_type=event_type,
+        source=source,
         min_received=min_received,
         min_accepted=min_accepted,
         settle_seconds=settle_seconds,

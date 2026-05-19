@@ -11,7 +11,9 @@ use tokio_util::sync::CancellationToken;
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
 
-use crate::kv_router::metrics::kv_publisher_metrics;
+use crate::kv_router::metrics::{
+    KV_PUBLISHER_EVENT_STAGE_ACCEPTED, KV_PUBLISHER_EVENT_STAGE_RECEIVED, kv_publisher_metrics,
+};
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 pub(super) async fn start_zmq_listener(
@@ -106,7 +108,7 @@ pub(super) async fn start_zmq_listener(
                 for raw_event in batch.events {
                     let event_type = raw_event.event_type_label();
                     if let Some(metrics) = &metrics {
-                        metrics.increment_zmq_event("received", event_type);
+                        metrics.increment_zmq_event(KV_PUBLISHER_EVENT_STAGE_RECEIVED, event_type);
                     }
                     let worker = WorkerWithDpRank::new(worker_id, dp_rank);
                     let raw_event = match normalizer.preprocess_with_reason(raw_event, worker) {
@@ -119,7 +121,7 @@ pub(super) async fn start_zmq_listener(
                         }
                     };
                     if let Some(metrics) = &metrics {
-                        metrics.increment_zmq_event("accepted", event_type);
+                        metrics.increment_zmq_event(KV_PUBLISHER_EVENT_STAGE_ACCEPTED, event_type);
                     }
                     let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
                     let Some(event) =

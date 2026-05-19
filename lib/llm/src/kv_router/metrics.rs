@@ -46,6 +46,7 @@
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
+use dynamo_kv_router::protocols::KvCacheEventData;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
@@ -81,6 +82,8 @@ fn async_overhead_buckets() -> Vec<f64> {
 pub(crate) struct KvPublisherMetrics {
     /// Total number of raw events dropped by engines before reaching publisher.
     pub engines_dropped_events_total: IntCounter,
+    /// Total number of KV events by source, publisher stage, and event type.
+    pub events_total: IntCounterVec,
     /// Total number of decoded ZMQ KV events by relay stage and event type.
     pub zmq_events_total: IntCounterVec,
     /// Total number of ZMQ KV events filtered before conversion.
@@ -93,7 +96,101 @@ pub(crate) struct KvPublisherMetrics {
 
 static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
 
+pub(crate) const KV_PUBLISHER_EVENT_SOURCE_ZMQ: &str = "zmq";
+pub(crate) const KV_PUBLISHER_EVENT_SOURCE_EVENT_PLANE: &str = "event_plane";
+pub(crate) const KV_PUBLISHER_EVENT_STAGE_RECEIVED: &str = "received";
+pub(crate) const KV_PUBLISHER_EVENT_STAGE_ACCEPTED: &str = "accepted";
+pub(crate) const KV_PUBLISHER_EVENT_TYPE_STORED: &str = "stored";
+pub(crate) const KV_PUBLISHER_EVENT_TYPE_REMOVED: &str = "removed";
+pub(crate) const KV_PUBLISHER_EVENT_TYPE_CLEARED: &str = "cleared";
+
+pub(crate) fn kv_cache_event_type_label(event: &KvCacheEventData) -> &'static str {
+    match event {
+        KvCacheEventData::Stored(_) => KV_PUBLISHER_EVENT_TYPE_STORED,
+        KvCacheEventData::Removed(_) => KV_PUBLISHER_EVENT_TYPE_REMOVED,
+        KvCacheEventData::Cleared => KV_PUBLISHER_EVENT_TYPE_CLEARED,
+    }
+}
+
+fn is_kv_publisher_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        KV_PUBLISHER_EVENT_TYPE_STORED
+            | KV_PUBLISHER_EVENT_TYPE_REMOVED
+            | KV_PUBLISHER_EVENT_TYPE_CLEARED
+    )
+}
+
 impl KvPublisherMetrics {
+    #[cfg(test)]
+    pub(crate) fn new_unregistered_for_tests() -> Self {
+        fn metric_name(name: &str) -> String {
+            format!("{}_{}", name_prefix::COMPONENT, name)
+        }
+
+        let engines_dropped_events_total = IntCounter::with_opts(Opts::new(
+            metric_name(kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL),
+            "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
+        ))
+        .expect("failed to create test kv_publisher_engines_dropped_events_total");
+        let events_total = IntCounterVec::new(
+            Opts::new(
+                metric_name(kv_publisher::EVENTS_TOTAL),
+                "Total number of KV events seen by publisher source, relay stage, and event type",
+            ),
+            &["stage", "event_type", "source"],
+        )
+        .expect("failed to create test kv_publisher_events_total");
+        let zmq_events_total = IntCounterVec::new(
+            Opts::new(
+                metric_name(kv_publisher::ZMQ_EVENTS_TOTAL),
+                "Total number of ZMQ KV events seen by the relay",
+            ),
+            &["stage", "event_type"],
+        )
+        .expect("failed to create test kv_publisher_zmq_events_total");
+        let zmq_filtered_events_total = IntCounterVec::new(
+            Opts::new(
+                metric_name(kv_publisher::ZMQ_FILTERED_EVENTS_TOTAL),
+                "Total number of ZMQ KV events filtered before conversion",
+            ),
+            &["event_type", "reason"],
+        )
+        .expect("failed to create test kv_publisher_zmq_filtered_events_total");
+        let zmq_conversion_issues_total = IntCounterVec::new(
+            Opts::new(
+                metric_name(kv_publisher::ZMQ_CONVERSION_ISSUES_TOTAL),
+                "Total number of ZMQ KV events dropped due to conversion issues",
+            ),
+            &["event_type", "reason"],
+        )
+        .expect("failed to create test kv_publisher_zmq_conversion_issues_total");
+        let zmq_suspicious_events_total = IntCounterVec::new(
+            Opts::new(
+                metric_name(kv_publisher::ZMQ_SUSPICIOUS_EVENTS_TOTAL),
+                "Total number of suspicious-but-forwarded ZMQ KV events",
+            ),
+            &["event_type", "reason"],
+        )
+        .expect("failed to create test kv_publisher_zmq_suspicious_events_total");
+
+        Self {
+            engines_dropped_events_total,
+            events_total,
+            zmq_events_total,
+            zmq_filtered_events_total,
+            zmq_conversion_issues_total,
+            zmq_suspicious_events_total,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn init_for_tests() -> Arc<Self> {
+        KV_PUBLISHER_METRICS
+            .get_or_init(|| Arc::new(Self::new_unregistered_for_tests()))
+            .clone()
+    }
+
     /// Create from a Component, memoized in a static OnceLock.
     /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
     /// injects hierarchy labels (including `worker_id`), and registers with the
@@ -109,6 +206,14 @@ impl KvPublisherMetrics {
                         &[],
                     )
                     .expect("failed to create kv_publisher_engines_dropped_events_total");
+                let events_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::EVENTS_TOTAL,
+                        "Total number of KV events seen by publisher source, relay stage, and event type",
+                        &["stage", "event_type", "source"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_events_total");
                 let zmq_events_total = metrics
                     .create_intcountervec(
                         kv_publisher::ZMQ_EVENTS_TOTAL,
@@ -144,6 +249,7 @@ impl KvPublisherMetrics {
 
                 Arc::new(Self {
                     engines_dropped_events_total,
+                    events_total,
                     zmq_events_total,
                     zmq_filtered_events_total,
                     zmq_conversion_issues_total,
@@ -158,10 +264,24 @@ impl KvPublisherMetrics {
         self.engines_dropped_events_total.inc_by(count);
     }
 
+    pub fn increment_event(
+        &self,
+        stage: &'static str,
+        event_type: &'static str,
+        source: &'static str,
+    ) {
+        self.events_total
+            .with_label_values(&[stage, event_type, source])
+            .inc();
+    }
+
     pub fn increment_zmq_event(&self, stage: &'static str, event_type: &'static str) {
         self.zmq_events_total
             .with_label_values(&[stage, event_type])
             .inc();
+        if is_kv_publisher_event_type(event_type) {
+            self.increment_event(stage, event_type, KV_PUBLISHER_EVENT_SOURCE_ZMQ);
+        }
     }
 
     pub fn increment_zmq_filtered_event(&self, event_type: &'static str, reason: &'static str) {
@@ -185,6 +305,79 @@ impl KvPublisherMetrics {
 
 pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
     KV_PUBLISHER_METRICS.get().cloned()
+}
+
+#[cfg(test)]
+mod kv_publisher_metric_tests {
+    use super::*;
+    use prometheus::Encoder;
+    use prometheus::core::Collector;
+
+    fn encode_metric_families(metrics: &KvPublisherMetrics) -> String {
+        let mut metric_families = metrics.events_total.collect();
+        metric_families.extend(metrics.zmq_events_total.collect());
+
+        let mut buffer = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&metric_families, &mut buffer)
+            .expect("failed to encode metrics");
+        String::from_utf8(buffer).expect("metrics were not valid utf-8")
+    }
+
+    #[test]
+    fn kv_cache_event_type_labels_are_stable() {
+        let stored = KvCacheEventData::Stored(dynamo_kv_router::protocols::KvCacheStoreData {
+            parent_hash: None,
+            start_position: None,
+            blocks: vec![],
+        });
+        let removed = KvCacheEventData::Removed(dynamo_kv_router::protocols::KvCacheRemoveData {
+            block_hashes: vec![],
+        });
+
+        assert_eq!(kv_cache_event_type_label(&stored), "stored");
+        assert_eq!(kv_cache_event_type_label(&removed), "removed");
+        assert_eq!(
+            kv_cache_event_type_label(&KvCacheEventData::Cleared),
+            "cleared"
+        );
+    }
+
+    #[test]
+    fn zmq_event_increments_legacy_and_generic_metrics() {
+        let metrics = KvPublisherMetrics::new_unregistered_for_tests();
+
+        metrics.increment_zmq_event(
+            KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+            KV_PUBLISHER_EVENT_TYPE_STORED,
+        );
+
+        let legacy = metrics
+            .zmq_events_total
+            .with_label_values(&[
+                KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+                KV_PUBLISHER_EVENT_TYPE_STORED,
+            ])
+            .get();
+        let generic = metrics
+            .events_total
+            .with_label_values(&[
+                KV_PUBLISHER_EVENT_STAGE_RECEIVED,
+                KV_PUBLISHER_EVENT_TYPE_STORED,
+                KV_PUBLISHER_EVENT_SOURCE_ZMQ,
+            ])
+            .get();
+
+        assert_eq!(legacy, 1);
+        assert_eq!(generic, 1);
+
+        let content = encode_metric_families(&metrics);
+        assert!(content.contains("dynamo_component_kv_publisher_zmq_events_total"));
+        assert!(content.contains("dynamo_component_kv_publisher_events_total"));
+        assert!(content.contains("event_type=\"stored\""));
+        assert!(content.contains("source=\"zmq\""));
+        assert!(content.contains("stage=\"received\""));
+    }
 }
 
 // ---------------------------------------------------------------------------

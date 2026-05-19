@@ -700,6 +700,9 @@ pub mod kv_publisher {
     /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
 
+    /// Total number of KV events seen by publisher source, relay stage, and event type
+    pub const EVENTS_TOTAL: &str = "kv_publisher_events_total";
+
     /// Total number of ZMQ KV events seen by the relay, labeled by stage and event type
     pub const ZMQ_EVENTS_TOTAL: &str = "kv_publisher_zmq_events_total";
 
