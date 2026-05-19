@@ -129,7 +129,7 @@ pub(crate) fn simulate_trace(
     record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_trace_single(args, requests, arrival_speedup_ratio)
+        simulate_trace_single(args, requests, arrival_speedup_ratio, record_per_request)
     } else {
         simulate_trace_multi(
             args,
@@ -156,7 +156,7 @@ pub(crate) fn simulate_concurrency(
     record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_concurrency_single(args, requests, max_in_flight)
+        simulate_concurrency_single(args, requests, max_in_flight, record_per_request)
     } else {
         simulate_concurrency_multi(
             args,
@@ -225,7 +225,7 @@ fn simulate_trace_workload_with_delta_mode(
     record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_trace_workload_single(args, trace, accumulate_session_deltas)
+        simulate_trace_workload_single(args, trace, accumulate_session_deltas, record_per_request)
     } else {
         simulate_trace_workload_multi(
             args,
@@ -301,7 +301,13 @@ fn simulate_concurrency_workload_with_delta_mode(
     record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_concurrency_workload_single(args, trace, max_in_flight, accumulate_session_deltas)
+        simulate_concurrency_workload_single(
+            args,
+            trace,
+            max_in_flight,
+            accumulate_session_deltas,
+            record_per_request,
+        )
     } else {
         simulate_concurrency_workload_multi(
             args,
@@ -416,11 +422,14 @@ pub(crate) fn simulate_trace_single(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
+    record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace).run()?;
+    let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace)
+        .with_per_request_records(record_per_request)
+        .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
@@ -428,6 +437,7 @@ pub(crate) fn simulate_concurrency_single(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
+    record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -437,6 +447,7 @@ pub(crate) fn simulate_concurrency_single(
         pending,
         SingleReplayMode::Concurrency { max_in_flight },
     )
+    .with_per_request_records(record_per_request)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
@@ -445,6 +456,7 @@ pub(crate) fn simulate_trace_workload_single(
     args: MockEngineArgs,
     trace: Trace,
     accumulate_session_deltas: bool,
+    record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -454,7 +466,9 @@ pub(crate) fn simulate_trace_workload_single(
     } else {
         trace.into_trace_driver_with_block_size(engine_block_size)?
     };
-    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace).run()?;
+    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)
+        .with_per_request_records(record_per_request)
+        .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
@@ -463,6 +477,7 @@ pub(crate) fn simulate_concurrency_workload_single(
     trace: Trace,
     max_in_flight: usize,
     accumulate_session_deltas: bool,
+    record_per_request: bool,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -477,6 +492,7 @@ pub(crate) fn simulate_concurrency_workload_single(
         driver,
         SingleReplayMode::Concurrency { max_in_flight },
     )
+    .with_per_request_records(record_per_request)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
