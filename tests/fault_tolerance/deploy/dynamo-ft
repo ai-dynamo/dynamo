@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# dynamo-ft — thin wrapper around `uv run pytest` for the overload /
+# fault-tolerance test harness. Resolves short scenario names to pytest
+# nodeids, applies sensible defaults (namespace, prefetch-model,
+# skip-service-restart), and optionally tees output to a log file you
+# can `tail -f`.
+#
+# Usage:
+#   dynamo-ft <target> [extra pytest args...]
+#
+# Targets:
+#   decode_overload                              — alias for the overload scenario
+#   test_overload.py::test_decode_overload       — explicit pytest nodeid
+#   <path>.yaml                                  — future: yaml-driven scenario
+#
+# Flags handled by the wrapper (rest pass through to pytest):
+#   -n / --namespace <ns>          (default $DYNAMO_FT_NAMESPACE or `neelays-test`)
+#   -i / --image <img>             (default $DYNAMO_FT_IMAGE; if unset the test's
+#                                   own default applies — currently vllm-runtime:1.1.1)
+#   -s / --storage-class <sc>      (default $DYNAMO_FT_STORAGE_CLASS)
+#   -l / --log <file>              (tee output to <file>; otherwise stdout)
+#       --no-prefetch-model        (skip prefetch; default is to prefetch)
+#       --no-skip-service-restart  (do restart NATS/etcd; default skips)
+#       --bg                       (run in background, write PID + log path)
+#       --list                     (print known scenario aliases and exit)
+#       --dry-run                  (print the pytest command and exit)
+#
+# Env vars:
+#   DYNAMO_FT_NAMESPACE / DYNAMO_FT_IMAGE / DYNAMO_FT_STORAGE_CLASS
+
+set -euo pipefail
+
+# ─── resolve script dir (so this works from anywhere) ────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── defaults from env ───────────────────────────────────────────────
+NAMESPACE="${DYNAMO_FT_NAMESPACE:-neelays-test}"
+IMAGE="${DYNAMO_FT_IMAGE:-}"
+STORAGE_CLASS="${DYNAMO_FT_STORAGE_CLASS:-}"
+LOG_FILE=""
+PREFETCH_MODEL=1
+SKIP_SERVICE_RESTART=1
+BG=0
+DRY_RUN=0
+LIST=0
+
+# ─── known aliases ────────────────────────────────────────────────────
+# Add new scenarios here as the file grows.
+declare -A ALIASES=(
+    [decode_overload]="test_overload.py::test_decode_overload"
+)
+
+print_aliases() {
+    echo "Known scenario aliases:"
+    for k in "${!ALIASES[@]}"; do
+        printf "  %-30s → %s\n" "$k" "${ALIASES[$k]}"
+    done
+}
+
+usage() { sed -n '4,/^set/p' "$0" | grep -E '^#' | sed 's/^# \?//'; }
+
+# ─── arg parsing ──────────────────────────────────────────────────────
+TARGET=""
+EXTRA=()
+while (($# > 0)); do
+    case "$1" in
+        -n | --namespace) NAMESPACE="$2"; shift 2 ;;
+        -i | --image) IMAGE="$2"; shift 2 ;;
+        -s | --storage-class) STORAGE_CLASS="$2"; shift 2 ;;
+        -l | --log) LOG_FILE="$2"; shift 2 ;;
+        --no-prefetch-model) PREFETCH_MODEL=0; shift ;;
+        --no-skip-service-restart) SKIP_SERVICE_RESTART=0; shift ;;
+        --bg) BG=1; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --list) LIST=1; shift ;;
+        -h | --help) usage; exit 0 ;;
+        --)
+            shift; while (($# > 0)); do EXTRA+=("$1"); shift; done ;;
+        -*) EXTRA+=("$1"); shift ;;
+        *)
+            if [[ -z "$TARGET" ]]; then TARGET="$1"; shift
+            else EXTRA+=("$1"); shift
+            fi ;;
+    esac
+done
+
+if ((LIST)); then print_aliases; exit 0; fi
+if [[ -z "$TARGET" ]]; then echo "error: no target given (use --list to see aliases)" >&2; exit 2; fi
+
+# ─── resolve TARGET → pytest nodeid ──────────────────────────────────
+if [[ -n "${ALIASES[$TARGET]:-}" ]]; then
+    NODEID="${ALIASES[$TARGET]}"
+elif [[ "$TARGET" == *.yaml ]]; then
+    # Reserved for the YAML runner once it lands.
+    stem="$(basename "$TARGET" .yaml)"
+    NODEID="test_overload_yaml.py::test_yaml_scenario[$stem]"
+elif [[ "$TARGET" == *::* || "$TARGET" == *.py ]]; then
+    NODEID="$TARGET"
+else
+    echo "error: unknown target $TARGET" >&2; print_aliases >&2; exit 2
+fi
+
+# ─── build pytest args ───────────────────────────────────────────────
+ARGS=( "$NODEID" --namespace "$NAMESPACE" -s -v )
+[[ -n "$IMAGE" ]]              && ARGS+=( --image "$IMAGE" )
+[[ -n "$STORAGE_CLASS" ]]      && ARGS+=( --storage-class "$STORAGE_CLASS" )
+((PREFETCH_MODEL))             && ARGS+=( --prefetch-model )
+((SKIP_SERVICE_RESTART))       && ARGS+=( --skip-service-restart )
+ARGS+=( "${EXTRA[@]}" )
+
+# Default log path if --bg without --log
+if ((BG)) && [[ -z "$LOG_FILE" ]]; then
+    LOG_FILE="/tmp/dynamo-ft-$(date +%Y%m%d-%H%M%S).log"
+fi
+
+cd "$SCRIPT_DIR"
+
+if ((DRY_RUN)); then
+    echo "(cd $SCRIPT_DIR && uv run pytest ${ARGS[*]@Q})"
+    [[ -n "$LOG_FILE" ]] && echo "  → log: $LOG_FILE"
+    exit 0
+fi
+
+if ((BG)); then
+    nohup uv run pytest "${ARGS[@]}" > "$LOG_FILE" 2>&1 &
+    echo "PID: $!"
+    echo "log: $LOG_FILE"
+    echo "tail with:  tail -f $LOG_FILE"
+elif [[ -n "$LOG_FILE" ]]; then
+    uv run pytest "${ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+else
+    exec uv run pytest "${ARGS[@]}"
+fi
