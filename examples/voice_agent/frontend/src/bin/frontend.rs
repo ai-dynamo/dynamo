@@ -30,9 +30,8 @@ use tokio::{
         TcpListener,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::{Mutex, MutexGuard, Notify},
+    sync::{Mutex, Notify},
 };
-use voice_agent_realtime::server_event_finishes_turn;
 
 const MODEL_NAME: &str = "echo";
 const NAMESPACE: &str = "voice-agent";
@@ -162,14 +161,14 @@ impl BackendBridge {
         }
     }
 
-    async fn wait_for_connection<'a>(
-        &'a self,
+    async fn wait_for_connection(
+        &self,
         ctx: &Arc<dyn AsyncEngineContext>,
-    ) -> Option<MutexGuard<'a, Option<BackendConnection>>> {
+    ) -> Option<BackendConnection> {
         loop {
-            let guard = self.connection.lock().await;
-            if guard.is_some() {
-                return Some(guard);
+            let mut guard = self.connection.lock().await;
+            if let Some(conn) = guard.take() {
+                return Some(conn);
             }
             drop(guard);
 
@@ -203,76 +202,62 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
 
         let output = stream! {
             let ctx = ctx_for_stream;
+            let Some(mut conn) = bridge.wait_for_connection(&ctx).await else {
+                return;
+            };
+            let mut backend_lines = conn.reader.lines();
 
-            while let Some(event) = incoming.next().await {
+            loop {
                 if ctx.is_stopped() {
                     break;
                 }
 
-                let Some(mut guard) = bridge.wait_for_connection(&ctx).await else {
-                    break;
-                };
-                let Some(conn) = guard.as_mut() else {
-                    continue;
-                };
-
-                match serde_json::to_string(&event) {
-                    Ok(payload) => {
-                        if let Err(err) = conn.writer.write_all(payload.as_bytes()).await {
-                            tracing::warn!(%err, "failed to write request to realtime backend");
-                            *guard = None;
-                            continue;
+                tokio::select! {
+                    maybe_event = incoming.next() => {
+                        let Some(event) = maybe_event else {
+                            break;
+                        };
+                        match serde_json::to_string(&event) {
+                            Ok(payload) => {
+                                if let Err(err) = conn.writer.write_all(payload.as_bytes()).await {
+                                    tracing::warn!(%err, "failed to write request to realtime backend");
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(%err, "failed to serialize realtime request");
+                                continue;
+                            }
                         }
-                    }
-                    Err(err) => {
-                        tracing::warn!(%err, "failed to serialize realtime request");
-                        continue;
-                    }
-                }
-                if let Err(err) = conn.writer.write_all(b"\n").await {
-                    tracing::warn!(%err, "failed to finish request frame to realtime backend");
-                    *guard = None;
-                    continue;
-                }
-                if let Err(err) = conn.writer.flush().await {
-                    tracing::warn!(%err, "failed to flush request to realtime backend");
-                    *guard = None;
-                    continue;
-                }
-
-                let mut line = String::new();
-                loop {
-                    if ctx.is_stopped() {
-                        break;
-                    }
-
-                    line.clear();
-                    match conn.reader.read_line(&mut line).await {
-                        Ok(0) => {
-                            tracing::warn!("realtime backend disconnected");
-                            *guard = None;
+                        if let Err(err) = conn.writer.write_all(b"\n").await {
+                            tracing::warn!(%err, "failed to finish request frame to realtime backend");
                             break;
                         }
-                        Ok(_) => {}
-                        Err(err) => {
-                            tracing::warn!(%err, "failed to read response from realtime backend");
-                            *guard = None;
+                        if let Err(err) = conn.writer.flush().await {
+                            tracing::warn!(%err, "failed to flush request to realtime backend");
                             break;
                         }
                     }
-
-                    let chunk: Annotated<RealtimeServerEvent> =
-                        match serde_json::from_str(line.trim_end()) {
+                    maybe_line = backend_lines.next_line() => {
+                        let line = match maybe_line {
+                            Ok(Some(line)) => line,
+                            Ok(None) => {
+                                tracing::warn!("realtime backend disconnected");
+                                break;
+                            }
+                            Err(err) => {
+                                tracing::warn!(%err, "failed to read response from realtime backend");
+                                break;
+                            }
+                        };
+                        let chunk: Annotated<RealtimeServerEvent> = match serde_json::from_str(&line) {
                             Ok(chunk) => chunk,
                             Err(err) => {
                                 tracing::warn!(%err, "realtime backend sent malformed response");
                                 continue;
                             }
                         };
-                    let finished = server_event_finishes_turn(&chunk);
-                    yield chunk;
-                    if finished {
-                        break;
+                        yield chunk;
                     }
                 }
             }

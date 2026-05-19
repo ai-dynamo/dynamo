@@ -110,6 +110,7 @@ class DynamoASRService(SegmentedSTTService):
             client = await self._ensure_client()
             request = AsrRequest(
                 audio_b64=base64.b64encode(audio).decode("ascii"),
+                # SegmentedSTTService wraps the buffered PCM utterance as WAV.
                 encoding="wav",
                 sample_rate_hz=self._sample_rate,
                 channels=self._channels,

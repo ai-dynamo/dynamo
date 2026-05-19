@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--audio-file",
         type=Path,
-        help="16-bit PCM WAV file to send as input_audio_buffer.append audio.",
+        help="16-bit mono PCM WAV file to read as input_audio_buffer.append PCM audio.",
     )
     parser.add_argument(
         "--chunk-seconds",
@@ -50,7 +50,8 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help=(
             "Split --audio-file into multiple input_audio_buffer.append events "
-            "of this many seconds. 0 sends the whole file as one event."
+            "of this many seconds before sending input_audio_buffer.commit. "
+            "0 sends the whole file as one append event."
         ),
     )
     parser.add_argument(
@@ -143,7 +144,6 @@ async def run_client(args: argparse.Namespace) -> None:
         )
         await expect_event(ws, "session.updated", args.timeout)
 
-        outputs = []
         for audio in audio_chunks:
             await ws.send(
                 json.dumps(
@@ -154,49 +154,43 @@ async def run_client(args: argparse.Namespace) -> None:
                 )
             )
 
-            audio_base64 = ""
-            streamed_output = False
-            input_transcript = None
-            while True:
-                event = await recv_event(ws, args.timeout)
-                event_type = event.get("type")
-                if event_type == "response.output_audio.delta":
-                    audio_base64 += event.get("delta", "")
-                    decode_len = (len(audio_base64) // 4) * 4
-                    if decode_len:
-                        decoded = base64.b64decode(
-                            audio_base64[:decode_len],
-                            validate=False,
-                        ).decode("utf-8", errors="replace")
-                        printer.write(decoded)
-                        streamed_output = True
-                        audio_base64 = audio_base64[decode_len:]
-                elif event_type == "response.output_text.delta":
-                    printer.write(event.get("delta", ""))
-                    streamed_output = True
-                elif (
-                    event_type
-                    == "conversation.item.input_audio_transcription.completed"
-                ):
-                    input_transcript = event.get("transcript")
-                elif event_type == "response.done":
-                    if audio_base64:
-                        padded_audio = audio_base64 + "=" * (-len(audio_base64) % 4)
-                        decoded = base64.b64decode(padded_audio).decode(
-                            "utf-8", errors="replace"
-                        )
-                        printer.write(decoded)
-                        streamed_output = True
-                    if streamed_output:
-                        printer.finish_turn()
-                    elif input_transcript is not None:
-                        outputs.append(input_transcript)
-                    break
+        await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
 
-        if outputs:
-            if printer.printed and not printer.ends_with_newline:
-                printer.finish_turn()
-            print("\n".join(outputs))
+        audio_base64 = ""
+        streamed_output = False
+        input_transcript = None
+        while True:
+            event = await recv_event(ws, args.timeout)
+            event_type = event.get("type")
+            if event_type == "response.output_audio.delta":
+                audio_base64 += event.get("delta", "")
+                decode_len = (len(audio_base64) // 4) * 4
+                if decode_len:
+                    decoded = base64.b64decode(
+                        audio_base64[:decode_len],
+                        validate=False,
+                    ).decode("utf-8", errors="replace")
+                    printer.write(decoded)
+                    streamed_output = True
+                    audio_base64 = audio_base64[decode_len:]
+            elif event_type == "response.output_text.delta":
+                printer.write(event.get("delta", ""))
+                streamed_output = True
+            elif event_type == "conversation.item.input_audio_transcription.completed":
+                input_transcript = event.get("transcript")
+            elif event_type == "response.done":
+                if audio_base64:
+                    padded_audio = audio_base64 + "=" * (-len(audio_base64) % 4)
+                    decoded = base64.b64decode(padded_audio).decode(
+                        "utf-8", errors="replace"
+                    )
+                    printer.write(decoded)
+                    streamed_output = True
+                if streamed_output:
+                    printer.finish_turn()
+                elif input_transcript is not None:
+                    print(input_transcript)
+                break
 
 
 def main() -> int:

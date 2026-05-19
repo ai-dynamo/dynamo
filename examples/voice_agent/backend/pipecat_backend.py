@@ -226,6 +226,7 @@ class PipecatASRSession:
         self._channels = args.channels
         self._timeout = args.pipeline_timeout
         self._drain_timeout = args.transcript_drain_timeout
+        self._input_audio_buffer = bytearray()
         self._output_queue: asyncio.Queue[
             TranscriptResult | PipelineFailure
         ] = asyncio.Queue()
@@ -296,6 +297,17 @@ class PipecatASRSession:
             if result.final:
                 text_parts.append(result.text)
 
+    def append_audio(self, audio: bytes) -> None:
+        self._input_audio_buffer.extend(audio)
+
+    def clear_audio(self) -> None:
+        self._input_audio_buffer.clear()
+
+    def commit_audio(self) -> bytes:
+        audio = bytes(self._input_audio_buffer)
+        self._input_audio_buffer.clear()
+        return audio
+
     def audio_duration_seconds(self, audio: bytes) -> float:
         return len(audio) / (self._sample_rate * self._channels * 2)
 
@@ -334,8 +346,61 @@ async def handle_event(
         return frame
 
     if event_type == "input_audio_buffer.append":
+        audio_base64 = event.get("audio", "")
+        if not isinstance(audio_base64, str):
+            audio_base64 = ""
+
+        try:
+            session.append_audio(base64.b64decode(audio_base64, validate=False))
+        except Exception as exc:
+            frame += 1
+            await write_chunk(
+                writer,
+                error_event(frame, f"failed to decode input audio append: {exc}"),
+            )
+        return frame
+
+    if event_type == "input_audio_buffer.clear":
+        session.clear_audio()
+        frame += 1
+        await write_chunk(
+            writer,
+            annotated_event(
+                frame,
+                {
+                    "type": "input_audio_buffer.cleared",
+                    "event_id": f"event_{SESSION_ID}_{frame}",
+                },
+            ),
+        )
+        return frame
+
+    if event_type == "input_audio_buffer.commit":
         response_id = f"resp_{SESSION_ID}_{frame}"
         item_id = f"item_{SESSION_ID}_{frame}"
+
+        input_audio = session.commit_audio()
+        if not input_audio:
+            frame += 1
+            await write_chunk(
+                writer,
+                error_event(frame, "input audio buffer is empty"),
+            )
+            return frame
+
+        frame += 1
+        await write_chunk(
+            writer,
+            annotated_event(
+                frame,
+                {
+                    "type": "input_audio_buffer.committed",
+                    "event_id": f"event_{SESSION_ID}_{frame}",
+                    "previous_item_id": None,
+                    "item_id": item_id,
+                },
+            ),
+        )
 
         frame += 1
         await write_chunk(
@@ -350,12 +415,7 @@ async def handle_event(
             ),
         )
 
-        audio_base64 = event.get("audio", "")
-        if not isinstance(audio_base64, str):
-            audio_base64 = ""
-
         try:
-            input_audio = base64.b64decode(audio_base64, validate=False)
             transcript = await session.transcribe_audio(input_audio)
         except Exception as exc:
             frame += 1
