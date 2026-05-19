@@ -373,25 +373,17 @@ def build_sampling_params(
         ):
             existing = sampling_params.stop_token_ids or []
             sampling_params.stop_token_ids = list(set(existing).union(value))
-        # Dynamo's StopConditions uses `max_thinking_tokens`. We do NOT map
-        # it to vLLM's builtin `SamplingParams.thinking_token_budget` because
-        # that field requires ``vllm_config.reasoning_config`` to be
-        # configured (vLLM raises a ``ValueError`` otherwise) — and enabling
-        # ``reasoning_config`` (via ``--reasoning-parser``) destabilizes
-        # ``tool_choice=required`` on Qwen3 family models via sampling-pipeline
-        # side effects in ``gpu_model_runner.py``.
-        #
-        # Instead, the value rides in ``SamplingParams.extra_args`` and is
-        # enforced by ``DynThinkingBudgetLogitsProcessor`` (auto-installed when
-        # ``--dyn-reasoning-parser`` is set; see ``main.py``).
-        if key == "max_thinking_tokens" and value is not None:
-            from dynamo.vllm.dyn_thinking_budget_logits_processor import (
-                BUDGET_KEY,
-            )
-
-            extra = dict(sampling_params.extra_args or {})
-            extra[BUDGET_KEY] = int(value)
-            sampling_params.extra_args = extra
+        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
+        # the same concept as `thinking_token_budget` on SamplingParams and
+        # enforces it via the builtin thinking-budget logits processor.
+        # ``reasoning_parser`` is auto-forwarded in ``main.py`` so vLLM's
+        # ``reasoning_config`` is populated for budget enforcement.
+        if (
+            key == "max_thinking_tokens"
+            and value is not None
+            and hasattr(sampling_params, "thinking_token_budget")
+        ):
+            sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
     output_options = request.get("output_options", {})
