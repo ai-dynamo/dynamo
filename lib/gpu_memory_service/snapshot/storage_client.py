@@ -9,8 +9,6 @@ import base64
 import json
 import logging
 import os
-import queue
-import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,9 +32,6 @@ from gpu_memory_service.snapshot.disk import (
 )
 from gpu_memory_service.snapshot.disk import (
     read_shard_sequential as _read_shard_sequential_impl,
-)
-from gpu_memory_service.snapshot.disk import (
-    read_shard_to_queue as _read_shard_to_queue_impl,
 )
 from gpu_memory_service.snapshot.model import CURRENT_VERSION as _CURRENT_VERSION
 from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
@@ -128,24 +123,6 @@ def _plan_shard_layout(
     shard_size_bytes: int,
 ) -> List[Tuple[int, int]]:
     return _plan_shard_layout_impl(allocations_info, shard_size_bytes)
-
-
-def _read_shard_to_queue(
-    abs_path: str,
-    sorted_entries: List[AllocationEntry],
-    work_q: "queue.Queue[Optional[Tuple[AllocationEntry, 'torch.Tensor']]]",
-    *,
-    pin_memory: bool,
-    cancel_event: Optional[threading.Event] = None,
-) -> int:
-    return _read_shard_to_queue_impl(
-        abs_path,
-        sorted_entries,
-        work_q,
-        pin_memory=pin_memory,
-        read_shard=_read_shard_sequential,
-        cancel_event=cancel_event,
-    )
 
 
 def _load_manifest_and_metadata(
