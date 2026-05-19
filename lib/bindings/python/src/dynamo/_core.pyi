@@ -1813,7 +1813,6 @@ class MockEngineArgs:
         max_num_batched_tokens: Optional[int] = 8192,
         enable_prefix_caching: bool = True,
         enable_chunked_prefill: bool = True,
-        scheduler_reserve_full_isl: bool = True,
         speedup_ratio: float = 1.0,
         decode_speedup_ratio: float = 1.0,
         dp_size: int = 1,
@@ -1854,6 +1853,7 @@ class MockEngineArgs:
         enable_g4_storage: bool = False,
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
+        scheduler_reserve_full_isl: bool = True,
     ) -> None:
         ...
 
