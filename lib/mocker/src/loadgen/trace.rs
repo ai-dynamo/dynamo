@@ -70,7 +70,7 @@ impl TurnTrace {
         Ok(())
     }
 
-    pub(crate) fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
+    pub fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
         self.validate_block_size_and_capacity(trace_block_size)?;
 
         let mut tokens = Vec::with_capacity(self.input_length);
@@ -742,6 +742,10 @@ impl Trace {
         Ok(requests)
     }
 
+    pub fn is_single_turn(&self) -> bool {
+        self.sessions.iter().all(|session| session.turns.len() == 1)
+    }
+
     pub fn to_router_sequences(
         &self,
         worker_id: WorkerId,
@@ -795,12 +799,28 @@ impl Trace {
         WorkloadDriver::new_trace(self, engine_block_size)
     }
 
+    pub fn into_delta_accumulating_trace_driver_with_block_size(
+        self,
+        engine_block_size: usize,
+    ) -> Result<WorkloadDriver> {
+        self.validate_for_trace_mode()?;
+        WorkloadDriver::new_trace_accumulating_deltas(self, engine_block_size)
+    }
+
     pub fn into_concurrency_driver_with_block_size(
         self,
         engine_block_size: usize,
     ) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
         WorkloadDriver::new_concurrency(self, engine_block_size)
+    }
+
+    pub fn into_delta_accumulating_concurrency_driver_with_block_size(
+        self,
+        engine_block_size: usize,
+    ) -> Result<WorkloadDriver> {
+        self.validate_for_concurrency_mode()?;
+        WorkloadDriver::new_concurrency_accumulating_deltas(self, engine_block_size)
     }
 
     fn validate(&self, allow_missing_first_timestamp: bool) -> Result<()> {

@@ -9,8 +9,12 @@
 //! 3. Splitting off exact message sizes (zero-copy via Bytes::split_to)
 //! 4. Returning Arc-counted Bytes that can be cloned cheaply
 
+use super::{
+    check_tcp_request_max_message_size, parse_tcp_request_frame_header, tcp_request_endpoint_len,
+    tcp_request_header_size, tcp_request_headers_len,
+};
 use crate::pipeline::network::get_tcp_max_message_size;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use std::io;
 use std::sync::OnceLock;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -109,12 +113,8 @@ impl ZeroCopyTcpDecoder {
         &mut self,
         reader: &mut R,
     ) -> io::Result<TcpRequestMessageZeroCopy> {
-        // Ensure we have at least enough bytes to start parsing
-        // Wire format: [path_len(2)][path][headers_len(2)][headers][payload_len(4)][payload]
-        const MIN_HEADER_SIZE: usize = 2;
-
         // Fill buffer if needed
-        while self.read_buffer.len() < MIN_HEADER_SIZE {
+        while self.read_buffer.len() < super::TCP_REQUEST_ENDPOINT_LEN_WIDTH {
             let n = reader.read_buf(&mut self.read_buffer).await?;
             if n == 0 {
                 if self.read_buffer.is_empty() {
@@ -132,18 +132,11 @@ impl ZeroCopyTcpDecoder {
         }
 
         // Parse endpoint path length (first 2 bytes) - NO COPY
-        let path_len = u16::from_be_bytes([self.read_buffer[0], self.read_buffer[1]]) as usize;
-
-        // Sanity check path length
-        if path_len == 0 || path_len > 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid endpoint path length: {}", path_len),
-            ));
-        }
+        let path_len = tcp_request_endpoint_len(&self.read_buffer)?;
 
         // Ensure we have path + headers_len
-        let initial_header_size = 2 + path_len + 2; // path_len(2) + path + headers_len(2)
+        let initial_header_size =
+            super::TCP_REQUEST_ENDPOINT_LEN_WIDTH + path_len + super::TCP_REQUEST_HEADERS_LEN_WIDTH;
         while self.read_buffer.len() < initial_header_size {
             let n = reader.read_buf(&mut self.read_buffer).await?;
             if n == 0 {
@@ -155,14 +148,10 @@ impl ZeroCopyTcpDecoder {
         }
 
         // Parse headers length (2 bytes after path) - NO COPY
-        let headers_len_offset = 2 + path_len;
-        let headers_len = u16::from_be_bytes([
-            self.read_buffer[headers_len_offset],
-            self.read_buffer[headers_len_offset + 1],
-        ]) as usize;
+        let headers_len = tcp_request_headers_len(&self.read_buffer, path_len)?;
 
         // Ensure we have headers + payload length
-        let full_header_size = 2 + path_len + 2 + headers_len + 4; // path_len(2) + path + headers_len(2) + headers + payload_len(4)
+        let full_header_size = tcp_request_header_size(path_len, headers_len);
         while self.read_buffer.len() < full_header_size {
             let n = reader.read_buf(&mut self.read_buffer).await?;
             if n == 0 {
@@ -173,38 +162,20 @@ impl ZeroCopyTcpDecoder {
             }
         }
 
-        // Parse payload length (4 bytes after headers) - NO COPY
-        let payload_len_offset = 2 + path_len + 2 + headers_len;
-        let payload_len = u32::from_be_bytes([
-            self.read_buffer[payload_len_offset],
-            self.read_buffer[payload_len_offset + 1],
-            self.read_buffer[payload_len_offset + 2],
-            self.read_buffer[payload_len_offset + 3],
-        ]) as usize;
-
-        // Calculate total message size
-        let total_len = 2 + path_len + 2 + headers_len + 4 + payload_len;
+        let parsed = parse_tcp_request_frame_header(&self.read_buffer)?;
 
         // Sanity check total message length (including all overhead)
-        if total_len > self.max_message_size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "message too large: {} bytes (max: {} bytes)",
-                    total_len, self.max_message_size
-                ),
-            ));
-        }
+        check_tcp_request_max_message_size(parsed.total_len, self.max_message_size)?;
 
         // Ensure entire message is buffered
-        while self.read_buffer.len() < total_len {
+        while self.read_buffer.len() < parsed.total_len {
             let n = reader.read_buf(&mut self.read_buffer).await?;
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     format!(
                         "incomplete message: expected {} bytes, got {}",
-                        total_len,
+                        parsed.total_len,
                         self.read_buffer.len()
                     ),
                 ));
@@ -213,7 +184,7 @@ impl ZeroCopyTcpDecoder {
 
         // Split off exactly what we need - ZERO COPY!
         // split_to() just advances the internal pointer, doesn't allocate or copy
-        let message_bytes = self.read_buffer.split_to(total_len).freeze();
+        let message_bytes = self.read_buffer.split_to(parsed.total_len).freeze();
 
         // Shrink buffer if it grew too large and is now empty, could be optimized with lock-free buffer pool in the future.
         if self.read_buffer.is_empty() && self.read_buffer.capacity() > self.shrink_threshold {
@@ -221,7 +192,7 @@ impl ZeroCopyTcpDecoder {
         }
 
         // Return zero-copy message wrapper
-        Ok(TcpRequestMessageZeroCopy::new(message_bytes))
+        Ok(TcpRequestMessageZeroCopy::new(message_bytes, parsed))
     }
 
     /// Get the current buffer capacity
@@ -250,48 +221,30 @@ pub struct TcpRequestMessageZeroCopy {
     /// Entire message as Arc-counted buffer
     /// Format: [path_len(2)][path(var)][headers_len(2)][headers(var)][payload_len(4)][payload(var)]
     raw: Bytes,
+    parsed: super::TcpRequestWireHeader,
 }
 
 impl TcpRequestMessageZeroCopy {
     /// Create a new zero-copy message from raw bytes
-    fn new(raw: Bytes) -> Self {
-        Self { raw }
-    }
-
-    /// Get the endpoint path length
-    #[inline]
-    fn path_len(&self) -> usize {
-        u16::from_be_bytes([self.raw[0], self.raw[1]]) as usize
+    fn new(raw: Bytes, parsed: super::TcpRequestWireHeader) -> Self {
+        Self { raw, parsed }
     }
 
     /// Get endpoint path as a string slice (zero-copy)
     ///
     /// This returns a reference into the message buffer, no allocation.
     pub fn endpoint_path(&self) -> Result<&str, std::str::Utf8Error> {
-        let path_len = self.path_len();
-        std::str::from_utf8(&self.raw[2..2 + path_len])
+        std::str::from_utf8(&self.raw[self.parsed.endpoint_start()..self.parsed.endpoint_end()])
     }
 
     /// Get endpoint path as bytes (zero-copy)
     pub fn endpoint_path_bytes(&self) -> &[u8] {
-        let path_len = self.path_len();
-        &self.raw[2..2 + path_len]
-    }
-
-    /// Get the headers length
-    #[inline]
-    fn headers_len(&self) -> usize {
-        let path_len = self.path_len();
-        let offset = 2 + path_len;
-        u16::from_be_bytes([self.raw[offset], self.raw[offset + 1]]) as usize
+        &self.raw[self.parsed.endpoint_start()..self.parsed.endpoint_end()]
     }
 
     /// Get headers as bytes (zero-copy)
     pub fn headers_bytes(&self) -> &[u8] {
-        let path_len = self.path_len();
-        let headers_len = self.headers_len();
-        let headers_start = 2 + path_len + 2;
-        &self.raw[headers_start..headers_start + headers_len]
+        &self.raw[self.parsed.headers_start()..self.parsed.headers_end()]
     }
 
     /// Get headers as a HashMap (requires parsing)
@@ -308,15 +261,7 @@ impl TcpRequestMessageZeroCopy {
     /// Get the payload length
     #[inline]
     fn payload_len(&self) -> usize {
-        let path_len = self.path_len();
-        let headers_len = self.headers_len();
-        let offset = 2 + path_len + 2 + headers_len;
-        u32::from_be_bytes([
-            self.raw[offset],
-            self.raw[offset + 1],
-            self.raw[offset + 2],
-            self.raw[offset + 3],
-        ]) as usize
+        self.parsed.payload_len
     }
 
     /// Get payload as zero-copy Bytes
@@ -324,10 +269,7 @@ impl TcpRequestMessageZeroCopy {
     /// This returns an Arc-counted slice of the message buffer.
     /// Cloning the returned Bytes is extremely cheap (just Arc clone).
     pub fn payload(&self) -> Bytes {
-        let path_len = self.path_len();
-        let headers_len = self.headers_len();
-        let payload_start = 2 + path_len + 2 + headers_len + 4;
-        self.raw.slice(payload_start..) // ZERO COPY! Just Arc clone + offset
+        self.raw.slice(self.parsed.payload_start()..) // ZERO COPY! Just Arc clone + offset
     }
 
     /// Get total message size in bytes
@@ -444,6 +386,27 @@ mod tests {
         assert_eq!(msg.payload().as_ref(), payload);
         assert_eq!(msg.total_size(), message.len());
         assert_eq!(msg.headers().len(), 0); // Empty headers
+    }
+
+    #[tokio::test]
+    async fn test_zero_copy_decoder_allows_empty_and_long_endpoint_paths() {
+        for endpoint in [String::new(), "x".repeat(2048)] {
+            let payload = b"payload";
+
+            let mut message = Vec::new();
+            message.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
+            message.extend_from_slice(endpoint.as_bytes());
+            message.extend_from_slice(&(0u16).to_be_bytes());
+            message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            message.extend_from_slice(payload);
+
+            let mut reader = &message[..];
+            let mut decoder = ZeroCopyTcpDecoder::new();
+            let msg = decoder.read_message(&mut reader).await.unwrap();
+
+            assert_eq!(msg.endpoint_path().unwrap(), endpoint.as_str());
+            assert_eq!(msg.payload().as_ref(), payload);
+        }
     }
 
     #[tokio::test]

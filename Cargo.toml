@@ -8,6 +8,7 @@ members = [
     "lib/config",
     "lib/tokenizers",
     "lib/tokens",
+    "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
@@ -15,18 +16,21 @@ members = [
     "lib/kvbm-config",
     "lib/kvbm-engine",
     "lib/kvbm-kernels",
+    "lib/kvbm-consolidator",
     "lib/kvbm-logical",
     "lib/kvbm-physical",
     "lib/protocols",
     "lib/parsers",
     "lib/bench",
+    "lib/backend-common",
+    "lib/backend-common/examples/mocker",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -37,32 +41,36 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "1.1.0" }
-dynamo-llm = { path = "lib/llm", version = "1.1.0" }
-dynamo-config = { path = "lib/config", version = "1.1.0" }
-dynamo-tokenizers = { path = "lib/tokenizers", version = "1.1.0" }
-dynamo-tokens = { path = "lib/tokens", version = "1.1.0" }
-dynamo-memory = { path = "lib/memory", version = "1.1.0" }
-dynamo-mocker = { path = "lib/mocker", version = "1.1.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "1.1.0", features = ["metrics", "runtime-protocols"] }
-dynamo-protocols = { path = "lib/protocols", version = "1.1.0" }
-dynamo-parsers = { path = "lib/parsers", version = "1.1.0" }
+dynamo-runtime = { path = "lib/runtime", version = "1.2.0" }
+dynamo-llm = { path = "lib/llm", version = "1.2.0" }
+dynamo-config = { path = "lib/config", version = "1.2.0" }
+dynamo-tokenizers = { path = "lib/tokenizers", version = "1.2.0" }
+dynamo-tokens = { path = "lib/tokens", version = "1.2.0" }
+dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.2.0" }
+dynamo-memory = { path = "lib/memory", version = "1.2.0" }
+dynamo-mocker = { path = "lib/mocker", version = "1.2.0" }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.2.0", features = ["metrics", "runtime-protocols"] }
+dynamo-protocols = { path = "lib/protocols", version = "1.2.0" }
+dynamo-parsers = { path = "lib/parsers", version = "1.2.0" }
+dynamo-backend-common = { path = "lib/backend-common", version = "1.2.0" }
 fastokens = { version = "0.1.0" }
 
 
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.1.0" }
-kvbm-config = { path = "lib/kvbm-config", version = "1.1.0" }
-kvbm-engine = { path = "lib/kvbm-engine", version = "1.1.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.1.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.1.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.1.0" }
+kvbm-common = { path = "lib/kvbm-common", version = "1.2.0" }
+kvbm-config = { path = "lib/kvbm-config", version = "1.2.0" }
+kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.2.0" }
+kvbm-engine = { path = "lib/kvbm-engine", version = "1.2.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.2.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "1.2.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.0" }
 
 # velo
 velo = { version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
+lru = { version = "0.12" }
 async-nats = { version = "0.45.0", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
@@ -77,6 +85,7 @@ chrono = { version = "0.4", default-features = false, features = [
 ] }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
+moka = { version = "0.12", features = ["future"] }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
@@ -113,6 +122,7 @@ serde_bytes = { version = "0.11" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
+serde_path_to_error = "0.1"
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
@@ -121,7 +131,7 @@ tokio = { version = "=1.48.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
 tower-http = { version = "0.6", features = ["trace"] }
-axum = { version = "=0.8.4", features = ["macros"] }
+axum = { version = "=0.8.4", features = ["macros", "ws"] }
 axum-core = { version = "0.5.2" }
 hyper = { version = "=1.7.0" }
 hyper-util = { version = "=0.1.17" }
@@ -160,3 +170,10 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Pin llm-multimodal + llm-tokenizer to the smg commit that switches
+# hf-hub from native-tls to rustls-tls (PR #1459, merged 2026-05-05).
+# Remove this block once llm-multimodal ≥1.6.0 is published on crates.io.
+[patch.crates-io]
+llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }

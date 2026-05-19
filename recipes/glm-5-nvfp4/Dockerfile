@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# TODO: bump to lmsysorg/sglang:v0.5.11-cu130
 ARG BASE_IMAGE="lmsysorg/sglang:v0.5.10.post1-cu130"
 ARG ARCH=arm64
 ARG DYNAMO_COMMIT="main"
@@ -30,8 +31,8 @@ RUN cargo install maturin --locked
 RUN git clone https://github.com/ai-dynamo/dynamo.git /build/dynamo && \
     cd /build/dynamo && git checkout ${DYNAMO_COMMIT}
 
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     cd /build/dynamo/lib/bindings/python && \
     maturin build --release && \
     mkdir -p /build/dist && \

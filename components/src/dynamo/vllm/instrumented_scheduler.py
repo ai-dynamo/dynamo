@@ -80,6 +80,7 @@ from __future__ import annotations
 import enum
 import json
 import logging
+import math
 import os
 import queue
 import threading
@@ -269,7 +270,7 @@ class InstrumentedScheduler(AsyncScheduler):
             **kwargs,
         )
 
-        dp_rank = getattr(vllm_config.parallel_config, "data_parallel_rank", 0) or 0
+        dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
         self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
         self._fpm_dp_rank = dp_rank
 
@@ -296,6 +297,21 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
         self._bench_init(vllm_config)
+
+    @staticmethod
+    def _resolve_dp_rank(parallel_config) -> int:
+        # ``data_parallel_index`` always holds the true global DP rank of the
+        # engine process. For dense (non-MoE) models in external DP mode,
+        # vLLM resets ``data_parallel_rank`` to 0 in every child process but
+        # preserves ``data_parallel_index`` (see ``vllm/v1/engine/core.py``:
+        # ``parallel_config.data_parallel_index = dp_rank`` then
+        # ``parallel_config.data_parallel_rank = 0``). Reading the rank field
+        # would make every DP child compute ``base_port + 0`` and the second
+        # ``bind()`` would fail with "Address already in use".
+        dp_rank = getattr(parallel_config, "data_parallel_index", None)
+        if dp_rank is None:
+            dp_rank = getattr(parallel_config, "data_parallel_rank", 0) or 0
+        return dp_rank
 
     # ------------------------------------------------------------------
     # Overrides
@@ -339,6 +355,22 @@ class InstrumentedScheduler(AsyncScheduler):
                     finished_req_ids=self.finished_req_ids,
                     free_encoder_mm_hashes=[],
                 )
+                # See _bench_inject_fake_decode for the rationale; the
+                # parent scheduler attaches connector metadata to every
+                # SchedulerOutput when a connector is configured, so
+                # benchmark-built outputs must do the same or the worker
+                # asserts on bind_connector_metadata. Use direct
+                # attribute access (not getattr-with-default) so a
+                # future vLLM bump that drops these attributes from the
+                # parent fails loudly instead of being silently masked.
+                if self.connector is not None:
+                    empty.kv_connector_metadata = self.connector.build_connector_meta(
+                        empty
+                    )
+                if self.ec_connector is not None:
+                    empty.ec_connector_metadata = (
+                        self.ec_connector.build_connector_meta(empty)
+                    )
                 self._update_after_schedule(empty)
                 return empty
 
@@ -424,6 +456,9 @@ class InstrumentedScheduler(AsyncScheduler):
         decode_kv = WelfordAccumulator()
 
         for req in new_reqs:
+            if self._bench_new_request_counts_as_decode(req.req_id):
+                decode_kv.add(req.num_computed_tokens)
+                continue
             num_prefill += 1
             sum_prefill_tokens += num_scheduled.get(req.req_id, 0)
             prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
@@ -450,6 +485,15 @@ class InstrumentedScheduler(AsyncScheduler):
             var_decode_kv_tokens=decode_kv.variance(),
         )
 
+    def _bench_new_request_counts_as_decode(self, req_id: str) -> bool:
+        """Synthetic decode benchmark requests register as new requests."""
+        return (
+            getattr(self, "_bench_active", False)
+            and getattr(self, "_bench_phase", _BenchPhase.IDLE)
+            == _BenchPhase.DECODE_SWEEP
+            and req_id in getattr(self, "_bench_active_req_ids", set())
+        )
+
     def _compute_queued(self) -> QueuedRequestMetrics:
         """Single-pass aggregation over ``self.waiting`` and ``self.skipped_waiting``.
 
@@ -461,7 +505,9 @@ class InstrumentedScheduler(AsyncScheduler):
           async precondition — see ``Scheduler._is_blocked_waiting_status`` /
           ``Scheduler._enqueue_waiting_request``:
 
-              WAITING_FOR_FSM             -- grammar/structured-output compile
+              WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+                                          -- grammar/structured-output compile
+                                          -- WAITING_FOR_FSM on older vLLM
               WAITING_FOR_REMOTE_KVS      -- disagg decode-engine KV transfer
               WAITING_FOR_STREAMING_REQ   -- streaming request handshake
 
@@ -472,8 +518,9 @@ class InstrumentedScheduler(AsyncScheduler):
         (see ``Scheduler.schedule`` at the ``load_kv_async`` branch), so it is
         the correct decode-KV-context value for FPM purposes.
 
-        ``WAITING_FOR_FSM`` / ``WAITING_FOR_STREAMING_REQ`` have no KV computed
-        yet — they are queued prefill requests blocked on a precondition.
+        ``WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR`` /
+        ``WAITING_FOR_STREAMING_REQ`` have no KV computed yet — they are queued
+        prefill requests blocked on a precondition.
 
         Only iterating ``self.waiting`` (the previous behaviour) silently
         misses every ``WAITING_FOR_REMOTE_KVS`` request on the decode engine
@@ -496,8 +543,9 @@ class InstrumentedScheduler(AsyncScheduler):
                 # start generating -- count as queued decode.
                 decode_kv.add(request.num_computed_tokens)
             else:
-                # WAITING_FOR_FSM / WAITING_FOR_STREAMING_REQ: no KV yet,
-                # essentially a queued prefill awaiting a precondition.
+                # Structured-output waits / WAITING_FOR_STREAMING_REQ:
+                # no KV yet, essentially a queued prefill awaiting a
+                # precondition.
                 prefill.add(request.num_tokens)
 
         return QueuedRequestMetrics(
@@ -610,7 +658,6 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_generate_decode_grid(self) -> None:
         n_len = max(1, self._bench_config.decode_length_granularity)
         n_bs = max(1, self._bench_config.decode_batch_size_granularity)
-        total_kv_tokens = self.cache_config.num_gpu_blocks * self.block_size
         max_ctx = self.max_model_len - 10
         if max_ctx < self.block_size:
             logger.warning("max_model_len too small for decode grid, skipping")
@@ -618,7 +665,19 @@ class InstrumentedScheduler(AsyncScheduler):
         ctx_lens = np.unique(np.linspace(self.block_size, max_ctx, n_len, dtype=int))
         for ctx_len in ctx_lens:
             ctx_len = int(ctx_len)
-            max_batch = min(self.max_num_running_reqs, total_kv_tokens // ctx_len)
+            # Match what _bench_inject_fake_decode actually allocates:
+            # ctx_len + 1 tokens (the +1 is the input slot for the
+            # async-scheduler placeholder write -- see the comment on
+            # _bench_inject_fake_decode), rounded UP to the next block
+            # boundary by the KV cache manager. Sizing max_batch from
+            # ctx_len directly would under-count blocks per request and
+            # let the allocator silently truncate the batch on boundary
+            # points (e.g. ctx_len that is a multiple of block_size:
+            # ctx_len=16 with block_size=16 actually consumes 2 blocks
+            # per request, not 1).
+            blocks_per_req = math.ceil((ctx_len + 1) / self.block_size)
+            kv_capped_batch = self.cache_config.num_gpu_blocks // blocks_per_req
+            max_batch = min(self.max_num_running_reqs, kv_capped_batch)
             if max_batch < 1:
                 continue
             batch_sizes = np.unique(np.linspace(1, max_batch, n_bs, dtype=int))
@@ -654,13 +713,31 @@ class InstrumentedScheduler(AsyncScheduler):
         self, ctx_len: int, batch_size: int
     ) -> SchedulerOutput:
         """Create fake decode requests with pre-allocated KV and return
-        a custom SchedulerOutput that registers them with the model runner."""
+        a custom SchedulerOutput that registers them with the model runner.
+
+        We pad the synthetic prompt to ``ctx_len + 1`` tokens (rather than
+        ``ctx_len``) so the input slot at position ``ctx_len`` -- the one
+        the decode iteration reads from -- is part of the request's prompt
+        and therefore guaranteed to be a valid token id (0). Without this
+        padding the worker's async-scheduler bookkeeping writes a ``-1``
+        placeholder into ``token_ids_cpu[req_idx, ctx_len]`` after
+        sampling (gpu_model_runner._update_states_after_model_execute, see
+        ``sampled_ids = [-1]`` for async scheduling). When the same input
+        batch slot gets reused by a later benchmark batch, that ``-1``
+        is read as the input token and the embedding lookup OOBs. Padding
+        by one keeps the placeholder write at position ``ctx_len + 1``
+        (out of the read range) and leaves position ``ctx_len`` untouched.
+        Also allocate ``ctx_len + 1`` KV slots so block-table indexing for
+        position ``ctx_len`` (block ``ctx_len // block_size`` -- which is
+        a NEW block when ``ctx_len % block_size == 0``) stays in range.
+        """
         new_reqs_data: list[NewRequestData] = []
         num_scheduled_tokens: dict[str, int] = {}
+        padded_len = ctx_len + 1
 
         for _ in range(batch_size):
             req_id = f"__bench_{self._bench_seq}"
-            prompt = [0] * ctx_len
+            prompt = [0] * padded_len
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=prompt,
@@ -671,11 +748,11 @@ class InstrumentedScheduler(AsyncScheduler):
             )
 
             new_blocks = self.kv_cache_manager.allocate_slots(
-                req, ctx_len, delay_cache_blocks=True
+                req, padded_len, delay_cache_blocks=True
             )
             if new_blocks is None:
                 logger.warning(
-                    "KV exhausted at ctx_len=%d after %d requests, " "truncating batch",
+                    "KV exhausted at ctx_len=%d after %d requests, truncating batch",
                     ctx_len,
                     len(new_reqs_data),
                 )
@@ -683,7 +760,6 @@ class InstrumentedScheduler(AsyncScheduler):
 
             req.num_computed_tokens = ctx_len
             req.status = RequestStatus.RUNNING
-            req.append_output_token_ids(0)
 
             self.requests[req_id] = req
             self.running.append(req)  # type: ignore[has-type]
@@ -711,7 +787,7 @@ class InstrumentedScheduler(AsyncScheduler):
             else None
         )
 
-        return SchedulerOutput(
+        output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
             num_scheduled_tokens=num_scheduled_tokens,
@@ -723,6 +799,25 @@ class InstrumentedScheduler(AsyncScheduler):
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
+
+        # Mirror the parent scheduler's connector-metadata population (see
+        # vllm/v1/core/sched/scheduler.py:912-923). Without this, the
+        # gpu_model_runner asserts ``scheduler_output.kv_connector_metadata
+        # is not None`` whenever a KV connector is configured (e.g. the
+        # NixlConnector used by disagg workers), and EngineCore dies the
+        # instant the decode sweep tries to run a synthetic batch.
+        # Our fake decode reqs have their KV pre-allocated via
+        # ``allocate_slots`` above, so ``build_connector_meta`` produces a
+        # no-op metadata -- no transfers planned, just a non-None object
+        # the worker-side ``bind_connector_metadata`` can consume.
+        if self.connector is not None:
+            output.kv_connector_metadata = self.connector.build_connector_meta(output)
+        if self.ec_connector is not None:
+            output.ec_connector_metadata = self.ec_connector.build_connector_meta(
+                output
+            )
+
+        return output
 
     def _bench_cleanup_requests(self) -> None:
         """Free all resources held by active benchmark requests."""

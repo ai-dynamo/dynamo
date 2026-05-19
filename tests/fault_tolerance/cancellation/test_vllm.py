@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
@@ -278,7 +279,7 @@ def test_request_cancellation_vllm_aggregated(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                     log_offset=frontend_log_offset,
                 )
 
@@ -296,7 +297,6 @@ def test_request_cancellation_vllm_aggregated(
                 )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2606")
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
@@ -372,7 +372,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(
@@ -396,7 +396,6 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: OPS-4448")
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
@@ -466,7 +465,7 @@ def test_request_cancellation_vllm_prefill_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 # Verify decode worker never received the request

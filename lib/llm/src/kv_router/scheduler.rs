@@ -20,7 +20,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
-    protocols::{WorkerId, WorkerWithDpRank},
+    protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -134,7 +134,6 @@ where
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
         effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
-        tree_sizes: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -142,6 +141,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self
@@ -153,7 +153,6 @@ where
                 tier_overlap_blocks,
                 effective_overlap_blocks,
                 effective_cached_tokens,
-                tree_sizes,
                 router_config_override,
                 update_states,
                 lora_name,
@@ -161,6 +160,7 @@ where
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
+                routing_constraints,
                 shared_cache_hits,
             )
             .await;

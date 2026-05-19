@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 import pytest
 import requests
 
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 # ============================================================================
@@ -529,6 +530,19 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     params = getattr(request, "param", {})
     cpu_blocks = params.get("cpu_blocks", 100)
     gpu_blocks = params.get("gpu_blocks", 10)
+    block_size = int(params.get("block_size", 16))
+    max_model_len = params.get("max_model_len")
+    if max_model_len is None:
+        env_max_model_len = os.environ.get("KVBM_MAX_MODEL_LEN")
+        if env_max_model_len is not None:
+            max_model_len = int(env_max_model_len)
+        elif gpu_blocks is not None:
+            # vLLM 0.20.1 validates max_model_len against explicit KV block
+            # overrides during engine init. These tests intentionally use tiny
+            # GPU caches, so default the sequence limit to that cache budget.
+            max_model_len = int(gpu_blocks) * block_size
+        else:
+            max_model_len = 8000
     model = params.get(
         "model",
         os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
@@ -560,25 +574,44 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         f"NATS: {nats_process.port}, etcd: {etcd_process.port}"
     )
 
+    # Set up environment
+    # Note: NATS_SERVER and ETCD_ENDPOINTS are already set by
+    # runtime_services_dynamic_ports fixture.
+    env = os.environ.copy()
+    env.update(
+        {
+            "RUST_BACKTRACE": "1",
+            "VLLM_SERVER_DEV_MODE": "1",
+            "DYN_LOG": "debug",
+            "DYN_KVBM_METRICS": "true",
+            "DYN_KVBM_METRICS_PORT": str(metrics_port),
+            "DYN_KVBM_LEADER_ZMQ_PUB_PORT": str(zmq_pub_port),
+            "DYN_KVBM_LEADER_ZMQ_ACK_PORT": str(zmq_ack_port),
+            # DynamoConnector uses NATS_SERVER and ETCD_ENDPOINTS from the env.
+        }
+    )
+
+    if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in env:
+        kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+        if kv_mark:
+            env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(int(kv_mark.args[0]))
+
+    gpu_mem_args = build_gpu_mem_args("build_vllm_gpu_mem_args", env=env)
+
     # Build vLLM command
-    # TODO: For parallel execution on single GPU with pytest-xdist, add dynamic GPU memory allocation:
-    #   1. Detect parallel execution: worker_count = os.environ.get("PYTEST_XDIST_WORKER_COUNT")
-    #   2. Calculate fraction: gpu_memory_fraction = 0.85 / int(worker_count) if worker_count else 0.9
-    #   3. Add to command: "--gpu-memory-utilization", str(gpu_memory_fraction)
-    #   Example: 2 workers → 42.5% each, 3 workers → 28.3% each
-    #   Trade-off: Smaller GPU memory per worker = smaller KV cache = more CPU offloads
     command = [
         "vllm",
         "serve",
         "--block-size",
-        "16",
+        str(block_size),
         "--port",
         str(port),
         "--kv-transfer-config",
         '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
         model,
         "--max-model-len",
-        "8000",  # Required to fit on L4 GPU with smaller models
+        str(max_model_len),
+        *gpu_mem_args,
     ]
 
     # GPU blocks override
@@ -590,23 +623,6 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         command.extend(
             ["--max-num-batched-tokens", str(params["max_num_batched_tokens"])]
         )
-
-    # Set up environment
-    # Note: NATS_SERVER and ETCD_ENDPOINTS are already set by runtime_services_dynamic_ports fixture
-    env = os.environ.copy()
-    env.update(
-        {
-            "RUST_BACKTRACE": "1",
-            "VLLM_SERVER_DEV_MODE": "1",
-            "DYN_LOG": "debug",
-            "DYN_KVBM_METRICS": "true",
-            "DYN_KVBM_METRICS_PORT": str(metrics_port),
-            "DYN_KVBM_LEADER_ZMQ_PUB_PORT": str(zmq_pub_port),
-            "DYN_KVBM_LEADER_ZMQ_ACK_PORT": str(zmq_ack_port),
-            # DynamoConnector will use NATS_SERVER and ETCD_ENDPOINTS from environment
-            # (already set by runtime_services_dynamic_ports fixture)
-        }
-    )
 
     # CPU cache blocks override via env
     if cpu_blocks is not None:

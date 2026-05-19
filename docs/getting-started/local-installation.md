@@ -34,13 +34,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.1
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
 ```
 
 To run frontend and worker in the same container, either:
@@ -154,7 +154,12 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 ```
 
 The warning `Cannot connect to ModelExpress server/transport error. Using direct download.`
-is expected in local deployments and can be safely ignored.
+is expected in this local single-machine setup (no ModelExpress server running) and can
+be safely ignored. In a Kubernetes deployment where `MODEL_EXPRESS_URL` is configured,
+this warning -- or the related `Failed to resolve local model path after server download`
+-- indicates that ModelExpress is configured but is not actually serving cached models;
+see [Model Caching in Kubernetes](../kubernetes/model-caching.md#option-2-modelexpress-p2p-distribution)
+for the correct configuration.
 
 **vLLM**
 
@@ -211,10 +216,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.1
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
 ```
 
 ## Next Steps

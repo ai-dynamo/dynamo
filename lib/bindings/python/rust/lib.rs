@@ -7,7 +7,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
@@ -34,11 +34,12 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
-use crate::llm::local_model::ModelRuntimeConfig;
+use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
+
+use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints};
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
@@ -69,6 +70,7 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+mod backend;
 mod context;
 mod engine;
 pub mod errors;
@@ -181,12 +183,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
+    m.add_class::<RoutingConstraints>()?;
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::fpm::FpmEventRelay>()?;
+    m.add_class::<llm::fpm::FpmDirectPublisher>()?;
     m.add_class::<llm::fpm::FpmEventSubscriber>()?;
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
@@ -195,6 +199,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::KvRouter>()?;
+    m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -205,6 +210,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     engine::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
+    backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
@@ -263,7 +269,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, self_host_metadata=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -274,7 +280,7 @@ fn register_model<'p>(
     model_name: Option<&str>,
     context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
-    router_mode: Option<RouterMode>,
+    router_config: Option<PyRouterConfig>,
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
@@ -282,6 +288,7 @@ fn register_model<'p>(
     media_fetcher: Option<MediaFetcher>,
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
+    self_host_metadata: Option<bool>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill
@@ -306,8 +313,10 @@ fn register_model<'p>(
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
-    let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
-    let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
+    // Only embed router_config in the MDC when the caller explicitly provided it.
+    // This preserves backward-compat: workers that don't specify router_config continue to
+    // fall back to the frontend-level global router config via the watcher.
+    let explicit_router_config: Option<RouterConfig> = router_config.map(|rc| rc.into());
 
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
@@ -361,6 +370,7 @@ fn register_model<'p>(
             if let Some(cfg) = runtime_config {
                 card.runtime_config = cfg.inner;
             }
+            card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
             let discovery = endpoint.inner.drt().discovery();
@@ -396,12 +406,16 @@ fn register_model<'p>(
             .model_name(model_name.clone())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
-            .router_config(Some(router_config))
+            .router_config(explicit_router_config.clone())
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
             .media_fetcher(media_fetcher.map(|m| m.inner));
+        // Absence falls through to the DYN_SELF_HOST_METADATA env var default.
+        if let Some(enabled) = self_host_metadata {
+            builder.self_host_metadata(enabled);
+        }
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
 
@@ -516,6 +530,7 @@ struct ModelCardInstanceId {
 #[derive(Clone)]
 struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
+    endpoint: rs::component::Endpoint,
 }
 
 #[pyclass]
@@ -910,6 +925,7 @@ impl Endpoint {
             .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
+                endpoint: inner,
             })
         })
     }
@@ -989,6 +1005,76 @@ impl Client {
         })
     }
 
+    /// Wait for exactly one ready endpoint instance whose MDC runtime_data contains
+    /// the requested JSON string value.
+    #[pyo3(signature = (key, value, timeout_s=None))]
+    fn wait_for_instance_by_runtime_data<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: String,
+        timeout_s: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let endpoint = self.endpoint.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let last_matches = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+            let wait_state = last_matches.clone();
+            let error_key = key.clone();
+            let error_value = value.clone();
+            let wait = async move {
+                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint)
+                    .await
+                    .map_err(to_pyerr)?;
+
+                loop {
+                    let matches: Vec<u64> = rx
+                        .borrow_and_update()
+                        .iter()
+                        .filter_map(|(worker_id, runtime_config)| {
+                            let matched = runtime_config
+                                .runtime_data
+                                .get(&key)
+                                .and_then(|value| value.as_str())
+                                == Some(value.as_str());
+                            matched.then_some(*worker_id)
+                        })
+                        .collect();
+
+                    if let Ok(mut last) = wait_state.lock() {
+                        *last = matches.clone();
+                    }
+
+                    if let [worker_id] = matches.as_slice() {
+                        return Ok(*worker_id);
+                    }
+
+                    rx.changed().await.map_err(to_pyerr)?;
+                }
+            };
+
+            if let Some(timeout_s) = timeout_s {
+                if !timeout_s.is_finite() || timeout_s < 0.0 {
+                    return Err(PyValueError::new_err(
+                        "timeout_s must be a finite non-negative number",
+                    ));
+                }
+                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                tokio::time::timeout(timeout, wait).await.map_err(|_| {
+                    let matches = last_matches
+                        .lock()
+                        .map(|matches| matches.clone())
+                        .unwrap_or_default();
+                    PyTimeoutError::new_err(format!(
+                        "Timed out waiting for one endpoint instance with runtime_data[{error_key:?}] == {error_value:?}; last_match_count={}, matching_ids={matches:?}",
+                        matches.len(),
+                    ))
+                })?
+            } else {
+                wait.await
+            }
+        })
+    }
+
     /// Issue a request to the endpoint using the default routing strategy.
     #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn generate<'p>(
@@ -1063,6 +1149,46 @@ impl Client {
                         .map_err(to_pyerr)?
                 }
                 _ => client.random(request_ctx).await.map_err(to_pyerr)?,
+            };
+            tokio::spawn(process_stream(stream, tx));
+            Ok(AsyncResponseStream::new(rx, annotated))
+        })
+    }
+
+    /// Send a request using device-aware weighted routing.
+    /// Preferentially routes to GPU (CUDA) workers; CPU workers receive overflow
+    /// only when GPU workers are sufficiently loaded (controlled by DYN_ENCODER_CUDA_TO_CPU_RATIO).
+    /// With the default ratio of 8, all requests go to GPU workers unless they are
+    /// handling 8x more load than CPU workers.
+    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
+    fn device_aware_weighted<'p>(
+        &self,
+        py: Python<'p>,
+        request: PyObject,
+        annotated: Option<bool>,
+        context: Option<context::Context>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
+        let annotated = annotated.unwrap_or(false);
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let client = self.router.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream = match context {
+                Some(context) => {
+                    let span = get_span_for_context(&context, "device_aware_weighted");
+                    client
+                        .device_aware_weighted(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
+                }
+                _ => client
+                    .device_aware_weighted(request_ctx)
+                    .await
+                    .map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream::new(rx, annotated))

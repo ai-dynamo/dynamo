@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
@@ -137,6 +138,10 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 
 	// Validate GMS failover constraints
 	if err := v.validateFailover(); err != nil {
+		return nil, err
+	}
+
+	if err := v.validateSnapshotWithGPUMemoryService(); err != nil {
 		return nil, err
 	}
 
@@ -406,6 +411,13 @@ func (v *SharedSpecValidator) validateGPUMemoryService() error {
 	}
 
 	return nil
+}
+
+func (v *SharedSpecValidator) validateSnapshotWithGPUMemoryService() error {
+	return checkpoint.ValidateGMSSnapshotGate(
+		fmt.Sprintf("%s.checkpoint", v.fieldPath),
+		v.spec.Checkpoint != nil && v.spec.Checkpoint.Enabled,
+		v.spec.GPUMemoryService)
 }
 
 // validateServiceAnnotations validates known annotations on the service-level spec.

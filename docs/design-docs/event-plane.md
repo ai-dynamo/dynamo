@@ -119,7 +119,7 @@ With `--no-router-kv-events`:
 
 - The router falls back to prediction-based cache-aware routing (estimates cache state from routing decisions).
 - No NATS server or ZMQ sockets are needed.
-- TTL-based expiration and LRU pruning keep predicted state from growing stale.
+- TTL-based expiration keeps predicted state from growing stale.
 
 ## Deployment Modes
 

@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: HiCache
+title: Using HiCache
 subtitle: Hierarchical KV caching with tier-aware router integration
 ---
 
@@ -58,19 +58,21 @@ By default the router's radix tree only reflects blocks resident in **GPU HBM** 
 
 SGLang's `HiRadixCache` emits `BlockStored` / `BlockRemoved` events carrying a `medium` field on every tier transition:
 
-| Transition                                        | Event emitted    |
-| ------------------------------------------------- | ---------------- |
-| Fresh prefill writes blocks to GPU                | `store(GPU)`     |
-| GPU → Host copy (after async DMA completes)       | `store(CPU)`     |
-| GPU evicted, block still resident on Host         | `remove(GPU)`    |
-| Host evicted (block gone from all worker tiers)   | `remove(CPU)`    |
-| Host → GPU promotion (`load_back`)                | `store(GPU)`     |
-| External → Host prefetch (L2 materialization)     | `store(CPU)`     |
+| Transition                                      | Event emitted        |
+| ----------------------------------------------- | -------------------- |
+| Fresh prefill writes blocks to GPU              | `store(GPU)`         |
+| GPU → Host copy (after async DMA completes)     | `store(CPU_PINNED)`  |
+| GPU evicted, block still resident on Host       | `remove(GPU)`        |
+| Host evicted (block gone from all worker tiers) | `remove(CPU_PINNED)` |
+| Host → GPU promotion (`load_back`)              | `store(GPU)`         |
+| External → Host prefetch (L2 materialization)   | `store(CPU_PINNED)`  |
+
+`CPU_PINNED` is the value SGLang's `HiRadixCache` actually emits for host-tier blocks (page-locked memory). The rest of this guide uses `CPU_PINNED` to match the on-the-wire string; "Host" is the conceptual tier name.
 
 A few properties the router relies on:
 
 - **Ordering.** `store(new_tier)` is emitted before `remove(old_tier)` so the block is never invisible to the router during a transition.
-- **DMA safety.** `store(CPU)` for a GPU→Host copy is deferred until `finish_event.synchronize()` confirms the DMA landed — events never fire before bytes are resident.
+- **DMA safety.** `store(CPU_PINNED)` for a GPU→Host copy is deferred until `finish_event.synchronize()` confirms the DMA landed — events never fire before bytes are resident.
 - **Per-tier tracking.** A block can be on GPU and Host simultaneously. The router records both and picks the highest-priority tier when scoring overlap.
 
 ### How it works
@@ -99,25 +101,38 @@ For each candidate worker, the router computes a **logit** (lower wins):
 
 ```text
 # Without shared cache
-logit = overlap_weight * (prefill_tokens / block_size) + decode_blocks
+adjusted_prefill_blocks = max(
+    prefill_blocks
+    - overlap_score_credit * device_overlap_blocks
+    - host_cache_hit_weight * host_overlap_blocks
+    - disk_cache_hit_weight * disk_overlap_blocks,
+    0,
+)
+logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 
 # With shared cache
-shared_beyond    = shared_cache_hits.hits_beyond(worker_device_overlap)
-reduction        = shared_cache_multiplier * shared_beyond * block_size
-adjusted_prefill = max(0, prefill_tokens - reduction)
-logit            = overlap_weight * (adjusted_prefill / block_size) + decode_blocks
+shared_beyond = shared_cache_hits.hits_beyond(device_overlap_blocks)
+adjusted_prefill_blocks = max(
+    prefill_blocks
+    - overlap_score_credit * device_overlap_blocks
+    - host_cache_hit_weight * host_overlap_blocks
+    - disk_cache_hit_weight * disk_overlap_blocks
+    - shared_cache_multiplier * shared_beyond,
+    0,
+)
+logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
 `hits_beyond(n)` counts shared-cache pages at positions `>= n` — "pages past my device prefix that I can still fetch from Mooncake instead of recomputing."
 
-**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_weight = 1.0`. Shared pool contains blocks 0–3.
+**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3.
 
-| Worker | Device overlap | `hits_beyond` | Reduction | Adjusted prefill | Logit          |
-| ------ | -------------- | ------------- | --------- | ---------------- | -------------- |
-| W0     | 2 (A, B)       | 2 (C, D)      | 1.0       | 3.0              | 3.0            |
-| W1     | 0              | 4 (A, B, C, D)| 2.0       | 2.0              | **2.0 — wins** |
+| Worker | Device overlap | `hits_beyond`  | Device credit | Shared credit | Adjusted prefill | Logit          |
+| ------ | -------------- | -------------- | ------------- | ------------- | ---------------- | -------------- |
+| W0     | 2 (A, B)       | 2 (C, D)       | 2.0           | 1.0           | 1.0              | **1.0 — wins** |
+| W1     | 0              | 4 (A, B, C, D) | 0.0           | 2.0           | 2.0              | 2.0            |
 
-W1 wins despite zero local overlap, because the shared pool covers its whole prefix. The multiplier encodes the cost ratio of a Mooncake fetch relative to a fresh GPU compute — `0.5` means "fetching from shared is half as expensive as recomputing."
+W0 wins because it combines device-local reuse with shared-pool hits beyond that device prefix. The multiplier encodes the cost ratio of a Mooncake fetch relative to a fresh GPU compute — `0.5` means "fetching from shared is half as expensive as recomputing."
 
 ## Requirements
 
@@ -161,9 +176,9 @@ python -m dynamo.frontend \
 
 ## Configuration
 
-| Flag                        | Env var                       | Default | Description                                                                                                                                                       |
-| --------------------------- | ----------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--shared-cache-type`       | `DYN_SHARED_CACHE_TYPE`       | `none`  | `none` disables shared-pool lookups; `hicache` enables Mooncake queries.                                                                                          |
+| Flag                        | Env var                       | Default | Description                                                                                                                                                        |
+| --------------------------- | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--shared-cache-type`       | `DYN_SHARED_CACHE_TYPE`       | `none`  | `none` disables shared-pool lookups; `hicache` enables Mooncake queries.                                                                                           |
 | `--shared-cache-multiplier` | `DYN_SHARED_CACHE_MULTIPLIER` | `0.0`   | Discount factor for shared-pool hits. `0.0` queries but ignores them; `0.5` treats a shared hit as half a device hit; `1.0` treats shared and device hits equally. |
 
 Per-request overrides are available via `RouterConfigOverride.shared_cache_multiplier` for A/B experimentation without restarting the router.
@@ -184,10 +199,10 @@ If `medium` is missing or always reads `GPU`, the worker is running an SGLang bu
 
 **Router sees the shared pool.** Two new histograms are exposed on the frontend's Prometheus endpoint:
 
-| Metric                              | Meaning                                                                 |
-| ----------------------------------- | ----------------------------------------------------------------------- |
-| `router_shared_cache_hit_rate`      | Fraction of request blocks found in the shared pool (0.0–1.0).          |
-| `router_shared_cache_beyond_blocks` | Blocks in the shared pool *beyond* the selected worker's device overlap. |
+| Metric                              | Meaning                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------ |
+| `router_shared_cache_hit_rate`      | Fraction of request blocks found in the shared pool (0.0–1.0).           |
+| `router_shared_cache_beyond_blocks` | Blocks in the shared pool _beyond_ the selected worker's device overlap. |
 
 ```bash
 curl -s localhost:8000/metrics | grep shared_cache
@@ -195,14 +210,14 @@ curl -s localhost:8000/metrics | grep shared_cache
 
 ## Troubleshooting
 
-| Symptom                                                  | Likely cause                                                          | Fix                                                                                           |
-| -------------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `shared_cache_hit_rate` is always 0                      | Mooncake master unreachable from the router host                      | Check network path; the router logs `Shared cache query failed` when it can't reach Mooncake. |
-| Events only ever carry `medium=GPU`                      | SGLang missing [PR #22894](https://github.com/sgl-project/sglang/pull/22894) | Rebuild SGLang from the PR branch.                                                      |
-| Workers registered but router never queries shared cache | `--shared-cache-type` left at default `none`                          | Set `--shared-cache-type hicache` on the frontend.                                            |
-| Queries issued but winning worker rarely changes         | `--shared-cache-multiplier 0.0`                                       | Raise the multiplier — typical starting range is `0.3`–`0.7`.                                 |
-| Page-size mismatch warnings                              | Router `--page-size` doesn't match worker `--page-size`               | They must agree; the router hashes pages using the worker's page size.                        |
-| Router logs "no workers have HiCache enabled"            | No worker published `sglang_hicache_mooncake` metadata                | Confirm workers started with `--hicache-storage-backend mooncake`.                            |
+| Symptom                                                  | Likely cause                                                                 | Fix                                                                                           |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `shared_cache_hit_rate` is always 0                      | Mooncake master unreachable from the router host                             | Check network path; the router logs `Shared cache query failed` when it can't reach Mooncake. |
+| Events only ever carry `medium=GPU`                      | SGLang missing [PR #22894](https://github.com/sgl-project/sglang/pull/22894) | Rebuild SGLang from the PR branch.                                                            |
+| Workers registered but router never queries shared cache | `--shared-cache-type` left at default `none`                                 | Set `--shared-cache-type hicache` on the frontend.                                            |
+| Queries issued but winning worker rarely changes         | `--shared-cache-multiplier 0.0`                                              | Raise the multiplier — typical starting range is `0.3`–`0.7`.                                 |
+| Page-size mismatch warnings                              | Router `--page-size` doesn't match worker `--page-size`                      | They must agree; the router hashes pages using the worker's page size.                        |
+| Router logs "no workers have HiCache enabled"            | No worker published `sglang_hicache_mooncake` metadata                       | Confirm workers started with `--hicache-storage-backend mooncake`.                            |
 
 ## Further Reading
 

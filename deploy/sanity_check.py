@@ -56,7 +56,7 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 │  ├─ Driver version: 570.133.07
 │  └─ nvidia-smi CUDA: 12.8 (driver max supported)
 ├─ 🤖Framework
-│  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
+│  ├─ ✅ vLLM: 0.19.1, module=/usr/local/lib/python3.12/dist-packages/vllm/__init__.py, exec=/usr/local/bin/vllm
 │  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
 ├─ File System
 │  ├─ ✅ Dynamo workspace ($HOME/dynamo) writable
