@@ -8,7 +8,7 @@
 # Run a single scenario:
 #     uv run pytest test_overload.py::test_decode_overload \
 #       --namespace neelays-test --storage-class azurefile-csi-premium \
-#       --overload-image nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1 -s -v
+#       --image nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1 -s -v
 
 import os
 from dataclasses import dataclass
@@ -43,7 +43,7 @@ from tests.utils.managed_load import LoadConfig
 
 # ─── DGD ──────────────────────────────────────────────────────────────
 # The seed DGD all scenarios use. To run against a different DGD, either
-# edit this line or override via `--overload-dgd <name>` on the CLI.
+# edit this line or override via `--dgd <name>` on the CLI.
 dgd = "disagg_qwen3_30b_unit_prod"
 
 _DEFAULT_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
@@ -54,57 +54,55 @@ _PROD_SEQ_DIST = "100,200:5;500,200:15;1000,200:20;1600,200:30;3400,200:20;7000,
 _NUM_PREFIX_PROMPTS = 15
 _PREFIX_PROMPT_LENGTH = 600
 
-# Default rung ladder. Overridable via --overload-rungs.
+# Default rung ladder. Overridable via --rungs.
 _DEFAULT_RUNGS = "72,216,432"
 _DEFAULT_RUNG_MINUTES = 5.0
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────
+# Image override comes from the framework-shared --image flag (already
+# registered by tests/conftest.py and the deploy conftest). Test reads
+# it via request.config.getoption("--image") with a 1.1.1 fallback.
 def add_cli_options(parser):
     """Called from the deploy conftest's pytest_addoption."""
     g = parser.getgroup("overload", "Overload scenarios (test_overload.py)")
     g.addoption(
-        "--overload-image",
-        default=_DEFAULT_IMAGE,
-        help=f"vllm-runtime image to test against. Default: {_DEFAULT_IMAGE}",
-    )
-    g.addoption(
-        "--overload-dgd",
+        "--dgd",
         default=dgd,
         help=f"DGD template basename under templates/vllm/. Default: {dgd}",
     )
     g.addoption(
-        "--overload-units",
+        "--units",
         type=int,
         default=3,
         help="Convenience: scale frontend/prefill/decode together (prod-unit "
         "replicas). Default 3 (3F : 6P : 3D = 18 GPUs).",
     )
     g.addoption(
-        "--overload-frontend-replicas",
+        "--frontend-replicas",
         type=int,
         default=None,
-        help="Override frontend replicas (takes precedence over --overload-units).",
+        help="Override frontend replicas (takes precedence over --units).",
     )
     g.addoption(
-        "--overload-prefill-replicas",
+        "--prefill-replicas",
         type=int,
         default=None,
-        help="Override prefill replicas (takes precedence over --overload-units).",
+        help="Override prefill replicas (takes precedence over --units).",
     )
     g.addoption(
-        "--overload-decode-replicas",
+        "--decode-replicas",
         type=int,
         default=None,
-        help="Override decode replicas (takes precedence over --overload-units).",
+        help="Override decode replicas (takes precedence over --units).",
     )
     g.addoption(
-        "--overload-rungs",
+        "--rungs",
         default=_DEFAULT_RUNGS,
         help=f"Comma-separated concurrency rungs. Default: {_DEFAULT_RUNGS}",
     )
     g.addoption(
-        "--overload-rung-minutes",
+        "--rung-minutes",
         type=float,
         default=_DEFAULT_RUNG_MINUTES,
         help=f"Minutes per rung. Default: {_DEFAULT_RUNG_MINUTES}",
@@ -132,6 +130,37 @@ def _apply_topology(spec, units, fe, pf, dec):
     spec["VllmDecodeWorker"].replicas = (
         dec if dec is not None else base["VllmDecodeWorker"] * units
     )
+
+
+def _apply_router_config(
+    spec,
+    *,
+    decode_blocks_threshold: str = "0.85",
+    prefill_tokens_threshold_frac: str = "0.85",
+    router_mode: str = "kv",
+    overlap_score_weight: str = "0.0",
+    temperature: str = "0.0",
+    use_kv_events: str = "false",
+) -> None:
+    """Apply the final-recommended router config to the Frontend spec.
+
+    Defaults match the recipe from the 2026-05-16 cascade-reproducer doc
+    (and the joint thread close-out): per-worker admission thresholds
+    enabled at 0.85, KV-aware routing with prefix-cache weight zeroed,
+    deterministic argmin selection, no KV events. The same config is
+    applied to every comparison arm — the diff between arms is purely
+    the image (1.1.1 baseline vs 1.1.2-test with the routing fix), not
+    the router knobs.
+    """
+    fe = spec["Frontend"]
+    fe.set_env_var("DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD", decode_blocks_threshold)
+    fe.set_env_var(
+        "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC", prefill_tokens_threshold_frac
+    )
+    fe.set_env_var("DYN_ROUTER_MODE", router_mode)
+    fe.set_env_var("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", overlap_score_weight)
+    fe.set_env_var("DYN_ROUTER_TEMPERATURE", temperature)
+    fe.set_env_var("DYN_ROUTER_USE_KV_EVENTS", use_kv_events)
 
 
 def _apply_cluster_portability(spec):
@@ -247,14 +276,14 @@ async def test_decode_overload(runtime_env, request):
     --overload-dgd.
     """
     cfg = request.config
-    image = cfg.getoption("--overload-image")
-    dgd_name = cfg.getoption("--overload-dgd")
-    units = cfg.getoption("--overload-units")
-    fe = cfg.getoption("--overload-frontend-replicas")
-    pf = cfg.getoption("--overload-prefill-replicas")
-    dec = cfg.getoption("--overload-decode-replicas")
-    rungs = _parse_rungs(cfg.getoption("--overload-rungs"))
-    rung_minutes = cfg.getoption("--overload-rung-minutes")
+    image = cfg.getoption("--image") or _DEFAULT_IMAGE
+    dgd_name = cfg.getoption("--dgd")
+    units = cfg.getoption("--units")
+    fe = cfg.getoption("--frontend-replicas")
+    pf = cfg.getoption("--prefill-replicas")
+    dec = cfg.getoption("--decode-replicas")
+    rungs = _parse_rungs(cfg.getoption("--rungs"))
+    rung_minutes = cfg.getoption("--rung-minutes")
 
     spec = _load_dgd(dgd_name)
     _apply_topology(spec, units=units, fe=fe, pf=pf, dec=dec)
@@ -263,6 +292,7 @@ async def test_decode_overload(runtime_env, request):
         spec[svc].image = image
 
     _apply_cluster_portability(spec)
+    _apply_router_config(spec)
 
     served_model = spec["VllmDecodeWorker"].model
 
