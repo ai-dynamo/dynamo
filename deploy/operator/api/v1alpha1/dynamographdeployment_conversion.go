@@ -111,9 +111,9 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 		dst.TopologyConstraint = &v1beta1.SpecTopologyConstraint{}
 		ConvertFromSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
-	if src.KvTransferPolicy != nil {
-		dst.KvTransferPolicy = &v1beta1.KvTransferPolicy{}
-		ConvertFromKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	if src.Experimental != nil {
+		dst.Experimental = &v1beta1.DynamoGraphDeploymentExperimentalSpec{}
+		ConvertFromDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
 	}
 	dst.Env = src.Envs
 	if save != nil && len(src.PVCs) > 0 {
@@ -417,9 +417,9 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 		dst.TopologyConstraint = &SpecTopologyConstraint{}
 		ConvertToSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
-	if src.KvTransferPolicy != nil {
-		dst.KvTransferPolicy = &KvTransferPolicy{}
-		ConvertToKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	if src.Experimental != nil {
+		dst.Experimental = &DynamoGraphDeploymentExperimentalSpec{}
+		ConvertToDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
 	}
 	dst.Envs = src.Env
 
@@ -561,13 +561,34 @@ func ConvertToRestartStrategy(src *v1beta1.RestartStrategy, dst *RestartStrategy
 	}
 }
 
+// ConvertFromDynamoGraphDeploymentExperimentalSpec converts graph-level
+// experimental config from v1alpha1 to v1beta1.
+func ConvertFromDynamoGraphDeploymentExperimentalSpec(src *DynamoGraphDeploymentExperimentalSpec, dst *v1beta1.DynamoGraphDeploymentExperimentalSpec) {
+	if src.KvTransferPolicy != nil {
+		dst.KvTransferPolicy = &v1beta1.KvTransferPolicy{}
+		ConvertFromKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	}
+}
+
+// ConvertToDynamoGraphDeploymentExperimentalSpec converts graph-level
+// experimental config from v1beta1 to v1alpha1.
+func ConvertToDynamoGraphDeploymentExperimentalSpec(src *v1beta1.DynamoGraphDeploymentExperimentalSpec, dst *DynamoGraphDeploymentExperimentalSpec) {
+	if src.KvTransferPolicy != nil {
+		dst.KvTransferPolicy = &KvTransferPolicy{}
+		ConvertToKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	}
+}
+
 // ConvertFromKvTransferPolicy converts KV transfer policy from v1alpha1 to
 // v1beta1.
 func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferPolicy) {
 	*dst = v1beta1.KvTransferPolicy{
-		LabelKey:      src.LabelKey,
-		Domain:        v1beta1.TopologyDomain(src.Domain),
-		NoMatchPolicy: v1beta1.NoMatchPolicy(src.NoMatchPolicy),
+		LabelKey:    src.LabelKey,
+		Domain:      v1beta1.TopologyDomain(src.Domain),
+		Enforcement: v1beta1.KvTransferEnforcement(src.Enforcement),
+	}
+	if src.PreferredWeight != nil {
+		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
 	}
 }
 
@@ -575,9 +596,12 @@ func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferP
 // v1alpha1.
 func ConvertToKvTransferPolicy(src *v1beta1.KvTransferPolicy, dst *KvTransferPolicy) {
 	*dst = KvTransferPolicy{
-		LabelKey:      src.LabelKey,
-		Domain:        TopologyDomain(src.Domain),
-		NoMatchPolicy: NoMatchPolicy(src.NoMatchPolicy),
+		LabelKey:    src.LabelKey,
+		Domain:      TopologyDomain(src.Domain),
+		Enforcement: KvTransferEnforcement(src.Enforcement),
+	}
+	if src.PreferredWeight != nil {
+		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
 	}
 }
 

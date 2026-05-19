@@ -65,8 +65,8 @@ type TopologyConstraint struct {
 // TopologyDomain is a free-form topology level identifier.
 // Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
 // When used with a ClusterTopology CR, domain names are defined in the CR's
-// hierarchy; when used with `kvTransferPolicy.labelKey` alone, the value is a
-// user-chosen logical name for the topology level.
+// hierarchy; when used with `spec.experimental.kvTransferPolicy.labelKey`
+// alone, the value is a user-chosen logical name for the topology level.
 // Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (lowercase alphanumeric,
 // may contain hyphens but must not start or end with one).
 // +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
@@ -79,23 +79,23 @@ func IsValidTopologyDomainFormat(d TopologyDomain) bool {
 	return topologyDomainRegex.MatchString(string(d))
 }
 
-// NoMatchPolicy controls behavior when no decode workers share the same value
-// for the configured `domain` as the prefill worker during KV-cache transfer
-// routing.
-// +kubebuilder:validation:Enum=fail;fallback
-type NoMatchPolicy string
+// KvTransferEnforcement controls how the selected prefill worker's topology is
+// applied to decode routing.
+// +kubebuilder:validation:Enum=required;preferred
+type KvTransferEnforcement string
 
 const (
-	// NoMatchPolicyFail returns an error to the client when no decode
-	// workers match the prefill worker's domain value.
-	NoMatchPolicyFail NoMatchPolicy = "fail"
-	// NoMatchPolicyFallback allows cross-domain KV transfer if no decode
-	// workers share the prefill worker's domain value.
-	NoMatchPolicyFallback NoMatchPolicy = "fallback"
+	// KvTransferEnforcementRequired maps the generated topology taint to a
+	// required RoutingConstraints entry.
+	KvTransferEnforcementRequired KvTransferEnforcement = "required"
+	// KvTransferEnforcementPreferred maps the generated topology taint to a
+	// preferred RoutingConstraints entry.
+	KvTransferEnforcementPreferred KvTransferEnforcement = "preferred"
 )
 
 // KvTransferPolicy configures topology-aware routing for KV-cache transfers
-// between prefill and decode workers.
+// between prefill and decode workers. This graph-wide policy lives under
+// `spec.experimental` while the API is incubating.
 type KvTransferPolicy struct {
 	// LabelKey is a Kubernetes node label key (e.g.
 	// "topology.kubernetes.io/zone") whose value identifies the topology
@@ -110,10 +110,18 @@ type KvTransferPolicy struct {
 	// share the same value for the label identified by `labelKey`.
 	Domain TopologyDomain `json:"domain"`
 
-	// NoMatchPolicy controls behavior when no decode workers share the same
-	// `domain` value as the prefill worker. Defaults to "fail".
+	// Enforcement controls how the selected prefill worker's topology is
+	// applied to decode routing. Defaults to "required".
 	// +optional
-	// +kubebuilder:default=fail
-	// +kubebuilder:validation:Enum=fail;fallback
-	NoMatchPolicy NoMatchPolicy `json:"noMatchPolicy,omitempty"`
+	// +kubebuilder:default=required
+	// +kubebuilder:validation:Enum=required;preferred
+	Enforcement KvTransferEnforcement `json:"enforcement,omitempty"`
+
+	// PreferredWeight is used when enforcement is "preferred". It maps to the
+	// RoutingConstraints preferred_taints weight for the generated topology
+	// taint.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	PreferredWeight *float32 `json:"preferredWeight,omitempty"`
 }

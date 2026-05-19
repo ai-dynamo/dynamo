@@ -911,36 +911,52 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 	return nil
 }
 
-// validateKvTransferPolicy validates the spec.kvTransferPolicy configuration
-// when set. In this phase only the `labelKey` path is supported
+// validateKvTransferPolicy validates the spec.experimental.kvTransferPolicy
+// configuration when set. In this phase only the `labelKey` path is supported
 // (clusterTopologyName is added in a future PR).
 func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
-	kvt := v.deployment.Spec.KvTransferPolicy
+	if v.deployment.Spec.Experimental == nil {
+		return nil
+	}
+	kvt := v.deployment.Spec.Experimental.KvTransferPolicy
 	if kvt == nil {
 		return nil
 	}
 
 	var errs []error
+	const fieldPath = "spec.experimental.kvTransferPolicy"
 
 	// labelKey is required (only supported path in this phase)
 	if kvt.LabelKey == "" {
-		errs = append(errs, fmt.Errorf("spec.kvTransferPolicy.labelKey is required"))
+		errs = append(errs, fmt.Errorf("%s.labelKey is required", fieldPath))
 	}
 
 	// domain is required and must be a valid topology domain format
 	if kvt.Domain == "" {
-		errs = append(errs, fmt.Errorf("spec.kvTransferPolicy.domain is required"))
+		errs = append(errs, fmt.Errorf("%s.domain is required", fieldPath))
 	} else if !nvidiacomv1alpha1.IsValidTopologyDomainFormat(kvt.Domain) {
-		errs = append(errs, fmt.Errorf("spec.kvTransferPolicy.domain %q is not a valid topology domain; "+
-			"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", kvt.Domain))
+		errs = append(errs, fmt.Errorf("%s.domain %q is not a valid topology domain; "+
+			"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", fieldPath, kvt.Domain))
 	}
 
-	// noMatchPolicy must be a valid enum value when explicitly set
-	if kvt.NoMatchPolicy != "" &&
-		kvt.NoMatchPolicy != nvidiacomv1alpha1.NoMatchPolicyFail &&
-		kvt.NoMatchPolicy != nvidiacomv1alpha1.NoMatchPolicyFallback {
-		errs = append(errs, fmt.Errorf("spec.kvTransferPolicy.noMatchPolicy %q is invalid; "+
-			"must be \"fail\" or \"fallback\"", kvt.NoMatchPolicy))
+	enforcement := kvt.Enforcement
+	if enforcement == "" {
+		enforcement = nvidiacomv1alpha1.KvTransferEnforcementRequired
+	}
+	if enforcement != nvidiacomv1alpha1.KvTransferEnforcementRequired &&
+		enforcement != nvidiacomv1alpha1.KvTransferEnforcementPreferred {
+		errs = append(errs, fmt.Errorf("%s.enforcement %q is invalid; "+
+			"must be \"required\" or \"preferred\"", fieldPath, kvt.Enforcement))
+	}
+
+	if kvt.PreferredWeight != nil {
+		if *kvt.PreferredWeight < 0 || *kvt.PreferredWeight > 1 {
+			errs = append(errs, fmt.Errorf("%s.preferredWeight %g is invalid; "+
+				"must be >= 0 and <= 1", fieldPath, *kvt.PreferredWeight))
+		}
+		if enforcement == nvidiacomv1alpha1.KvTransferEnforcementRequired {
+			errs = append(errs, fmt.Errorf("%s.preferredWeight must not be set when enforcement is \"required\"", fieldPath))
+		}
 	}
 
 	return errors.Join(errs...)
