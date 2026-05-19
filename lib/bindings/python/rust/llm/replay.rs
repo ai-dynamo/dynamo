@@ -560,7 +560,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -581,6 +581,7 @@ pub fn run_mocker_trace_replay(
     trace_format: &str,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    report_jsonl_path: Option<PathBuf>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -601,6 +602,13 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config);
     let replay_mode = replay_mode.to_owned();
+    if report_jsonl_path.is_some() && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "report_jsonl_path is only supported for replay_mode='offline'",
+        ));
+    }
+    let jsonl_path_for_emit = report_jsonl_path.clone();
+    let record_per_request = report_jsonl_path.is_some();
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
@@ -627,6 +635,7 @@ pub fn run_mocker_trace_replay(
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
+                            record_per_request,
                         )
                     }
                     ("offline", None) => {
@@ -642,6 +651,7 @@ pub fn run_mocker_trace_replay(
                             trace_format,
                             trace_shared_prefix_ratio,
                             trace_num_prefix_groups,
+                            record_per_request,
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -694,6 +704,7 @@ pub fn run_mocker_trace_replay(
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
+                        record_per_request,
                     )
                 }
                 ("offline", None) => {
@@ -708,6 +719,7 @@ pub fn run_mocker_trace_replay(
                         trace_format,
                         trace_shared_prefix_ratio,
                         trace_num_prefix_groups,
+                        record_per_request,
                     )
                 }
                 ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
@@ -719,9 +731,41 @@ pub fn run_mocker_trace_replay(
         }
     });
     let report = report.map_err(to_pyerr)?;
+    // Write per-request JSONL from Rust directly if requested, avoiding a
+    // potentially-large round trip through pyo3 / pythonize. Each line is one
+    // JSON object (matching AIPerf's profile_export.jsonl convention).
+    if let Some(path) = jsonl_path_for_emit.as_ref() {
+        py.allow_threads(|| write_per_request_jsonl(path, &report.per_request))
+            .map_err(to_pyerr)?;
+    }
     pythonize(py, &report)
         .map_err(to_pyerr)
         .map(|obj| obj.unbind())
+}
+
+/// Write per-request records to a JSONL file. One JSON object per line, no
+/// outer array wrapper — matches AIPerf's `profile_export.jsonl` convention
+/// and is friendlier to streaming consumers (pandas read_json with lines=True,
+/// jq -c, etc.).
+fn write_per_request_jsonl(
+    path: &std::path::Path,
+    records: &[dynamo_mocker::replay::PerRequestRecord],
+) -> anyhow::Result<()> {
+    use std::io::{BufWriter, Write};
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for record in records {
+        let line = serde_json::to_string(record)?;
+        writer.write_all(line.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 #[pyfunction]
