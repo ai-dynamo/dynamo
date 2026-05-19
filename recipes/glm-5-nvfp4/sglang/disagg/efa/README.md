@@ -154,6 +154,23 @@ Measured on 5 × p6e-gb200.36xlarge, EFA driver 3.0.0g, kernel 6.14.0-1018-aws-6
 
 Baseline numbers reproduced from [../README.md](../../../README.md). EFA achieves parity on all four published metrics. TTFT p50 is lower (better) on EFA, though TTFT avg is higher with a long tail (p99 ≈ 12.5 s).
 
+## Long-context performance (ISL=20k, OSL=2k, concurrency=64)
+
+The benefit of the LIBFABRIC backend grows with per-request KV cache size. Running the same recipe with `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` set vs. unset (NIXL defaults to UCX) on the same 5 × p6e-gb200.36xlarge hardware:
+
+
+| Metric                  | LIBFABRIC (this recipe) | UCX (default) |
+| ----------------------- | ----------------------- | ------------- |
+| Output token throughput | **2,023 tok/s**         | 1,454 tok/s   |
+| TTFT p50                | **20,273 ms**           | 46,369 ms     |
+| TTFT avg                | **20,452 ms**           | 41,746 ms     |
+| ITL avg                 | 17.56 ms                | 17.20 ms      |
+| Benchmark duration      | **194 s**               | 270 s         |
+| Request count           | 192                     | 192           |
+
+
+With 20× larger per-request KV cache, LIBFABRIC is **39% higher throughput** and **56% lower TTFT p50** than UCX. ITL is essentially unchanged because steady-state decoding never touches the KV transfer path — only the prefill→decode KV hand-off does.
+
 
 ## References
 
