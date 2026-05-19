@@ -1,0 +1,357 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GLM-5.1-FP8 — vLLM disaggregated prefill/decode on GB200 (NVL36/NVL72).
+#
+# Topology (4 nodes, 32 GPUs):
+#   Frontend : 1 pod  — Dynamo HTTP gateway, round-robin router
+#   Prefill  : 2 nodes x TP8 — NIXL kv_producer, enforce-eager
+#   Decode   : 2 nodes x TP8 — NIXL kv_consumer, CUDA graphs, FP8 KV cache
+#
+# Prerequisites:
+#   kubectl apply -f chat-template.yaml
+#   kubectl apply -f ../../../model-cache/model-cache.yaml
+#   kubectl create secret generic hf-token-secret \
+#     --from-literal=HF_TOKEN=<token> -n <your-namespace>
+#
+# Adjust before applying:
+#   - NCCL_IB_HCA: verify HCA names with `ibstat` or `ls /dev/infiniband/`
+#   - nvidia.com/gpu.product: confirm label with `kubectl get nodes --show-labels`
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm51-fp8
+  namespace: <your-namespace>
+  labels:
+    app.kubernetes.io/name: glm51-fp8
+spec:
+  backendFramework: vllm
+  envs:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: hf-token-secret
+          key: HF_TOKEN
+    - { name: HF_HOME,                   value: /models }
+    - { name: VLLM_USE_DEEP_GEMM,        value: "1" }
+    - { name: VLLM_DEEP_GEMM_WARMUP,     value: skip }
+    - { name: VLLM_ENGINE_READY_TIMEOUT_S, value: "4200" }
+
+  services:
+
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          command: [python3]
+          args:
+            - -m
+            - dynamo.frontend
+            - --http-port=3000
+            - --router-mode=round-robin
+            - --model-name=zai-org/GLM-5.1-FP8
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          ports:
+            - { name: http, containerPort: 3000 }
+          volumeMounts:
+            - { name: model-cache, mountPath: /models }
+        tolerations:
+          - { key: kubernetes.io/arch, operator: Equal, value: arm64, effect: NoSchedule }
+          - { key: nvidia.com/gpu,     operator: Exists,              effect: NoSchedule }
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        claims:
+          - name: compute-domain-channel
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+          custom:
+            ephemeral-storage: 10Gi
+      extraPodSpec:
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: glm51-fp8-compute-domain-channel
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
+          command: [bash, -c]
+          args:
+            - >-
+              NCCL_LIB=/opt/dynamo/venv/lib/python3.12/site-packages/nvidia/nccl/lib;
+              ln -sf "$NCCL_LIB/libnccl.so.2" /tmp/libnccl.so 2>/dev/null || true;
+              export LIBRARY_PATH="/tmp:${LIBRARY_PATH:-}";
+              export LD_LIBRARY_PATH="$NCCL_LIB:${LD_LIBRARY_PATH:-}";
+              ulimit -l unlimited 2>/dev/null || true;
+              ulimit -n 1048576 2>/dev/null || true;
+              exec python3 -m dynamo.vllm
+              --model zai-org/GLM-5.1-FP8
+              --tensor-parallel-size 8
+              --pipeline-parallel-size 1
+              --enable-expert-parallel
+              --max-model-len 65536
+              --max-num-batched-tokens 8192
+              --max-num-seqs 64
+              --gpu-memory-utilization 0.85
+              --dyn-tool-call-parser glm47
+              --dyn-reasoning-parser glm45
+              --chat-template /etc/glm51/chat_template.jinja
+              --enforce-eager
+              --disaggregation-mode prefill
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}'
+              --trust-remote-code
+          env:
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+            - { name: PYTHONHASHSEED,              value: "0" }
+            - { name: VLLM_ENABLE_MOE_DP_CHUNK,    value: "0" }
+            - { name: PYTORCH_CUDA_ALLOC_CONF,      value: "expandable_segments:False" }
+            - { name: VLLM_USE_NCCL_SYMM_MEM,      value: "1" }
+            - { name: UCX_NET_DEVICES,              value: all }
+            - { name: UCX_TLS,                      value: all }
+            - { name: UCX_IB_GID_INDEX,             value: "3" }
+            - { name: UCX_RC_TIMEOUT,               value: 600s }
+            - { name: UCX_KEEPALIVE_INTERVAL,       value: 300s }
+            - { name: UCX_LOG_LEVEL,                value: error }
+            - { name: NCCL_IB_DISABLE,              value: "0" }
+            - { name: NCCL_CUMEM_ENABLE,            value: "1" }
+            - { name: NCCL_CUMEM_HOST_ENABLE,       value: "1" }
+            - { name: NCCL_NVLS_ENABLE,             value: "1" }
+            - { name: NCCL_MNNVL_ENABLE,            value: "1" }
+            - { name: NCCL_IB_HCA,                  value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3" }  # verify for your cluster
+            - { name: NCCL_IB_MERGE_NICS,           value: "0" }
+            - { name: NCCL_IB_GID_INDEX,            value: "3" }
+            - { name: NCCL_GRAPH_MIXING_SUPPORT,    value: "0" }
+            - { name: NCCL_STORE_TIMEOUT,           value: "7200" }
+            - { name: NCCL_SOCKET_IFNAME,           value: eth0 }
+            - { name: GLOO_SOCKET_IFNAME,           value: eth0 }
+            - { name: NVIDIA_GDRCOPY,               value: "1" }
+            - { name: NCCL_DEBUG,                   value: INFO }
+            - { name: NCCL_DEBUG_SUBSYS,            value: "INIT,ENV,NET" }
+            - { name: NIXL_LOG_LEVEL,               value: INFO }
+            - { name: NIXL_TELEMETRY_ENABLE,        value: "y" }
+            - { name: NIXL_TELEMETRY_EXPORTER,      value: prometheus }
+            - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+            - name: LD_LIBRARY_PATH
+              value: /opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib
+          securityContext:
+            capabilities:
+              add: [IPC_LOCK, SYS_RESOURCE]
+          startupProbe:
+            failureThreshold: 60
+            periodSeconds: 60
+            timeoutSeconds: 10
+            httpGet: { path: /live, port: 9090 }
+          livenessProbe:
+            failureThreshold: 6
+            periodSeconds: 15
+            timeoutSeconds: 10
+            httpGet: { path: /live, port: 9090 }
+          readinessProbe:
+            failureThreshold: 6
+            periodSeconds: 15
+            timeoutSeconds: 10
+            httpGet: { path: /health, port: 9090 }
+          volumeMounts:
+            - { name: model-cache,    mountPath: /models }
+            - { name: dshm,           mountPath: /dev/shm }
+            - { name: chat-template,  mountPath: /etc/glm51 }
+            # - { name: compilation-cache, mountPath: /home/dynamo/.cache/vllm }
+          workingDir: /workspace
+        tolerations:
+          - { key: kubernetes.io/arch, operator: Equal, value: arm64, effect: NoSchedule }
+          - { key: nvidia.com/gpu,     operator: Exists,              effect: NoSchedule }
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: dshm
+            emptyDir: { medium: Memory, sizeLimit: 128Gi }
+          - name: chat-template
+            configMap:
+              name: glm51-fp8-chat-template
+          # - name: compilation-cache
+          #   persistentVolumeClaim:
+          #     claimName: compilation-cache
+
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        claims:
+          - name: compute-domain-channel
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
+          custom:
+            ephemeral-storage: 10Gi
+      extraPodSpec:
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: glm51-fp8-compute-domain-channel
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
+          command: [bash, -c]
+          args:
+            - >-
+              NCCL_LIB=/opt/dynamo/venv/lib/python3.12/site-packages/nvidia/nccl/lib;
+              ln -sf "$NCCL_LIB/libnccl.so.2" /tmp/libnccl.so 2>/dev/null || true;
+              export LIBRARY_PATH="/tmp:${LIBRARY_PATH:-}";
+              export LD_LIBRARY_PATH="$NCCL_LIB:${LD_LIBRARY_PATH:-}";
+              ulimit -l unlimited 2>/dev/null || true;
+              ulimit -n 1048576 2>/dev/null || true;
+              exec python3 -m dynamo.vllm
+              --model zai-org/GLM-5.1-FP8
+              --tensor-parallel-size 8
+              --pipeline-parallel-size 1
+              --enable-expert-parallel
+              --max-model-len 65536
+              --max-num-batched-tokens 8192
+              --max-num-seqs 64
+              --gpu-memory-utilization 0.75
+              --kv-cache-dtype fp8
+              --dyn-tool-call-parser glm47
+              --dyn-reasoning-parser glm45
+              --chat-template /etc/glm51/chat_template.jinja
+              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+              --disaggregation-mode decode
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"block_size":64,"cpu_bytes_to_use":128000000000}}'
+              --trust-remote-code
+          env:
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+            - { name: PYTHONHASHSEED,              value: "0" }
+            - { name: PYTORCH_CUDA_ALLOC_CONF,      value: "expandable_segments:False" }
+            - { name: VLLM_USE_NCCL_SYMM_MEM,      value: "1" }
+            - { name: UCX_NET_DEVICES,              value: all }
+            - { name: UCX_TLS,                      value: all }
+            - { name: UCX_IB_GID_INDEX,             value: "3" }
+            - { name: UCX_RC_TIMEOUT,               value: 600s }
+            - { name: UCX_KEEPALIVE_INTERVAL,       value: 300s }
+            - { name: UCX_CUDA_IPC_ENABLE_MNNVL,   value: "y" }
+            - { name: UCX_LOG_LEVEL,                value: error }
+            - { name: NCCL_IB_DISABLE,              value: "0" }
+            - { name: NCCL_CUMEM_ENABLE,            value: "1" }
+            - { name: NCCL_CUMEM_HOST_ENABLE,       value: "1" }
+            - { name: NCCL_NVLS_ENABLE,             value: "1" }
+            - { name: NCCL_MNNVL_ENABLE,            value: "1" }
+            - { name: NCCL_P2P_PXN_LEVEL,           value: "1" }
+            - { name: NCCL_IB_HCA,                  value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3" }  # verify for your cluster
+            - { name: NCCL_IB_MERGE_NICS,           value: "0" }
+            - { name: NCCL_IB_GID_INDEX,            value: "3" }
+            - { name: NCCL_GRAPH_MIXING_SUPPORT,    value: "0" }
+            - { name: NCCL_STORE_TIMEOUT,           value: "7200" }
+            - { name: NCCL_SOCKET_IFNAME,           value: eth0 }
+            - { name: GLOO_SOCKET_IFNAME,           value: eth0 }
+            - { name: NVIDIA_GDRCOPY,               value: "1" }
+            - { name: NCCL_DEBUG,                   value: INFO }
+            - { name: NCCL_DEBUG_SUBSYS,            value: "INIT,ENV,NET" }
+            - { name: NIXL_LOG_LEVEL,               value: INFO }
+            - { name: NIXL_TELEMETRY_ENABLE,        value: "y" }
+            - { name: NIXL_TELEMETRY_EXPORTER,      value: prometheus }
+            - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+            - name: LD_LIBRARY_PATH
+              value: /opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib
+          securityContext:
+            capabilities:
+              add: [IPC_LOCK, SYS_RESOURCE]
+          startupProbe:
+            failureThreshold: 60
+            periodSeconds: 60
+            timeoutSeconds: 10
+            httpGet: { path: /live, port: 9090 }
+          livenessProbe:
+            failureThreshold: 6
+            periodSeconds: 15
+            timeoutSeconds: 10
+            httpGet: { path: /live, port: 9090 }
+          readinessProbe:
+            failureThreshold: 6
+            periodSeconds: 15
+            timeoutSeconds: 10
+            httpGet: { path: /health, port: 9090 }
+          volumeMounts:
+            - { name: model-cache,    mountPath: /models }
+            - { name: dshm,           mountPath: /dev/shm }
+            - { name: chat-template,  mountPath: /etc/glm51 }
+            # - { name: compilation-cache, mountPath: /home/dynamo/.cache/vllm }
+          workingDir: /workspace
+        tolerations:
+          - { key: kubernetes.io/arch, operator: Equal, value: arm64, effect: NoSchedule }
+          - { key: nvidia.com/gpu,     operator: Exists,              effect: NoSchedule }
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: dshm
+            emptyDir: { medium: Memory, sizeLimit: 128Gi }
+          - name: chat-template
+            configMap:
+              name: glm51-fp8-chat-template
+          # - name: compilation-cache
+          #   persistentVolumeClaim:
+          #     claimName: compilation-cache
+
+---
+# ComputeDomain — pins all 4 worker nodes to the same MNNVL NVLink clique.
+# numNodes = prefill.multinode.nodeCount (2) + decode.multinode.nodeCount (2)
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: glm51-fp8-compute-domain
+  namespace: <your-namespace>
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: glm51-fp8-compute-domain-channel
+  numNodes: 4
+---
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceClaimTemplate
+metadata:
+  name: glm51-fp8-compute-domain-channel
+  namespace: <your-namespace>
+spec:
+  spec:
+    devices:
+      config:
+        - opaque:
+            driver: compute-domain.nvidia.com
+            parameters:
+              allocationMode: Single
+              apiVersion: resource.nvidia.com/v1beta1
+              kind: ComputeDomainChannelConfig
+          requests:
+            - channel
+      requests:
+        - exactly:
+            allocationMode: ExactCount
+            count: 1
+            deviceClassName: compute-domain-default-channel.nvidia.com
+          name: channel
