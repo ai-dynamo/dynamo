@@ -8,15 +8,18 @@ use local_ip_address::Error;
 use std::net::IpAddr;
 
 fn resolve_local_ip_with_resolver<R: IpResolver>(resolver: R) -> IpAddr {
-    let resolved_ip = resolver.local_ip().or_else(|err| match err {
-        Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-        _ => Err(err),
-    });
+    // Try IPv4 first, fallback to IPv6 on any error
+    let resolved_ip = match resolver.local_ip() {
+        Ok(addr) => Ok(addr),
+        Err(_) => resolver.local_ipv6(),
+    };
 
     match resolved_ip {
         Ok(addr) => addr,
-        Err(Error::LocalIpAddressNotFound) => IpAddr::from([127, 0, 0, 1]),
-        Err(_) => IpAddr::from([127, 0, 0, 1]), // Fallback for any other error
+        Err(_) => {
+            // Both IPv4 and IPv6 failed, fall back to loopback
+            IpAddr::from([127, 0, 0, 1])
+        }
     }
 }
 
