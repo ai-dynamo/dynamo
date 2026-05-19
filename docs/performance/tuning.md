@@ -72,7 +72,7 @@ Each engine backend has its own CLI flag to control what fraction of GPU memory 
 
 Dynamo launch scripts use absolute KV cache overrides for deterministic, parallel-safe GPU memory control. For vLLM, `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` maps to `--kv-cache-memory-bytes`. For SGLang, `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` maps to `--max-total-tokens`. These are set by `tests/utils/profile_pytest.py` during binary-search profiling and by `tests/utils/pytest_parallel_gpu.py` at runtime.
 
-Setting a lower memory fraction leaves more headroom for other CUDA allocations (e.g. activation buffers, NCCL buffers) at the cost of a smaller KV cache. Setting it higher allows more concurrent requests but risks OOM from non-KV-cache allocations. Typical production values are 0.85-0.95.
+Setting a lower memory fraction leaves more headroom for other CUDA allocations (e.g. activation buffers, NCCL buffers) at the cost of a smaller KV cache. Setting it higher allows more concurrent requests but risks OOM from non-KV-cache allocations. Typical production values are 0.85-0.95, but large MoE and disaggregated recipes should start closer to 0.85 and only move higher after a load-and-request validation on the target hardware. Recipe READMEs should document any per-hardware or per-worker values that differ from the backend default.
 
 > [!Important]
 > In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This is exactly why we use `--kv-cache-memory-bytes` for parallel-safe allocation: it provides a deterministic, absolute KV cache cap that is immune to profiling races.
