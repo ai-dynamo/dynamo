@@ -18,16 +18,12 @@ pub const G2PB_ENDPOINT_NAME: &str = "g2pb";
 pub struct G2pbPeer {
     pub instance_id: u64,
     pub endpoint: String,
-    pub hostname: String,
+    pub stable_routing_id: String,
 }
 
 impl G2pbPeer {
     pub fn routing_id(&self) -> u64 {
-        if self.hostname.is_empty() {
-            return self.instance_id;
-        }
-
-        compute_hash_v2(self.hostname.as_bytes(), 0)
+        compute_hash_v2(self.stable_routing_id.as_bytes(), 0)
     }
 }
 
@@ -99,13 +95,6 @@ pub struct G2pbOfferRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G2pbHealthResponse {
-    pub instance_id: u64,
-    pub listen: String,
-    pub hostname: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct G2pbQueryRequest {
     pub sequence_hashes: Vec<SequenceHash>,
 }
@@ -132,7 +121,6 @@ pub struct G2pbFetchResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum G2pbRpcRequest {
-    Health,
     PutBlocks(Vec<G2pbPutBlock>),
     Offer(G2pbOfferRequest),
     PutPayload(G2pbPutPayloadRequest),
@@ -146,7 +134,6 @@ pub enum G2pbRpcRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum G2pbRpcResponse {
     Ack,
-    Health(G2pbHealthResponse),
     Offer(G2pbOfferResponse),
     PutPayload(Vec<G2pbTransferBlock>),
     Query(Vec<G2pbQueryHit>),
@@ -230,17 +217,17 @@ mod tests {
             G2pbPeer {
                 instance_id: 101,
                 endpoint: "tcp://peer-10".to_string(),
-                hostname: "g2pb-10".to_string(),
+                stable_routing_id: "g2pb-10".to_string(),
             },
             G2pbPeer {
                 instance_id: 202,
                 endpoint: "tcp://peer-20".to_string(),
-                hostname: "g2pb-20".to_string(),
+                stable_routing_id: "g2pb-20".to_string(),
             },
             G2pbPeer {
                 instance_id: 303,
                 endpoint: "tcp://peer-30".to_string(),
-                hostname: "g2pb-30".to_string(),
+                stable_routing_id: "g2pb-30".to_string(),
             },
         ]
     }
@@ -280,59 +267,24 @@ mod tests {
 
     #[test]
     fn discovered_peers_reject_duplicate_instance_ids() {
-        let err = G2pbDiscoveredPeers::from_health_responses(vec![
-            (
-                101,
-                G2pbHealthResponse {
-                    instance_id: 10,
-                    listen: "tcp://peer-10-a".to_string(),
-                    hostname: "g2pb-10-a".to_string(),
-                },
-            ),
-            (
-                202,
-                G2pbHealthResponse {
-                    instance_id: 10,
-                    listen: "tcp://peer-10-b".to_string(),
-                    hostname: "g2pb-10-b".to_string(),
-                },
-            ),
+        let err = G2pbDiscoveredPeers::from_mdc_discovery(vec![
+            (101, "tcp://peer-10-a".to_string(), "g2pb-10-a".to_string()),
+            (101, "tcp://peer-10-b".to_string(), "g2pb-10-b".to_string()),
         ])
         .unwrap_err();
 
         assert!(
             err.to_string()
-                .contains("duplicate remote instance_id 10 discovered")
+                .contains("duplicate remote instance_id 101 discovered")
         );
     }
 
     #[test]
     fn discovered_peers_sort_instances_by_routing_id() {
-        let discovered = G2pbDiscoveredPeers::from_health_responses(vec![
-            (
-                303,
-                G2pbHealthResponse {
-                    instance_id: 30,
-                    listen: "tcp://peer-30".to_string(),
-                    hostname: "g2pb-30".to_string(),
-                },
-            ),
-            (
-                101,
-                G2pbHealthResponse {
-                    instance_id: 10,
-                    listen: "tcp://peer-10".to_string(),
-                    hostname: "g2pb-10".to_string(),
-                },
-            ),
-            (
-                202,
-                G2pbHealthResponse {
-                    instance_id: 20,
-                    listen: "tcp://peer-20".to_string(),
-                    hostname: "g2pb-20".to_string(),
-                },
-            ),
+        let discovered = G2pbDiscoveredPeers::from_mdc_discovery(vec![
+            (303, "tcp://peer-30".to_string(), "g2pb-30".to_string()),
+            (101, "tcp://peer-10".to_string(), "g2pb-10".to_string()),
+            (202, "tcp://peer-20".to_string(), "g2pb-20".to_string()),
         ])
         .unwrap();
 

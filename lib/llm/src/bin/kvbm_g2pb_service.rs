@@ -13,14 +13,17 @@ use dynamo_llm::block_manager::config::{
 };
 use dynamo_llm::block_manager::distributed::{
     G2PB_COMPONENT_NAME, G2PB_ENDPOINT_NAME, G2PB_NAMESPACE, G2pbCacheStorage, G2pbError,
-    G2pbFetchBlocksResponse, G2pbHealthResponse, G2pbPutBlock, G2pbQueryHit, G2pbRpcRequest,
+    G2pbFetchBlocksResponse, G2pbPutBlock, G2pbQueryHit, G2pbRpcRequest,
     G2pbRpcResponse, G2pbStageBlocksResponse, G2pbStorageAgent, G2pbStorageConfig,
 };
 use dynamo_llm::block_manager::locality::Local as LocalityLocal;
 use dynamo_llm::block_manager::storage::{PinnedAllocator, PinnedStorage, nixl::NixlAgent};
 use dynamo_llm::block_manager::{CancellationToken, KvBlockManager};
+use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_runtime::{
     DistributedRuntime, Runtime, Worker, logging,
+    discovery::DiscoverySpec,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
         async_trait, network::Ingress,
@@ -574,11 +577,6 @@ impl G2pbBackendService {
 
     async fn handle_rpc(&self, request: G2pbRpcRequest) -> Result<G2pbRpcResponse> {
         match request {
-            G2pbRpcRequest::Health => Ok(G2pbRpcResponse::Health(G2pbHealthResponse {
-                instance_id: self.agent.instance_id(),
-                listen: self.endpoint_id.clone(),
-                hostname: std::env::var("HOSTNAME").unwrap_or_default(),
-            })),
             G2pbRpcRequest::PutBlocks(blocks) => {
                 self.agent.put_blocks(blocks).await;
                 Ok(G2pbRpcResponse::Ack)
@@ -628,9 +626,39 @@ impl G2pbBackendService {
         let component = distributed
             .namespace(G2PB_NAMESPACE)?
             .component(G2PB_COMPONENT_NAME)?;
+        let endpoint = component.endpoint(G2PB_ENDPOINT_NAME);
 
-        component
-            .endpoint(G2PB_ENDPOINT_NAME)
+        let stable_routing_id = std::env::var("DYN_STABLE_ROUTING_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        
+        if let Some(ref sri) = stable_routing_id {
+            tracing::info!(
+                stable_routing_id = %sri,
+                instance_id = %self.instance_id(),
+                "G2PB service advertising stable_routing_id"
+            );
+        }
+
+        let mut runtime_config = ModelRuntimeConfig::default();
+        if let Some(sri) = stable_routing_id {
+            runtime_config.stable_routing_id = Some(sri);
+        }
+
+        let mut card = ModelDeploymentCard::with_name_only("g2pb-service");
+        card.runtime_config = runtime_config;
+
+        let discovery = distributed.discovery();
+        let spec = DiscoverySpec::from_model(
+            component.namespace().name().to_string(),
+            component.name().to_string(),
+            endpoint.name().to_string(),
+            &card,
+        )?;
+        discovery.register(spec).await?;
+
+        endpoint
             .endpoint_builder()
             .handler(ingress)
             .graceful_shutdown(true)

@@ -3,7 +3,7 @@
 
 use super::{
     G2PB_ENDPOINT_NAME, G2pbCommitRequest, G2pbError, G2pbFetchBlocksResponse, G2pbFetchRequest,
-    G2pbHealthResponse, G2pbLoadRemoteRequest, G2pbOfferRequest, G2pbOfferResponse, G2pbPeer,
+    G2pbLoadRemoteRequest, G2pbOfferRequest, G2pbOfferResponse, G2pbPeer,
     G2pbPutBlock, G2pbPutPayloadRequest, G2pbQueryHit, G2pbQueryRequest, G2pbRpcRequest,
     G2pbRpcResponse, G2pbStageBlocksRequest, G2pbStageBlocksResponse, G2pbStorageAgent,
     G2pbTransferBlock,
@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use dynamo_runtime::{
     component::Component,
     pipeline::{RouterMode, SingleIn, network::egress::push_router::PushRouter},
+    prelude::DistributedRuntimeProvider,
     protocols::annotated::Annotated,
 };
 use futures::{StreamExt, future::join_all};
@@ -84,6 +85,7 @@ pub struct G2pbStorageClient {
 #[derive(Clone)]
 pub struct G2pbRequestPlaneClient {
     router: PushRouter<G2pbRpcRequest, Annotated<G2pbRpcResponse>>,
+    component: Component,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +110,7 @@ impl G2pbRequestPlaneClient {
         let client = component.endpoint(G2PB_ENDPOINT_NAME).client().await?;
         client.wait_for_instances().await?;
         let router = PushRouter::from_client_no_fault_detection(client, RouterMode::Direct).await?;
-        Ok(Self { router })
+        Ok(Self { router, component })
     }
 
     pub fn instance_ids(&self) -> Vec<u64> {
@@ -131,13 +133,6 @@ impl G2pbRequestPlaneClient {
         response.into_result()?.ok_or_else(|| {
             anyhow::anyhow!("G2PB request to instance {instance_id} returned an empty response")
         })
-    }
-
-    pub async fn health(&self, instance_id: u64) -> Result<G2pbHealthResponse> {
-        match self.request(instance_id, G2pbRpcRequest::Health).await? {
-            G2pbRpcResponse::Health(response) => Ok(response),
-            other => anyhow::bail!("unexpected G2PB health response: {other:?}"),
-        }
     }
 
     pub async fn put_blocks(&self, instance_id: u64, blocks: Vec<G2pbPutBlock>) -> Result<()> {
@@ -286,23 +281,25 @@ impl G2pbPeerResolver {
 }
 
 impl G2pbDiscoveredPeers {
-    pub fn from_health_responses(discovered: Vec<(u64, G2pbHealthResponse)>) -> Result<Self> {
+    pub fn from_mdc_discovery(
+        discovered: Vec<(u64, String, String)>,
+    ) -> Result<Self> {
         let mut peers_by_instance = HashMap::with_capacity(discovered.len());
-        for (instance_id, health) in discovered {
+        for (instance_id, endpoint, stable_routing_id) in discovered {
             let peer = G2pbPeer {
-                instance_id: health.instance_id,
-                endpoint: health.listen,
-                hostname: health.hostname,
+                instance_id,
+                endpoint,
+                stable_routing_id,
             };
             let resolved = G2pbPeerInstance {
                 peer: peer.clone(),
                 instance_id,
             };
 
-            if let Some(previous) = peers_by_instance.insert(health.instance_id, resolved) {
+            if let Some(previous) = peers_by_instance.insert(instance_id, resolved) {
                 anyhow::bail!(
                     "duplicate remote instance_id {} discovered at instance {} and {}",
-                    health.instance_id,
+                    instance_id,
                     previous.instance_id,
                     instance_id
                 );
@@ -370,13 +367,51 @@ impl G2pbDiscoveredPeers {
 pub async fn discover_g2pb_peers(
     request_client: &G2pbRequestPlaneClient,
 ) -> Result<G2pbDiscoveredPeers> {
+    use dynamo_runtime::discovery::DiscoveryQuery;
+    
+    let instances = request_client.router.client.instances();
+    let discovery = request_client.component.drt().discovery();
+    
+    let query = DiscoveryQuery::EndpointModels {
+        namespace: request_client.component.namespace().name(),
+        component: request_client.component.name().to_string(),
+        endpoint: G2PB_ENDPOINT_NAME.to_string(),
+    };
+    
+    let model_cards = discovery.list(query).await?;
+    
+    let mut stable_routing_id_by_instance: HashMap<u64, String> = HashMap::new();
+    for model_instance in model_cards {
+        if let dynamo_runtime::discovery::DiscoveryInstance::Model {
+            instance_id,
+            card_json,
+            ..
+        } = model_instance
+        {
+            if let Some(runtime_config) = card_json.get("runtime_config") {
+                if let Some(sri) = runtime_config.get("stable_routing_id") {
+                    if let Some(sri_str) = sri.as_str() {
+                        if !sri_str.is_empty() {
+                            stable_routing_id_by_instance.insert(instance_id, sri_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     let mut discovered = Vec::new();
-    for instance_id in request_client.instance_ids() {
-        let health = request_client.health(instance_id).await?;
-        discovered.push((instance_id, health));
+    for instance in instances {
+        let instance_id = instance.id();
+        let endpoint = instance.endpoint_id().as_url();
+        let stable_routing_id = stable_routing_id_by_instance
+            .get(&instance_id)
+            .cloned()
+            .unwrap_or_default();
+        discovered.push((instance_id, endpoint, stable_routing_id));
     }
 
-    G2pbDiscoveredPeers::from_health_responses(discovered)
+    G2pbDiscoveredPeers::from_mdc_discovery(discovered)
 }
 
 impl G2pbStorageClient {

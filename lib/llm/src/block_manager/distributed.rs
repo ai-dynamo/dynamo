@@ -14,7 +14,7 @@ mod worker;
 pub use g2pb::{
     G2PB_COMPONENT_NAME, G2PB_ENDPOINT_NAME, G2PB_NAMESPACE, G2pbCacheStorage, G2pbCommitRequest,
     G2pbDiscoveredPeers, G2pbError, G2pbFetchBlocksResponse, G2pbFetchRequest, G2pbFetchResponse,
-    G2pbHealthResponse, G2pbLoadRemoteRequest, G2pbOfferRequest, G2pbOfferResponse, G2pbPeer,
+    G2pbLoadRemoteRequest, G2pbOfferRequest, G2pbOfferResponse, G2pbPeer,
     G2pbPeerInstance, G2pbPeerResolver, G2pbPutBlock, G2pbPutPayloadRequest, G2pbQueryHit,
     G2pbQueryRequest, G2pbRequestPlaneClient, G2pbRpcRequest, G2pbRpcResponse,
     G2pbStageBlocksRequest, G2pbStageBlocksResponse, G2pbStorageAgent, G2pbStorageClient,

@@ -408,18 +408,18 @@ async fn app(runtime: Runtime) -> Result<()> {
     let peer_resolver = G2pbPeerResolver::new(request_client.clone()).await?;
     let mut rpc_timings = Vec::new();
 
-    let health_start = Instant::now();
+    let discovery_start = Instant::now();
     let discovered_peers = peer_resolver.snapshot().await;
     for resolved in discovered_peers.instances() {
         println!(
-            "remote service ready: instance_id={} endpoint={}",
-            resolved.peer.instance_id, resolved.peer.endpoint
+            "remote service ready: instance_id={} endpoint={} stable_routing_id={}",
+            resolved.peer.instance_id, resolved.peer.endpoint, resolved.peer.stable_routing_id
         );
     }
     rpc_timings.push(RpcTiming {
-        label: "health",
+        label: "discovery",
         ops: discovered_peers.instances().len(),
-        elapsed: health_start.elapsed(),
+        elapsed: discovery_start.elapsed(),
     });
     let remote_workers = discovered_peers.peers();
 
