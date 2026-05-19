@@ -192,6 +192,9 @@ The dedicated replay CLI exposes:
 - `--aic-backend-version`
 - `--aic-tp-size`
 - `--aic-model-path`
+- `--aic-moe-tp-size`
+- `--aic-moe-ep-size`
+- `--aic-attention-dp-size`
 - `--report-json`
 
 Defaults:
@@ -237,6 +240,10 @@ Replay has two independent AIC surfaces:
 - engine timing AIC via `--extra-engine-args` / staged engine JSON
 - router-side prompt-load AIC via top-level `--aic-*` flags together with
   `router_prefill_load_model: "aic"` in `--router-config`
+
+Both surfaces accept MoE parallelism fields. For Kimi-style TP-only MoE configs, keep them aligned by
+setting `aic_moe_tp_size` to the same value as `aic_tp_size`, with `aic_moe_ep_size=1` and
+`aic_attention_dp_size=1`.
 
 Offline disagg replay uses staged engine args instead of `--extra-engine-args`:
 
@@ -414,6 +421,16 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
 
 For offline disagg replay, the same top-level `--aic-*` flags are supported, but the estimator is
 applied only to the prefill-stage router.
+
+For MoE models that require AIC MoE parallelism, add the matching top-level router AIC flags, for
+example:
+
+```bash
+    --aic-tp-size 2 \
+    --aic-moe-tp-size 2 \
+    --aic-moe-ep-size 1 \
+    --aic-attention-dp-size 1
+```
 
 ## Output
 
