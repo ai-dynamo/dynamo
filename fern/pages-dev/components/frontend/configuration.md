@@ -93,7 +93,7 @@ For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd` | Service discovery: `kubernetes`, `etcd`, `file`, `mem` |
-| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats`, `http` |
+| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats` |
 | `--event-plane` | `DYN_EVENT_PLANE` | `nats` | Event publishing: `nats`, `zmq` |
 
 ## KServe gRPC
