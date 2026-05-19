@@ -54,6 +54,13 @@ kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-download.yaml -n ${NAMESP
 kubectl wait --for=condition=complete job/model-download -n ${NAMESPACE} --timeout=3600s
 ```
 
+If your cluster already provides a shared RWX cache PVC, skip
+`model-cache/model-cache.yaml` and update `claimName: model-cache` in
+`model-cache/model-download.yaml`, `sglang/disagg/deploy.yaml`, and
+`sglang/disagg/perf.yaml` to that PVC's name. Keep the mount path as
+`/model-store` so the workers, model download job, and benchmark job share the
+same HuggingFace cache and JIT artifacts.
+
 ## Step 3: Deploy
 
 Edit `sglang/disagg/deploy.yaml` and replace the namespace placeholder:
@@ -95,6 +102,11 @@ kubectl logs -f -l job-name=glm5-disagg-bench -n ${NAMESPACE}
 
 Default benchmark: ISL=1000, OSL=8192, concurrency=512 (32/GPU).
 
+The benchmark pod runs as a non-root user and installs AIPerf into `/tmp/.local`.
+It pins Transformers v5 because `nvidia/GLM-5-NVFP4` declares
+`tokenizer_class=TokenizersBackend`, which older Transformers v4 releases do not
+load.
+
 ## Key Configuration Notes
 
 ### Speculative Decoding (EAGLE MTP)
@@ -125,11 +137,26 @@ while TCP provides UCX active-message control traffic.
 Uses Kubernetes service discovery. Worker registration is tied to pod lifetime
 via Kubernetes EndpointSlices, preventing TTL expiry issues under high load.
 
+### Recovery and Rollouts
+The decode side is one TP16 rank group spread across four GB200 nodes. Treat
+single decode-pod replacement as disruptive, and validate full-group recovery in
+your cluster before relying on individual decode pod restarts for production
+rollouts. In validation, cold deploy plus frontend and prefill replacement
+recovered successfully, while deleting one decode worker restarted the decode
+leader and the graph stayed NotReady during repeated rank-group reinitialization
+attempts.
+
 ## Performance (ISL=1k, OSL=8k, concurrency=512)
+
+Reference AIPerf run: 1,536 requests, 0 errors, 747.87s benchmark duration.
+This is a concurrency-burst benchmark, so TTFT includes queueing under 512
+concurrent users.
 
 | Metric | Value |
 |--------|-------|
-| Output throughput | ~19,000 tokens/sec |
-| TTFT p50 | ~850ms |
-| ITL avg | ~24ms/token |
-| Tokens/user/sec | ~41 |
+| Output throughput | 16,824 tokens/sec |
+| Request throughput | 2.05 requests/sec |
+| TTFT p50 | 15,423ms |
+| ITL avg | 23.31ms/token |
+| Tokens/user/sec avg | 43.39 |
+| Request errors | 0 |
