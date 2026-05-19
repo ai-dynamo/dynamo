@@ -84,7 +84,7 @@ class DistributedRuntime:
         Args:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
-            request_plane: Request plane transport ("tcp", "http", or "nats")
+            request_plane: Request plane transport ("tcp" or "nats")
         """
         ...
 
@@ -352,18 +352,41 @@ def compute_block_hash_for_seq(
 
     ...
 
+class ContextMetadata:
+    """
+    Live mutable view over propagated context metadata.
+    """
+    def __getitem__(self, key: str) -> str: ...
+    def __setitem__(self, key: str, value: str) -> None: ...
+    def __delitem__(self, key: str) -> None: ...
+    def __len__(self) -> int: ...
+    def __contains__(self, key: str) -> bool: ...
+    def __iter__(self) -> Any: ...
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]: ...
+    def pop(self, key: str, default: Optional[str] = None) -> Optional[str]: ...
+    def keys(self) -> List[str]: ...
+    def values(self) -> List[str]: ...
+    def items(self) -> List[Tuple[str, str]]: ...
+    def clear(self) -> None: ...
+    def copy(self) -> Dict[str, str]: ...
+
 class Context:
     """
     Context wrapper around AsyncEngineContext for Python bindings.
     Provides tracing and cancellation capabilities for request handling.
     """
 
-    def __init__(self, id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        id: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
         """
         Create a new Context instance.
 
         Args:
             id: Optional request ID. If None, a default ID will be generated.
+            metadata: Optional propagated metadata map.
         """
         ...
 
@@ -391,12 +414,12 @@ class Context:
         """
         ...
 
-    def id(self) -> Optional[str]:
+    def id(self) -> str:
         """
         Get the context ID.
 
         Returns:
-            The context identifier string, or None if not set.
+            The context identifier string.
         """
         ...
 
@@ -415,6 +438,16 @@ class Context:
         requests. Engines normally don't need this — the framework
         auto-fires on the first non-empty chunk in the response stream."""
         ...
+
+    @property
+    def metadata(self) -> ContextMetadata:
+        """
+        Get the live propagated context metadata mapping.
+        """
+        ...
+
+    @metadata.setter
+    def metadata(self, metadata: Dict[str, str]) -> None: ...
 
     @property
     def trace_id(self) -> Optional[str]:
@@ -1308,6 +1341,9 @@ class AicPerfConfig:
         aic_model_path: str,
         aic_tp_size: int = 1,
         aic_backend_version: Optional[str] = None,
+        aic_moe_tp_size: Optional[int] = None,
+        aic_moe_ep_size: Optional[int] = None,
+        aic_attention_dp_size: Optional[int] = None,
     ) -> None:
         ...
 
