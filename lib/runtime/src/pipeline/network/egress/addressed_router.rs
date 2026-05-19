@@ -500,7 +500,10 @@ mod tests {
     #[test]
     fn serialize_control_message_errors_over_limit() {
         let mut metadata = BTreeMap::new();
-        metadata.insert("x-large-blob".to_string(), "x".repeat(CONTROL_MESSAGE_MAX_BYTES));
+        metadata.insert(
+            "x-large-blob".to_string(),
+            "x".repeat(CONTROL_MESSAGE_MAX_BYTES),
+        );
 
         let err = serialize_control_message(&base_control_message(metadata))
             .expect_err("oversized control message should fail")

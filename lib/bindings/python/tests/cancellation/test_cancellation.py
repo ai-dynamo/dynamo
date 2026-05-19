@@ -45,7 +45,7 @@ class MockServer:
         Checks for context.is_stopped() / context.is_killed() before each yield and raises
         CancelledError if stopped / killed
         """
-        include_metadata = request == "_generate_until_context_cancelled_with_metadata_baseten"
+        include_metadata = request == "_generate_until_context_cancelled_with_metadata"
 
         for i in range(1000):
             print(f"Processing iteration {i}")
@@ -212,13 +212,13 @@ async def test_client_context_cancel(temp_file_store, server, client):
 @pytest.mark.forked
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-async def test_client_context_cancel_preserves_metadata_baseten(
+async def test_client_context_cancel_preserves_metadata(
     temp_file_store, server, client
 ):
     _, handler = server
     context = Context(metadata={"tenant": "alpha", "region": "us-west"})
     stream = await client.generate(
-        "_generate_until_context_cancelled_with_metadata_baseten", context=context
+        "_generate_until_context_cancelled_with_metadata", context=context
     )
 
     iteration_count = 0
