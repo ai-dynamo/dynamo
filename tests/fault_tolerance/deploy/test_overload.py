@@ -165,7 +165,13 @@ def _apply_router_config(
 
 def _apply_cluster_portability(spec):
     """Pod-security + memory-budget tweaks that make this DGD run cleanly on
-    aks-dev (A100-80GB) and aws-dev-02 (H100-80GB) shared clusters."""
+    aks-dev (A100-80GB) and aws-dev-02 (H100-80GB) shared clusters.
+
+    Includes image-pull-secret wiring: aws-dev-02's `default` SA only carries
+    `acr-token-secret` (a controller resets the list on any add). We tack on
+    `ngc-pull-secret` per-service so private nvcr.io/nvidian/* images pull
+    cleanly. The secret is harmless on clusters that don't have it (k8s
+    silently ignores unknown imagePullSecrets in pod specs)."""
     # Pin Frontend to A100/H100 node pool with the GPU toleration so the
     # operator's default CPU scheduling doesn't land it on a small node.
     fe = spec["Frontend"]._spec.setdefault("extraPodSpec", {})
@@ -175,6 +181,14 @@ def _apply_cluster_portability(spec):
             {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"},
         ],
     )
+
+    # Add NGC private-org pull secret on every service. Default SA is reset
+    # by a controller on shared clusters; per-pod secrets bypass that.
+    for svc in ("Frontend", "VllmPrefillWorker", "VllmDecodeWorker"):
+        eps = spec[svc]._spec.setdefault("extraPodSpec", {})
+        ips = eps.setdefault("imagePullSecrets", [])
+        if not any(s.get("name") == "ngc-pull-secret" for s in ips):
+            ips.append({"name": "ngc-pull-secret"})
 
     # Full unprivileged-bypass for UCX/NIXL on cri-containerd AppArmor +
     # 64KB memlock default (OPS-4332).
