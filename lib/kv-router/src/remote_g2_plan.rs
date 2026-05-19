@@ -31,6 +31,15 @@ pub struct RemoteKvReusePlan {
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub plan_version: u32,
+    /// Parallel to `block_hashes`, carrying each block's source-side
+    /// KV-cache-manager hash (TRT-LLM splitmix). The TRT-LLM source side
+    /// uses these values to look up blocks via `find_block_by_hash`;
+    /// `block_hashes` (XXH3 tokens hash) remains the plan's identity.
+    /// Empty when the producer has not been updated to populate the new
+    /// field — TRT-LLM's source falls back to using `block_hashes` for
+    /// the lookup (legacy behavior).
+    #[serde(default)]
+    pub kv_block_hashes: Vec<u64>,
 }
 
 // Compatibility identity is intentionally deferred in v1; source resolve remains authoritative.
@@ -193,6 +202,10 @@ pub fn select_remote_g2_reuse_plan(
             created_at_ms: input.created_at_ms,
             expires_at_ms: input.expires_at_ms,
             plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
+            // Caller fills this in post-selection by walking the indexer for
+            // the chosen source. Left empty here so the planner stays a pure
+            // function of `tiered_matches` and does not depend on the indexer.
+            kv_block_hashes: Vec::new(),
         },
         stats,
     }
@@ -223,6 +236,7 @@ mod tests {
             created_at_ms: 1000,
             expires_at_ms: 2000,
             plan_version: REMOTE_KV_REUSE_PLAN_VERSION,
+            kv_block_hashes: vec![],
         }
     }
 
@@ -273,6 +287,45 @@ mod tests {
         let json = serde_json::to_string(&plan).unwrap();
         let decoded: RemoteKvReusePlan = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, plan);
+    }
+
+    #[test]
+    fn remote_kv_reuse_plan_round_trips_kv_block_hashes() {
+        // Populated kv_block_hashes must appear in the JSON and survive
+        // a serialize → deserialize round trip with the exact same values.
+        let mut plan = test_plan();
+        plan.kv_block_hashes = vec![
+            0xAAAA_AAAA_AAAA_AAAA,
+            0xBBBB_BBBB_BBBB_BBBB,
+            0xCCCC_CCCC_CCCC_CCCC,
+        ];
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            json.contains("\"kv_block_hashes\""),
+            "serialized plan missing kv_block_hashes field: {json}"
+        );
+        // Big values must serialize as integers, not stringified
+        assert!(json.contains("12297829382473034410"));
+        let decoded: RemoteKvReusePlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.kv_block_hashes, plan.kv_block_hashes);
+    }
+
+    #[test]
+    fn remote_kv_reuse_plan_accepts_legacy_payload_without_kv_block_hashes() {
+        // A producer that has not been updated to populate kv_block_hashes
+        // emits the field-less JSON; it must still deserialize, with the
+        // new field defaulting to empty.
+        let plan = test_plan();
+        let json = serde_json::to_string(&plan).unwrap();
+        // Strip the kv_block_hashes field from the JSON to simulate a
+        // legacy producer.
+        let legacy = json.replace(",\"kv_block_hashes\":[]", "");
+        assert!(
+            !legacy.contains("kv_block_hashes"),
+            "legacy payload should not contain kv_block_hashes"
+        );
+        let decoded: RemoteKvReusePlan = serde_json::from_str(&legacy).unwrap();
+        assert!(decoded.kv_block_hashes.is_empty());
     }
 
     #[test]

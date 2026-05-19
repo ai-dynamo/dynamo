@@ -152,6 +152,17 @@ pub fn create_stored_block_from_parts(
         kv_block_size,
         mm_extra_info
     );
+    // PROBE: emit both hashes at WARN so the worker log can be cross-referenced
+    // against the planner output. The planner emits plans containing tokens_hash
+    // values (LocalBlockHash, XXH3 seed=1337), while publisher.py's PROBE log
+    // captures the upstream block_hash (TRT-LLM external). Both spaces matter:
+    // - tokens_hash is what the indexer keys on and what the planner emits.
+    // - block_hash is what the source descriptor registry would key on (for NIXL).
+    tracing::warn!(
+        "PROBE create_stored_block: block_hash={} tokens_hash={}",
+        block_hash,
+        tokens_hash.0,
+    );
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash::from(block_hash),
         tokens_hash,

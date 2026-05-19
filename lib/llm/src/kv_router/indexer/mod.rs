@@ -13,8 +13,8 @@ use dynamo_kv_router::{
         MatchDetails, ThreadPoolIndexer, query_lower_tiers,
     },
     protocols::{
-        DpRank, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId,
-        WorkerWithDpRank,
+        DpRank, ExternalSequenceBlockHash, LocalBlockHash, OverlapScores, RouterEvent,
+        StorageTier, TokensWithHashes, WorkerId, WorkerWithDpRank,
     },
 };
 
@@ -203,6 +203,41 @@ impl Indexer {
             }
             Self::None => Ok(TieredMatchDetails::default()),
         }
+    }
+
+    /// Walk the host-pinned chain for `source` starting from `parent_hash`,
+    /// returning each step's TRT-LLM-side block_hash. Used by the remote-G2
+    /// planner to populate `RemoteKvReusePlan.kv_block_hashes` for the
+    /// selected source worker.
+    ///
+    /// Returns an empty Vec when:
+    /// - the indexer is `None` or `Remote` (host-pinned indexer not locally
+    ///   reachable),
+    /// - no host-pinned events have been seen yet (lazy tier is unallocated),
+    /// - the source's chain breaks before the first step (eviction race or
+    ///   worker not an owner of the first edge).
+    ///
+    /// Empty result causes `kv_block_hashes` to stay empty, in which case
+    /// the TRT-LLM source side falls back to using `block_hashes` for the
+    /// resolve lookup (legacy behavior).
+    pub fn chain_block_hashes_for_host_pinned(
+        &self,
+        source: WorkerWithDpRank,
+        parent_hash: Option<ExternalSequenceBlockHash>,
+        tokens_hashes: &[LocalBlockHash],
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let lower_tier = match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier
+            }
+            Self::Remote(_) | Self::None => return Vec::new(),
+        };
+        let Some(indexer) = lower_tier.get(StorageTier::HostPinned) else {
+            return Vec::new();
+        };
+        indexer
+            .backend()
+            .chain_block_hashes_for_worker(source, parent_hash, tokens_hashes)
     }
 
     pub(crate) async fn record_hashed_routing_decision(

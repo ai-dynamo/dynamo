@@ -618,7 +618,7 @@ where
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await?;
         let created_at_ms = unix_epoch_ms();
-        let remote_kv_reuse = if remote_g2_reuse_enabled() {
+        let mut remote_kv_reuse = if remote_g2_reuse_enabled() {
             select_remote_g2_reuse_plan(RemoteKvReuseSelectionInput {
                 request_id: context_id.unwrap_or_default(),
                 target: response.best_worker,
@@ -634,6 +634,69 @@ where
                 stats: RemoteKvReuseSelectionStats::default(),
             }
         };
+
+        // Post-selection: extract the chosen source's host-pinned chain of
+        // TRT-LLM-side block_hashes and populate the plan. The chain may
+        // come back shorter than `planned_prefix_blocks` if eviction races
+        // with our walk; in that case shrink the plan to the chain length,
+        // or demote to NoPlan if the chain is empty entirely.
+        if let RemoteKvReuseDecision::Plan {
+            plan,
+            stats: plan_stats,
+        } = &mut remote_kv_reuse
+        {
+            let source = dynamo_kv_router::protocols::WorkerWithDpRank::new(
+                plan.source_worker_id,
+                plan.source_dp_rank,
+            );
+            let start = plan.start_block_index as usize;
+            let end = start + plan.planned_prefix_blocks as usize;
+            // Starting parent_hash for the host-pinned chain: None when the
+            // source had no device-tier matches (start == 0), otherwise the
+            // device tier's last matched block_hash for this source.
+            let parent_hash = if start == 0 {
+                None
+            } else {
+                tiered_matches
+                    .device
+                    .last_matched_hashes
+                    .get(&source)
+                    .copied()
+            };
+
+            let chain = self.indexer.chain_block_hashes_for_host_pinned(
+                source,
+                parent_hash,
+                &block_hashes[start..end],
+            );
+
+            // PROBE: emit at WARN so worker-side block_hash logs can be
+            // cross-referenced against planner output. Investigation-only
+            // until the hash plumbing is validated end-to-end.
+            tracing::warn!(
+                plan_id = %plan.plan_id,
+                source_worker_id = source.worker_id,
+                source_dp_rank = source.dp_rank,
+                requested_block_hashes = ?plan.block_hashes,
+                chain_kv_block_hashes = ?chain,
+                "PROBE remote_g2_plan kv_block_hash chain"
+            );
+
+            if chain.is_empty() {
+                let stats_copy = *plan_stats;
+                remote_kv_reuse = RemoteKvReuseDecision::NoPlan {
+                    reason: RemoteKvReuseNoPlanReason::NoContiguousPrefix,
+                    stats: stats_copy,
+                };
+            } else {
+                if chain.len() < end - start {
+                    let new_len = chain.len();
+                    plan.planned_prefix_blocks = new_len as u32;
+                    plan.block_hashes.truncate(new_len);
+                }
+                plan.kv_block_hashes = chain.into_iter().map(|h| h.0).collect();
+            }
+        }
         let total_elapsed = start.elapsed();
 
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
