@@ -97,31 +97,52 @@ class RouterConfigBase(ConfigBase):
           so the threshold takes effect (preserves the v1.0.x / v1.1.x
           launch-config contract where setting a threshold flag implicitly
           activated admission control). Otherwise resolve to "none".
-        - "token-capacity": keep the configured busy thresholds as-is.
+        - "token-capacity": keep configured thresholds as-is, fill
+          production defaults for thresholds the user did not pass.
         - "none" (explicit): clear all busy thresholds; if any threshold
-          flag was also explicitly set, raise — the combination is a
-          contradiction (you explicitly turned admission off while also
-          configuring a threshold value).
+          flag was set to a *numeric* value, raise — explicit `--<flag>
+          None` is consistent with admission disabled and silently kept.
 
         After this method returns, ``self.admission_control`` is always one
-        of ADMISSION_CONTROL_CHOICES.
+        of ADMISSION_CONTROL_CHOICES and the threshold fields are
+        ``Optional[float|int]``. Calling the method again on the resolved
+        state is a no-op (idempotent).
         """
-        explicit_thresholds: list[str] = []
-        if self.active_decode_blocks_threshold is not _THRESHOLD_UNSET:
-            explicit_thresholds.append("--active-decode-blocks-threshold")
-        if self.active_prefill_tokens_threshold is not _THRESHOLD_UNSET:
-            explicit_thresholds.append("--active-prefill-tokens-threshold")
-        if self.active_prefill_tokens_threshold_frac is not _THRESHOLD_UNSET:
-            explicit_thresholds.append("--active-prefill-tokens-threshold-frac")
+        # `numeric_thresholds` is the subset that actually configures a cap.
+        # The auto-promote rule and the explicit-`none` contradiction both
+        # key off this — explicit `--<flag> None` is consistent with
+        # admission disabled, so it never auto-promotes and never raises.
+        # Restricting the contradiction check to numeric values also makes
+        # this method idempotent: after the sentinel → None normalization
+        # below, a subsequent call sees fields that are `None` (no longer
+        # _THRESHOLD_UNSET) and correctly treats them as "no numeric cap".
+        numeric_thresholds: list[str] = []
+        for value, flag in (
+            (
+                self.active_decode_blocks_threshold,
+                "--active-decode-blocks-threshold",
+            ),
+            (
+                self.active_prefill_tokens_threshold,
+                "--active-prefill-tokens-threshold",
+            ),
+            (
+                self.active_prefill_tokens_threshold_frac,
+                "--active-prefill-tokens-threshold-frac",
+            ),
+        ):
+            if value is _THRESHOLD_UNSET or value is None:
+                continue
+            numeric_thresholds.append(flag)
 
         if self.admission_control == _ADMISSION_CONTROL_AUTO:
-            if explicit_thresholds:
+            if numeric_thresholds:
                 logger.info(
                     "admission-control: implicit mode resolved to 'token-capacity' "
-                    "because %s was explicitly set. Pass --admission-control "
+                    "because %s was set to a numeric value. Pass --admission-control "
                     "token-capacity to make this explicit, or unset the "
                     "threshold(s) to keep admission control disabled.",
-                    ", ".join(explicit_thresholds),
+                    ", ".join(numeric_thresholds),
                 )
                 self.admission_control = "token-capacity"
             else:
@@ -152,20 +173,24 @@ class RouterConfigBase(ConfigBase):
                 )
             return
 
-        # admission_control == "none" (explicit or auto-resolved). Contradiction
-        # with any explicit threshold flag — raise rather than silently
-        # overriding.
-        if explicit_thresholds:
+        # admission_control == "none" (explicit or auto-resolved). A numeric
+        # threshold value alongside explicit `none` is a contradiction; an
+        # explicit `--<flag> None` is consistent and silently kept.
+        if numeric_thresholds:
             raise ValueError(
                 "--admission-control none cannot be combined with explicit "
-                f"{', '.join(explicit_thresholds)} — drop the threshold flag(s) "
+                f"{', '.join(numeric_thresholds)} — drop the threshold flag(s) "
                 "to keep admission disabled, or pass --admission-control "
                 "token-capacity to activate the threshold(s)."
             )
         # Sentinel → None so downstream sees the documented Optional[…] type.
-        self.active_decode_blocks_threshold = None
-        self.active_prefill_tokens_threshold = None
-        self.active_prefill_tokens_threshold_frac = None
+        # Explicit user-passed `None` already matches; this is a no-op for those.
+        if self.active_decode_blocks_threshold is _THRESHOLD_UNSET:
+            self.active_decode_blocks_threshold = None
+        if self.active_prefill_tokens_threshold is _THRESHOLD_UNSET:
+            self.active_prefill_tokens_threshold = None
+        if self.active_prefill_tokens_threshold_frac is _THRESHOLD_UNSET:
+            self.active_prefill_tokens_threshold_frac = None
 
 
 class RouterArgGroup(ArgGroup):

@@ -590,6 +590,55 @@ def test_admission_control_default_none_with_no_thresholds_stays_none(
     assert config.router_queue_threshold == 32.0
 
 
+def test_admission_control_apply_is_idempotent(monkeypatch) -> None:
+    """``apply_admission_control()`` runs once in ``validate()`` and again
+    when ``router_kwargs()`` builds the worker config. The second call
+    must not raise the explicit-none contradiction against the ``None``
+    threshold values its first call normalized them to."""
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()  # first apply
+    # router_kwargs() runs apply_admission_control() again on the
+    # already-normalized state. Must not raise.
+    kwargs = config.router_kwargs()
+
+    assert config.admission_control == "none"
+    assert kwargs["active_decode_blocks_threshold"] is None
+    assert kwargs["active_prefill_tokens_threshold"] is None
+    assert kwargs["active_prefill_tokens_threshold_frac"] is None
+
+
+def test_admission_control_explicit_none_threshold_with_none_mode_ok(
+    monkeypatch,
+) -> None:
+    """``--admission-control none --active-decode-blocks-threshold None``
+    is consistent (both say disabled) — must not raise. Only a *numeric*
+    threshold value alongside explicit ``none`` is a contradiction."""
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--admission-control",
+            "none",
+            "--active-decode-blocks-threshold",
+            "None",
+        ]
+    )
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.admission_control == "none"
+    assert config.active_decode_blocks_threshold is None
+
+
 def test_admission_control_token_capacity_with_explicit_none_threshold_keeps_disabled(
     monkeypatch,
 ) -> None:
