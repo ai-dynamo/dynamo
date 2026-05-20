@@ -137,10 +137,7 @@ class KvRouterConfigBase(ConfigBase):
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         self.apply_load_aware_preset()
-        kwargs = {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
-        if kwargs["router_queue_depth_by_missing_isl"] is None:
-            del kwargs["router_queue_depth_by_missing_isl"]
-        return kwargs
+        return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
 
 class KvRouterArgGroup(ArgGroup):
@@ -315,10 +312,6 @@ class KvRouterArgGroup(ArgGroup):
             help="KV Router: Number of messages in stream before triggering a snapshot.",
             arg_type=int,
         )
-        # router_queue_depth_by_missing_isl is config-file-only:
-        # it's a structured list of (missing_isl_floor, max_queue_depth) tuples
-        # that doesn't map cleanly to a single CLI flag. Set it via the Python
-        # KvRouterConfig constructor or the JSON/YAML config file.
         add_negatable_bool_argument(
             g,
             flag_name="--router-reset-states",
