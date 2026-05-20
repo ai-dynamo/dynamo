@@ -161,18 +161,37 @@ jobs:
           if [ "${{ matrix.cuda_version }}" != "" ]; then
             CUDA_VERSION="${{ matrix.cuda_version }}"
             CUDA_MAJOR=${CUDA_VERSION%%.*}
-            TAG_BUILDER+="-cuda${CUDA_MAJOR}"
+            # cuda13 is the default — no suffix in the ECR tag. cuda12 (and
+            # any future non-13 major) stays explicit so the tag still
+            # disambiguates the variant. Keep the cuda-suffix expressions in
+            # shared-test.yml and dynamo-pipeline.yml in sync with this rule.
+            if [ "${CUDA_MAJOR}" != "13" ]; then
+              TAG_BUILDER+="-cuda${CUDA_MAJOR}"
+            fi
           fi
           SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           IMAGE_TAG_SUFFIX='${{ inputs.image_tag_suffix }}'
           IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}
           TEST_IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}-test
 
-          IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
-          TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
+          IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${IMAGE_TAG}"
+          TEST_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
+
+          # When a suffix is set (e.g. "-nightly"), also emit a mutable,
+          # SHA-less floating ECR tag (e.g. vllm-runtime-cuda12-nightly) so
+          # consumers can pull the latest nightly without knowing the SHA.
+          # Repushed on every build via extra_tags below; the immutable
+          # SHA-keyed tag above is still the source of truth for promotions.
+          MUTABLE_IMAGE_URI=""
+          if [ -n "${IMAGE_TAG_SUFFIX}" ]; then
+            MUTABLE_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
+          fi
+
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "mutable_image_uri=${MUTABLE_IMAGE_URI}" >> $GITHUB_OUTPUT
       - name: Calculate Builder Flavor
         id: calculate-builder-flavor
         shell: bash
@@ -195,6 +214,7 @@ jobs:
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
+          MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.mutable_image_uri }}
         run: |
           ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
           RESULT=""
@@ -204,6 +224,11 @@ jobs:
                 RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
+          fi
+          # Append the mutable floating tag computed in calculate-target-tag
+          # (e.g. vllm-runtime-cuda12-nightly). Empty for non-nightly builds.
+          if [ -n "${MUTABLE_IMAGE_URI}" ]; then
+            RESULT+="${MUTABLE_IMAGE_URI}"$'\n'
           fi
           if [ -n "$RESULT" ]; then
             echo "tags<<EOF" >> $GITHUB_OUTPUT

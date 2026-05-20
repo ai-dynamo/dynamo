@@ -660,7 +660,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
-      image_suffix: vllm-runtime-cuda13
+      image_suffix: vllm-runtime
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -672,7 +672,7 @@ jobs:
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime-cuda13
+      image_suffix: sglang-runtime
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -684,7 +684,7 @@ jobs:
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
-      image_suffix: trtllm-runtime-cuda13
+      image_suffix: trtllm-runtime
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -766,7 +766,7 @@ jobs:
           extra_pytest_args: >-
             -m framework_with_gaie
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
-            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda13
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
 
   deploy-status-check:
     runs-on: ubuntu-latest
