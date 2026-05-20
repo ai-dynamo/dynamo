@@ -10,6 +10,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Dynamo Rust backend example wrapping the dynamo-mocker scheduler — a full-fidelity mocked LLM engine exposed through the LLMEngine trait."
+publish = false
 
 [[bin]]
 name = "dynamo-mocker-backend"

@@ -67,6 +67,7 @@ jobs:
       ngc_version_tag: ${{ steps.rc_tag.outputs.ngc_version_tag }}
       helm_chart_version: ${{ steps.rc_tag.outputs.helm_chart_version }}
       wheel_version: ${{ steps.rc_tag.outputs.wheel_version }}
+      cargo_version: ${{ steps.rc_tag.outputs.cargo_version }}
     steps:
       - name: Extract version and validate inputs
         id: extract
@@ -139,12 +140,19 @@ jobs:
             SHORT_SHA="${COMMIT_SHA:0:7}"
             NGC_VERSION_TAG="nightly-${DATE_UTC}-${SHORT_SHA}"
             WHEEL_VERSION="${BASE_VERSION}.dev${DATE_UTC}"
+            # Helm and cargo now publish on nightly with collision-safe SemVer pre-release suffixes.
+            # Two runs on the same UTC day for the same commit would still collide; daily nightly schedule won't hit that.
+            HELM_CHART_VERSION="${BASE_VERSION}-nightly.${DATE_UTC}.${SHORT_SHA}"
+            CARGO_VERSION="${BASE_VERSION}-dev.${DATE_UTC}.${SHORT_SHA}"
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
-            echo "helm_chart_version=" >> $GITHUB_OUTPUT
+            echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
             echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
+            echo "cargo_version=${CARGO_VERSION}" >> $GITHUB_OUTPUT
             echo "Nightly NGC tag: ${NGC_VERSION_TAG}"
             echo "Nightly wheel version: ${WHEEL_VERSION}"
+            echo "Nightly helm chart version: ${HELM_CHART_VERSION}"
+            echo "Nightly cargo version: ${CARGO_VERSION}"
             exit 0
           fi
 
@@ -175,41 +183,93 @@ jobs:
 
           # Normalize version for Helm SemVer: X.Y.Z.suffix → X.Y.Z-suffix
           SEMVER_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
-          HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
+          HELM_CHART_VERSION="${SEMVER_VERSION}-rc.${NEXT_RC}"
 
           WHEEL_VERSION="${BASE_VERSION}"
+
+          # Cargo carries run_id + run_attempt so each manual rerun against the same SHA
+          # publishes a fresh version, avoiding Artifactory's republish rejection.
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          CARGO_VERSION="${BASE_VERSION}-rc.${NEXT_RC}.${SHORT_SHA}.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
 
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
           echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
+          echo "cargo_version=${CARGO_VERSION}" >> $GITHUB_OUTPUT
           echo "RC number: ${NEXT_RC}"
           echo "Helm chart version: ${HELM_CHART_VERSION}"
           echo "RC wheel version: ${WHEEL_VERSION}"
+          echo "RC cargo version: ${CARGO_VERSION}"
 
   # ============================================================================
-  # NGC PUBLISH: crane copy to NGC, Helm chart push
-  # Sources images from ECR using SHA-based tags produced by post-merge CI.
+  # IMAGE MATRIX: emit the list of ECR→NGC copy operations as JSON so the
+  # publish-image job can fan out one parallel matrix entry per image.
+  # No environment, no AWS creds — the ECR hostname is composed inside
+  # publish-image so this job stays a pure-bash matrix builder.
   # ============================================================================
 
-  release-publish:
-    name: Publish to NGC
+  generate-image-matrix:
+    name: Generate Image Matrix
     needs: [prepare-release]
     if: needs.prepare-release.result == 'success'
-    runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
+    runs-on: prod-default-small-v2
+    outputs:
+      images: ${{ steps.matrix.outputs.images }}
+    steps:
+      - name: Build matrix JSON
+        id: matrix
+        env:
+          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          IS_NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
+        run: |
+          set -euo pipefail
+          ENTRIES=$(jq -c -n --arg t "$NGC_VERSION_TAG" --arg nightly "$IS_NIGHTLY" '
+            $t as $T |
+            ($nightly == "true") as $is_nightly |
+            [
+              {label: ("vllm-runtime:" + $T),                source_suffix: "vllm-runtime-cuda12",        target_repo: "vllm-runtime",         target_tag: $T},
+              {label: ("sglang-runtime:" + $T),              source_suffix: "sglang-runtime-cuda12",      target_repo: "sglang-runtime",       target_tag: $T},
+              {label: ("vllm-runtime:" + $T + "-cuda13"),    source_suffix: "vllm-runtime-cuda13",        target_repo: "vllm-runtime",         target_tag: ($T + "-cuda13")},
+              {label: ("sglang-runtime:" + $T + "-cuda13"),  source_suffix: "sglang-runtime-cuda13",      target_repo: "sglang-runtime",       target_tag: ($T + "-cuda13")},
+              {label: ("tensorrtllm-runtime:" + $T + "-cuda13"), source_suffix: "trtllm-runtime-cuda13",  target_repo: "tensorrtllm-runtime",  target_tag: ($T + "-cuda13")}
+            ] + (if $is_nightly then [] else [
+              {label: ("vllm-runtime:" + $T + "-efa"),        source_suffix: "vllm-runtime-efa-cuda12",   target_repo: "vllm-runtime",         target_tag: ($T + "-efa")},
+              {label: ("sglang-runtime:" + $T + "-efa"),      source_suffix: "sglang-runtime-efa-cuda12", target_repo: "sglang-runtime",       target_tag: ($T + "-efa")},
+              {label: ("tensorrtllm-runtime:" + $T + "-efa"), source_suffix: "trtllm-runtime-efa-cuda13", target_repo: "tensorrtllm-runtime",  target_tag: ($T + "-efa")},
+              {label: ("dynamo-frontend:" + $T),              source_suffix: "dynamo-frontend",           target_repo: "dynamo-frontend",      target_tag: $T},
+              {label: ("kubernetes-operator:" + $T),          source_suffix: "operator",                  target_repo: "kubernetes-operator",  target_tag: $T},
+              {label: ("dynamo-planner:" + $T),               source_suffix: "dynamo-planner",            target_repo: "dynamo-planner",       target_tag: $T},
+              {label: ("snapshot-agent:" + $T),               source_suffix: "snapshot-agent",            target_repo: "snapshot-agent",       target_tag: $T}
+            ] end)
+          ')
+          echo "images=${ENTRIES}" >> "$GITHUB_OUTPUT"
+          echo "Matrix entries:"
+          echo "$ENTRIES" | jq .
+
+  # ============================================================================
+  # NGC PUBLISH IMAGES: one matrix entry per image, ECR→NGC via crane copy.
+  # fail-fast: false so a single broken tag does not block the others; each
+  # entry hard-fails (no warn-only fallback) so regressions surface clearly.
+  # ============================================================================
+
+  publish-image:
+    name: Publish ${{ matrix.label }}
+    needs: [prepare-release, generate-image-matrix]
+    if: ${{ needs.generate-image-matrix.outputs.images != '' }}
+    runs-on: prod-tester-amd-v1
     environment: automated-release
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include: ${{ fromJson(needs.generate-image-matrix.outputs.images) }}
     env:
-      VERSION: ${{ needs.prepare-release.outputs.version }}
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
       NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
-      REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      REGISTRY_IMAGE: ai-dynamo/dynamo
     steps:
-      - name: Checkout at source commit
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          ref: ${{ needs.prepare-release.outputs.commit_sha }}
-
       - name: Setup crane
         env:
           CRANE_VERSION: v0.20.2
@@ -226,173 +286,57 @@ jobs:
         run: |
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          aws ecr get-login-password --region "${AWS_DEFAULT_REGION}" | crane auth login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          echo "ECR_HOSTNAME=${ECR_HOSTNAME}" >> "$GITHUB_ENV"
 
       - name: Login to NGC
         env:
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
           NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
         run: |
-          echo "${NGC_TOKEN}" | docker login nvcr.io -u "${NGC_USERNAME}" --password-stdin
           echo "${NGC_TOKEN}" | crane auth login nvcr.io -u "${NGC_USERNAME}" --password-stdin
 
-      - name: Copy images to NGC
-        id: copy_images
+      - name: Copy image
         env:
-          NGC_REGISTRY: nvcr.io
+          SOURCE_SUFFIX: ${{ matrix.source_suffix }}
+          TARGET_REPO: ${{ matrix.target_repo }}
+          TARGET_TAG: ${{ matrix.target_tag }}
           NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
-          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
         run: |
           set -euo pipefail
+          NIGHTLY_SUFFIX=""
+          if [ "${NIGHTLY}" = "true" ]; then NIGHTLY_SUFFIX="-nightly"; fi
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${SOURCE_SUFFIX}${NIGHTLY_SUFFIX}"
+          TARGET="nvcr.io/${NGC_ORG}/ai-dynamo/${TARGET_REPO}:${TARGET_TAG}"
+          echo "Copying ${SOURCE} -> ${TARGET}"
+          crane copy "${SOURCE}" "${TARGET}"
+          echo "- \`${TARGET_REPO}:${TARGET_TAG}\` pushed to NGC" >> "$GITHUB_STEP_SUMMARY"
 
-          SUCCESSFUL_COPIES=()
-          FAILED_COPIES=()
+  # ============================================================================
+  # NGC PUBLISH HELM: package both platform and snapshot charts at the
+  # collision-safe HELM_CHART_VERSION from prepare-release, then cm-push
+  # to NGC Helm. Runs on both RC and nightly.
+  # ============================================================================
 
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-
-          # Nightly builds push ECR tags with a `-nightly` suffix so a missing
-          # or failed nightly build can't fall through to the post-merge image
-          # at the same SHA (which carries stable, non-dev wheel versions).
-          NIGHTLY_TAG_SUFFIX=""
-          if [ "${NIGHTLY}" = "true" ]; then
-            NIGHTLY_TAG_SUFFIX="-nightly"
-          fi
-
-          echo "========================================"
-          echo "Copying images from ECR to NGC (registry-to-registry)"
-          echo "Source commit SHA: ${COMMIT_SHA}"
-          echo "NGC Version Tag: ${NGC_VERSION_TAG}"
-          echo "Nightly tag suffix: '${NIGHTLY_TAG_SUFFIX}'"
-          echo "========================================"
-
-          copy_image() {
-            local SRC="$1" DST="$2" LABEL="$3"
-            echo "----------------------------------------"
-            echo "Copying: ${LABEL}"
-            # crane copy preserves multi-arch manifest lists by default (no --platform needed)
-            if crane copy "${SRC}" "${DST}"; then
-              echo "  Copied: ${LABEL}"
-              SUCCESSFUL_COPIES+=("${LABEL}")
-              return 0
-            else
-              echo "  Warning: Failed to copy ${LABEL}, skipping..."
-              FAILED_COPIES+=("${LABEL}")
-              return 1
-            fi
-          }
-
-          # ---- CUDA 12 runtime images (vllm and sglang) ----
-          echo ""
-          echo "=== CUDA 12 Runtime Images (vllm, sglang) ==="
-          CUDA12_FRAMEWORKS=("vllm" "sglang")
-          for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
-            NGC_NAME="${FRAMEWORK}-runtime"
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
-            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
-          done
-
-          # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
-          echo ""
-          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) ==="
-          CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm")
-          for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
-            if [ "${FRAMEWORK}" = "trtllm" ]; then
-              NGC_NAME="tensorrtllm-runtime"
-            else
-              NGC_NAME="${FRAMEWORK}-runtime"
-            fi
-
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13${NIGHTLY_TAG_SUFFIX}"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
-            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
-          done
-
-          # Nightly builds only the runtime images above (vllm/sglang/trtllm
-          # cuda12+cuda13). EFA/frontend/operator/planner/snapshot are built
-          # by post-merge and other workflows on release branches; for nightly
-          # we skip them entirely so we don't try to copy ECR tags that don't
-          # exist for the resolved SHA.
-          if [[ "${NIGHTLY}" != "true" ]]; then
-            # ---- EFA runtime images ----
-            # All EFA runtime images are multi-arch (amd64+arm64).
-            # crane copy preserves multi-arch manifests automatically.
-            echo ""
-            echo "=== EFA Runtime Images ==="
-
-            # vllm EFA (CUDA 12)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
-            copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
-
-            # sglang EFA (CUDA 12)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
-            copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
-
-            # trtllm EFA (CUDA 13)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
-            copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
-
-            # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
-            echo ""
-            echo "=== Frontend Image ==="
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
-            copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
-
-            # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
-            echo ""
-            echo "=== Operator Image ==="
-            OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
-            OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
-            copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
-
-            # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
-            echo ""
-            echo "=== Planner Image ==="
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
-            copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
-
-            # ---- Snapshot image ----
-            echo ""
-            echo "=== Snapshot Image ==="
-            SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
-            SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
-            copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
-          else
-            echo ""
-            echo "=== Skipping EFA / frontend / operator / planner / snapshot (not built by nightly) ==="
-          fi
-
-          # ---- Summary ----
-          echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
-          echo "failed_count=${#FAILED_COPIES[@]}" >> $GITHUB_OUTPUT
-
-          printf '%s\n' "${SUCCESSFUL_COPIES[@]}" > /tmp/successful_copies.txt
-          printf '%s\n' "${FAILED_COPIES[@]}" > /tmp/failed_copies.txt 2>/dev/null || true
-
-          echo "========================================"
-          echo "NGC Publishing Summary:"
-          echo "  Successful: ${#SUCCESSFUL_COPIES[@]}"
-          echo "  Failed: ${#FAILED_COPIES[@]}"
-          echo "========================================"
-
-          if [ ${#SUCCESSFUL_COPIES[@]} -eq 0 ]; then
-            echo "ERROR: No images were successfully copied to NGC!"
-            exit 1
-          fi
+  publish-helm:
+    name: Publish Helm Charts
+    needs: [prepare-release]
+    if: needs.prepare-release.result == 'success'
+    runs-on: prod-tester-amd-v1
+    environment: automated-release
+    env:
+      HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
+    steps:
+      - name: Checkout at source commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
 
       - name: Package and push Helm charts to NGC
-        if: env.NIGHTLY != 'true'
         env:
           NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
           NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
-          HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
         run: |
           set -euo pipefail
 
@@ -408,82 +352,29 @@ jobs:
           helm repo add nats https://nats-io.github.io/k8s/helm/charts/ || true
           helm repo add bitnami https://charts.bitnami.com/bitnami || true
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Helm Charts" >> $GITHUB_STEP_SUMMARY
+          echo "## Helm Charts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          PLATFORM_CHART_DIR="deploy/helm/charts/platform"
-          CHART_NAME=$(awk '/^name:/ {print $2}' "${PLATFORM_CHART_DIR}/Chart.yaml")
-          pushd "${PLATFORM_CHART_DIR}"
-          helm dep build .
-          popd
+          for CHART_DIR in deploy/helm/charts/platform deploy/helm/charts/snapshot; do
+            CHART_NAME=$(awk '/^name:/ {print $2}' "${CHART_DIR}/Chart.yaml")
+            echo "Building deps for ${CHART_NAME}..."
+            pushd "${CHART_DIR}"
+            helm dep build .
+            popd
 
-          echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
-          helm package \
-            --version "${HELM_CHART_VERSION}" \
-            --app-version "${HELM_CHART_VERSION}" \
-            "${PLATFORM_CHART_DIR}"
+            echo "Packaging ${CHART_NAME} with version ${HELM_CHART_VERSION}..."
+            helm package \
+              --version "${HELM_CHART_VERSION}" \
+              --app-version "${HELM_CHART_VERSION}" \
+              "${CHART_DIR}"
 
-          CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
-          echo "Pushing ${CHART_FILE} to NGC Helm registry..."
-          helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
-          echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
+            CHART_FILE="${CHART_NAME}-${HELM_CHART_VERSION}.tgz"
+            echo "Pushing ${CHART_FILE} to NGC Helm registry..."
+            helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
+            echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> "$GITHUB_STEP_SUMMARY"
+          done
 
           helm repo remove "${REPO_ALIAS}"
-
-      - name: Create release summary
-        env:
-          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
-          HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
-          SUCCESSFUL_COUNT: ${{ steps.copy_images.outputs.successful_count }}
-          FAILED_COUNT: ${{ steps.copy_images.outputs.failed_count }}
-        run: |
-          if [[ "${NIGHTLY}" == "true" ]]; then
-            echo "## Nightly Build Summary" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Version | ${VERSION} |" >> $GITHUB_STEP_SUMMARY
-          echo "| NGC Version Tag | ${NGC_VERSION_TAG} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Source Commit SHA | ${COMMIT_SHA} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### NGC Publishing Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Successful copies**: ${SUCCESSFUL_COUNT}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Failed copies**: ${FAILED_COUNT}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 12 - default):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          if [[ "${NIGHTLY}" != "true" ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "EFA runtime images (multi-arch):" >> $GITHUB_STEP_SUMMARY
-            echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Operator image:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Planner image:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
-            echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
-          fi
 
   # ============================================================================
   # ARTIFACTORY STAGING: extract wheels from the dynamo-runtime image in ECR
@@ -583,6 +474,11 @@ jobs:
 
       - name: Upload wheels to Artifactory
         env:
+          # Prefer the two-variable scheme (ARTIFACTORY_SERVICE_URL + ARTIFACTORY_PYTHON_INDEX_NAME)
+          # so a single ARTIFACTORY_SERVICE_URL rotation covers every artifact type. Fall back to
+          # the legacy ARTIFACTORY_URL secret for one release while consumers migrate.
+          ARTIFACTORY_SERVICE_URL: ${{ secrets.ARTIFACTORY_SERVICE_URL }}
+          ARTIFACTORY_PYTHON_INDEX_NAME: ${{ secrets.ARTIFACTORY_PYTHON_INDEX_NAME }}
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
           ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
@@ -600,7 +496,14 @@ jobs:
             SUBPATH="release/${VERSION}/rc${RC_NUMBER}"
           fi
 
-          BASE_URL="${ARTIFACTORY_URL%/}/${SUBPATH}"
+          if [ -n "${ARTIFACTORY_SERVICE_URL}" ] && [ -n "${ARTIFACTORY_PYTHON_INDEX_NAME}" ]; then
+            BASE_URL="${ARTIFACTORY_SERVICE_URL%/}/artifactory/${ARTIFACTORY_PYTHON_INDEX_NAME}/${SUBPATH}"
+          elif [ -n "${ARTIFACTORY_URL}" ]; then
+            BASE_URL="${ARTIFACTORY_URL%/}/${SUBPATH}"
+          else
+            echo "::error::Neither ARTIFACTORY_SERVICE_URL+ARTIFACTORY_PYTHON_INDEX_NAME nor ARTIFACTORY_URL is set"
+            exit 1
+          fi
           echo "Uploading to: ${BASE_URL}/"
 
           echo "## Wheel Staging Summary" >> $GITHUB_STEP_SUMMARY
@@ -636,6 +539,97 @@ jobs:
           done
 
   # ============================================================================
+  # CARGO PUBLISH: bump workspace crates to the collision-safe CARGO_VERSION
+  # and publish them to Artifactory's cargo registry in topological order.
+  # Uses cargo-workspaces which honors inter-crate dep ordering and skips
+  # crates already published at this version.
+  # ============================================================================
+
+  publish-cargo:
+    name: Publish Cargo Crates
+    needs: [prepare-release]
+    if: needs.prepare-release.result == 'success'
+    runs-on: prod-tester-amd-v1
+    environment: automated-release
+    env:
+      COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+      CARGO_VERSION: ${{ needs.prepare-release.outputs.cargo_version }}
+      ARTIFACTORY_SERVICE_URL: ${{ secrets.ARTIFACTORY_SERVICE_URL }}
+      ARTIFACTORY_CARGO_INDEX_NAME: ${{ secrets.ARTIFACTORY_CARGO_INDEX_NAME }}
+      ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+    steps:
+      - name: Checkout at source commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ needs.prepare-release.outputs.commit_sha }}
+
+      - name: Install cargo-workspaces
+        run: |
+          set -euo pipefail
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "::error::cargo is not on PATH on this runner"
+            exit 1
+          fi
+          cargo install cargo-workspaces --locked --version '^0.3' || cargo install cargo-workspaces --locked
+
+      - name: Configure cargo registry
+        run: |
+          set -euo pipefail
+          if [ -z "${ARTIFACTORY_SERVICE_URL}" ] || [ -z "${ARTIFACTORY_CARGO_INDEX_NAME}" ]; then
+            echo "::error::ARTIFACTORY_SERVICE_URL and ARTIFACTORY_CARGO_INDEX_NAME must both be set"
+            exit 1
+          fi
+          CARGO_INDEX_URL="sparse+${ARTIFACTORY_SERVICE_URL%/}/artifactory/api/cargo/${ARTIFACTORY_CARGO_INDEX_NAME}/"
+          # Append rather than overwrite — .cargo/config.toml carries rustflags we must preserve.
+          cat >> .cargo/config.toml <<EOF
+
+          [registries.dynamo]
+          index = "${CARGO_INDEX_URL}"
+          EOF
+          echo "Registered cargo registry 'dynamo' -> ${CARGO_INDEX_URL}"
+
+      - name: Pre-flight metadata check
+        run: |
+          set -euo pipefail
+          # Every publishable crate needs description/license/repository/readme either
+          # directly or inherited from workspace.package. cargo publish will hard-fail
+          # on missing metadata; surface the list up front instead of partway through.
+          MISSING=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.publish == null) | select(
+                (.description // "") == "" or
+                (.license // "") == "" or
+                (.repository // "") == "" or
+                (.readme // "") == ""
+              ) | .name')
+          if [ -n "${MISSING}" ]; then
+            echo "::error::Crates missing one of description/license/repository/readme:"
+            echo "${MISSING}"
+            exit 1
+          fi
+          echo "All publishable crates have required metadata."
+
+      - name: Bump workspace version
+        run: |
+          set -euo pipefail
+          cargo workspaces version --no-git-commit --no-git-push --yes custom "${CARGO_VERSION}"
+
+      - name: Publish crates to Artifactory
+        env:
+          CARGO_REGISTRIES_DYNAMO_TOKEN: Bearer ${{ secrets.ARTIFACTORY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo workspaces publish \
+            --from-git \
+            --registry dynamo \
+            --no-git-push \
+            --no-verify \
+            --allow-dirty \
+            skip
+          echo "## Cargo Crates" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published workspace crates at version \`${CARGO_VERSION}\` to registry \`dynamo\`." >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
   # GITLAB RELEASE AUTOMATION TRIGGER
   # Fires the GitLab release-automation pipeline once images and wheels are
   # staged. Variable shape consumed by
@@ -645,8 +639,15 @@ jobs:
 
   trigger-gitlab-release-pipeline:
     name: Trigger GitLab Release Pipeline
-    needs: [prepare-release, release-publish, stage-wheels-artifactory]
-    if: ${{ inputs.skip_gitlab_pipeline != true }}
+    needs: [prepare-release, publish-image, publish-helm, stage-wheels-artifactory, publish-cargo]
+    if: |
+      always()
+      && inputs.skip_gitlab_pipeline != true
+      && needs.prepare-release.result == 'success'
+      && needs.publish-image.result == 'success'
+      && needs.stage-wheels-artifactory.result == 'success'
+      && (needs.publish-helm.result == 'success' || needs.publish-helm.result == 'skipped')
+      && (needs.publish-cargo.result == 'success' || needs.publish-cargo.result == 'skipped')
     runs-on:
       group: gitlab_ci_runners
     environment: automated-release
