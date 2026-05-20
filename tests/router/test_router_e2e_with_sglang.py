@@ -307,7 +307,7 @@ def test_sglang_dp_workers_use_contiguous_kv_event_port_blocks(monkeypatch):
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.profiled_vram_gib(7.4)
+@pytest.mark.profiled_vram_gib(12.0)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
@@ -445,7 +445,7 @@ def test_router_decisions_sglang_disagg(
 @pytest.mark.skip_in_nightly
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.profiled_vram_gib(7.4)
+@pytest.mark.profiled_vram_gib(12.0)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
