@@ -166,4 +166,4 @@ Prerequisite: `cargo build -p kvbm-hub --bin kvbm_hub` (no other components need
 - `/disagg-teardown` — cleanup between runs.
 - `/disagg-trace` — render `trace.html` from an experiment dir.
 - `/disagg-hub-curl` — exercise hub HTTP endpoints during a run.
-- `/kvbm-maturin-dev` — rebuild bindings.
+- `/kvbm-maturin-dev` — rebuild bindings (release by default; use a release kvbm build for smokes).

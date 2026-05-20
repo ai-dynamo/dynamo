@@ -20,6 +20,15 @@ returns one entry under `prefill` and one under `decode`.
 | `verify-block-layout.sh` | Post-bringup assertion: confirms a registered instance's G2 layout matches the requested mode (via hub describe). |
 | `new-experiment.sh` | Mints `/tmp/kvbm-experiments/<ts>-<label>/` and prints the path. |
 
+### Fresh-artifact guarantees (read before debugging a "registration failed" hang)
+
+Two stale-artifact traps have bitten this bringup; both are now guarded, do not regress them:
+
+1. **Stale hub binary.** `start-hub.sh` runs `cargo build --bin kvbm_hub` (incremental — a no-op when fresh) *before* launching, so it can never run an out-of-date binary. A `test -x $HUB` existence check does **not** catch staleness. The 2026-05-19 incident: a May-15 debug `kvbm_hub` ran against May-19 hub source; the fresh connector's CD registration handshake didn't match the old hub → `Exception: conditional-disagg hub registration failed` in `leader.initialize_workers()` → EngineCore died → the smoke hung on its readiness loop. If you ever pin `KVBM_HUB_BIN` or set `KVBM_HUB_SKIP_BUILD=1`, you own binary freshness yourself. Cheapest post-run check: `ls -l --time-style=+%F target/debug/kvbm_hub` should show *today*.
+2. **Wrong/foreign venv.** `launch-{prefill,decode}.sh` honor `KVBM_VENV` but default to the global `/home/ryan/.venvs/dynamo-kvbm`. When running from a worktree, **export `KVBM_VENV=<worktree>/.sandbox`** so you exercise the worktree's kvbm build, not a sibling worktree's or the global one. `two-request-smoke.sh` now sets this from `KVBM_REPO` automatically.
+
+Bringup waits are bounded: `two-request-smoke.sh` waits on the hub `/health` (default 300 s, covers a cold rebuild) before launching vLLMs, then on each vLLM `/v1/models` (default 240 s) with per-process death detection — a dead EngineCore aborts in seconds with a log tail instead of hanging. Tune via `KVBM_HUB_READY_TIMEOUT` / `KVBM_VLLM_READY_TIMEOUT`.
+
 The `KVBM_DISAGG_LEADER` env var (recognized by `kvbm-connector::init`) selects between the legacy `ConditionalDisaggLeader` (default / unset / `legacy`) and the new `UnifiedDisaggLeader` (`unified`). Set it in the caller's environment before invoking `launch-{prefill,decode}.sh`; the scripts inherit it.
 
 ### Universal-mode launch

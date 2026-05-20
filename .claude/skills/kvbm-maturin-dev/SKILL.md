@@ -13,9 +13,10 @@ Rebuild the `kvbm-py3` PyO3 extension against the current `.sandbox/` torch, wit
 
 ## Arguments
 
-`/dynamo:kvbm:maturin-dev [--clean] [--features FEATS]`
+`/dynamo:kvbm:maturin-dev [--clean] [--debug] [--features FEATS]`
 
 - **--clean** (default for ABI-change runs): `cargo clean -p kvbm-py3` before rebuilding. Required when torch ABI changed (e.g. after `/dynamo:kvbm:sandbox-venv`).
+- **--debug**: build the unoptimized debug profile for fast binding-dev iteration. **Off by default — the default build is `--release`.** A debug kvbm extension is materially slower at runtime and will drag the smokes/perf/matrix (e.g. the 4-cell × ~40-iter agg matrix). Only use `--debug` when actively iterating on the Rust binding code and you need short rebuilds. Any run that feeds a smoke/perf/matrix result must be a release build — that is the reproducibility contract.
 - **--features FEATS** (default: `v1,v2`): Cargo feature flags. Options: `v1`, `v2`, `dynamo`, `kernels`, `nccl`. The `v1` feature implies `dynamo`.
 
 ## Step 1: Preflight
@@ -61,16 +62,20 @@ Signs you need `--clean`: `undefined symbol` at `import kvbm`, PyO3 ABI mismatch
 
 ## Step 4: maturin develop
 
+Release is the default. Drop `--release` only if `--debug` was requested.
+
 ```bash
 cd lib/bindings/kvbm
-maturin develop --features v1,v2
+maturin develop --release --features v1,v2
 cd -
 ```
 
-Stream the output. The build takes ~2-5 minutes cold, under 1 minute incremental. Watch for:
-- `Finished dev [unoptimized + debuginfo] target(s)` — rust build OK
+Stream the output. The release build takes ~2-5 minutes cold, under 1 minute incremental. Watch for:
+- `Finished \`release\` profile [optimized] target(s)` — rust build OK (with `--debug`: `Finished \`dev\` profile [unoptimized + debuginfo]`)
 - `📦 Built wheel` — maturin packaging OK
 - `Installed kvbm-1.0.0` — site-packages install OK
+
+> Release artifacts live in `target/release/`, separate from `target/debug/`. Switching debug↔release does **not** require `--clean` (different profile dirs, same torch ABI) — only a torch ABI change does.
 
 ## Step 5: Post-Maturin NCCL Re-Bump (CRITICAL)
 

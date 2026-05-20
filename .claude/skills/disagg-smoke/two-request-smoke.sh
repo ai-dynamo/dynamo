@@ -4,7 +4,9 @@
 # Wraps disagg-bringup's launchers + start-hub.
 #
 # Honors:
-#   KVBM_REPO           (default: /home/ryan/repos/dynamo)  → repo root
+#   KVBM_REPO           (default: the worktree THIS script lives in,        → repo root
+#                        derived from its path — NOT a hard-coded main repo)
+#   KVBM_VENV           (default: $KVBM_REPO/.sandbox)         → launchers' venv
 #   KVBM_DISAGG_LEADER  (legacy | unified ; default legacy)  → exported into launches
 #   KVBM_BLOCK_LAYOUT   (operational | universal ; default operational)
 #                         → injected into kv_connector_extra_config JSON; verified
@@ -33,9 +35,25 @@
 #   (KVBM_EXPERIMENTS_DIR defaults to /tmp/kvbm-experiments — see new-experiment.sh).
 set -eu
 
-DYNAMO=${KVBM_REPO:-/home/ryan/repos/dynamo}
+# Default the repo to the worktree THIS script lives in, not a hard-coded
+# main-repo path — otherwise a no-arg run silently drives a foreign repo's
+# binaries/scripts. Mirrors start-hub.sh: the script sits at
+# <repo>/.claude/skills/disagg-smoke/two-request-smoke.sh, so the repo root
+# is three levels above its dir. Caller can still override with KVBM_REPO.
+SMOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DYNAMO=${KVBM_REPO:-$(cd "$SMOKE_DIR/../../.." && pwd)}
+# Default the venv to THIS worktree's .sandbox so the launchers don't fall
+# back to the global /home/ryan/.venvs/dynamo-kvbm (or some other worktree's
+# venv) and silently run a foreign/stale kvbm build. Honored by
+# launch-{prefill,decode}.sh via KVBM_VENV. Caller can still override.
+export KVBM_VENV=${KVBM_VENV:-$DYNAMO/.sandbox}
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
 SKILL_TRACE=$DYNAMO/.claude/skills/disagg-trace
+# Readiness timeouts — convert a dead/misconfigured bringup into a fast,
+# diagnosable failure instead of an unbounded hang (2026-05-19: a failed
+# hub registration left this loop spinning for 9+ minutes).
+HUB_READY_TIMEOUT=${KVBM_HUB_READY_TIMEOUT:-300}   # covers a cold hub rebuild
+VLLM_READY_TIMEOUT=${KVBM_VLLM_READY_TIMEOUT:-240}
 LABEL=${KVBM_EXPERIMENT_LABEL:-two-request}
 KVBM_BLOCK_LAYOUT=${KVBM_BLOCK_LAYOUT:-operational}
 KVBM_ONBOARD_MODE=${KVBM_ONBOARD_MODE:-inter}
@@ -52,23 +70,60 @@ PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | t
 [ -n "$PIDS" ] && echo "$PIDS" | xargs -r kill -9 2>/dev/null || true
 sleep 2
 pkill -9 -f kvbm_hub 2>/dev/null || true
+# Stale velo UDS sockets from a crashed prior run can leave the hub
+# polling a dead peer ("Peer … not registered"); clear them.
+rm -f /tmp/velo-kvbm-*.sock 2>/dev/null || true
 sleep 1
 
-# Start hub + vLLMs.  start-hub.sh bakes in --prefill-vllm-url +
-# --prefill-vllm-model so the CD prefill dispatcher worker is enabled.
-bash $SKILL_BRINGUP/start-hub.sh "$ROOT/hub.log" &
-disown
+# fail_dump <msg> <logfile> — print a diagnostic tail and tear down, then exit 1.
+fail_dump() {
+  echo "FATAL: $1" >&2
+  if [ -n "${2:-}" ] && [ -f "$2" ]; then
+    echo "--- tail $2 ---" >&2
+    tail -n 30 "$2" | sed 's/\x1b\[[0-9;]*m//g' >&2
+  fi
+  pkill -f "vllm.entrypoints.openai" 2>/dev/null || true
+  pkill -9 -f kvbm_hub 2>/dev/null || true
+  exit 1
+}
 
+# Start the hub.  start-hub.sh rebuilds kvbm_hub (incremental) so we never
+# run a stale binary, then bakes in --prefill-vllm-url + --prefill-vllm-model
+# so the CD prefill dispatcher worker is enabled.
+bash $SKILL_BRINGUP/start-hub.sh "$ROOT/hub.log" &
+HUB_PID=$!
+
+# Wait for the hub to be listening BEFORE launching vLLMs — this both covers
+# a cold hub rebuild and removes the registration race (vLLMs must not try to
+# register against a hub that isn't up yet).
+echo "waiting for hub /health (timeout ${HUB_READY_TIMEOUT}s)..."
+hub_deadline=$(( $(date +%s) + HUB_READY_TIMEOUT ))
+until curl -fsS -m 5 http://127.0.0.1:8337/health >/dev/null 2>&1; do
+  kill -0 "$HUB_PID" 2>/dev/null || fail_dump "hub process exited before becoming ready (build or bind failure)" "$ROOT/hub.log"
+  [ "$(date +%s)" -ge "$hub_deadline" ] && fail_dump "hub not ready after ${HUB_READY_TIMEOUT}s" "$ROOT/hub.log"
+  sleep 2
+done
+echo "HUB UP $(date)"
+
+# Now launch the vLLMs against the live hub.
 RUST_LOG=${RUST_LOG:-info,kvbm_connector=debug,kvbm_audit=info} \
   bash $SKILL_BRINGUP/launch-prefill.sh > "$ROOT/prefill.log" 2>&1 &
-disown
+PREFILL_PID=$!
 RUST_LOG=${RUST_LOG:-info,kvbm_connector=debug,kvbm_audit=info} \
   bash $SKILL_BRINGUP/launch-decode.sh > "$ROOT/decode.log" 2>&1 &
-disown
+DECODE_PID=$!
 
-echo "waiting for both vLLMs..."
-until curl -fsS http://127.0.0.1:8000/v1/models >/dev/null 2>&1 \
-   && curl -fsS http://127.0.0.1:8001/v1/models >/dev/null 2>&1; do sleep 5; done
+echo "waiting for both vLLMs (timeout ${VLLM_READY_TIMEOUT}s)..."
+vllm_deadline=$(( $(date +%s) + VLLM_READY_TIMEOUT ))
+until curl -fsS -m 5 http://127.0.0.1:8000/v1/models >/dev/null 2>&1 \
+   && curl -fsS -m 5 http://127.0.0.1:8001/v1/models >/dev/null 2>&1; do
+  # Bail the instant an EngineCore dies during startup (e.g. CD hub
+  # registration failure) instead of waiting out the full timeout.
+  kill -0 "$PREFILL_PID" 2>/dev/null || fail_dump "prefill exited before ready (EngineCore init failed?)" "$ROOT/prefill.log"
+  kill -0 "$DECODE_PID"  2>/dev/null || fail_dump "decode exited before ready (EngineCore init failed?)"  "$ROOT/decode.log"
+  [ "$(date +%s)" -ge "$vllm_deadline" ] && fail_dump "vLLMs not ready after ${VLLM_READY_TIMEOUT}s" "$ROOT/prefill.log"
+  sleep 5
+done
 echo "BOTH UP $(date)"
 
 INSTS=$(curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances)

@@ -44,6 +44,26 @@ CTRL_PORT=${KVBM_HUB_CONTROL_PORT:-8337}
 VELO_PORT=${KVBM_HUB_VELO_PORT:-1338}
 RUST_LOG=${RUST_LOG:-info,kvbm_hub=debug,kvbm_connector=debug,kvbm_audit=info}
 
+# Never run a stale hub. 2026-05-19 incident: a May-15 debug binary ran
+# against May-19 kvbm-hub source, so the CD registration handshake the fresh
+# connector spoke didn't match the old hub → `conditional-disagg hub
+# registration failed` → EngineCore died → smoke hung on its readiness loop.
+# A `test -x $HUB` existence guard does NOT catch a stale binary; cargo does.
+# cargo build is incremental: a near-noop when fresh, a rebuild when stale.
+# Skip only when the caller pinned an explicit binary (KVBM_HUB_BIN) or opts
+# out (KVBM_HUB_SKIP_BUILD=1). Build output prepends to the hub log.
+if [ -z "${KVBM_HUB_BIN:-}" ] && [ "${KVBM_HUB_SKIP_BUILD:-0}" != "1" ]; then
+    if [ -d /usr/local/cuda/bin ] && [[ ":$PATH:" != *":/usr/local/cuda/bin:"* ]]; then
+        export PATH="/usr/local/cuda/bin:$PATH"
+    fi
+    export CUDA_PATH=${CUDA_PATH:-/usr/local/cuda} CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+    echo "[start-hub] cargo build --bin kvbm_hub (incremental; rebuilds iff stale)…" > "$LOG"
+    if ! ( cd "$REPO" && cargo build --bin kvbm_hub ) >> "$LOG" 2>&1; then
+        echo "[start-hub] kvbm_hub build FAILED — see $LOG" >&2
+        exit 1
+    fi
+fi
+
 if [ ! -x "$HUB" ]; then
     echo "kvbm_hub binary missing at $HUB" >&2
     echo "build it via: cargo build --bin kvbm_hub" >&2
@@ -58,4 +78,4 @@ exec "$HUB" \
     --heartbeat-interval-secs 10 \
     --prefill-vllm-url "$PREFILL_URL" \
     --prefill-vllm-model "$MODEL" \
-    > "$LOG" 2>&1
+    >> "$LOG" 2>&1

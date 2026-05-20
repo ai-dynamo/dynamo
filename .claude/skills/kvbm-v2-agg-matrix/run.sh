@@ -67,6 +67,22 @@ if ! "$VENV/bin/python" -c "import kvbm" 2>/dev/null; then
   exit 2
 fi
 
+# Put the venv's bin on PATH so the test's child subprocess can find `vllm`.
+# The matrix spawns `vllm serve …` as a BARE command; invoking
+# "$VENV/bin/pytest" alone does NOT add $VENV/bin to PATH, so without this
+# every cell errors at setup with `FileNotFoundError: 'vllm'` (2026-05-19).
+export VIRTUAL_ENV="$VENV"
+export PATH="$VENV/bin:$PATH"
+
+# GB10 (Spark) is a unified-memory box: ~20 GiB of the 120 GiB is permanently
+# held by the OS/desktop, so vLLM's default `--gpu-memory-utilization 0.9`
+# (≈108 GiB) exceeds free memory and every cell dies at init with
+# "Free memory … less than desired GPU memory utilization" (2026-05-19).
+# KV-cache size is pinned by KVBM_MATRIX_GPU_BLOCKS (--num-gpu-blocks-override),
+# not by GMU, so a lower ceiling is harmless for a correctness run. Default to
+# a GB10-safe 0.7; override KVBM_GPU_MEMORY_UTILIZATION for other hardware.
+export KVBM_GPU_MEMORY_UTILIZATION=${KVBM_GPU_MEMORY_UTILIZATION:-0.7}
+
 cd "$DYNAMO"
 
 # Parse args: support -k, --, and pass-through.
@@ -86,7 +102,11 @@ done
 LOG=$(mktemp -t kvbm-matrix-XXXXXX.log)
 trap 'rm -f "$LOG"' EXIT
 
-CMD=("$VENV/bin/pytest" "$TEST_FILE" -v -s --tb=short)
+# -rA emits an end-of-session summary (`PASSED <nodeid>` lines) AFTER all
+# server stdout, so the per-cell verdict parser below has un-interleaved
+# status lines to match. Without it, `-s` glues pytest's inline `PASSED`
+# token onto the next server's stdout and the parser sees zero passes.
+CMD=("$VENV/bin/pytest" "$TEST_FILE" -v -s -rA --tb=short)
 if [[ -n "$PYTEST_K" ]]; then
   CMD+=(-k "$PYTEST_K")
 fi
@@ -136,8 +156,15 @@ for cell in "${EXPECTED_CELLS[@]}"; do
   # have no match in the log), causing the script to die on the first
   # UNRUN cell and never print the verdict matrix. Trailing `|| true`
   # turns the empty-match case into a clean empty `verdict` string.
-  verdict=$(grep -E "\[${cell}\] (PASSED|FAILED|SKIPPED|ERROR)" "$LOG" \
-    | tail -1 | grep -oE "(PASSED|FAILED|SKIPPED|ERROR)" | head -1 || true)
+  # Prefer the -rA end-of-session summary line ("PASSED <nodeid>[cell]"),
+  # which is printed after all server stdout and so is not interleaved.
+  # Fall back to the inline verbose form ("...[cell] PASSED") for safety.
+  verdict=$(grep -E "^(PASSED|FAILED|SKIPPED|ERROR) .*\[${cell}\]" "$LOG" \
+    | tail -1 | grep -oE "^(PASSED|FAILED|SKIPPED|ERROR)" | head -1 || true)
+  if [[ -z "$verdict" ]]; then
+    verdict=$(grep -E "\[${cell}\][[:space:]]+(PASSED|FAILED|SKIPPED|ERROR)" "$LOG" \
+      | tail -1 | grep -oE "(PASSED|FAILED|SKIPPED|ERROR)" | head -1 || true)
+  fi
   if [[ -z "$verdict" ]]; then
     verdict="UNRUN"
   fi

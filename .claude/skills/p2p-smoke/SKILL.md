@@ -37,7 +37,7 @@ A future iteration may collapse these into one hub orchestration endpoint (`/v1/
 
 ## Prerequisites
 
-- `.sandbox/` venv with `kvbm` importable: `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev` first.
+- `.sandbox/` venv with `kvbm` importable: `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev` first. Use a **release** kvbm build (the maturin-dev default) — a debug extension drags transfer-path timing.
 - `target/debug/kvbm_hub` built: `cargo build --bin kvbm_hub`.
 - One GPU. The Spark's unified-memory GB10 fits two Qwen3-0.6B instances comfortably at `gpu-memory-utilization=0.15` each.
 - Hub free at ports 1337/8337/1338, vLLMs free at 8000/8002.

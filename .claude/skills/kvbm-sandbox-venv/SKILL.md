@@ -69,18 +69,48 @@ If `--fresh`:
 ```bash
 rm -rf .sandbox
 uv venv .sandbox --clear --python 3.12
+```
+
+### Preferred: deterministic install from the pinned freeze
+
+If a worktree-local `requirements.release-pinned.txt` exists (a full
+`pip freeze` of a known-good release venv — see Step 7), reproduce it
+exactly and **skip Step 5 entirely**:
+
+```bash
+# A complete freeze is internally consistent, so --no-deps bypasses the
+# resolver. This is REQUIRED: a plain `uv pip install -r` fails because
+# torch 2.11.0's metadata pins nvidia-nccl-cu13==2.28.9 while the freeze
+# carries the rolled-forward >=2.29 — uv's resolver rejects the pair and
+# has no per-line --no-deps escape. --no-deps installs exactly what is
+# listed, in the versions listed.
+VIRTUAL_ENV=.sandbox PATH=.sandbox/bin:$PATH \
+    uv pip install --no-deps -r .sandbox/requirements.release-pinned.txt
+```
+
+Reproducibility caveat: the vllm wheel carries a nightly local version
+tag (e.g. `0.19.1rc1.dev232+g0e39202ca.cu130`). Nightlies are GC'd from
+the index over time; if the exact wheel is gone, fall back to Step 5's
+live nightly path and regenerate the pin (Step 7).
+
+### Fallback: bootstrap from the integration requirements
+
+Only when no pinned freeze is available (then continue to Step 5):
+```bash
 VIRTUAL_ENV=.sandbox PATH=.sandbox/bin:$PATH \
     uv pip install -r tests/kvbm_integration/requirements.txt
 ```
 
-Otherwise:
+Otherwise (repair, venv already present):
 ```bash
 source .sandbox/bin/activate
 ```
 
-## Step 5: Install vllm cu130 Nightly + Pinned NCCL
+## Step 5: Install vllm cu130 Nightly + Pinned NCCL (fallback / pin regeneration)
 
-This is the gotcha-heavy step. Order matters.
+Run this only when Step 4's pinned-freeze path was unavailable, or when
+you are deliberately regenerating the pin against a fresh nightly. Order
+matters.
 
 ```bash
 # 1. Remove the stale cu12 nccl that comes with torch 2.10.0+cu126 — it
@@ -108,8 +138,11 @@ If `--skip-vllm` was passed, do only step 4 after ensuring torch 2.11+cu130 is o
 # Torch arch list must include sm_100/sm_110/sm_120 for Blackwell fwd-compat
 python -c "import torch; print('torch', torch.__version__, 'archs', torch.cuda.get_arch_list())"
 
-# NCCL version must be >= 2.29 (DevCommDestroy availability)
-python -c "import torch; print('nccl', torch.cuda.nccl.version())"
+# NCCL version must be >= 2.29 (DevCommDestroy availability).
+# NB: check the INSTALLED package, not torch.cuda.nccl.version() — the
+# latter reports torch's compile-time constant (2,28,9 here) regardless
+# of the runtime lib actually loaded, so it falsely looks "rolled back".
+uv pip show nvidia-nccl-cu13 | grep -i version    # expect >= 2.29 (e.g. 2.30.4)
 
 # Tiny matmul on the GPU — catches cudaErrorNoKernelImageForDevice immediately
 python -c "import torch; x = torch.randn(64, 64, device='cuda'); print('matmul', (x @ x.T).mean().item())"
@@ -123,17 +156,22 @@ Stop the smoke server with Ctrl-C after the "Application startup complete" line.
 
 Expected output highlights:
 - `torch 2.11.0+cu130`, archs containing `sm_100`, `sm_110`, `sm_120`
-- `nccl (2, 29, 7)` or newer
+- `nvidia-nccl-cu13` installed version `>= 2.29` (e.g. `2.30.4`)
 - matmul prints a finite float (no `cudaErrorNoKernelImageForDevice`)
 - vllm reaches `Application startup complete`
 
 ## Step 7: Snapshot and Next Steps
 
-Capture the final pip state for reproducibility:
+Capture the final pip state for reproducibility. Promote it to the
+canonical pinned freeze so the next `--fresh` build can take Step 4's
+deterministic `--no-deps` path instead of a live nightly:
 
 ```bash
 .sandbox/bin/python -m pip freeze > .sandbox/requirements.after.txt
 diff .sandbox/requirements.before.txt .sandbox/requirements.after.txt | head -30
+
+# Promote to the canonical pinned set (Step 4 reads this file).
+cp .sandbox/requirements.after.txt .sandbox/requirements.release-pinned.txt
 ```
 
 Tell the user:
@@ -164,7 +202,10 @@ Tell the user:
 
 ## Reference: Known-Good Pinned Set
 
-`.sandbox/requirements.after-phase3-wheels.txt` — captured 2026-04-13 on GB10. Notable pins:
+Canonical: `.sandbox/requirements.release-pinned.txt` — a full `pip freeze`
+of a known-good **release** venv (regenerated 2026-05-19 on GB10). Install
+it with `uv pip install --no-deps -r .sandbox/requirements.release-pinned.txt`
+(Step 4). Notable pins:
 
 | Package | Version |
 |---|---|
@@ -172,7 +213,11 @@ Tell the user:
 | `torchvision` | `0.26.0` |
 | `torchaudio` | `2.11.0` |
 | `vllm` | `0.19.1rc1.dev232+g0e39202ca.cu130` |
-| `nvidia-nccl-cu13` | `2.29.7` |
+| `nvidia-nccl-cu13` | `2.30.4` |
 | `flashinfer-python` | `0.6.7` |
 
-If a future wheel install corrupts the venv, `uv pip install -r .sandbox/requirements.after-phase3-wheels.txt` is the recovery path.
+> The older `.sandbox/requirements.after-phase3-wheels.txt` (2026-04-13,
+> nccl 2.29.7) is **superseded** — it is NOT uv-installable verbatim
+> (`uv pip install -r` fails: torch's metadata pins nccl to 2.28.9 while the
+> file carries 2.29.7, and uv has no per-line dep bypass). Use the
+> `release-pinned` freeze with `--no-deps` instead.

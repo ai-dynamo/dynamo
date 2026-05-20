@@ -27,6 +27,10 @@ set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DYNAMO=${KVBM_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
+# Default the venv to THIS worktree's .sandbox so launch-instance.sh doesn't
+# fall back to the global /home/ryan/.venvs/dynamo-kvbm and run a foreign/stale
+# kvbm build. Caller can still override KVBM_VENV.
+export KVBM_VENV=${KVBM_VENV:-$DYNAMO/.sandbox}
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
 SKILL_TRACE=$DYNAMO/.claude/skills/disagg-trace
 LABEL=${KVBM_EXPERIMENT_LABEL:-p2p-smoke}
@@ -50,12 +54,27 @@ sleep 3
 # ----------------------------------------------------------------------
 # 1. Hub up.
 # ----------------------------------------------------------------------
+# start-hub.sh rebuilds kvbm_hub (incremental) so we never run a stale binary.
 bash "$SKILL_BRINGUP/start-hub.sh" "$ROOT/hub.log" &
-disown
-sleep 2
+HUB_PID=$!
 
-# Wait for hub HTTP
-until curl -fsS http://127.0.0.1:8337/health >/dev/null 2>&1; do sleep 1; done
+# Wait for hub HTTP — bounded, with build/bind-failure detection (covers a
+# cold hub rebuild). Without a deadline a failed build hangs this forever.
+HUB_READY_TIMEOUT=${KVBM_HUB_READY_TIMEOUT:-300}
+hub_deadline=$(( $(date +%s) + HUB_READY_TIMEOUT ))
+until curl -fsS -m 5 http://127.0.0.1:8337/health >/dev/null 2>&1; do
+  if ! kill -0 "$HUB_PID" 2>/dev/null; then
+    echo "FAIL: hub process exited before becoming ready (build or bind failure)" >&2
+    tail -30 "$ROOT/hub.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' >&2
+    exit 1
+  fi
+  if [ "$(date +%s)" -ge "$hub_deadline" ]; then
+    echo "FAIL: hub not ready after ${HUB_READY_TIMEOUT}s" >&2
+    tail -30 "$ROOT/hub.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' >&2
+    exit 1
+  fi
+  sleep 2
+done
 echo "HUB UP"
 
 # ----------------------------------------------------------------------

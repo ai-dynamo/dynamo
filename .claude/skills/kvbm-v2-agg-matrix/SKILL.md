@@ -26,7 +26,7 @@ This skill is the follow-on to the disagg-smoke shell smokes. The shell smokes p
 
 ## Prerequisites
 
-- `.sandbox/` venv with `kvbm` importable: `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev` first (see the `kvbm-maturin-dev` skill).
+- `.sandbox/` venv with `kvbm` importable: `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev` first (see the `kvbm-maturin-dev` skill). Build **release** (the maturin-dev default) — this 4-cell × ~40-iter matrix is the run a debug build hurts most.
 - HF model cache populated with `Qwen/Qwen3-0.6B` (will download on first run).
 - One GPU (the matrix is `gpu_1`-marked, no TP yet).
 
