@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -213,7 +213,15 @@ impl Router {
         }
 
         self.prefill_router
-            .query_prefill_worker(tokens, None, false, None, priority_jump, allowed_worker_ids)
+            .query_prefill_worker(
+                tokens,
+                None,
+                false,
+                None,
+                priority_jump,
+                allowed_worker_ids,
+                RoutingConstraints::default(),
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))
     }
@@ -256,6 +264,7 @@ impl Router {
                 priority_jump,
                 None,
                 allowed_worker_ids,
+                RoutingConstraints::default(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
@@ -578,9 +587,16 @@ async fn spawn_pod_reflector(
     // request after startup doesn't race against an empty cache. Bounded so
     // we don't block startup forever if the API server is slow.
     match tokio::time::timeout(Duration::from_secs(30), store_for_wait.wait_until_ready()).await {
-        Ok(()) => {
+        Ok(Ok(())) => {
             ready.store(true, Ordering::Release);
             tracing::info!("Pod reflector initial LIST sync complete");
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                error = %e,
+                "Pod reflector writer was dropped before initial LIST completed; \
+                 returning 503 until ready"
+            );
         }
         Err(_) => {
             tracing::warn!(
@@ -589,9 +605,19 @@ async fn spawn_pod_reflector(
             let store_for_background_wait = store.clone();
             let ready_for_background_wait = ready.clone();
             tokio::spawn(async move {
-                store_for_background_wait.wait_until_ready().await;
-                ready_for_background_wait.store(true, Ordering::Release);
-                tracing::info!("Pod reflector became ready after startup timeout");
+                match store_for_background_wait.wait_until_ready().await {
+                    Ok(()) => {
+                        ready_for_background_wait.store(true, Ordering::Release);
+                        tracing::info!("Pod reflector became ready after startup timeout");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Pod reflector writer dropped while waiting in background; \
+                             store will remain not-ready"
+                        );
+                    }
+                }
             });
         }
     }
