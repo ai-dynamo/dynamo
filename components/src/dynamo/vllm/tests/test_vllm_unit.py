@@ -729,24 +729,22 @@ class TestBenchmarkGrid:
 
 
 @pytest.mark.asyncio
-async def test_health_check_decode_opts_out_with_warning(caplog):
-    import logging
-
+async def test_health_check_decode_opts_out_with_warning():
+    # mock.patch the module logger directly: dynamo's logging setup
+    # turns off propagation on per-module loggers, so pytest's caplog
+    # (which attaches at root) doesn't see these warnings.
     from dynamo.vllm.llm_engine import VllmLLMEngine
 
     engine = VllmLLMEngine(
         engine_args=None, disaggregation_mode=DisaggregationMode.DECODE
     )
-    with caplog.at_level(logging.WARNING, logger="dynamo.vllm.llm_engine"):
+    with patch("dynamo.vllm.llm_engine.logger") as mock_logger:
         payload = await engine.health_check_payload()
 
     assert payload is None
-    matches = [
-        r
-        for r in caplog.records
-        if "DECODE worker: health-check canary disabled" in r.message
-    ]
-    assert len(matches) == 1, f"expected exactly one warning, got {len(matches)}"
+    assert mock_logger.warning.call_count == 1
+    msg = mock_logger.warning.call_args.args[0]
+    assert "DECODE worker: health-check canary disabled" in msg
 
 
 @pytest.mark.asyncio

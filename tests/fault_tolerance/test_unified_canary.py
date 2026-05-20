@@ -22,6 +22,7 @@ MODEL = "Qwen/Qwen3-0.6B"
 
 pytestmark = [
     pytest.mark.fault_tolerance,
+    pytest.mark.integration,
     pytest.mark.unified,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
