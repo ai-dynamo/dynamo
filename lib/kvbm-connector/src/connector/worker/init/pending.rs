@@ -66,14 +66,33 @@ use kvbm_physical::transfer::TransferCapabilities;
 ///
 /// G2/G3 layouts are always allocated fully-contiguous; this enum only
 /// controls the G1 build path in [`PendingWorkerState::complete_initialization`].
+///
+/// Both variants carry `block_layout` (NHD/HND/Universal/Unknown) derived
+/// from the vLLM `AttentionBackend` stride order by `dim_probe.py` on the
+/// Python side. It is threaded into
+/// `PhysicalLayoutBuilder::with_block_layout` at NIXL bind time and drives
+/// G2 layout selection via [`select_g2_block_layout`].
 #[derive(Debug, Clone, Copy)]
 pub enum PendingLayoutMode {
     /// One NIXL region per layer; G1 → `LayerSeparateLayout`.
-    LayerSeparate { block_dim: BlockDimension },
+    LayerSeparate {
+        block_dim: BlockDimension,
+        block_layout: KvBlockLayout,
+    },
     /// Single NIXL region covering all layers in
     /// `[num_blocks, num_layers, outer_dim, page_size, inner_dim]` byte order;
     /// G1 → `FullyContiguousLayout`.
-    FullyContiguous,
+    FullyContiguous { block_layout: KvBlockLayout },
+}
+
+impl PendingLayoutMode {
+    /// G1 block layout (always present — labelled by `dim_probe.py`).
+    pub fn block_layout(&self) -> KvBlockLayout {
+        match self {
+            Self::LayerSeparate { block_layout, .. } => *block_layout,
+            Self::FullyContiguous { block_layout } => *block_layout,
+        }
+    }
 }
 
 /// Cached state from `register_kv_caches` for deferred initialization.
@@ -98,18 +117,14 @@ pub struct PendingWorkerState {
     #[expect(dead_code)]
     pub dtype_width_bytes: usize,
 
-    /// Layout configuration determined from tensor shapes (LayerSeparate) or
-    /// from explicit dims passed by Python (FullyContiguous).
+    /// Layout configuration resolved from the labelled `KvDimLayout` (per-layer)
+    /// or from the cross-layer labelled shape (`FullyContiguous`).
     pub layout_config: LayoutConfig,
 
-    /// Selects which G1 physical layout to build (LayerSeparate carries the
-    /// per-layer `BlockDimension`; FullyContiguous needs no extra dim).
+    /// Selects which G1 physical layout to build. Carries `block_layout`
+    /// (NHD/HND/Universal/Unknown) for both variants — labelled by
+    /// `dim_probe.py` from `AttentionBackend.get_kv_cache_stride_order`.
     pub mode: PendingLayoutMode,
-
-    /// Per-block dimension ordering (NHD/HND/Universal/Unknown). Threaded
-    /// into `PhysicalLayoutBuilder::with_block_layout` at NIXL bind time so
-    /// the hub-side compat gate sees the same labels on both ends.
-    pub block_layout: KvBlockLayout,
 }
 
 impl PendingWorkerStateBuilder {
@@ -241,26 +256,28 @@ impl PendingWorkerState {
         //    registers N regions (one per layer); fully-contiguous registers
         //    the single cross-layer allocation. The FC builder requires
         //    exactly one external region (see kvbm-physical builder).
-        //    `with_block_layout` is threaded into both arms so the hub-side
-        //    compat gate sees consistent NHD/HND/Universal labels regardless
-        //    of which G1 family was built.
+        //    Both paths thread the labelled `block_layout` through so the
+        //    hub-side `layout_compat` gate and G2 selection see the same
+        //    NHD/HND/Universal/Unknown classification.
         let physical_layout = match self.mode {
-            PendingLayoutMode::LayerSeparate { block_dim } => {
-                PhysicalLayoutBuilder::new(nixl_agent.clone())
-                    .with_config(self.layout_config.clone())
-                    .layer_separate(block_dim)
-                    .with_block_layout(self.block_layout)
-                    .with_external_device_regions(self.tensors)?
-                    .build()?
-            }
-            PendingLayoutMode::FullyContiguous => {
+            PendingLayoutMode::LayerSeparate {
+                block_dim,
+                block_layout,
+            } => PhysicalLayoutBuilder::new(nixl_agent.clone())
+                .with_config(self.layout_config.clone())
+                .layer_separate(block_dim)
+                .with_block_layout(block_layout)
+                .with_external_device_regions(self.tensors)?
+                .build()?,
+            PendingLayoutMode::FullyContiguous { block_layout } => {
                 tracing::info!(
+                    ?block_layout,
                     "Registering G1 (device) layout as fully-contiguous cross-layer tensor"
                 );
                 PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(self.layout_config.clone())
                     .fully_contiguous()
-                    .with_block_layout(self.block_layout)
+                    .with_block_layout(block_layout)
                     .with_external_device_regions(self.tensors)?
                     .build()?
             }
@@ -313,11 +330,12 @@ impl PendingWorkerState {
         // same canonical layout, regardless of each leader's engine-side
         // G1 layout. G1↔G2 transfers in Universal mode dispatch the
         // fused permute kernel.
+        let g1_block_layout = self.mode.block_layout();
         let g2_block_layout =
-            select_g2_block_layout(self.block_layout, runtime.config().block_layout);
+            select_g2_block_layout(g1_block_layout, runtime.config().block_layout);
         let g3_block_layout = g2_block_layout;
         tracing::info!(
-            g1 = %self.block_layout,
+            g1 = %g1_block_layout,
             g2 = %g2_block_layout,
             mode = %runtime.config().block_layout,
             "Selected G1/G2 block layouts"

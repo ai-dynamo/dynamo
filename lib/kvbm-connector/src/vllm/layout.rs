@@ -308,6 +308,131 @@ pub fn determine_kv_layout(
     Ok((layout_config, block_dim))
 }
 
+/// Cross-layer (fully-contiguous) sibling of [`determine_kv_layout`].
+///
+/// Used by the `register_cross_layers_kv_cache` FFI: `kv_tensor` is the
+/// single contiguous allocation vLLM hands us when
+/// `prefer_cross_layer_blocks=True` and the backend supports a uniform
+/// layout. `dim_layout` is produced by `dim_probe.py` with
+/// `include_num_layers=True`, which returns labels already in **physical
+/// byte order** (the probe applies the backend's cross-layer
+/// stride-order permutation), and therefore carries a `KvDim::Layer`
+/// axis somewhere in the list.
+///
+/// The check that the physical byte order is
+/// `[num_blocks, num_layers, K/V, page_size, heads, head_size]` (what
+/// `FullyContiguousLayout` assumes) is *not* enforced here — Python's FC
+/// callback validates the permutation directly before crossing the FFI.
+/// Here we only confirm the labels are coherent and the byte total
+/// matches. `relabel_to_physical_order` is still called as a defensive
+/// fully-contiguous-strides assertion: on a contiguous tensor with
+/// already-physical labels, it returns the input unchanged but errors
+/// out if strides are unexpectedly non-row-major.
+pub fn determine_cross_layer_kv_layout(
+    num_device_blocks: usize,
+    dtype_width_bytes: usize,
+    kv_tensor: &Arc<dyn TensorDescriptor>,
+    dim_layout: &KvDimLayout,
+    declared_block_layout: KvBlockLayout,
+) -> Result<LayoutConfig> {
+    // Shape == labelled sizes.
+    let shape = kv_tensor.shape();
+    if shape.len() != dim_layout.sizes().len() {
+        bail!(
+            "cross-layer tensor: rank {} does not match labelled rank {} (shape {:?}, dims {:?})",
+            shape.len(),
+            dim_layout.sizes().len(),
+            shape,
+            dim_layout.dims(),
+        );
+    }
+    for (axis, (&actual, (&expected, label))) in shape
+        .iter()
+        .zip(dim_layout.sizes().iter().zip(dim_layout.dims().iter()))
+        .enumerate()
+    {
+        if actual != expected {
+            bail!(
+                "cross-layer tensor axis {axis} ({label}): shape size {actual} != labelled size {expected}",
+            );
+        }
+    }
+
+    // Relabel to physical order so derived_block_layout / size lookups
+    // see the byte-order view.
+    let phys_layout = relabel_to_physical_order(0, kv_tensor, dim_layout)?;
+
+    let derived_block_layout = derive_block_layout_from_physical(&phys_layout);
+    if declared_block_layout != KvBlockLayout::Unknown
+        && derived_block_layout != KvBlockLayout::Unknown
+        && declared_block_layout != derived_block_layout
+    {
+        tracing::warn!(
+            declared = %declared_block_layout,
+            derived = %derived_block_layout,
+            phys_dims = ?phys_layout.dims(),
+            "Python-declared KvBlockLayout disagrees with stride-derived physical \
+             ordering for cross-layer tensor; trusting strides",
+        );
+    }
+
+    // Cross-layer requires an explicit Layer axis. Without it this is a
+    // per-layer tensor and should have gone through `determine_kv_layout`.
+    let num_layers = phys_layout.size_of(KvDim::Layer).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cross-layer tensor missing KvDim::Layer axis; use determine_kv_layout for per-layer"
+        )
+    })?;
+
+    let labeled_blocks = phys_layout.size_of(KvDim::Block).ok_or_else(|| {
+        anyhow::anyhow!("determine_cross_layer_kv_layout: KvDimLayout missing Block axis")
+    })?;
+    if labeled_blocks != num_device_blocks {
+        bail!("Block axis size ({labeled_blocks}) != num_device_blocks ({num_device_blocks})",);
+    }
+
+    let outer_dim = phys_layout.outer_size();
+    let page_size = phys_layout.page_size()?;
+    let inner_dim = phys_layout
+        .inner_elements()
+        .ok_or_else(|| anyhow::anyhow!("KvDimLayout has neither HeadSize nor Payload axis"))?;
+
+    let mut builder = LayoutConfig::builder();
+    builder.num_blocks(num_device_blocks);
+    builder.num_layers(num_layers);
+    builder.outer_dim(outer_dim);
+    builder.page_size(page_size);
+    builder.inner_dim(inner_dim);
+    builder.dtype_width_bytes(dtype_width_bytes);
+    if let Some(nh) = phys_layout.head_count() {
+        builder.num_heads(Some(nh));
+    }
+    let layout_config = builder.build()?;
+
+    // Total-bytes cross-check: the single FC tensor carries N layers'
+    // worth of bytes — guard against label/sizing drift.
+    let expected_bytes =
+        num_device_blocks * num_layers * outer_dim * page_size * inner_dim * dtype_width_bytes;
+    let observed = kv_tensor.shape().iter().product::<usize>() * kv_tensor.element_size();
+    if observed != expected_bytes {
+        bail!(
+            "cross-layer tensor: total bytes {observed} != layout expectation {expected_bytes} \
+             (num_blocks={num_device_blocks}, num_layers={num_layers}, outer={outer_dim}, \
+              page={page_size}, inner={inner_dim}, dtype_bytes={dtype_width_bytes})",
+        );
+    }
+
+    tracing::debug!(
+        ?layout_config,
+        physical_dims = ?phys_layout.dims(),
+        derived_block_layout = %derived_block_layout,
+        declared_block_layout = %declared_block_layout,
+        "Resolved cross-layer KV layout from physical (relabelled) dim layout"
+    );
+
+    Ok(layout_config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -210,14 +210,30 @@ class DynamoConnector(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         """
-        KVBM prefers a single cross-layer allocation so the device-side
-        layout becomes `FullyContiguousLayout`, letting the transfer planner
-        do per-block transfers across all layers in one operation.
+        Decide whether vLLM should allocate a single cross-layer KV cache
+        (FC, registered through `register_cross_layers_kv_cache`) or one
+        tensor per layer (LW, registered through `register_kv_caches`).
 
-        Override at runtime via `KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS={false,0,no,n}`
-        to force the per-layer `register_kv_caches` path (useful for A/B
-        comparisons, or to work around a backend whose physical layout
-        doesn't match `FullyContiguousLayout`'s schema). Default is `true`.
+        Default ("auto"):
+
+        1. Hybrid models with multiple distinct attention backends are
+           rejected here with a clear log. KVBM v2 does NOT currently
+           support hybrid models in either path — `register_kv_caches`
+           also bails on `len(self._attn_backends) != 1` and `len(groups)
+           != 1`. Returning False here just routes the failure into LW
+           where the `NotImplementedError` is the authoritative source
+           of truth; the FC path's `register_cross_layers_kv_cache` also
+           rejects multi-group inputs defensively. Hybrid kv_cache_groups
+           on a single backend cannot be detected here (kv_cache_config
+           is not yet built when this property is read) and will surface
+           as the LW `NotImplementedError`.
+
+        2. Otherwise: probe the single backend with
+           `dim_probe.select_fc_variant`. Return True iff it maps to one
+           of `FullyContiguousLayout`'s supported orderings (OperationalNHD,
+           OperationalHND, Universal). Anything else (FlashInfer HND,
+           MLA, missing cross-layer stride support) returns False so vLLM
+           uses LW for the single-backend case.
 
         Override precedence (highest first):
           1. Env var `KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS={true,false}`.
@@ -229,12 +245,7 @@ class DynamoConnector(KVConnectorBase_V1):
              (bool). This is the channel that survives the EngineCore spawn
              and is the canonical way for tests / launch scripts to pin
              FC vs LW per run.
-          3. Default `True` (prefer fully-contiguous).
-
-        Even with this `True`, vLLM still falls back to the per-layer
-        `register_kv_caches` path when the backend doesn't support
-        `get_kv_cache_stride_order(include_num_layers_dimension=True)` or
-        for MLA models.
+          3. Auto-detect (the body below).
         """
         override = os.getenv("KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS", "").lower()
         if override in ("false", "0", "no", "n", "off"):
@@ -280,10 +291,63 @@ class DynamoConnector(KVConnectorBase_V1):
                 )
                 return False
 
-        # Default: prefer fully-contiguous (current-branch default). vLLM
-        # guards FC-ineligible backends by falling back to the per-layer
-        # `register_kv_caches` path.
-        return True
+        # Auto: enumerate backends and use the shared `select_fc_for_model`
+        # helper so the FC eligibility contract has one definition (and
+        # one set of tests) shared between this connector and any future
+        # caller.
+        try:
+            from kvbm.v2.vllm.dim_probe import (
+                FC_INELIGIBLE_BACKEND_NO_MATCH,
+                FC_INELIGIBLE_HYBRID_BACKENDS,
+                FC_INELIGIBLE_NO_BACKENDS,
+                select_fc_for_model,
+            )
+            from vllm.distributed.kv_transfer.kv_connector.utils import (
+                get_current_attn_backends,
+            )
+
+            backends = list(get_current_attn_backends(self._vllm_config))
+        except Exception as e:
+            print(
+                f"[KVBM] prefer_cross_layer_blocks auto-detect failed to "
+                f"enumerate backends ({type(e).__name__}: {e}); "
+                f"defaulting to per-layer (LW) registration."
+            )
+            return False
+
+        variant, reason = select_fc_for_model(backends)
+        if variant is not None:
+            print(
+                f"[KVBM] prefer_cross_layer_blocks=True: backend "
+                f"{backends[0].__name__} maps to FC variant {variant.value}."
+            )
+            return True
+
+        if reason == FC_INELIGIBLE_NO_BACKENDS:
+            # Unusual: no static_forward_context entries. Defer to LW.
+            print(
+                "[KVBM] prefer_cross_layer_blocks=False: "
+                "get_current_attn_backends returned no backends."
+            )
+        elif reason == FC_INELIGIBLE_HYBRID_BACKENDS:
+            backend_names = [b.__name__ for b in backends]
+            print(
+                f"[KVBM] prefer_cross_layer_blocks=False: model has "
+                f"{len(backends)} distinct attention backends "
+                f"({backend_names}); hybrid models are not supported in "
+                f"either FC or LW paths. Registration will fail with a "
+                f"NotImplementedError from register_kv_caches."
+            )
+        elif reason == FC_INELIGIBLE_BACKEND_NO_MATCH:
+            print(
+                f"[KVBM] prefer_cross_layer_blocks=False: backend "
+                f"{backends[0].__name__} has no compatible FC variant "
+                f"(probably HND-with-Outer-before-HeadCount, MLA, or "
+                f"missing cross-layer stride support). Set "
+                f"KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS=true to override "
+                f"(will fail at registration if truly incompatible)."
+            )
+        return False
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV caches - no-op for scheduler connector."""

@@ -291,13 +291,6 @@ impl Layout for FullyContiguousLayout {
         }
         let regions = vec![buffers[0].addr()];
 
-        // NHD/HND/Universal here are layout *contracts*: the caller is
-        // responsible for ensuring the actual byte layout matches the chosen
-        // `KvBlockLayout` exactly. For the connector's cross-layer entry
-        // (`register_cross_layers_kv_cache`) Python enforces NHD positionally
-        // — see `worker.py` `register_cross_layers_kv_cache` (`heads @ physical
-        // 4`, `head_size @ physical 5`) — because a tail-swapped HND tensor
-        // would silently pass a set check and then be mis-projected here.
         let (dims, sizes, byte_strides) = match block_layout {
             KvBlockLayout::OperationalNHD => {
                 // [Block, Layer, Outer, Page, HeadCount, HeadSize]

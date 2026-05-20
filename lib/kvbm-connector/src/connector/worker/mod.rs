@@ -55,12 +55,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::connector::leader::scheduler::KvConnectorMetadata;
-use crate::vllm::layout::determine_kv_layout;
+use crate::vllm::layout::{determine_cross_layer_kv_layout, determine_kv_layout};
 use crate::{BlockId, KvbmRuntime};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_engine::worker::{DirectWorker, WorkerTransfers};
 use kvbm_physical::TransferOptions;
-use kvbm_physical::layout::LayoutConfig;
 
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
@@ -84,29 +83,18 @@ pub trait ConnectorWorkerInterface: Send + Sync {
 
     /// Register a single cross-layer KV cache tensor (deferred mode).
     ///
-    /// The tensor's physical byte layout must be
-    /// `[num_blocks, num_layers, outer_dim, page_size, num_kv_heads, head_size]`,
-    /// which is what vLLM's `allocate_uniform_kv_caches` produces for
-    /// FlashAttention NHD after the stride-order permutation. The caller
-    /// (Python) is responsible for asserting the layout matches before
-    /// invoking this method.
-    ///
-    /// `inner_dim = num_kv_heads * head_size` is passed pre-collapsed because
-    /// the physical layout treats the tail as one contiguous run; `num_kv_heads`
-    /// is passed separately so the planner can split the inner axis back into
-    /// `[HeadCount, HeadSize]` for stride-aware projection
-    /// (see [`kvbm_physical::layout::Layout::layout_view`]).
-    #[allow(clippy::too_many_arguments)]
+    /// The tensor's logical shape carries a `KvDim::Layer` axis (plus
+    /// `Block`, `Outer`, `Page`, `HeadCount`, `HeadSize`/`Payload`).
+    /// `dim_probe.py` produces the labels and sizes; Python's FC
+    /// callback also verifies the *physical* byte order matches what
+    /// `FullyContiguousLayout` assumes before calling.
     fn register_cross_layers_kv_cache(
         &self,
         tensor: Arc<dyn TensorDescriptor>,
         num_device_blocks: usize,
-        num_layers: usize,
-        outer_dim: usize,
-        page_size: usize,
-        num_kv_heads: usize,
-        inner_dim: usize,
         dtype_width_bytes: usize,
+        dim_layout: kvbm_common::KvDimLayout,
+        block_layout: kvbm_common::KvBlockLayout,
     ) -> Result<()>;
 
     /// Bind connector metadata from the leader.
@@ -457,8 +445,10 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             .num_device_blocks(num_device_blocks)
             .dtype_width_bytes(dtype_width_bytes)
             .layout_config(layout_config)
-            .mode(PendingLayoutMode::LayerSeparate { block_dim })
-            .block_layout(block_layout)
+            .mode(PendingLayoutMode::LayerSeparate {
+                block_dim,
+                block_layout,
+            })
             .build()?;
 
         let details = WorkerDetails { num_layers };
@@ -468,12 +458,11 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             num_tensors = pending.tensors.len(),
             num_device_blocks,
             dtype_width_bytes,
-            block_layout = %pending.block_layout,
+            mode = ?pending.mode,
             outer_dim = pending.layout_config.outer_dim,
             page_size = pending.layout_config.page_size,
             inner_dim = pending.layout_config.inner_dim,
             num_heads = ?pending.layout_config.num_heads,
-            mode = ?pending.mode,
             "KV caches registered (deferred mode - waiting for leader RPC)"
         );
 
@@ -488,17 +477,13 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.runtime.messenger().instance_id()))]
-    #[allow(clippy::too_many_arguments)]
     fn register_cross_layers_kv_cache(
         &self,
         tensor: Arc<dyn TensorDescriptor>,
         num_device_blocks: usize,
-        num_layers: usize,
-        outer_dim: usize,
-        page_size: usize,
-        num_kv_heads: usize,
-        inner_dim: usize,
         dtype_width_bytes: usize,
+        dim_layout: kvbm_common::KvDimLayout,
+        block_layout: kvbm_common::KvBlockLayout,
     ) -> Result<()> {
         // Prevent double registration (mirror register_kv_caches checks).
         if self.state.service.get().is_some() {
@@ -511,40 +496,27 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             bail!("Worker details already set");
         }
 
-        // `num_kv_heads` must split `inner_dim` exactly; otherwise the
-        // planner's `resolve_head_dims` will reject this layout downstream.
-        if num_kv_heads == 0 || !inner_dim.is_multiple_of(num_kv_heads) {
-            bail!(
-                "register_cross_layers_kv_cache: inner_dim ({}) is not divisible \
-                 by num_kv_heads ({})",
-                inner_dim,
-                num_kv_heads
-            );
-        }
-
-        // Build LayoutConfig from explicit dims — Python already validated the
-        // physical layout matches `[num_blocks, num_layers, outer, page, heads, head_size]`.
-        // `num_heads` is required because `KvBlockLayout::OperationalNHD` (set
-        // below) drives the planner to split `inner_dim` into `(HeadCount, HeadSize)`
-        // when projecting to a `LayoutView`.
-        let layout_config = LayoutConfig::builder()
-            .num_blocks(num_device_blocks)
-            .num_layers(num_layers)
-            .outer_dim(outer_dim)
-            .page_size(page_size)
-            .inner_dim(inner_dim)
-            .num_heads(Some(num_kv_heads))
-            .dtype_width_bytes(dtype_width_bytes)
-            .build()?;
+        // Derive LayoutConfig from the labelled cross-layer layout.
+        // Python's FC callback has already verified the physical byte
+        // order matches `[num_blocks, num_layers, K/V, page, heads, head_size]`
+        // against `attn_backend.get_kv_cache_stride_order(include_num_layers_dimension=True)`.
+        let layout_config = determine_cross_layer_kv_layout(
+            num_device_blocks,
+            dtype_width_bytes,
+            &tensor,
+            &dim_layout,
+            block_layout,
+        )?;
+        let num_layers = layout_config.num_layers;
 
         tracing::info!(
             num_device_blocks,
             num_layers,
-            outer_dim,
-            page_size,
-            num_kv_heads,
-            inner_dim,
+            outer_dim = layout_config.outer_dim,
+            page_size = layout_config.page_size,
+            inner_dim = layout_config.inner_dim,
             dtype_width_bytes,
+            ?block_layout,
             "Registering cross-layer KV cache (fully-contiguous, deferred mode)"
         );
 
@@ -553,14 +525,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             .num_device_blocks(num_device_blocks)
             .dtype_width_bytes(dtype_width_bytes)
             .layout_config(layout_config)
-            .mode(PendingLayoutMode::FullyContiguous)
-            // FlashAttention NHD is enforced upstream by Python (see
-            // register_cross_layers_kv_cache validation: stride_order +
-            // get_kv_cache_stride_order checks). Hardcoding NHD here keeps
-            // the hub-side block-layout compat gate consistent with the LS
-            // path; if other layouts are ever accepted, plumb this through
-            // as a parameter on the trait method.
-            .block_layout(kvbm_common::KvBlockLayout::OperationalNHD)
+            .mode(PendingLayoutMode::FullyContiguous { block_layout })
             .build()?;
 
         let details = WorkerDetails { num_layers };

@@ -104,47 +104,48 @@ impl PyConnectorWorker {
     ///
     /// Used when vLLM allocates a uniform cross-layer KV cache (a single
     /// allocation whose physical byte layout is
-    /// `[num_blocks, num_layers, outer_dim, page_size, num_kv_heads, head_size]`).
-    /// The caller must validate the layout against the attention backend's
-    /// stride order before invoking this; the Rust side trusts the dims.
+    /// `[num_blocks, num_layers, K/V, page_size, num_kv_heads, head_size]`).
+    /// The Python caller (`dim_probe.probe_kv_dim_layout(..., include_num_layers=True)`
+    /// + FC stride-order assertion) labels the axes and verifies the
+    /// physical permutation before invoking this method; the Rust side
+    /// derives `LayoutConfig` deterministically from the labelled layout.
     ///
     /// Args:
     ///     tensor: A single PyTorch CUDA tensor covering all layers.
     ///     num_device_blocks: Number of device blocks from vLLM's cache config.
-    ///     num_layers: Number of attention layers fused into the tensor.
-    ///     outer_dim: K/V split dimension (typically 2 for standard attention).
-    ///     page_size: Block/page size (tokens per block).
-    ///     num_kv_heads: Per-rank KV head count. Must evenly divide `inner_dim`;
-    ///         used by the planner to split the inner axis into
-    ///         `(HeadCount, HeadSize)` for stride-aware projection.
-    ///     inner_dim: Flattened head dimension (`num_kv_heads * head_size`).
     ///     dtype_width_bytes: Data type width in bytes (e.g. 2 for fp16).
-    #[pyo3(signature = (tensor, num_device_blocks, num_layers, outer_dim, page_size, num_kv_heads, inner_dim, dtype_width_bytes))]
-    #[allow(clippy::too_many_arguments)]
+    ///     dim_labels: Per-axis `KvDim` labels as strings (same encoding
+    ///         as `register_kv_caches`). Must contain a `Layer` axis.
+    ///     dim_sizes: Per-axis sizes, paired with `dim_labels` by index.
+    ///     block_layout: `KvBlockLayout` enum string from
+    ///         `derive_block_layout(backend, ..., include_num_layers=True)`.
+    #[pyo3(signature = (tensor, num_device_blocks, dtype_width_bytes, dim_labels, dim_sizes, block_layout))]
     pub fn register_cross_layers_kv_cache(
         &self,
         tensor: Py<PyAny>,
         num_device_blocks: usize,
-        num_layers: usize,
-        outer_dim: usize,
-        page_size: usize,
-        num_kv_heads: usize,
-        inner_dim: usize,
         dtype_width_bytes: usize,
+        dim_labels: Vec<String>,
+        dim_sizes: Vec<usize>,
+        block_layout: String,
     ) -> PyResult<()> {
         let rust_tensor = Tensor::new(tensor).map_err(to_pyerr)?;
         let rust_tensor: Arc<dyn TensorDescriptor> = Arc::new(rust_tensor);
+
+        let dims: Vec<kvbm_common::KvDim> = dim_labels
+            .iter()
+            .map(|s| parse_kv_dim(s))
+            .collect::<PyResult<_>>()?;
+        let dim_layout = kvbm_common::KvDimLayout::new(dims, dim_sizes).map_err(to_pyerr)?;
+        let block_layout = parse_kv_block_layout(&block_layout)?;
 
         self.inner
             .register_cross_layers_kv_cache(
                 rust_tensor,
                 num_device_blocks,
-                num_layers,
-                outer_dim,
-                page_size,
-                num_kv_heads,
-                inner_dim,
                 dtype_width_bytes,
+                dim_layout,
+                block_layout,
             )
             .map_err(to_pyerr)
     }
