@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+model_label: DeepSeek V3
+mode: stream
+cases:
+  PARSER.stream.2:
+    description: Multiple tool calls split across multiple content chunks
+    ref: derived from PARSER.batch.2.a
+    chunks:
+    - delta_text: <｜tool▁ca
+    - delta_text: lls▁beg
+    - delta_text: in｜><｜tool▁ca
+    - delta_text: ll▁be
+    - delta_text: gin｜>function<｜to
+    - delta_text: ol▁
+    - delta_text: sep｜>get_
+    - delta_text: weather
+    - delta_text: |2-
+
+        ```json
+        {"lo
+    - delta_text: catio
+    - delta_text: |-
+        n": "NYC"}
+        ```<｜t
+    - delta_text: ool
+    - delta_text: ▁call▁end
+    - delta_text: ｜><｜too
+    - delta_text: l▁call▁begin｜
+    - delta_text: '>func'
+    - delta_text: tion<｜tool▁sep｜>g
+    - delta_text: et_
+    - delta_text: |-
+        time
+        ```j
+    - delta_text: |-
+        son
+        {"t
+    - delta_text: 'imezone": "ES'
+    - delta_text: |-
+        T"}
+        `
+    - delta_text: '``<｜tool▁call▁end'
+    - delta_text: ｜><
+    - delta_text: ｜tool▁cal
+    - delta_text: ls▁end｜
+    - delta_text: '>'
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          json
+          {"location": "NYC"}
+          <｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
+          json
+          {"timezone": "EST"}
+          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"location": "NYC"}
+          ```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
+          ```json
+          {"timezone": "EST"}
+          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>

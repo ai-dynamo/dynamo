@@ -120,7 +120,7 @@ python3 -m dynamo.frontend --help
 If you cloned the repository, you can run additional system checks:
 
 ```bash
-python3 deploy/sanity_check.py
+python3 dev/sanity_check.py
 ```
 
 ### Start the Frontend

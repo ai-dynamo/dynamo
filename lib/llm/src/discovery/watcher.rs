@@ -801,13 +801,13 @@ impl ModelWatcher {
             // Create a new worker monitor for this WorkerSet. Each WorkerSet gets its own
             // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
             // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL cleanup). The thresholds control busy detection behavior only.
+            // worker TTFT/ITL cleanup). The thresholds control overload detection behavior only.
             //
             // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that busy-state updates (via set_busy_instances) are visible to the
+            // so that overload-state updates (via set_overloaded_instances) are visible to the
             // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
             // Using a different Client instance would cause the PushRouter to never see
-            // busy workers, since each Client::new() creates independent ArcSwap state.
+            // overloaded workers, since each Client::new() creates independent ArcSwap state.
             let worker_monitor = if needs_preprocessed_routing {
                 let monitor_client = kv_chooser
                     .as_ref()
