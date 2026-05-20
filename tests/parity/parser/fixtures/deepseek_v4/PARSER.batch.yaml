@@ -31,6 +31,10 @@ cases:
       vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to deepseek_v4 because SGLang has no peer detector for this parser family.
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -43,16 +47,43 @@ cases:
       vllm: *id003
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &id004
+      dynamo:
         calls: []
         normal_text: ''
-      vllm: *id004
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.10:
@@ -81,14 +112,14 @@ cases:
       vllm: *id005
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
-  PARSER.batch.11:
-    description: Separator-character case — n/a for this family's syntax
+  PARSER.batch.30:
+    description: Separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. deepseek_v4 uses DSML invoke/parameter tags rather than delimiter-splitting call bodies, so separator-looking characters inside values are not a distinct parser state from the existing malformed/string-value coverage.
-  PARSER.batch.12:
-    description: Multi-call separator-character case — n/a for this family's syntax
+      This case is not applicable to deepseek_v4 because it uses DSML invoke/parameter tags, not delimiter-separated call bodies.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets delimiter-separated parser formats. deepseek_v4 uses DSML invoke/parameter tags rather than delimiter-splitting call bodies, so separator-looking characters inside values are not a distinct parser state from the existing malformed/string-value coverage. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+      This case is not applicable to deepseek_v4 because it uses DSML invoke/parameter tags, not delimiter-separated call bodies.
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo

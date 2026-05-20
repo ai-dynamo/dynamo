@@ -289,8 +289,8 @@ The disaggregated launch script supports `--enable-otel` to enable tracing acros
 
 ```bash
 # Start observability stack first
-docker compose -f deploy/docker-compose.yml up -d
-docker compose -f deploy/docker-observability.yml up -d
+docker compose -f dev/docker-compose.yml up -d
+docker compose -f dev/docker-observability.yml up -d
 
 # Launch SGLang disaggregated with tracing
 cd examples/backends/sglang/launch
@@ -378,7 +378,7 @@ For more details on the Tempo/Grafana tracing infrastructure, see the [Dynamo Tr
 
 ## SGLang Grafana Dashboard
 
-Dynamo ships a pre-provisioned Grafana dashboard for SGLang at `deploy/observability/grafana_dashboards/sglang.json`. It is automatically loaded when the observability stack starts.
+Dynamo ships a pre-provisioned Grafana dashboard for SGLang at `dev/observability/grafana_dashboards/sglang.json`. It is automatically loaded when the observability stack starts.
 
 ### Dashboard Panels
 
