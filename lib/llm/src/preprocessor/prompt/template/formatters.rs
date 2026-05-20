@@ -88,6 +88,17 @@ fn remove_known_non_jinja2_tags(template: &str) -> String {
         .replace("{% endgeneration %}", "")
 }
 
+/// Normalize common Python/Jinja dict method calls that are ambiguous in minijinja.
+///
+/// JSON schemas commonly use an `items` key for array item definitions. In
+/// minijinja, `foo.items()` can resolve `items` as a map entry before the
+/// pycompat method callback sees it, causing "object is not callable" for
+/// templates that iterate OpenAI tool schemas. The `items` filter gives the same
+/// map iteration behavior without colliding with schema keys.
+fn normalize_dict_method_calls(template: &str) -> String {
+    template.replace(".items()", "|items")
+}
+
 impl JinjaEnvironment {
     fn env(self) -> Environment<'static> {
         self.env
@@ -153,7 +164,8 @@ impl HfTokenizerConfigJsonFormatter {
                     supports_add_generation_prompt = Some(true);
                 }
                 // Remove known non-standard tags before validation (they don't affect output)
-                let template_cleaned = remove_known_non_jinja2_tags(x);
+                let template_cleaned =
+                    normalize_dict_method_calls(&remove_known_non_jinja2_tags(x));
                 env.add_template_owned("default", template_cleaned.clone())?;
                 env.add_template_owned("tool_use", template_cleaned)?;
             }
@@ -178,7 +190,8 @@ impl HfTokenizerConfigJsonFormatter {
                             supports_add_generation_prompt = Some(false);
                         }
                         // Remove known non-standard tags before validation (they don't affect output)
-                        let template_cleaned = remove_known_non_jinja2_tags(v);
+                        let template_cleaned =
+                            normalize_dict_method_calls(&remove_known_non_jinja2_tags(v));
                         env.add_template_owned(k.to_string(), template_cleaned)?;
                     }
                 }
@@ -278,6 +291,45 @@ mod tests {
         let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
         let result = remove_known_non_jinja2_tags(template);
         assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+
+    #[test]
+    fn test_normalize_dict_method_calls_rewrites_items_method() {
+        let template = "{% for k, v in tool.parameters.properties.items() %}{{ k }}{% endfor %}";
+        let result = normalize_dict_method_calls(template);
+        assert_eq!(
+            result,
+            "{% for k, v in tool.parameters.properties|items %}{{ k }}{% endfor %}"
+        );
+    }
+
+    #[test]
+    fn test_normalize_dict_method_calls_avoids_schema_items_collision() {
+        let template = normalize_dict_method_calls(
+            "{% for param_name, param_spec in tool.parameters.properties.items() %}{{ param_name }}={{ param_spec.type }};{% endfor %}",
+        );
+
+        let mut env = Environment::new();
+        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+        env.add_template("t", &template).unwrap();
+
+        let tool = json!({
+            "parameters": {
+                "properties": {
+                    "items": {"type": "array", "items": {"type": "object"}},
+                    "message": {"type": "string"}
+                }
+            }
+        });
+
+        let out = env
+            .get_template("t")
+            .unwrap()
+            .render(context! { tool => tool })
+            .unwrap();
+
+        assert!(out.contains("items=array;"));
+        assert!(out.contains("message=string;"));
     }
 
     #[test]
