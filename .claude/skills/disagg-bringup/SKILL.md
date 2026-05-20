@@ -1,6 +1,6 @@
 ---
 name: disagg-bringup
-description: End-to-end bringup for KVBM conditional disaggregation — kill stale procs, start kvbm-hub with the CD prefill dispatcher enabled, launch one Prefill + one Decode vLLM (Qwen3-0.6B) on a single GPU, and verify both register on the hub. Self-contained — owns its launch scripts.
+description: End-to-end bringup for KVBM conditional disaggregation — kill stale procs, start kvbm-hub with the CD prefill dispatcher enabled, launch one Prefill + one Decode vLLM, and verify both register on the hub. Hardware/model sizing is caller-controlled; the old Spark/Qwen path is a profile, not the workflow definition.
 ---
 
 # Skill: KVBM Disagg Bringup
@@ -25,7 +25,9 @@ returns one entry under `prefill` and one under `decode`.
 Two stale-artifact traps have bitten this bringup; both are now guarded, do not regress them:
 
 1. **Stale hub binary.** `start-hub.sh` runs `cargo build --bin kvbm_hub` (incremental — a no-op when fresh) *before* launching, so it can never run an out-of-date binary. A `test -x $HUB` existence check does **not** catch staleness. The 2026-05-19 incident: a May-15 debug `kvbm_hub` ran against May-19 hub source; the fresh connector's CD registration handshake didn't match the old hub → `Exception: conditional-disagg hub registration failed` in `leader.initialize_workers()` → EngineCore died → the smoke hung on its readiness loop. If you ever pin `KVBM_HUB_BIN` or set `KVBM_HUB_SKIP_BUILD=1`, you own binary freshness yourself. Cheapest post-run check: `ls -l --time-style=+%F target/debug/kvbm_hub` should show *today*.
-2. **Wrong/foreign venv.** `launch-{prefill,decode}.sh` honor `KVBM_VENV` but default to the global `/home/ryan/.venvs/dynamo-kvbm`. When running from a worktree, **export `KVBM_VENV=<worktree>/.sandbox`** so you exercise the worktree's kvbm build, not a sibling worktree's or the global one. `two-request-smoke.sh` now sets this from `KVBM_REPO` automatically.
+2. **Wrong/foreign venv.** `launch-{prefill,decode}.sh` honor `KVBM_VENV`
+   and default to `<worktree>/.sandbox`. Keep that default or export an
+   explicit current venv so you exercise this worktree's kvbm build.
 
 Bringup waits are bounded: `two-request-smoke.sh` waits on the hub `/health` (default 300 s, covers a cold rebuild) before launching vLLMs, then on each vLLM `/v1/models` (default 240 s) with per-process death detection — a dead EngineCore aborts in seconds with a log tail instead of hanging. Tune via `KVBM_HUB_READY_TIMEOUT` / `KVBM_VLLM_READY_TIMEOUT`.
 
@@ -55,10 +57,28 @@ This is the reproducer for the env-var stripping bug: the assertion fails when o
 
 ## Prerequisites
 
-1. **Canonical venv at `/home/ryan/.venvs/dynamo-kvbm`** (symlink to a worktree's `.sandbox/`). If missing: `/kvbm-sandbox-venv`.
-2. **Bindings built against the current branch.** If `kvbm._core.__version__` is older than the work-tree commit: `/kvbm-maturin-dev`.
-3. **Kernels lib reachable.** Verify `/home/ryan/repos/dynamo/lib/bindings/kvbm/python/kvbm/libkvbm_kernels.so` exists. If not (maturin couldn't set rpath without `patchelf`), copy from `target/release/build/kvbm-kernels-*/out/libkvbm_kernels.so`. The launch scripts already export `LD_LIBRARY_PATH`.
-4. **Hub binary built**: `cargo build -p kvbm-hub --bin kvbm_hub`.
+1. **A current Dynamo/KVBM Python environment.** In experiment containers this
+   is usually `/opt/dynamo/venv`; for local sandbox work use
+   `/kvbm-sandbox-venv`.
+2. **Bindings built against the current branch.** If `kvbm._core.__version__`
+   is older than the work-tree commit: `/kvbm-maturin-dev`.
+3. **Kernels lib reachable.** The launch scripts export `LD_LIBRARY_PATH`;
+   verify `lib/bindings/kvbm/python/kvbm/libkvbm_kernels.so` exists if imports
+   fail.
+4. **Hub binary built**: `cargo build -p kvbm-hub --bin kvbm_hub`. The hub
+   launcher rebuilds incrementally by default.
+
+## Hardware Profiles
+
+The workflow is the same across machines; only sizing changes. Profile defaults
+live in `hardware-profiles.sh`; launcher scripts source that file and consume
+env vars rather than embedding model, GPU, cache, or max-length assumptions.
+
+| Profile | Model | Placement | Memory sizing |
+|---|---|---|---|
+| `h100-a100` | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` | one process per GPU | higher GMU, longer context |
+| `spark-gb10` | `Qwen/Qwen3-0.6B` | two processes can share GPU 0 | low GMU, short context |
+| `custom` | caller-set | caller-set | caller-set |
 
 ## Workflow
 
@@ -69,7 +89,7 @@ Use `/disagg-teardown` (or inline the same `pkill -f vllm.entrypoints / kvbm_hub
 ### Step 1 — Mint a logs directory
 
 ```bash
-SKILL=/home/ryan/repos/dynamo/.claude/skills/disagg-bringup
+SKILL=$PWD/.claude/skills/disagg-bringup
 LOGS=$(bash "$SKILL/new-experiment.sh" disagg-bringup)
 echo "logs in $LOGS"
 ```
@@ -87,6 +107,8 @@ curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances
 ### Step 3 — Launch Prefill + Decode
 
 ```bash
+# Defaults to spark-gb10. Set KVBM_HARDWARE_PROFILE=h100-a100 for the
+# DeepSeek/H100-or-A100 sizing profile, or custom with explicit env overrides.
 bash "$SKILL/launch-prefill.sh" > "$LOGS/prefill.log" 2>&1 &
 bash "$SKILL/launch-decode.sh"  > "$LOGS/decode.log"  2>&1 &
 # Optionally pin the leader: prepend  KVBM_DISAGG_LEADER=unified
@@ -104,9 +126,10 @@ done
 ```bash
 curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances | jq
 
+MODEL=${MODEL:-Qwen/Qwen3-0.6B}
 curl -sS http://127.0.0.1:8001/v1/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"Qwen/Qwen3-0.6B","prompt":"hello","max_tokens":8,"temperature":0}' | jq
+  -d "{\"model\":\"$MODEL\",\"prompt\":\"hello\",\"max_tokens\":8,\"temperature\":0}" | jq
 ```
 
 Expect both UUIDs listed and a coherent completion.
@@ -115,14 +138,14 @@ Expect both UUIDs listed and a coherent completion.
 
 | Knob | Value | Why |
 |---|---|---|
-| `--gpu-memory-utilization` | `0.15` | GB10 reports `Memory-Usage: Not Supported`; with two instances on GPU 0, 0.35 OOMs. 0.15 leaves headroom for both at `--max-num-seqs=8`. |
-| `--max-model-len` | `1024` | Smaller KV reservation per slot; combined with `max-num-seqs=8`, two instances fit. |
-| `DYN_KVBM_CPU_CACHE_GB` | `2` | Qwen3-0.6B is tiny; 2 GB of pinned host KV per instance is plenty for smoke. |
+| `--gpu-memory-utilization` | profile-set | Use low values for shared-GPU Spark/GB10; use normal H100/A100 values when each instance owns a GPU. |
+| `--max-model-len` | profile-set | Smaller values reduce KV reservation and make local smoke profiles fit. |
+| `DYN_KVBM_CPU_CACHE_GB` | profile-set | Size to model and workload; small values are enough for Qwen smoke, larger values for DeepSeek 8B experiments. |
 | `LD_LIBRARY_PATH=.../kvbm/` | required | `_core.abi3.so` has an unset rpath because maturin's patchelf was missing during build. |
-| `kv_connector_module_path` | `kvbm.v2.vllm.schedulers.connector` | v2 (Rust scheduler) path. v1 path doesn't honor the `disagg` config block. |
+| `kv_connector_module_path` | `kvbm.v2.vllm.connector` | Canonical v2 lazy facade; avoids binding callers to the scheduler module layout. |
 | `--no-enable-prefix-caching` | required | Disables vLLM's own block prefix cache so the CD path's local-match (G2) lookup is the source of truth. |
 | `--prefill-vllm-url` (hub) | `http://127.0.0.1:8000` | Tells the hub's CD prefill dispatcher where to POST queued prefill requests. Without this the hub queues them but never dispatches → decode hangs at lifecycle watchdog. |
-| `--prefill-vllm-model` (hub) | `Qwen/Qwen3-0.6B` | Body field for dispatched POSTs; must match the prefill vLLM's `--model`. |
+| `--prefill-vllm-model` (hub) | caller-set | Body field for dispatched POSTs; must match the prefill vLLM's `--model`. |
 
 ## See also
 

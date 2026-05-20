@@ -25,7 +25,9 @@ export KVBM_REQUIRE_CUDA=1
 # Needed by `maturin develop`; the bash tool's env doesn't source the venv
 # activator, so set VIRTUAL_ENV explicitly.
 # Honors $KVBM_VENV if set (matches start-hub.sh's KVBM_REPO pattern).
-export VIRTUAL_ENV=${KVBM_VENV:-/home/ryan/.venvs/dynamo-kvbm}
+KVBM_ENV_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KVBM_ENV_REPO="${KVBM_REPO:-$(cd "$KVBM_ENV_SCRIPT_DIR/../../.." && pwd)}"
+export VIRTUAL_ENV=${KVBM_VENV:-$KVBM_ENV_REPO/.sandbox}
 
 # NIXL libnixl + plugin alignment -------------------------------------------
 # 2026-05-09: dev images shipped `nixl-cu13==0.10.1` AND a system NIXL

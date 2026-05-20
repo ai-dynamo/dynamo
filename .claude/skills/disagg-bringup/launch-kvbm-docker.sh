@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
-# KVBM disagg bringup for Docker-based nodes (dlcluster b100_preprod, 4u4g, etc.)
+# KVBM disagg bringup for Docker-based GPU nodes.
 #
-# ⚠️  DOCKER vs PYXIS context — choose the right script:
-#   - launch-prefill.sh + launch-decode.sh (Pyxis/srun): RECOMMENDED for KVBM on dlcluster
-#     Pyxis injects host NIXL plugins → cache.host works, UCX available
+# DOCKER vs scheduler-container context — choose the right script:
+#   - launch-prefill.sh + launch-decode.sh: recommended when the scheduler
+#     injects host NIXL plugins, because cache.host and UCX are then available.
 #   - This script (Docker): use only when Pyxis is not available; see Note 7 below
 #
 # Hard-won lessons from 2026-05-15 and 2026-05-18 sessions:
@@ -15,10 +15,11 @@
 #    - `cache: {device: {}}` is NOT a valid tier — causes "At least one cache tier must
 #      be configured" error. No such tier exists in KVBM's G1/G2/G3 hierarchy.
 #    - `cache: {host: ...}` auto-enables UCX for KV transfer. UCX IS available in Pyxis
-#      containers (host plugins injected) but NOT in plain Docker on dlcluster.
+#      containers when host plugins are injected but NOT necessarily in plain Docker.
 #    - For Docker WITHOUT UCX: use `cache: {disk: {cache_size_gb: N}}` which writes KV
 #      directly from GPU (G1) to disk (G3), bypassing CPU. Requires fast local storage.
-#    - RECOMMENDED: use Pyxis (see launch-prefill.sh) instead of Docker on dlcluster.
+#    - RECOMMENDED: use scheduler-provided containers (see launch-prefill.sh)
+#      instead of plain Docker when host UCX/NIXL plugins are required.
 #
 # 8. Do NOT specify explicit nixl.backends in the worker config. Let NIXL
 #    auto-discover. Specifying {"POSIX": {}} causes "No POSIX plugin found"
@@ -71,19 +72,19 @@
 #    the correct --prefill-vllm-url pointing to the prefill API port.
 #
 # Usage:
-#   CONTAINER=kvbm-b100 MODEL=Qwen/Qwen3-8B bash launch-kvbm-docker.sh
+#   CONTAINER=kvbm-docker MODEL=deepseek-ai/DeepSeek-R1-Distill-Llama-8B bash launch-kvbm-docker.sh
 #
 # Prereqs:
 #   - Docker container running: docker run -d --name $CONTAINER --gpus '"device=0,1"' \
-#       --net=host -v /home/scratch.mkosec_hw/worktrees/dynamo-pfaas:/workspace \
-#       -v /home/scratch.mkosec_hw:/scratch \
-#       -e HOME=/tmp nvcr.io/nvidian/dynamo-dev/vllm-dev:mkosec-a3a41eb9975 sleep infinity
+#       --net=host -v /path/to/dynamo:/workspace \
+#       -v /path/to/scratch:/scratch \
+#       -e HOME=/tmp <dynamo-dev-image> sleep infinity
 #   - kvbm built (see step 1 below)
 
 set -euo pipefail
 
-CONTAINER="${CONTAINER:-kvbm-b100}"
-MODEL="${MODEL:-Qwen/Qwen3-8B}"
+CONTAINER="${CONTAINER:-kvbm-docker}"
+MODEL="${MODEL:-deepseek-ai/DeepSeek-R1-Distill-Llama-8B}"
 CARGO_TARGET="/scratch/cargo-target-kvbm"
 WORKSPACE="/workspace"
 VENV="/opt/dynamo/venv"
@@ -137,9 +138,9 @@ echo "Hub started on port ${HUB_PORT}"
 sleep 3
 
 echo "=== Step 3: Launch prefill (GPU 0, port ${PREFILL_PORT}) ==="
-# cache.device → CUDA IPC (no UCX needed; Docker on dlcluster b100 has no UCX plugins)
+# cache.device → CUDA IPC (no UCX needed; plain Docker may not have UCX plugins)
 # worker section: NO explicit nixl.backends — auto-discover from LD_LIBRARY_PATH (comment #8)
-KVBM_PREFILL_CFG="{\"kv_connector\":\"DynamoConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_module_path\":\"kvbm.v2.vllm.schedulers.connector\",\"kv_connector_extra_config\":{\"leader\":{\"disagg\":{\"hub_url\":\"http://127.0.0.1:${HUB_PORT}\",\"role\":\"prefill\"},\"cache\":{\"device\":{}},\"tokio\":{\"worker_threads\":4}},\"worker\":{\"tokio\":{\"worker_threads\":4}}}}"
+KVBM_PREFILL_CFG="{\"kv_connector\":\"DynamoConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_module_path\":\"kvbm.v2.vllm.connector\",\"kv_connector_extra_config\":{\"leader\":{\"disagg\":{\"hub_url\":\"http://127.0.0.1:${HUB_PORT}\",\"role\":\"prefill\"},\"cache\":{\"device\":{}},\"tokio\":{\"worker_threads\":4}},\"worker\":{\"tokio\":{\"worker_threads\":4}}}}"
 NIXL_WHEEL=$(docker exec "${CONTAINER}" bash -c "ls -d ${VENV}/lib/python*/site-packages/.nixl_cu*.mesonpy.libs 2>/dev/null | head -1")
 docker exec -d \
   -e PYTHONPATH="${PYTHONPATH_KVBM}" \
@@ -154,7 +155,7 @@ echo "Prefill started on GPU 0, port ${PREFILL_PORT}"
 sleep 3
 
 echo "=== Step 4: Launch decode (GPU 1, port ${DECODE_PORT}) ==="
-KVBM_DECODE_CFG="{\"kv_connector\":\"DynamoConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_module_path\":\"kvbm.v2.vllm.schedulers.connector\",\"kv_connector_extra_config\":{\"leader\":{\"disagg\":{\"hub_url\":\"http://127.0.0.1:${HUB_PORT}\",\"role\":\"decode\"},\"cache\":{\"device\":{}},\"tokio\":{\"worker_threads\":4}},\"worker\":{\"tokio\":{\"worker_threads\":4}}}}"
+KVBM_DECODE_CFG="{\"kv_connector\":\"DynamoConnector\",\"kv_role\":\"kv_both\",\"kv_load_failure_policy\":\"recompute\",\"kv_connector_module_path\":\"kvbm.v2.vllm.connector\",\"kv_connector_extra_config\":{\"leader\":{\"disagg\":{\"hub_url\":\"http://127.0.0.1:${HUB_PORT}\",\"role\":\"decode\"},\"cache\":{\"device\":{}},\"tokio\":{\"worker_threads\":4}},\"worker\":{\"tokio\":{\"worker_threads\":4}}}}"
 docker exec -d \
   -e PYTHONPATH="${PYTHONPATH_KVBM}" \
   -e HF_HOME=/scratch/hf_cache \

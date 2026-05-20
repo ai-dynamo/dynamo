@@ -37,9 +37,17 @@ A future iteration may collapse these into one hub orchestration endpoint (`/v1/
 
 ## Prerequisites
 
-- `.sandbox/` venv with `kvbm` importable: `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev` first. Use a **release** kvbm build (the maturin-dev default) — a debug extension drags transfer-path timing.
-- `target/debug/kvbm_hub` built: `cargo build --bin kvbm_hub`.
-- One GPU. The Spark's unified-memory GB10 fits two Qwen3-0.6B instances comfortably at `gpu-memory-utilization=0.15` each.
+- A current Dynamo/KVBM environment with `kvbm` importable. In a dev
+  container use `/opt/dynamo/venv`; in a local sandbox use
+  `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev`.
+- `target/debug/kvbm_hub` built: `cargo build --bin kvbm_hub`. The hub
+  launcher rebuilds it incrementally unless `KVBM_HUB_SKIP_BUILD=1`.
+- Hardware profile selected via `P2P_HARDWARE_PROFILE`. The default
+  `h100-a100` profile uses two GPUs and the experiment model
+  `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`. The `spark-gb10` profile keeps
+  the original one-GPU, low-memory Qwen path available.
+- Profile defaults live in `../disagg-bringup/hardware-profiles.sh`; the smoke
+  workflow sources that file and should not embed machine-specific sizing.
 - Hub free at ports 1337/8337/1338, vLLMs free at 8000/8002.
 
 ## Run
@@ -64,10 +72,24 @@ The script prints a validation report at the end and the trace.html path.
 | Var | Default | What |
 |---|---|---|
 | `KVBM_REPO` | inferred from script location | Repo root for sibling skill scripts + hub binary |
-| `P2P_GMU` | `0.15` | vLLM `--gpu-memory-utilization` for each instance |
+| `P2P_HARDWARE_PROFILE` | `h100-a100` | Hardware sizing profile: `h100-a100`, `spark-gb10`, or `custom` |
+| `P2P_MODEL` | profile-specific | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` for `h100-a100`; `Qwen/Qwen3-0.6B` for `spark-gb10` unless overridden |
+| `P2P_GMU` | profile-specific | vLLM `--gpu-memory-utilization` for each instance |
+| `P2P_CACHE_GB` | profile-specific | KVBM host cache size per instance |
+| `P2P_A_CUDA_VISIBLE_DEVICES` | profile-specific | GPU for instance A |
+| `P2P_B_CUDA_VISIBLE_DEVICES` | profile-specific | GPU for instance B |
+| `P2P_MAX_MODEL_LEN` | profile-specific | vLLM `--max-model-len` |
 | `P2P_BLOCKS` | `16` | Number of full G2 blocks the prompt should fill (advisory — prompt is hand-tuned) |
 | `KVBM_BLOCK_LAYOUT` | `operational` | Threaded through `kv_connector_extra_config.default.block_layout`; both instances use the same value (P2P feature compat is enforced by the hub) |
 | `KVBM_EXPERIMENT_LABEL` | `p2p-smoke` | Suffix on the experiment directory name |
+
+Profile defaults:
+
+| Profile | Model | GPUs | GMU | Cache | Max len |
+|---|---|---:|---:|---:|---:|
+| `h100-a100` | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` | A=0, B=1 | `0.70` | `16 GiB` | `2048` |
+| `spark-gb10` | `Qwen/Qwen3-0.6B` | A=0, B=0 | `0.15` | `2 GiB` | `1024` |
+| `custom` | caller-set | caller-set | caller-set | caller-set | caller-set |
 
 ## When to run this
 

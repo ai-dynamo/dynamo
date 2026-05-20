@@ -10,7 +10,8 @@
 # smoke uses to exercise the Phase-4b kernel-catalog + `layer_range` path.
 #
 # Env vars (default-friendly so single-arg invocation works):
-#   KVBM_VENV          (default: /home/ryan/.venvs/dynamo-kvbm)
+#   KVBM_VENV          (default: <repo>/.sandbox)
+#   KVBM_HARDWARE_PROFILE (default: spark-gb10; also supports h100-a100, custom)
 #   KVBM_BLOCK_LAYOUT  (operational | universal ; default operational)
 #   KVBM_ONBOARD_MODE  (inter | intra            ; default inter)
 #   KVBM_SINGLE_PORT   (default: 8002)  — separate from 8000/8001 used by
@@ -18,7 +19,13 @@
 #                       smokes can coexist if needed.
 set -eu
 
-KVBM_VENV=${KVBM_VENV:-/home/ryan/.venvs/dynamo-kvbm}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="${KVBM_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+. "$SCRIPT_DIR/hardware-profiles.sh"
+kvbm_apply_disagg_bringup_profile
+
+KVBM_VENV=${KVBM_VENV:-$REPO/.sandbox}
+KVBM_CONNECTOR_MODULE_PATH=${KVBM_CONNECTOR_MODULE_PATH:-kvbm.v2.vllm.connector}
 KVBM_BLOCK_LAYOUT=${KVBM_BLOCK_LAYOUT:-operational}
 case "$KVBM_BLOCK_LAYOUT" in
   operational|universal) ;;
@@ -31,14 +38,15 @@ case "$KVBM_ONBOARD_MODE" in
 esac
 KVBM_SINGLE_PORT=${KVBM_SINGLE_PORT:-8002}
 
-export CUDA_VISIBLE_DEVICES=0
-export DYN_KVBM_CPU_CACHE_GB=2
+export CUDA_VISIBLE_DEVICES="$KVBM_SINGLE_CUDA_VISIBLE_DEVICES"
+export DYN_KVBM_CPU_CACHE_GB="$KVBM_CPU_CACHE_GB"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 exec "$KVBM_VENV/bin/python3" -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3-0.6B \
-  --max-model-len 1024 \
-  --max-num-seqs 8 \
-  --gpu-memory-utilization 0.30 \
+  --model "$KVBM_MODEL" \
+  --served-model-name "$KVBM_MODEL" \
+  --max-model-len "$KVBM_MAX_MODEL_LEN" \
+  --max-num-seqs "$KVBM_MAX_NUM_SEQS" \
+  --gpu-memory-utilization "$KVBM_SINGLE_GPU_MEMORY_UTILIZATION" \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --port "$KVBM_SINGLE_PORT" \
@@ -46,11 +54,11 @@ exec "$KVBM_VENV/bin/python3" -m vllm.entrypoints.openai.api_server \
     "kv_connector": "DynamoConnector",
     "kv_role": "kv_both",
     "kv_load_failure_policy": "recompute",
-    "kv_connector_module_path": "kvbm.v2.vllm.schedulers.connector",
+    "kv_connector_module_path": "'"$KVBM_CONNECTOR_MODULE_PATH"'",
     "kv_connector_extra_config": {
       "default": { "block_layout": "'"$KVBM_BLOCK_LAYOUT"'" },
       "leader": {
-        "cache":   { "host": { "cache_size_gb": 2.0 } },
+        "cache":   { "host": { "cache_size_gb": '"$KVBM_CPU_CACHE_GB"' } },
         "tokio":   { "worker_threads": 2 },
         "control": { "metrics": true },
         "onboard": { "mode": "'"$KVBM_ONBOARD_MODE"'" }

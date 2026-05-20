@@ -6,7 +6,7 @@
 #
 # Topology:  hub  +  instance_a (port 8000)  +  instance_b (port 8002)
 #                            ^                       ^
-#                            \__ both Qwen3-0.6B, both registered with hub
+#                            \__ same model, both registered with hub
 #
 # Flow:
 #   R1 → instance_a            (warms G2 on A; emits offload_register_complete
@@ -23,31 +23,43 @@
 #
 # Env vars:
 #   KVBM_REPO  (default: worktree root inferred from script location)
-#   P2P_GMU    (default: 0.15)   — per-instance GPU memory util
-#   P2P_BLOCKS (default: 16)     — desired ISL block count (Qwen3-0.6B
-#                                  block_size=16 → 16 blocks ≈ 256 tokens)
+#   P2P_HARDWARE_PROFILE (default: h100-a100; also supports spark-gb10, custom)
+#   P2P_BLOCKS (default: 16)     — desired ISL block count
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DYNAMO=${KVBM_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
 # Default the venv to THIS worktree's .sandbox so launch-instance.sh doesn't
-# fall back to the global /home/ryan/.venvs/dynamo-kvbm and run a foreign/stale
-# kvbm build. Caller can still override KVBM_VENV.
+# fall back to a foreign/stale kvbm build. Caller can still override KVBM_VENV.
 export KVBM_VENV=${KVBM_VENV:-$DYNAMO/.sandbox}
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
 SKILL_TRACE=$DYNAMO/.claude/skills/disagg-trace
 LABEL=${KVBM_EXPERIMENT_LABEL:-p2p-smoke}
-P2P_GMU=${P2P_GMU:-0.15}
+. "$SKILL_BRINGUP/hardware-profiles.sh"
+kvbm_apply_p2p_profile
 P2P_BLOCKS=${P2P_BLOCKS:-16}
-export P2P_GMU
 
 ROOT=${1:-$(bash "$SKILL_BRINGUP/new-experiment.sh" "$LABEL")}
 echo "EXP=$ROOT"
 echo "$ROOT" > /tmp/p2p-trace-current-exp
+cat > "$ROOT/contract.env" <<EOF
+experiment=F
+topology=hub-mediated-p2p
+hardware_profile=$P2P_HARDWARE_PROFILE
+model=$P2P_MODEL
+framework=vllm-hub-transfer
+endpoint_type=chat
+streaming=true
+gpu_class=$P2P_GPU_CLASS
+p2p_a_cuda_visible_devices=$P2P_A_CUDA_VISIBLE_DEVICES
+p2p_b_cuda_visible_devices=$P2P_B_CUDA_VISIBLE_DEVICES
+p2p_gmu=$P2P_GMU
+p2p_cache_gb=$P2P_CACHE_GB
+p2p_max_model_len=$P2P_MAX_MODEL_LEN
+EOF
 
 # ----------------------------------------------------------------------
-# 0. Teardown stale processes (the GB10 reports memory as Not Supported,
-#    so we kill by process name rather than by GPU process list).
+# 0. Teardown stale processes.
 # ----------------------------------------------------------------------
 pkill -f "vllm.entrypoints.openai" 2>/dev/null || true
 pkill -9 -f kvbm_hub 2>/dev/null || true
@@ -58,7 +70,7 @@ sleep 3
 # 1. Hub up.
 # ----------------------------------------------------------------------
 # start-hub.sh rebuilds kvbm_hub (incremental) so we never run a stale binary.
-bash "$SKILL_BRINGUP/start-hub.sh" "$ROOT/hub.log" &
+KVBM_HUB_MODEL="$P2P_MODEL" bash "$SKILL_BRINGUP/start-hub.sh" "$ROOT/hub.log" &
 HUB_PID=$!
 
 # Wait for hub HTTP — bounded, with build/bind-failure detection (covers a
@@ -85,13 +97,9 @@ echo "HUB UP"
 #    role=prefill for A, role=decode for B — purely cosmetic (transfer
 #    endpoints work on either; we never use the CD prefill queue).
 #
-#    Sequential is load-bearing on the Spark's unified-memory GB10:
-#    vLLM's GPU-memory profiler measures free memory at startup and
-#    allocates GMU * total. Launching in parallel makes both instances
-#    see the same "free", so the second one can't fit its KV cache and
-#    errors with "No available memory for the cache blocks". Waiting
-#    for A's /v1/models means A's GPU allocation is settled before B
-#    profiles.
+#    Sequential startup keeps vLLM memory profiling deterministic. On the
+#    default H100/A100 layout A and B use separate GPUs, but we still wait for
+#    A's /v1/models before starting B so the logs are easy to read.
 # ----------------------------------------------------------------------
 RUST_LOG=${RUST_LOG:-info,kvbm_connector=debug,kvbm_engine=info,kvbm_audit=info}
 export RUST_LOG
@@ -111,7 +119,8 @@ wait_for_models() {
 }
 
 echo "launching instance A (port 8000, role=prefill)..."
-P2P_PORT=8000 P2P_ROLE=prefill bash "$SCRIPT_DIR/launch-instance.sh" \
+P2P_PORT=8000 P2P_ROLE=prefill P2P_CUDA_VISIBLE_DEVICES="$P2P_A_CUDA_VISIBLE_DEVICES" \
+  bash "$SCRIPT_DIR/launch-instance.sh" \
   > "$ROOT/instance_a.log" 2>&1 &
 disown
 if ! wait_for_models 8000 "$P2P_STARTUP_TIMEOUT"; then
@@ -123,7 +132,8 @@ fi
 echo "instance A up $(date)"
 
 echo "launching instance B (port 8002, role=decode)..."
-P2P_PORT=8002 P2P_ROLE=decode  bash "$SCRIPT_DIR/launch-instance.sh" \
+P2P_PORT=8002 P2P_ROLE=decode P2P_CUDA_VISIBLE_DEVICES="$P2P_B_CUDA_VISIBLE_DEVICES" \
+  bash "$SCRIPT_DIR/launch-instance.sh" \
   > "$ROOT/instance_b.log" 2>&1 &
 disown
 if ! wait_for_models 8002 "$P2P_STARTUP_TIMEOUT"; then
@@ -193,13 +203,76 @@ words = [
 print(" ".join(words))
 ')"
 
-echo "=== R1: POST /v1/completions to instance A (port 8000) ==="
-R1=$(python3 -c '
-import json, sys
-print(json.dumps({"model":"Qwen/Qwen3-0.6B","prompt":sys.argv[1],"max_tokens":8,"temperature":0}))
-' "$P1" \
-  | curl -m 120 -sS -X POST http://127.0.0.1:8000/v1/completions \
-      -H "Content-Type: application/json" -d @-)
+run_chat_stream() {
+  port="$1"
+  label="$2"
+  prompt="$3"
+  python3 - "$port" "$P2P_MODEL" "$ROOT/${label}-chat-stream.jsonl" "$ROOT/${label}-ttft.json" "$prompt" <<'PY'
+import json
+import sys
+import time
+import urllib.request
+
+port, model, stream_path, metrics_path, prompt = sys.argv[1:6]
+payload = {
+    "model": model,
+    "messages": [{"role": "user", "content": prompt}],
+    "max_tokens": 8,
+    "temperature": 0,
+    "stream": True,
+}
+req = urllib.request.Request(
+    f"http://127.0.0.1:{port}/v1/chat/completions",
+    data=json.dumps(payload).encode(),
+    headers={"content-type": "application/json"},
+    method="POST",
+)
+start = time.perf_counter()
+first_byte = None
+first_token = None
+chunks = 0
+content_chars = 0
+with urllib.request.urlopen(req, timeout=120) as resp, open(stream_path, "w") as out:
+    for raw in resp:
+        now = time.perf_counter()
+        if first_byte is None:
+            first_byte = now
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+        out.write(line + "\n")
+        out.flush()
+        if not line.startswith("data: "):
+            continue
+        data = line[len("data: "):]
+        if data == "[DONE]":
+            break
+        chunks += 1
+        obj = json.loads(data)
+        text = obj["choices"][0].get("delta", {}).get("content") or ""
+        if text and first_token is None:
+            first_token = now
+        content_chars += len(text)
+end = time.perf_counter()
+metrics = {
+    "model": model,
+    "endpoint_type": "chat",
+    "streaming": True,
+    "ttfb_seconds": None if first_byte is None else first_byte - start,
+    "ttft_seconds": None if first_token is None else first_token - start,
+    "total_seconds": end - start,
+    "chunks": chunks,
+    "content_chars": content_chars,
+}
+with open(metrics_path, "w") as f:
+    json.dump(metrics, f, indent=2, sort_keys=True)
+    f.write("\n")
+print(json.dumps(metrics, sort_keys=True))
+PY
+}
+
+echo "=== R1: POST /v1/chat/completions stream=true to instance A (port 8000) ==="
+R1=$(run_chat_stream 8000 r1 "$P1")
 echo "$R1" | head -c 300; echo
 
 # ----------------------------------------------------------------------
@@ -344,13 +417,8 @@ echo "close_session response: $CLOSE_RESP"
 # ----------------------------------------------------------------------
 # 9. R2 — same prompt to instance B. Expect G2 cache hit.
 # ----------------------------------------------------------------------
-echo "=== R2: POST /v1/completions to instance B (port 8002) ==="
-R2=$(python3 -c '
-import json, sys
-print(json.dumps({"model":"Qwen/Qwen3-0.6B","prompt":sys.argv[1],"max_tokens":8,"temperature":0}))
-' "$P1" \
-  | curl -m 120 -sS -X POST http://127.0.0.1:8002/v1/completions \
-      -H "Content-Type: application/json" -d @-)
+echo "=== R2: POST /v1/chat/completions stream=true to instance B (port 8002) ==="
+R2=$(run_chat_stream 8002 r2 "$P1")
 echo "$R2" | head -c 300; echo
 
 sleep 3
