@@ -396,6 +396,8 @@ mod tests {
             disaggregated_params: None,
             completion_usage: None,
             engine_data: None,
+            tool_calls: None,
+            reasoning_content: None,
         })
     }
 

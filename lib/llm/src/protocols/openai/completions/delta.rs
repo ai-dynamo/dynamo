@@ -357,6 +357,8 @@ mod tests {
                 "routed_experts": {"layer_0": [1, 3]}
             })),
             engine_data: None,
+            tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -400,6 +402,8 @@ mod tests {
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -668,6 +672,8 @@ mod tests {
             completion_usage: None,
             disaggregated_params: None,
             engine_data: None, // engine didn't provide any data
+            tool_calls: None,
+            reasoning_content: None,
         };
 
         let response = generator

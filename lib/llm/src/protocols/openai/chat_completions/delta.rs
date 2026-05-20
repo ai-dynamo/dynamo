@@ -149,18 +149,20 @@ impl DeltaGenerator {
         text: Option<String>,
         finish_reason: Option<dynamo_protocols::types::FinishReason>,
         logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
+        tool_calls: Option<serde_json::Value>,
+        reasoning_content: Option<String>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
             content: text.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
             function_call: None,
-            tool_calls: None,
+            tool_calls: tool_calls.and_then(|v| serde_json::from_value(v).ok()),
             role: if self.msg_counter == 0 {
                 Some(dynamo_protocols::types::Role::Assistant)
             } else {
                 None
             },
             refusal: None,
-            reasoning_content: None,
+            reasoning_content,
         };
 
         let choice = dynamo_protocols::types::ChatChoiceStream {
@@ -299,7 +301,14 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Create the streaming response.
         let index = delta.index.unwrap_or(0);
-        let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        let mut stream_response = self.create_choice(
+            index,
+            delta.text,
+            finish_reason,
+            logprobs,
+            delta.tool_calls,
+            delta.reasoning_content,
+        );
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -459,6 +468,8 @@ mod tests {
                 "routed_experts": {"layer_0": [1, 3]}
             })),
             engine_data: None,
+            tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -511,6 +522,8 @@ mod tests {
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -715,6 +728,8 @@ mod tests {
             completion_usage: None,
             disaggregated_params: None,
             engine_data: None, // engine didn't provide any data
+            tool_calls: None,
+            reasoning_content: None,
         };
 
         let response = generator

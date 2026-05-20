@@ -59,7 +59,7 @@ impl
         let ctx = context.context();
         let mut generator = request.response_generator(ctx.id().to_string());
         let stream = stream! {
-            let output = generator.create_choice(0, Some("ok".to_string()), None, None);
+            let output = generator.create_choice(0, Some("ok".to_string()), None, None, None, None);
             yield Annotated::from_data(output);
         };
         Ok(ResponseStream::new(Box::pin(stream), ctx))
