@@ -39,6 +39,7 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
     LoraTestChatPayload,
     ToolCallingChatPayload,
@@ -893,3 +894,211 @@ def test_lora_aggregated_router(
     run_serve_deployment(
         config, request, ports=dynamo_dynamic_ports, extra_env=env_vars
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-worker embedding tests
+#
+# Verify that Dynamo's routing layer correctly:
+#   1. Load-balances across N workers serving the SAME embedding model.
+#   2. Dispatches by request `model` field across workers serving
+#      DIFFERENT embedding models.
+#
+# The routing code (`get_embeddings_engine` + `select_worker_set_with`) is
+# already exercised by chat-completions through identical machinery, so the
+# code is verified by construction; what these tests add is **explicit
+# exercise of the embedding code path**.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _embedding_warmup_payload(model: str) -> EmbeddingPayload:
+    """One quick embedding request used as a smoke check before the burst."""
+    return EmbeddingPayload(
+        body={"model": model, "input": "warmup"},
+        expected_response=["Generated 1 embeddings with dimension"],
+        expected_log=[],
+        repeat_count=1,
+    )
+
+
+def _embedding_dispatch_burst(
+    *,
+    model: str,
+    repeat_count: int,
+    expected_worker_indices_with_delta: set[int],
+    min_total_delta: int,
+) -> EmbeddingMultiWorkerDispatchPayload:
+    """One burst payload that drives the dispatch assertion.
+
+    ``system_ports`` is fixed at ``[SYSTEM_PORT1, SYSTEM_PORT2]`` — the
+    harness remaps those placeholders to the per-test dynamic ports.
+    Dispatch expectations are expressed as INDICES into that list (index 0
+    = first worker = GPU 0, index 1 = second worker = GPU 1).
+    """
+    return EmbeddingMultiWorkerDispatchPayload(
+        body={"model": model, "input": "Hello, world!"},
+        expected_response=["Generated 1 embeddings with dimension"],
+        expected_log=[],
+        repeat_count=repeat_count,
+        system_ports=[DefaultPort.SYSTEM1.value, DefaultPort.SYSTEM2.value],
+        expected_worker_indices_with_delta=expected_worker_indices_with_delta,
+        min_total_delta=min_total_delta,
+    )
+
+
+# Same model on both GPUs — verifies weighted-random selection in
+# `select_worker_set_with` fans out across both registered workers.
+_EMBED_SAME_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+
+# Multi-model setup: each model is served by exactly one worker, so a
+# request whose `model` field names model A must never reach model B's
+# worker. BGE-small-en is intentionally small (33M params, fits alongside
+# Qwen3-Embedding-0.6B on stock CI nodes).
+_EMBED_MODEL_A = "Qwen/Qwen3-Embedding-0.6B"
+_EMBED_MODEL_B = "BAAI/bge-small-en-v1.5"
+
+
+@pytest.mark.vllm
+@pytest.mark.core
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+@pytest.mark.model(_EMBED_SAME_MODEL)
+@pytest.mark.profiled_vram_gib(5.0)  # per GPU; mirrors single-worker embedding_agg
+@pytest.mark.requested_vllm_kv_cache_bytes(559_693_824)
+@pytest.mark.timeout(
+    420
+)  # 2x cold-load vs single-worker embedding_agg (2 GPUs in parallel)
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_embedding_multi_worker_same_model_load_balance(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Two workers serving the same model: a burst of requests should be
+    weighted-randomly distributed so both workers' /metrics counters > 0.
+
+    Burst size is deliberately small (20) so pure chance of all-to-one-
+    worker is negligible (≈ 1 in 2^19) while keeping test runtime tight
+    on 2-GPU CI nodes.
+    """
+    assert num_system_ports >= 2, "Requires SYSTEM_PORT1 + SYSTEM_PORT2"
+
+    # 20 repeats inside the burst; the payload uses repeat 1 as its
+    # baseline snapshot and asserts the delta across repeats 2..20.
+    burst = _embedding_dispatch_burst(
+        model=_EMBED_SAME_MODEL,
+        repeat_count=20,
+        # Both workers (indices 0 and 1) should see delta > 0.
+        expected_worker_indices_with_delta={0, 1},
+        # 19 post-baseline requests; loose lower bound absorbs any frontend
+        # health probes that the worker happens to count.
+        min_total_delta=15,
+    )
+
+    config = VLLMConfig(
+        name="embedding_multi_worker_same_model",
+        directory=vllm_dir,
+        script_name="agg_embed_multiworker.sh",
+        script_args=[_EMBED_SAME_MODEL, _EMBED_SAME_MODEL],
+        marks=[],  # markers at function level
+        model=_EMBED_SAME_MODEL,
+        timeout=420,
+        # Poll each DYN_SYSTEM_PORT*/health endpoint before sending
+        # traffic so we don't race the second worker's model
+        # registration with the frontend. Without this, the first burst
+        # can fire while only one worker has registered its model,
+        # which manifests as HTTP 404 on /v1/embeddings.
+        health_check_workers=True,
+        request_payloads=[
+            _embedding_warmup_payload(_EMBED_SAME_MODEL),
+            burst,
+        ],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.core
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+@pytest.mark.model(_EMBED_MODEL_A)
+@pytest.mark.model(_EMBED_MODEL_B)
+@pytest.mark.profiled_vram_gib(5.0)  # Qwen3-Embed (0.6B) is the larger of the two
+@pytest.mark.requested_vllm_kv_cache_bytes(559_693_824)
+@pytest.mark.timeout(420)
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_embedding_multi_worker_multi_model_dispatch(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Two workers, two different models: requests for model A must reach
+    only worker A; symmetric for model B. Verifies name-keyed dispatch in
+    ``get_embeddings_engine`` for embedding traffic.
+    """
+    assert num_system_ports >= 2, "Requires SYSTEM_PORT1 + SYSTEM_PORT2"
+
+    # Worker A → SYSTEM_PORT1 (GPU 0, model A, payload index 0)
+    # Worker B → SYSTEM_PORT2 (GPU 1, model B, payload index 1)
+    #
+    # Each burst takes its own baseline snapshot and checks the DELTA
+    # over its repeats — so burst_b's check is independent of burst_a's
+    # absolute count, and "wrong-model traffic stays out" can actually
+    # be expressed (no delta on the wrong worker during this burst).
+    burst_a = _embedding_dispatch_burst(
+        model=_EMBED_MODEL_A,
+        repeat_count=10,
+        expected_worker_indices_with_delta={0},  # only worker A
+        min_total_delta=5,
+    )
+    burst_b = _embedding_dispatch_burst(
+        model=_EMBED_MODEL_B,
+        repeat_count=10,
+        expected_worker_indices_with_delta={1},  # only worker B
+        min_total_delta=5,
+    )
+
+    config = VLLMConfig(
+        name="embedding_multi_worker_multi_model",
+        directory=vllm_dir,
+        script_name="agg_embed_multiworker.sh",
+        script_args=[_EMBED_MODEL_A, _EMBED_MODEL_B],
+        marks=[],  # markers at function level
+        # ``model`` here is just metadata for the test runner; the real
+        # per-request model is set in each payload's body.
+        model=_EMBED_MODEL_A,
+        # BGE-small-en-v1.5's architecture caps at ``max_position_embeddings=512``
+        # — applying the script's default ``MAX_MODEL_LEN=2048`` to it crashes
+        # the second worker at engine init. Drop the cap to BGE's native max;
+        # Qwen3-Embedding-0.6B happily accepts the lower cap.
+        env={"MAX_MODEL_LEN": "512"},
+        timeout=420,
+        # Poll each DYN_SYSTEM_PORT*/health endpoint before sending
+        # traffic. Qwen3-Embedding-0.6B (~600M params) loads ~25s
+        # slower than BGE-small (~33M); without the per-worker wait,
+        # the first burst can fire while only BGE's name is
+        # registered with the frontend, which manifests as HTTP 404
+        # for the Qwen3 model.
+        health_check_workers=True,
+        request_payloads=[
+            _embedding_warmup_payload(_EMBED_MODEL_A),
+            _embedding_warmup_payload(_EMBED_MODEL_B),
+            burst_a,
+            burst_b,
+        ],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
