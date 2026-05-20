@@ -196,3 +196,21 @@ impl ModelInput {
         }
     }
 }
+
+#[derive(Copy, Debug, Default, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ModelOutput {
+    /// Engine produces raw token IDs; Dynamo handles detokenization and parsing.
+    #[default]
+    Tokens,
+    /// Engine produces fully-formed text (detokenized, tool calls parsed, etc.).
+    Text,
+}
+
+impl ModelOutput {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Tokens => "tokens",
+            Self::Text => "text",
+        }
+    }
+}

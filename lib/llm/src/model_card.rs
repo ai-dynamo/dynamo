@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::model_type::{ModelInput, ModelType};
+use crate::model_type::{ModelInput, ModelOutput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::kv};
@@ -683,6 +683,11 @@ pub struct ModelDeploymentCard {
     /// `Text` for engines that take care of pre-processing themselves.
     pub model_input: ModelInput,
 
+    /// Specifies the model output type.
+    /// `Tokens` for engines that produce raw token IDs (Dynamo detokenizes).
+    /// `Text` for engines that handle detokenization and parsing themselves.
+    pub model_output: ModelOutput,
+
     /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
     /// Orthogonal to `model_type` (which describes endpoints exposed).
     ///
@@ -976,6 +981,10 @@ impl ModelDeploymentCard {
 
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_input, ModelInput::Tokens)
+    }
+
+    pub fn requires_postprocessing(&self) -> bool {
+        matches!(self.model_output, ModelOutput::Tokens)
     }
 
     /// Iterate populated metadata slots in deterministic order:
@@ -1309,6 +1318,7 @@ impl ModelDeploymentCard {
             migration_limit: 0,
             model_type: Default::default(),  // set later
             model_input: Default::default(), // set later
+            model_output: Default::default(), // set later
             worker_type: Default::default(), // set later
             needs: Default::default(),       // set later
             lora: None,
