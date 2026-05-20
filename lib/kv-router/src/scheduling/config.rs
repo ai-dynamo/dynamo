@@ -21,12 +21,6 @@ const fn default_track_prefill_tokens() -> bool {
 
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
 
-/// Default pending ISL token tiers per worker for `router_queue_by_incoming_missing_isl`.
-/// - Cheap requests (0-3071 cache miss): 4M ISL tokens per worker
-/// - Expensive requests (3072+ cache miss): 2M ISL tokens per worker
-pub const DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS: &[(usize, usize)] =
-    &[(0, 4 * 1024 * 1024), (3072, 2 * 1024 * 1024)];
-
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
         Ok(value) => value.parse::<usize>().map_err(|error| {
@@ -173,7 +167,6 @@ pub struct RouterQueueDepthByMissingIslTier {
 /// Validated, sorted pending ISL token cap tiers keyed by cache-miss tokens.
 ///
 /// Guarantees:
-/// - Empty vec means capping is disabled
 /// - Non-empty vec starts with `missing_cache_tokens_floor == 0`
 /// - Floors are strictly ascending
 /// - All `max_queue_depth > 0`
@@ -185,24 +178,6 @@ pub struct RouterQueueDepthByMissingIslTier {
 pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
 
 impl RouterQueueDepthTiers {
-    /// Default tiers for ISL token caps per worker.
-    ///
-    /// - Cheap requests (0-3071 cache miss): 4M ISL tokens per worker
-    /// - Expensive requests (3072+ cache miss): 2M ISL tokens per worker
-    ///
-    /// See [`DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS`].
-    pub fn default_per_worker() -> Self {
-        Self(
-            DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS
-                .iter()
-                .map(|&(floor, cap)| RouterQueueDepthByMissingIslTier {
-                    missing_cache_tokens_floor: floor,
-                    max_queue_depth: cap,
-                })
-                .collect(),
-        )
-    }
-
     /// Disable capping entirely (unbounded queue).
     pub fn unbounded_cap() -> Self {
         Self(Vec::new())
@@ -214,7 +189,6 @@ impl RouterQueueDepthTiers {
     }
 
     /// Get effective cap for a request's cache-miss tokens, scaled by worker count.
-    /// Returns None if capping is disabled (unbounded queue).
     pub fn cap_for(&self, cache_miss_tokens: usize, worker_count: usize) -> Option<usize> {
         if self.0.is_empty() {
             return None;
@@ -241,28 +215,14 @@ impl RouterQueueDepthTiers {
     }
 }
 
-fn default_router_queue_depth_by_incoming_missing_isl() -> Vec<RouterQueueDepthByMissingIslTier> {
-    DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS
-        .iter()
-        .map(|&(floor, cap)| RouterQueueDepthByMissingIslTier {
-            missing_cache_tokens_floor: floor,
-            max_queue_depth: cap,
-        })
-        .collect()
-}
-
-impl Default for RouterQueueDepthTiers {
-    fn default() -> Self {
-        Self::default_per_worker()
-    }
-}
-
 impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
     type Error = String;
 
     fn try_from(tiers: Vec<RouterQueueDepthByMissingIslTier>) -> Result<Self, Self::Error> {
         if tiers.is_empty() {
-            return Ok(Self::unbounded_cap());
+            return Err(
+                "router_queue_by_incoming_missing_isl: must contain at least one tier".to_string(),
+            );
         }
 
         // Must start with floor 0
@@ -290,6 +250,12 @@ impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
         }
 
         Ok(Self(tiers))
+    }
+}
+
+impl Default for RouterQueueDepthTiers {
+    fn default() -> Self {
+        Self::unbounded_cap()
     }
 }
 
@@ -468,9 +434,8 @@ struct KvRouterConfigSerde {
     router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
-    #[serde(default = "default_router_queue_depth_by_incoming_missing_isl")]
-    #[serde(alias = "router_queue_depth_by_missing_isl")]
-    router_queue_by_incoming_missing_isl: Vec<RouterQueueDepthByMissingIslTier>,
+    #[serde(default)]
+    router_queue_by_incoming_missing_isl: RouterQueueDepthTiers,
     router_event_threads: u32,
     skip_initial_worker_wait: bool,
     router_queue_policy: RouterQueuePolicy,
@@ -503,9 +468,7 @@ impl Default for KvRouterConfigSerde {
             router_reset_states: config.router_reset_states,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
-            router_queue_by_incoming_missing_isl: config
-                .router_queue_by_incoming_missing_isl
-                .into(),
+            router_queue_by_incoming_missing_isl: config.router_queue_by_incoming_missing_isl,
             router_event_threads: config.router_event_threads,
             skip_initial_worker_wait: config.skip_initial_worker_wait,
             router_queue_policy: config.router_queue_policy,
@@ -606,13 +569,10 @@ pub struct KvRouterConfig {
     /// - request missing 500 tokens  → matches (0, 4194304)    → cap = 4M*4 = 16M tokens
     /// - request missing 3500 tokens → matches (3072, 2097152) → cap = 2M*4 = 8M tokens
     ///
-    /// Default: `[(0, 4194304), (3072, 2097152)]` — 4M ISL tokens per worker for cheap
-    /// requests (low cache miss), 2M for expensive requests (high cache miss).
-    /// This allows more queued ISL tokens for cheap requests and fewer for expensive ones.
-    ///
     /// Semantics across config surfaces:
-    /// - omitted / `None` means "use the built-in default tier list above"
-    /// - empty vec / `[]` means "disable ISL-token capping" (unbounded queue cap)
+    /// - omitted / `None` disables ISL-token capping (unbounded queue cap)
+    /// - when provided, the tier list must be non-empty, start at floor 0,
+    ///   have strictly ascending floors, and use `max_queue_depth > 0`
     ///
     /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
     /// buffers. The TCP request plane has a fixed 1024-slot buffer per
@@ -687,7 +647,7 @@ impl Default for KvRouterConfig {
             router_reset_states: false,
             router_ttl_secs: 120.0,
             router_queue_threshold: Some(16.0),
-            router_queue_by_incoming_missing_isl: RouterQueueDepthTiers::default_per_worker(),
+            router_queue_by_incoming_missing_isl: RouterQueueDepthTiers::unbounded_cap(),
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
@@ -733,9 +693,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
-            router_queue_by_incoming_missing_isl: RouterQueueDepthTiers::try_from(
-                compat.router_queue_by_incoming_missing_isl,
-            )?,
+            router_queue_by_incoming_missing_isl: compat.router_queue_by_incoming_missing_isl,
             router_event_threads: compat.router_event_threads,
             skip_initial_worker_wait: compat.skip_initial_worker_wait,
             router_queue_policy: compat.router_queue_policy,
@@ -1004,6 +962,31 @@ mod tests {
             serde_json::from_str(r#"{"router_predicted_ttl_secs":5.0}"#).unwrap();
 
         assert_eq!(config.router_predicted_ttl_secs, Some(5.0));
+    }
+
+    #[test]
+    fn test_kv_router_config_defaults_to_unbounded_queue_cap() {
+        let config = KvRouterConfig::default();
+
+        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
+    }
+
+    #[test]
+    fn test_kv_router_config_deserializes_missing_queue_tiers_as_unbounded() {
+        let config: KvRouterConfig = serde_json::from_str(r#"{}"#).unwrap();
+
+        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_empty_queue_tiers() {
+        let error = serde_json::from_str::<KvRouterConfig>(
+            r#"{"router_queue_by_incoming_missing_isl":[]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("must contain at least one tier"));
     }
 
     #[test]

@@ -355,15 +355,12 @@ def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
     assert kwargs["router_queue_by_incoming_missing_isl"] == [(0, 2048), (2048, 512)]
 
 
-def test_kv_router_kwargs_uses_default_queue_tiers() -> None:
+def test_kv_router_kwargs_uses_unbounded_queue_cap_by_default() -> None:
     config = KvRouterConfigBase.from_cli_args(argparse.Namespace())
 
     kwargs = config.kv_router_kwargs()
 
-    assert kwargs["router_queue_by_incoming_missing_isl"] == [
-        (0, 4194304),
-        (3072, 2097152),
-    ]
+    assert kwargs["router_queue_by_incoming_missing_isl"] is None
 
 
 def test_load_aware_clears_predicted_ttl() -> None:

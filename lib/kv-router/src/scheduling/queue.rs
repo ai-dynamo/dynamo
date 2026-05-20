@@ -76,7 +76,6 @@ pub struct SchedulerQueue<
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
     /// Per-tier pending ISL token caps keyed on cache-miss tokens.
-    /// Empty means no admission cap.
     queue_depth_tiers: RouterQueueDepthTiers,
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
@@ -418,7 +417,7 @@ impl<
 
     /// Resolve the admission cap for `request` from the cache-miss tier table.
     ///
-    /// Returns `None` when capping is disabled (empty tiers).
+    /// Returns `None` when capping is disabled.
     fn tier_cap_for_request(&self, request: &SchedulingRequest) -> Option<usize> {
         let workers = self.workers_with_configs.borrow();
         let ctx = SchedulingContext::new(request, &workers);
