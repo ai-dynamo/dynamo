@@ -17,7 +17,11 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    nullable_float,
+)
 
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
@@ -341,13 +345,14 @@ class KvRouterArgGroup(ArgGroup):
                 "Requests are queued if all workers exceed this fraction of "
                 "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
                 "queueing sensitivity (queue as soon as any tokens are active). "
+                "Pass 'None' to disable router queueing. "
                 "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
                 "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
                 "cache pool size), not the per-step prefill window, which inflates "
                 "the threshold's effective denominator. Set --max-prefill-tokens "
                 "explicitly for predictable semantics, or use a smaller threshold."
             ),
-            arg_type=float,
+            arg_type=nullable_float,
         )
         add_argument(
             g,

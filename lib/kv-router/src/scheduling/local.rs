@@ -16,7 +16,8 @@ use super::prefill_load::PrefillLoadEstimator;
 use super::queue::SchedulerQueue;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -86,6 +87,7 @@ where
             policy,
             prefill_load_estimator,
             None,
+            None,
             recheck_interval,
             track_prefill_tokens_default,
             cancellation_token,
@@ -106,6 +108,7 @@ where
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -146,7 +149,7 @@ where
             });
         }
 
-        let queue = Arc::new(SchedulerQueue::new(
+        let queue = Arc::new(SchedulerQueue::new_with_overload_provider(
             Arc::clone(&slots),
             workers_with_configs,
             threshold_frac,
@@ -155,6 +158,7 @@ where
             policy,
             prefill_load_estimator,
             overlap_scores_refresh,
+            overloaded_worker_provider,
         ));
         let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);

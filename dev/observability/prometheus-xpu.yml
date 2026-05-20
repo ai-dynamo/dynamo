@@ -14,9 +14,9 @@
 # limitations under the License.
 
 # Prometheus configuration for Intel XPU environments.
-# Used via: docker compose -f deploy/docker-observability.yml -f deploy/docker-observability-xpu.yml up -d
+# Used via: docker compose -f dev/docker-observability.yml -f dev/docker-observability-xpu.yml up -d
 # Requires xpu_smi_exporter.py running on the host:
-#   python3 deploy/observability/xpu_smi_exporter.py --port 9966
+#   python3 dev/observability/xpu_smi_exporter.py --port 9966
 
 global:
   scrape_interval: 10s

@@ -5,8 +5,8 @@ use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
 pub use dynamo_kv_router::scheduling::overlap_refresh::{OverlapScoresRefresh, RefreshedOverlap};
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, PotentialLoad, SchedulingRequest, SchedulingResponse,
-    TierOverlapBlocks,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -45,6 +45,7 @@ where
 {
     /// Start the scheduler. Preserves the pre-overlap-refresh signature so downstream callers
     /// don't break. Use [`Self::start_with_overlap_refresh`] to enable dequeue-time refresh.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         component: Component,
         block_size: u32,
@@ -52,6 +53,7 @@ where
         selector: Sel,
         kv_router_config: &KvRouterConfig,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         Self::start_with_overlap_refresh(
@@ -62,6 +64,7 @@ where
             kv_router_config,
             prefill_load_estimator,
             None,
+            overloaded_worker_provider,
             worker_type,
         )
         .await
@@ -78,6 +81,7 @@ where
         kv_router_config: &KvRouterConfig,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
@@ -115,6 +119,7 @@ where
             policy,
             prefill_load_estimator,
             overlap_scores_refresh,
+            overloaded_worker_provider,
             kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
             component.drt().child_token(),

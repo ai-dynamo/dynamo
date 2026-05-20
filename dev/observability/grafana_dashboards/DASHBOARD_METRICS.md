@@ -272,13 +272,13 @@ Launch the XPU-SMI Prometheus exporter on the host, then start the observability
 ```bash
 # Install Intel XPU-SMI (xpumanager): https://github.com/intel/xpumanager
 # Start the exporter (serves Prometheus metrics on port 9966)
-python deploy/observability/xpu_smi_exporter.py --port 9966 &
+python dev/observability/xpu_smi_exporter.py --port 9966 &
 
 # Start base services
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 
 # Start observability with XPU overlay (uses prometheus-xpu.yml + xpu-alert-rules.yml)
-docker compose -f deploy/docker-observability.yml -f deploy/docker-observability-xpu.yml up -d
+docker compose -f dev/docker-observability.yml -f dev/docker-observability-xpu.yml up -d
 ```
 
 ### XPU-SMI Dashboard Panels (`xpu-smi-metrics.json`)

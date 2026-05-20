@@ -70,7 +70,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (None, None)
         };
 
-        let gen_ctx = GenerateContext::new(ctx.clone(), ft_tx.clone());
+        let gen_ctx =
+            GenerateContext::with_metadata(ctx.clone(), ft_tx.clone(), handle.metadata().clone());
         let chunks = self
             .engine
             .generate(request, gen_ctx)
