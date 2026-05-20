@@ -12,7 +12,8 @@ use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::{
     DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS, KvRouterConfig as RsKvRouterConfig,
-    RouterPrefillLoadModel as RsRouterPrefillLoadModel, apply_deprecated_overlap_score_weight_override,
+    RouterPrefillLoadModel as RsRouterPrefillLoadModel,
+    apply_deprecated_overlap_score_weight_override,
 };
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
