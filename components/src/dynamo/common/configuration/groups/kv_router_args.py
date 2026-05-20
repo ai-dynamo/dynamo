@@ -121,7 +121,7 @@ class KvRouterConfigBase(ConfigBase):
     router_reset_states: bool
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
-    router_queue_by_incoming_missing_isl: list[tuple[int, int]] = (
+    router_queue_by_incoming_missing_isl: tuple[tuple[int, int], ...] = (
         (0, 4 * 1024 * 1024),
         (3072, 2 * 1024 * 1024),
     )
@@ -144,7 +144,11 @@ class KvRouterConfigBase(ConfigBase):
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         self.apply_load_aware_preset()
-        return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
+        kwargs = {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
+        kwargs["router_queue_by_incoming_missing_isl"] = list(
+            kwargs["router_queue_by_incoming_missing_isl"]
+        )
+        return kwargs
 
 
 class KvRouterArgGroup(ArgGroup):
