@@ -41,12 +41,7 @@ from dynamo.common.backend.engine import (
     LLMEngine,
 )
 from dynamo.common.backend.metrics import register_global_registry
-from dynamo.common.backend.publisher import (
-    ComponentMetricsSource,
-    ComponentSnapshot,
-    KvEventSource,
-    PushSource,
-)
+from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, PushSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.llm import KvEventPublisher, ModelInput
@@ -165,9 +160,10 @@ class TrtllmLLMEngine(LLMEngine):
         # dict is fully populated before `_kv_events_thread` starts and
         # read-only thereafter.
         self._kv_publishers: dict[int, KvEventPublisher] = {}
-        # Written by `_metrics_poll_loop`, read by snapshot lambdas under
-        # the GIL. Per-rank key-level writes are GIL-serialized.
-        self._snapshots: dict[int, ComponentSnapshot] = {}
+        # Set by attach_snapshot_publisher. `_metrics_poll_loop` pushes
+        # ComponentSnapshots into it on every TRT-LLM stats tick — event-
+        # driven, no framework polling on the reader side.
+        self._snapshot_publisher: Optional[Any] = None
         # Per-rank hashes of partial blocks; their later "removed" events
         # must not reach the router (which never saw them stored). Scoping
         # by rank prevents a partial block on one rank from suppressing a
@@ -357,14 +353,11 @@ class TrtllmLLMEngine(LLMEngine):
             for rank in range(self._attention_dp_size)
         ]
 
-    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
-        def snapshot_for(r: int) -> Callable[[], Optional[ComponentSnapshot]]:
-            return lambda: self._snapshots.get(r)
+    def component_metrics_dp_ranks(self) -> list[int]:
+        return list(range(self._attention_dp_size))
 
-        return [
-            ComponentMetricsSource(snapshot=snapshot_for(rank), dp_rank=rank)
-            for rank in range(self._attention_dp_size)
-        ]
+    def attach_snapshot_publisher(self, publisher) -> None:
+        self._snapshot_publisher = publisher
 
     def _make_on_publisher_ready(self, rank: int):
         # Worker invokes on_ready serially during setup; the call that
@@ -411,13 +404,19 @@ class TrtllmLLMEngine(LLMEngine):
                 # cacheHitRate is on the kvCacheStats payload in recent
                 # TRT-LLM; absent on older releases. None means "no data."
                 hit_rate = kv_stats.get("cacheHitRate")
-                self._snapshots[rank] = ComponentSnapshot(
-                    kv_used_blocks=int(kv_used),
-                    kv_total_blocks=kv_total,
-                    gpu_cache_usage=(kv_used / kv_total) if kv_total else 0.0,
-                    kv_cache_hit_rate=float(hit_rate) if hit_rate is not None else None,
-                    dp_rank=rank,
-                )
+                if self._snapshot_publisher is not None:
+                    self._snapshot_publisher.publish(
+                        rank,
+                        ComponentSnapshot(
+                            kv_used_blocks=int(kv_used),
+                            kv_total_blocks=kv_total,
+                            gpu_cache_usage=(kv_used / kv_total) if kv_total else 0.0,
+                            kv_cache_hit_rate=float(hit_rate)
+                            if hit_rate is not None
+                            else None,
+                            dp_rank=rank,
+                        ),
+                    )
 
                 # TRT-LLM-native trtllm_kv_cache_* gauges (PR #11243).
                 if self._log_iteration_stats is not None:

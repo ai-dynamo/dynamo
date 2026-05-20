@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
 
-from .publisher import ComponentMetricsSource, KvEventSource
+from .publisher import KvEventSource
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -219,24 +219,33 @@ class LLMEngine(ABC):
         no-op. See :mod:`dynamo.common.backend.metrics` for helpers. Do not
         retain ``metrics`` past return.
 
-        Framework-owned lifecycle gauges
-        (``dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds}``)
-        are emitted by the framework independently — they do NOT require
-        the engine to implement this method."""
+        Framework-owned lifecycle + per-rank gauges
+        (``dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds,total_blocks,gpu_cache_usage_percent,kv_cache_hit_rate}``)
+        are owned and registered by the framework Rust-side — they do NOT
+        require the engine to implement this method."""
 
-    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
-        """One :class:`ComponentMetricsSource` per data-parallel rank.
-        Each entry's ``snapshot`` fn returns the latest
-        :class:`ComponentSnapshot` for that rank (cheap field read, < 1 ms).
-        Default empty list opts the engine out of per-rank gauges; lifecycle
-        gauges still emit.
+    def component_metrics_dp_ranks(self) -> list[int]:
+        """Declare the data-parallel ranks this engine publishes
+        per-rank snapshots for. Empty (default) opts out.
+
+        Stable for the engine's lifetime. ``Worker`` constructs a
+        :class:`SnapshotPublisher` sized to these ranks and hands it
+        back via :meth:`attach_snapshot_publisher`. The engine then
+        calls ``publisher.publish(rank, snap)`` from its stat-logger
+        thread — event-driven, no polling.
 
         ``ComponentSnapshot.kv_cache_hit_rate`` is tri-state:
-        ``None`` means "no data yet" or "no prefix cache" (gauge skipped),
-        ``0.0`` is a legitimate measurement (zero hits).
-
-        ``Worker`` invokes the snapshot fns on a fixed interval, feeds the
-        result through both the router-input signal and the
-        ``dynamo_component_*`` gauges. The rank set must be stable for the
-        engine's lifetime."""
+        ``None`` means "no data yet" or "no prefix cache" (gauge
+        skipped), ``0.0`` is a legitimate measurement (zero hits)."""
         return []
+
+    def attach_snapshot_publisher(self, publisher: Any) -> None:
+        """Framework hands the engine the Rust-owned
+        :class:`SnapshotPublisher` once, after ``setup_metrics``
+        constructed it from :meth:`component_metrics_dp_ranks`. Stash
+        the reference; call ``publisher.publish(rank, snap)`` from your
+        stat-logger thereafter.
+
+        Only invoked when :meth:`component_metrics_dp_ranks` returns
+        non-empty. Default is no-op so engines that opt out don't need
+        to override."""

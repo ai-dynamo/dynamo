@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Source descriptors returned by :meth:`LLMEngine.kv_event_sources` and
-:meth:`LLMEngine.component_metrics_sources`. Worker constructs one publisher
-per descriptor — engines never instantiate publishers themselves."""
+"""KV-event source descriptors returned by :meth:`LLMEngine.kv_event_sources`
+plus the :class:`ComponentSnapshot` payload engines push into the
+framework-owned :class:`SnapshotPublisher` (declared via
+:meth:`LLMEngine.component_metrics_dp_ranks` + received via
+:meth:`LLMEngine.attach_snapshot_publisher`). Worker constructs the
+publisher; engines never instantiate one themselves."""
 
 from __future__ import annotations
 
@@ -35,19 +38,19 @@ class PushSource:
 
 @dataclass
 class ComponentSnapshot:
-    """Rich per-rank snapshot returned by
-    :class:`ComponentMetricsSource`. ``Worker`` consumes it to drive both
-    the router-input signal (``kv_used_blocks``) and the engine-side
-    ``dynamo_component_*`` gauges (``kv_total_blocks``, ``gpu_cache_usage``,
-    ``kv_cache_hit_rate``).
+    """Rich per-rank snapshot the engine pushes into the Rust-owned
+    :class:`SnapshotPublisher` from its stat-logger thread.
 
-    Engines fill an in-memory dict from their natural push surface
-    (stat-logger / ZMQ / poll thread); the snapshot fn just returns the
-    latest entry as a cheap field read.
+    ``SnapshotPublisher.publish(rank, snap)`` atomically updates the
+    per-rank ``dynamo_component_*`` gauges (``total_blocks``,
+    ``gpu_cache_usage_percent``, ``kv_cache_hit_rate``) AND fires the
+    router-input signal (``kv_used_blocks``) inline — no GIL on the
+    framework reader side, no polling.
 
-    ``kv_cache_hit_rate`` is ``None`` when the engine hasn't observed
-    requests yet — avoids reporting a misleading 0.0 as the operator's
-    dashboard signal.
+    ``kv_cache_hit_rate`` is tri-state:
+    - ``None``: engine hasn't observed requests yet OR has no prefix
+      cache (gauge skipped — distinguishes "no measurement" from "0%").
+    - ``0.0``: legitimate measurement (no hits).
     """
 
     kv_used_blocks: int
@@ -57,21 +60,10 @@ class ComponentSnapshot:
     kv_cache_hit_rate: Optional[float] = None
 
 
-@dataclass(frozen=True)
-class ComponentMetricsSource:
-    """``snapshot`` is invoked under the GIL on a fixed interval. Keep it to
-    a member-field read; return ``None`` to skip publishing for that tick.
-    Conformance kit enforces a 1 ms ceiling."""
-
-    snapshot: Callable[[], Optional[ComponentSnapshot]]
-    dp_rank: int = 0
-
-
 KvEventSource = Union[ZmqSource, PushSource]
 
 
 __all__ = [
-    "ComponentMetricsSource",
     "ComponentSnapshot",
     "KvEventSource",
     "PushSource",

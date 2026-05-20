@@ -15,7 +15,7 @@ import logging
 import os
 import random
 import sys
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional
 
 import sglang as sgl
@@ -32,12 +32,7 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
-from dynamo.common.backend.publisher import (
-    ComponentMetricsSource,
-    ComponentSnapshot,
-    KvEventSource,
-    ZmqSource,
-)
+from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
@@ -97,8 +92,10 @@ class SglangLLMEngine(LLMEngine):
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
-        # Populated by `_metrics_pull_loop`; read by `component_metrics_sources()`.
-        self._snapshots: dict[int, ComponentSnapshot] = {}
+        # Set by attach_snapshot_publisher when component_metrics_dp_ranks
+        # is non-empty. `_metrics_pull_loop` pushes ComponentSnapshots into
+        # it on every ZMQ message — event-driven, no framework polling.
+        self._snapshot_publisher: Optional[Any] = None
         self._metrics_task: Optional[asyncio.Task[None]] = None
         self._metrics_zmq_ctx: Optional[zmq.asyncio.Context] = None
         self._metrics_zmq_sock = None
@@ -237,13 +234,17 @@ class SglangLLMEngine(LLMEngine):
             # SGLang's KvMetrics carries `cache_hit_rate_perc` on recent
             # versions; older releases (pre-N-1) may omit it.
             hit_rate = getattr(kv_metrics, "cache_hit_rate_perc", None)
-            self._snapshots[dp_rank] = ComponentSnapshot(
-                kv_used_blocks=kv_metrics.kv_active_blocks,
-                kv_total_blocks=kv_metrics.kv_total_blocks,
-                gpu_cache_usage=kv_metrics.gpu_cache_usage_perc,
-                kv_cache_hit_rate=hit_rate,
-                dp_rank=dp_rank,
-            )
+            if self._snapshot_publisher is not None:
+                self._snapshot_publisher.publish(
+                    dp_rank,
+                    ComponentSnapshot(
+                        kv_used_blocks=kv_metrics.kv_active_blocks,
+                        kv_total_blocks=kv_metrics.kv_total_blocks,
+                        gpu_cache_usage=kv_metrics.gpu_cache_usage_perc,
+                        kv_cache_hit_rate=hit_rate,
+                        dp_rank=dp_rank,
+                    ),
+                )
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -570,18 +571,14 @@ class SglangLLMEngine(LLMEngine):
             )
         return sources
 
-    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
+    def component_metrics_dp_ranks(self) -> list[int]:
         if not (self._kv_routing_enabled() and self._is_metrics_leader()):
             return []
-
-        def snapshot_for(r: int) -> Callable[[], Optional[ComponentSnapshot]]:
-            return lambda: self._snapshots.get(r)
-
         start, end = _local_dp_rank_range(self.server_args)
-        return [
-            ComponentMetricsSource(snapshot=snapshot_for(rank), dp_rank=rank)
-            for rank in range(start, end)
-        ]
+        return list(range(start, end))
+
+    def attach_snapshot_publisher(self, publisher) -> None:
+        self._snapshot_publisher = publisher
 
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
         # SGLang multiprocess registry — only when --enable-metrics is

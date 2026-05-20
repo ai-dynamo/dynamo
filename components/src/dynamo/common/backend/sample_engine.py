@@ -11,7 +11,7 @@ import queue
 import threading
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
@@ -19,12 +19,7 @@ from dynamo.llm import KvEventPublisher
 
 from .disagg import enforce_prefill_max_tokens, require_prefill_result
 from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
-from .publisher import (
-    ComponentMetricsSource,
-    ComponentSnapshot,
-    KvEventSource,
-    PushSource,
-)
+from .publisher import ComponentSnapshot, KvEventSource, PushSource
 from .worker import WorkerConfig
 
 logger = logging.getLogger(__name__)
@@ -65,6 +60,9 @@ class SampleLLMEngine(LLMEngine):
         self._publish_queue: queue.SimpleQueue[tuple[str, dict]] = queue.SimpleQueue()
         self._publish_stop = threading.Event()
         self._publish_thread: Optional[threading.Thread] = None
+        # Set by attach_snapshot_publisher when component_metrics_dp_ranks
+        # is non-empty. Driven from _publish_loop alongside KV events.
+        self._snapshot_publisher: Optional[Any] = None
         # itertools.count is thread-safe — concurrent generate() calls
         # won't race on hash issuance.
         self._block_hash_counter = itertools.count(1)
@@ -130,19 +128,15 @@ class SampleLLMEngine(LLMEngine):
     async def kv_event_sources(self) -> list[KvEventSource]:
         return [PushSource(on_ready=self._start_publisher_thread, dp_rank=0)]
 
-    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
-        return [
-            ComponentMetricsSource(
-                snapshot=lambda: ComponentSnapshot(
-                    kv_used_blocks=self._kv_used_blocks,
-                    kv_total_blocks=1000,
-                    gpu_cache_usage=self._kv_used_blocks / 1000.0,
-                    kv_cache_hit_rate=None,  # sample engine doesn't track hits
-                    dp_rank=0,
-                ),
-                dp_rank=0,
-            )
-        ]
+    def component_metrics_dp_ranks(self) -> list[int]:
+        return [0]
+
+    def attach_snapshot_publisher(self, publisher) -> None:
+        # Stash the Rust-owned publisher; the synthetic per-token loop in
+        # `generate()` increments `_kv_used_blocks`. We piggy-back on
+        # `_publish_loop` to push snapshots at ~50 ms cadence (it already
+        # runs to drive KV events).
+        self._snapshot_publisher = publisher
 
     def _start_publisher_thread(self, publisher: KvEventPublisher) -> None:
         self._publish_thread = threading.Thread(
@@ -158,6 +152,22 @@ class SampleLLMEngine(LLMEngine):
             try:
                 kind, payload = self._publish_queue.get(timeout=0.1)
             except queue.Empty:
+                # Push a snapshot on the idle tick (~10 Hz) so /metrics
+                # reflects current _kv_used_blocks without needing an
+                # event. Real engines push from their stat-logger event
+                # surface; the sample engine has no natural one, so we
+                # piggy-back on this loop.
+                if self._snapshot_publisher is not None:
+                    self._snapshot_publisher.publish(
+                        0,
+                        ComponentSnapshot(
+                            kv_used_blocks=self._kv_used_blocks,
+                            kv_total_blocks=1000,
+                            gpu_cache_usage=self._kv_used_blocks / 1000.0,
+                            kv_cache_hit_rate=None,  # sample engine doesn't track hits
+                            dp_rank=0,
+                        ),
+                    )
                 continue
             try:
                 if kind == "stored":

@@ -20,6 +20,7 @@ pub mod error;
 pub mod metrics;
 mod publisher;
 pub mod run;
+pub mod snapshot_publisher;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 #[cfg(debug_assertions)]
@@ -29,13 +30,14 @@ pub mod worker;
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use engine::{
-    AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentMetricsPublisher,
-    ComponentMetricsSource, ComponentSnapshot, ComponentSnapshotFn, EngineConfig, FinishReason,
-    GenerateContext, KvEventPublisher, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, Metrics, MetricsBindings, MetricsCtx, OnPublisherReady, OutputOptions,
-    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions, chunk, usage,
+    AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
+    FinishReason, GenerateContext, KvEventPublisher, KvEventSource, LLMEngine, LLMEngineOutput,
+    LLMEngineOutputExt, Metrics, MetricsBindings, MetricsCtx, OnPublisherReady,
+    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions,
+    StopConditions, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
-pub use metrics::{EngineMetrics, LifecycleGauges};
+pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use run::run;
+pub use snapshot_publisher::SnapshotPublisher;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};

@@ -397,11 +397,10 @@ impl Worker {
         let engine_metrics =
             crate::metrics::EngineMetrics::with_engine_config(endpoint.clone(), &engine_config);
 
-        // Framework-owned cleanup/drain gauges — always emitted, regardless
-        // of engine opt-in. Populated by Worker during shutdown.
-        // (`model_load_time_seconds` is set Python-side from the unified
-        // bridge for parity with the legacy entry points.)
-        let lifecycle = crate::metrics::LifecycleGauges::new(&engine_metrics)?;
+        // Framework-owned lifecycle gauges (cleanup_time, drain_time,
+        // model_load_time) — always emitted, regardless of engine opt-in.
+        let lifecycle =
+            crate::metrics::LifecycleGauges::new(&engine_metrics, model_load_time_seconds)?;
 
         self.setup_publishing(
             &component,
@@ -426,12 +425,13 @@ impl Worker {
             .await
     }
 
-    /// Build KV-event and component-metrics publishers from the engine's
-    /// declarations. Combines KV event sources with the engine-supplied
-    /// [`ComponentMetricsPublisher`] (load-signal + `dynamo_component_*`
-    /// gauges) into a single poll loop. No-op if `enable_kv_routing` is
-    /// off, the engine returned no sources / publisher, or
-    /// `engine_config.kv_cache_block_size` is unset for KV events.
+    /// Build KV-event publishers and the `SnapshotPublisher` from the
+    /// engine's declarations. KV events flow on the engine's own threads
+    /// (via Push or ZMQ); snapshot writes flow through the publisher
+    /// inline (no polling, no GIL on the framework side). No-op if
+    /// `enable_kv_routing` is off, the engine returned no sources +
+    /// no dp_ranks, or `engine_config.kv_cache_block_size` is unset for
+    /// KV events.
     async fn setup_publishing(
         &mut self,
         component: &dynamo_runtime::component::Component,
@@ -447,33 +447,32 @@ impl Worker {
             metrics: engine_metrics,
         };
         let bindings = self.engine.setup_metrics(ctx).await?;
-        let component_publisher = bindings.component;
 
         if !self.config.enable_kv_routing {
-            tracing::debug!("enable_kv_routing=false; skipping kv/component publishers");
+            tracing::debug!("enable_kv_routing=false; skipping kv/snapshot publishers");
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
         let kv_sources = self.engine.kv_event_sources().await?;
-        if kv_sources.is_empty() && component_publisher.is_none() {
-            tracing::debug!(
-                "engine returned no KV sources / component publisher; KV-aware routing disabled"
-            );
+        if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
+            tracing::debug!("engine returned no KV sources / dp_ranks; KV-aware routing disabled");
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
         let enable_local_indexer = self.config.effective_enable_local_indexer();
         tracing::debug!(
             kv_sources = kv_sources.len(),
-            has_component_publisher = component_publisher.is_some(),
+            snapshot_dp_ranks = bindings.dp_ranks.len(),
             enable_local_indexer,
             kv_cache_block_size = ?engine_config.kv_cache_block_size,
             "Starting KV-aware-routing publishers"
         );
         let handles = setup_publishers(
             component,
+            engine_metrics,
             kv_sources,
-            component_publisher,
+            bindings.dp_ranks,
+            bindings.on_publisher_ready,
             engine_config.kv_cache_block_size,
             enable_local_indexer,
         )
@@ -547,12 +546,11 @@ impl Worker {
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_cleanup_time(cleanup_elapsed);
         }
-        // Stop publisher metric loops AFTER engine.cleanup so the engine's
-        // last metric snapshots get published. Then drop the handles so the
-        // publishers' own tokio tasks drain while NATS is still alive.
-        if let Some(mut handles) = self.publishers.take() {
-            handles.shutdown().await;
-        }
+        // Drop publisher handles AFTER engine.cleanup so the engine's
+        // last snapshot writes complete. There is no background task to
+        // join — snapshot writes are event-driven (engine pushes
+        // synchronously); KV-event publishers own their own threads.
+        self.publishers = None;
         // Mark stopped even on failure so a follow-up call no-ops; engines
         // like vLLM/TRT-LLM tear down NCCL groups in cleanup() and a second
         // attempt can hang or raise.

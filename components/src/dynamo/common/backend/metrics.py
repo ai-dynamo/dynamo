@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Engine-facing Prometheus helpers.
+"""Engine-facing Prometheus helpers for vendor-registry bridging.
 
 Engines call :func:`register_global_registry` (for the default
 ``prometheus_client.REGISTRY``) or :func:`register_engine_registry` (for
@@ -11,9 +11,13 @@ multiprocess registry) from inside
 registry (``vllm:``, ``sglang:``, ``trtllm_``, ``lmcache:``) into the
 runtime's combined ``/metrics`` output.
 
-The ``dynamo_component_*`` registry is owned by the framework and built
-via the PyO3 bridge — engines do not construct it. See
-:mod:`dynamo.common.backend._internal_metrics`.
+The ``dynamo_component_*`` registry is owned by the framework Rust-side
+(see ``dynamo_backend_common::metrics::{ComponentGauges, LifecycleGauges}``
+and ``dynamo_backend_common::SnapshotPublisher``) — engines do not
+construct it. Engines that want per-rank visibility implement
+:meth:`LLMEngine.component_metrics_dp_ranks` +
+:meth:`LLMEngine.attach_snapshot_publisher` and push snapshots via the
+publisher's ``publish(rank, snap)``.
 """
 
 from __future__ import annotations
@@ -25,9 +29,9 @@ from typing import TYPE_CHECKING, Optional
 
 from dynamo.common.utils.prometheus import gather_with_labels
 
-from ._internal_metrics import register_engine_registry
-
 if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
+
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
@@ -54,6 +58,35 @@ def ensure_prometheus_multiproc_dir(
     os.environ["PROMETHEUS_MULTIPROC_DIR"] = tmpdir.name
     logger.debug("Created PROMETHEUS_MULTIPROC_DIR at: %s", tmpdir.name)
     return tmpdir
+
+
+def register_engine_registry(
+    metrics: "EngineMetrics",
+    registry: "CollectorRegistry",
+    *,
+    prefix_filters: Optional[list[str]] = None,
+    exclude_prefixes: Optional[list[str]] = None,
+) -> None:
+    """Register a Python ``CollectorRegistry`` as a ``/metrics`` callback
+    against the runtime's ``EngineMetrics`` handle. Auto-labels
+    (namespace/component/endpoint/worker_id/model) are injected at
+    scrape time.
+
+    Engines that own a custom ``CollectorRegistry`` (e.g. SGLang's
+    ``multiprocess.MultiProcessCollector`` over the scheduler ZMQ
+    socket) call this directly. The simpler :func:`register_global_registry`
+    handles the default ``prometheus_client.REGISTRY`` + K8s
+    multiproc-conflict case.
+    """
+    labels = metrics.auto_labels
+    metrics.register_prometheus_expfmt_callback(
+        lambda: gather_with_labels(
+            registry,
+            labels,
+            prefix_filters=prefix_filters,
+            exclude_prefixes=exclude_prefixes,
+        )
+    )
 
 
 def register_global_registry(

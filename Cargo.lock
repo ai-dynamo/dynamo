@@ -2340,6 +2340,7 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "parking_lot",
  "prometheus",
  "serde",
  "serde_json",

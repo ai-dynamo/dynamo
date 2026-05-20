@@ -79,49 +79,54 @@ impl EngineMetrics {
     }
 }
 
-/// Framework-owned lifecycle gauges. Emitted by `Worker` independently of
-/// whether the engine returned a [`crate::engine::ComponentMetricsPublisher`]
-/// — operators always see cleanup/drain timing in `/metrics` regardless of
-/// engine opt-in. The gauge names land in the `dynamo_component_*`
-/// namespace via the runtime's `build_component_metric_name`.
-///
-/// Note: `model_load_time_seconds` is NOT here — it lives in the Python
-/// `LLMBackendMetrics` for parity with the legacy entry points (both
-/// legacy `main.py` and the unified bridge populate it).
+/// Helper: build the `const_labels` slice that goes into `create_metric`
+/// — strips out the auto-injected hierarchy labels (namespace, component,
+/// endpoint, worker_id) so the runtime can re-inject them. Keeps
+/// model/model_name and anything else engine-specific.
+fn const_labels(metrics: &EngineMetrics) -> Vec<(&str, &str)> {
+    let auto_injected = [
+        labels::NAMESPACE,
+        labels::COMPONENT,
+        labels::ENDPOINT,
+        labels::WORKER_ID,
+    ];
+    metrics
+        .auto_labels()
+        .iter()
+        .filter(|(k, _)| !auto_injected.contains(&k.as_str()))
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
+
+fn gauge_err(name: &str, e: anyhow::Error) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::Unknown))
+        .message(format!("gauge create {name}: {e}"))
+        .build()
+}
+
+/// Framework-owned lifecycle gauges. Emitted by `Worker` independent of
+/// the engine — operators see cleanup/drain timing + model load time in
+/// `/metrics` regardless of engine opt-in. The gauge names land in the
+/// `dynamo_component_*` namespace via the runtime's
+/// `build_component_metric_name`.
 pub struct LifecycleGauges {
     cleanup_time_seconds: prometheus::Gauge,
     drain_time_seconds: prometheus::Gauge,
+    #[allow(dead_code)]
+    model_load_time_seconds: prometheus::Gauge,
 }
 
 impl LifecycleGauges {
-    /// Construct + register both gauges against the runtime
-    /// `MetricsRegistry`.
-    pub fn new(metrics: &EngineMetrics) -> Result<Self, DynamoError> {
-        // `create_metric` auto-injects hierarchy labels (namespace,
-        // component, endpoint, worker_id) and validates that user-provided
-        // labels don't collide with them. Pass only the model/model_name
-        // entries from auto_labels — the hierarchy ones land via auto-inject.
-        let auto_injected = [
-            labels::NAMESPACE,
-            labels::COMPONENT,
-            labels::ENDPOINT,
-            labels::WORKER_ID,
-        ];
-        let labels: Vec<(&str, &str)> = metrics
-            .auto_labels()
-            .iter()
-            .filter(|(k, _)| !auto_injected.contains(&k.as_str()))
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
+    /// Construct + register the three lifecycle gauges. `model_load_time`
+    /// is seeded with the measured `engine.start()` elapsed; cleanup and
+    /// drain start at 0 and are populated during shutdown.
+    pub fn new(metrics: &EngineMetrics, model_load_time_seconds: f64) -> Result<Self, DynamoError> {
+        let labels = const_labels(metrics);
         let hierarchy = metrics.hierarchy().as_ref();
         let build = |name: &str, help: &str| {
             create_metric::<prometheus::Gauge, _>(hierarchy, name, help, &labels, None, None)
-                .map_err(|e| {
-                    DynamoError::builder()
-                        .error_type(ErrorType::Backend(BackendError::Unknown))
-                        .message(format!("lifecycle gauge create {name}: {e}"))
-                        .build()
-                })
+                .map_err(|e| gauge_err(name, e))
         };
         let cleanup = build(
             "cleanup_time_seconds",
@@ -133,9 +138,15 @@ impl LifecycleGauges {
             "Time spent draining in-flight work before cleanup. Stays at \
              0 for engines without a drain hook.",
         )?;
+        let model_load = build(
+            "model_load_time_seconds",
+            "Time engine.start() took to return. Set once at Worker setup.",
+        )?;
+        model_load.set(model_load_time_seconds);
         Ok(Self {
             cleanup_time_seconds: cleanup,
             drain_time_seconds: drain,
+            model_load_time_seconds: model_load,
         })
     }
 
@@ -149,6 +160,88 @@ impl LifecycleGauges {
     /// graceful shutdown after `engine.drain()` returns.
     pub fn observe_drain_time(&self, seconds: f64) {
         self.drain_time_seconds.set(seconds);
+    }
+}
+
+/// Framework-owned per-rank engine gauges in the `dynamo_component_*`
+/// namespace. Written by [`crate::snapshot_publisher::SnapshotPublisher`]
+/// on every engine push — no GIL acquisition, no tokio poll task, just
+/// atomic stores into the runtime's `MetricsRegistry`.
+///
+/// Replaces the previous Python `LLMBackendMetrics` registry on the
+/// unified path. Legacy entry points still use the Python class for
+/// their own `dynamo_component_*` surface; the two registries never
+/// share a process.
+pub struct ComponentGauges {
+    total_blocks: prometheus::IntGaugeVec,
+    gpu_cache_usage_percent: prometheus::GaugeVec,
+    kv_cache_hit_rate: prometheus::GaugeVec,
+}
+
+impl ComponentGauges {
+    pub fn new(metrics: &EngineMetrics) -> Result<Self, DynamoError> {
+        let const_label_values = const_labels(metrics);
+        let hierarchy = metrics.hierarchy().as_ref();
+        let build_int = |name: &str, help: &str| {
+            create_metric::<prometheus::IntGaugeVec, _>(
+                hierarchy,
+                name,
+                help,
+                &const_label_values,
+                None,
+                Some(&["dp_rank"]),
+            )
+            .map_err(|e| gauge_err(name, e))
+        };
+        let build_f64 = |name: &str, help: &str| {
+            create_metric::<prometheus::GaugeVec, _>(
+                hierarchy,
+                name,
+                help,
+                &const_label_values,
+                None,
+                Some(&["dp_rank"]),
+            )
+            .map_err(|e| gauge_err(name, e))
+        };
+        let total_blocks = build_int(
+            "total_blocks",
+            "Total number of KV cache blocks available on the worker.",
+        )?;
+        let gpu_cache_usage_percent = build_f64(
+            "gpu_cache_usage_percent",
+            "GPU cache usage as a percentage (0.0-1.0).",
+        )?;
+        let kv_cache_hit_rate = build_f64(
+            "kv_cache_hit_rate",
+            "Prefix cache hit rate (0.0-1.0). Portable across engines.",
+        )?;
+        Ok(Self {
+            total_blocks,
+            gpu_cache_usage_percent,
+            kv_cache_hit_rate,
+        })
+    }
+
+    /// Apply a snapshot to the per-rank gauges. Atomic stores; safe to
+    /// call concurrently from multiple engine threads as long as each
+    /// targets a distinct `dp_rank`.
+    pub fn update(&self, snap: &crate::engine::ComponentSnapshot) {
+        let rank = snap.dp_rank.to_string();
+        self.total_blocks
+            .with_label_values(&[&rank])
+            .set(snap.kv_total_blocks as i64);
+        self.gpu_cache_usage_percent
+            .with_label_values(&[&rank])
+            .set(snap.gpu_cache_usage as f64);
+        // hit_rate is tri-state: None means "no data yet / no prefix
+        // cache" — skip the gauge update entirely. 0.0 is a legitimate
+        // measurement (no hits) and DOES write.
+        if let Some(hr) = snap.kv_cache_hit_rate {
+            self.kv_cache_hit_rate
+                .with_label_values(&[&rank])
+                .set(hr as f64);
+        }
     }
 }
 
@@ -326,7 +419,7 @@ mod tests {
             Some("generate")
         );
 
-        let lifecycle = LifecycleGauges::new(&metrics).expect("construct lifecycle gauges");
+        let lifecycle = LifecycleGauges::new(&metrics, 0.0).expect("construct lifecycle gauges");
         lifecycle.observe_cleanup_time(1.5);
         lifecycle.observe_drain_time(0.25);
 

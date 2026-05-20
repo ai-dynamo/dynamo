@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
@@ -36,12 +36,7 @@ from dynamo.common.backend.metrics import (
     ensure_prometheus_multiproc_dir,
     register_global_registry,
 )
-from dynamo.common.backend.publisher import (
-    ComponentMetricsSource,
-    ComponentSnapshot,
-    KvEventSource,
-    ZmqSource,
-)
+from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
@@ -95,26 +90,32 @@ class _UnifiedStatLogger(StatLoggerBase):
             queries = getattr(pcs, "queries", 0) or 0
             if queries > 0:
                 hit_rate = float(hits) / float(queries)
-        self._factory.snapshots[self.dp_rank] = ComponentSnapshot(
-            kv_used_blocks=int(total * usage),
-            kv_total_blocks=total,
-            gpu_cache_usage=usage,
-            kv_cache_hit_rate=hit_rate,
-            dp_rank=self.dp_rank,
-        )
+        publisher = self._factory.snapshot_publisher
+        if publisher is not None:
+            publisher.publish(
+                self.dp_rank,
+                ComponentSnapshot(
+                    kv_used_blocks=int(total * usage),
+                    kv_total_blocks=total,
+                    gpu_cache_usage=usage,
+                    kv_cache_hit_rate=hit_rate,
+                    dp_rank=self.dp_rank,
+                ),
+            )
 
     def log_engine_initialized(self) -> None:
         pass
 
 
 class _UnifiedStatLoggerFactory:
-    """Shared state for all per-rank stat loggers. The dict is mutated in
-    place by each logger's ``record``; ``component_metrics_sources``
-    returns closures that read the latest entry. ``num_gpu_blocks`` is
-    patched after AsyncLLM finishes KV profiling."""
+    """Shared state for all per-rank stat loggers. ``snapshot_publisher``
+    is the Rust-owned :class:`SnapshotPublisher` handed to the engine via
+    :meth:`attach_snapshot_publisher`; each per-rank logger calls
+    ``publisher.publish(rank, snap)`` from its ``record`` callback.
+    ``num_gpu_blocks`` is patched after AsyncLLM finishes KV profiling."""
 
     def __init__(self) -> None:
-        self.snapshots: dict[int, ComponentSnapshot] = {}
+        self.snapshot_publisher: Optional[Any] = None
         self.num_gpu_blocks: int = 0
 
     def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:
@@ -375,24 +376,23 @@ class VllmLLMEngine(LLMEngine):
             for rank in range(dp_start, dp_start + dp_size)
         ]
 
-    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
+    def component_metrics_dp_ranks(self) -> list[int]:
         # Same opt-in gating as kv_event_sources — if this worker isn't
         # publishing KV events, it shouldn't publish load metrics either,
         # or the router will score against partial worker state.
         if not self._kv_routing_enabled():
             return []
-        if self._dp_range is None or self._stat_logger_factory is None:
+        if self._dp_range is None:
             return []
-        snapshots = self._stat_logger_factory.snapshots
         dp_start, dp_size = self._dp_range
+        return list(range(dp_start, dp_start + dp_size))
 
-        def snapshot_for(r: int) -> Callable[[], Optional[ComponentSnapshot]]:
-            return lambda: snapshots.get(r)
-
-        return [
-            ComponentMetricsSource(snapshot=snapshot_for(rank), dp_rank=rank)
-            for rank in range(dp_start, dp_start + dp_size)
-        ]
+    def attach_snapshot_publisher(self, publisher) -> None:
+        # Stash on the factory so each per-rank _UnifiedStatLogger's
+        # `record` callback (running on the engine iteration thread)
+        # can push snapshots inline. Push is event-driven — no poll.
+        if self._stat_logger_factory is not None:
+            self._stat_logger_factory.snapshot_publisher = publisher
 
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
         # Framework owns the dynamo_component_* registry; we just bridge

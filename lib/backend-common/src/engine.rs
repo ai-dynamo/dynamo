@@ -263,22 +263,25 @@ pub trait LLMEngine: Send + Sync + 'static {
 
     /// Wire up Prometheus surfaces. Called once by `Worker` after
     /// [`start`](LLMEngine::start) succeeds. Default returns an empty
-    /// [`MetricsBindings`] (no engine-side gauges, no foreign callbacks).
+    /// [`MetricsBindings`] (no per-rank gauges, no foreign callbacks).
     ///
-    /// Two side-effects an engine can produce here:
+    /// Two things an engine can produce here:
     /// 1. Bridge a vendor-prefixed registry (`vllm:*`, `sglang:*`,
     ///    `trtllm_*`, `lmcache:*`) into the runtime's `/metrics` output
     ///    via [`EngineMetrics::add_expfmt_callback`](crate::metrics::EngineMetrics::add_expfmt_callback)
-    ///    on `ctx.metrics`. Side-effect only — nothing flows back through
-    ///    the return value.
-    /// 2. Return a [`ComponentMetricsPublisher`] in
-    ///    [`MetricsBindings::component`] to expose `dynamo_component_*`
-    ///    KV / cache gauges plus the router-input signal.
+    ///    on `ctx.metrics`. Side-effect only.
+    /// 2. Declare `dp_ranks` in [`MetricsBindings`] to opt into the
+    ///    per-rank `dynamo_component_*` gauges + KV router signal. The
+    ///    framework constructs a
+    ///    [`SnapshotPublisher`](crate::snapshot_publisher::SnapshotPublisher)
+    ///    sized to those ranks and hands it back via
+    ///    [`MetricsBindings::on_publisher_ready`]. Stash the `Arc` and
+    ///    call `publisher.publish(rank, snap)` from your stat-logger
+    ///    thread thereafter — event-driven, no polling.
     ///
-    /// Framework-owned lifecycle gauges
-    /// (`dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds}`)
-    /// are emitted by `Worker` independent of this method — they do NOT
-    /// require the engine to return a publisher.
+    /// Framework-owned lifecycle gauges (cleanup_time, drain_time,
+    /// model_load_time) are emitted by `Worker` independent of this
+    /// method — they do NOT require the engine to opt in.
     ///
     /// Errors abort startup; `cleanup` runs on the partial state. Do not
     /// retain `ctx.metrics` past return.
@@ -328,11 +331,13 @@ pub struct Metrics {
 }
 
 /// Rich per-rank snapshot driving both the router-input signal and the
-/// engine-side `dynamo_component_*` gauges.
+/// per-rank `dynamo_component_*` gauges.
 ///
-/// Engines fill an in-memory dict from their natural push mechanism
-/// (stat-logger / ZMQ / poll thread); `ComponentMetricsSource::snapshot`
-/// returns the latest entry as a cheap field read.
+/// Engines call
+/// [`SnapshotPublisher::publish`](crate::snapshot_publisher::SnapshotPublisher::publish)
+/// with a fresh `ComponentSnapshot` from their stat-logger thread —
+/// event-driven, no polling. The publisher atomically updates both
+/// consumers inline (Rust gauges + NATS router signal).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ComponentSnapshot {
     pub kv_used_blocks: u64,
@@ -355,35 +360,6 @@ pub struct ComponentSnapshot {
     pub dp_rank: u32,
 }
 
-/// `Worker` reads this on a fixed interval. MUST be a cheap field read —
-/// engine-internal calls land in the 10s of ms and breach the 1 ms
-/// conformance ceiling. Engines feed an in-memory dict from their natural
-/// push surface; the snapshot fn just returns the latest entry.
-pub type ComponentSnapshotFn = Arc<dyn Fn() -> Option<ComponentSnapshot> + Send + Sync>;
-
-/// One per data-parallel rank.
-#[derive(Clone)]
-pub struct ComponentMetricsSource {
-    pub snapshot: ComponentSnapshotFn,
-    pub dp_rank: u32,
-}
-
-/// Engine-supplied object that owns its gauge representation and provides
-/// snapshot accessors. `Worker` constructs the publisher via
-/// [`LLMEngine::setup_component_metrics`], then drives one poll task per
-/// source. Each tick reads the snapshot fn and calls [`Self::update`].
-///
-/// Python engines plug in via the PyO3 bridge in
-/// `lib/bindings/python/rust/backend.rs`, which constructs a
-/// `PyComponentMetricsPublisher` holding `Py<LLMBackendMetrics>`. Native
-/// Rust engines implement the trait directly with Rust-side gauges.
-pub trait ComponentMetricsPublisher: Send + Sync {
-    /// One per dp_rank, stable for the engine's lifetime.
-    fn sources(&self) -> Vec<ComponentMetricsSource>;
-    /// Apply `snapshot` to wherever gauges live.
-    fn update(&self, snapshot: &ComponentSnapshot);
-}
-
 /// Context handed to [`LLMEngine::setup_metrics`].
 pub struct MetricsCtx<'a> {
     pub model: &'a str,
@@ -395,15 +371,32 @@ pub struct MetricsCtx<'a> {
     pub metrics: &'a crate::metrics::EngineMetrics,
 }
 
+/// Invoked once with a freshly-built [`SnapshotPublisher`]; engine drives
+/// `publish(rank, snapshot)` from its own stat-logger threads thereafter.
+///
+/// Mirror of [`OnPublisherReady`] for the KV-event Push flavor — same
+/// "framework constructs, engine writes" handoff pattern.
+pub type OnSnapshotPublisherReady = Box<
+    dyn FnOnce(Arc<crate::snapshot_publisher::SnapshotPublisher>) -> Result<(), DynamoError>
+        + Send
+        + 'static,
+>;
+
 /// What an engine returns from [`LLMEngine::setup_metrics`].
 ///
-/// `component` is the only structured surface: an opaque publisher
-/// owning the engine's `dynamo_component_*` gauges plus snapshot
-/// sources. Foreign-registry expfmt callbacks are wired as a side
-/// effect on `ctx.metrics` — they don't flow through this struct.
+/// - `dp_ranks`: the data-parallel ranks this engine will publish
+///   snapshots for. Stable for the engine's lifetime. Empty = opt out.
+/// - `on_publisher_ready`: invoked exactly once with the constructed
+///   `SnapshotPublisher`. Engine stashes it and calls
+///   `publisher.publish(rank, snap)` from its stat-logger thereafter.
+///
+/// Foreign-registry expfmt callbacks (vLLM/SGLang/TRT-LLM vendor metrics)
+/// are wired as a side effect on `ctx.metrics` in `setup_metrics` — they
+/// don't flow through this struct.
 #[derive(Default)]
 pub struct MetricsBindings {
-    pub component: Option<Arc<dyn ComponentMetricsPublisher>>,
+    pub dp_ranks: Vec<u32>,
+    pub on_publisher_ready: Option<OnSnapshotPublisherReady>,
 }
 
 /// Non-terminal chunk constructor. Terminal chunks come from upstream
