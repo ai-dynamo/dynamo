@@ -1326,9 +1326,8 @@ mod tests {
             }),
         );
 
-        index.shards[shard_idx]
-            .apply_event(direct_worker_event)
-            .await;
+        let shard = index.shards[shard_idx].as_ref();
+        KvIndexerInterface::apply_event(shard, direct_worker_event).await;
         index.flush().await;
 
         let scores = index.shards[shard_idx]
