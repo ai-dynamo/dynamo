@@ -89,6 +89,21 @@ dynamo_exit_trap() {
     dynamo_reap_and_exit "$_rc"
 }
 
+# wait_for_port <port> [timeout_secs]
+#
+# Block until a TCP port on 127.0.0.1 accepts connections, or timeout.
+# Returns 0 on success, 1 on timeout. Default timeout: 180s.
+wait_for_port() {
+    local port=$1 timeout=${2:-180}
+    for _ in $(seq 1 "$timeout"); do
+        if (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 wait_any_exit() {
     trap 'dynamo_reap_and_exit 0' TERM INT
     if ! jobs -p | grep -q .; then

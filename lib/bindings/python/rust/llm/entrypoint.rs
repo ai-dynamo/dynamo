@@ -761,14 +761,16 @@ async fn select_engine(
         }
         EngineType::SglangGrpc => {
             let served_name = local_model.display_name().to_string();
-            let engine =
+            let (engine, mode) =
                 dynamo_sglang_bridge::build_in_process_engine_from_env(served_name)
                     .await
-                    .map_err(|e| anyhow::anyhow!("sglang_bridge: {e}"))?;
+                    .map_err(anyhow::Error::from)?;
             RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
-                is_prefill: args.is_prefill,
+                // `DYN_DISAGGREGATION_MODE=prefill` and `args.is_prefill`
+                // are two channels carrying the same fact; honour either.
+                is_prefill: args.is_prefill || mode.is_prefill(),
             }
         }
     };

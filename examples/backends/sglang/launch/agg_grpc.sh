@@ -31,18 +31,6 @@ if [ ! -x "$BRIDGE_BIN" ]; then
     exit 1
 fi
 
-# Wait up to TIMEOUT seconds for a TCP port on 127.0.0.1 to accept connections.
-wait_for_port() {
-    local port=$1 timeout=${2:-180}
-    for _ in $(seq 1 "$timeout"); do
-        if (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
 print_launch_banner "Launching Aggregated Serving (gRPC bridge)" "$MODEL" "$HTTP_PORT"
 
 OTEL_SERVICE_NAME=dynamo-frontend \

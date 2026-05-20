@@ -19,17 +19,6 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SGLANG_HTTP_PORT="${SGLANG_HTTP_PORT:-30000}"
 SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-40000}"
 
-wait_for_port() {
-    local port=$1 timeout=${2:-180}
-    for _ in $(seq 1 "$timeout"); do
-        if (echo > /dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
 print_launch_banner "Launching Aggregated Serving (embedded gRPC bridge)" "$MODEL" "$HTTP_PORT"
 
 # Start SGLang before the frontend so its 120s HealthCheck retry budget
