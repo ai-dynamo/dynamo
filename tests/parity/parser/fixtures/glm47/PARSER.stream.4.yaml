@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: glm47
+model_label: GLM 5.1
+mode: stream
+cases:
+  PARSER.stream.4.a:
+    description: Truncated stream terminates after a complete in-flight tool-call body
+    ref: derived from PARSER.batch.5.a
+    chunks:
+    - delta_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "NYC"'
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "NYC"'
+        normal_text: ''
+  PARSER.stream.4.b:
+    description: Stream terminates mid-call body before the in-flight argument payload is complete
+    ref: derived from PARSER.batch.5.c
+    chunks:
+    - delta_text: <tool_call>get_weather<arg_key
+    - delta_text: '>location</arg_key><arg_value>N'
+    - delta_text: ''
+      finish_reason: stop
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "N'
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments: '{"location": "N'
+        normal_text: ''

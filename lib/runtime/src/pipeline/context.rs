@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +16,7 @@ pub struct Context<T: Data> {
     controller: Arc<Controller>, //todo: hold this as an arc
     registry: Registry,
     stages: Vec<String>,
+    metadata: BTreeMap<String, String>,
 }
 
 impl<T: Send + Sync + 'static> Context<T> {
@@ -25,6 +27,7 @@ impl<T: Send + Sync + 'static> Context<T> {
             controller: Arc::new(Controller::default()),
             registry: Registry::new(),
             stages: Vec::new(),
+            metadata: BTreeMap::new(),
         }
     }
 
@@ -34,6 +37,7 @@ impl<T: Send + Sync + 'static> Context<T> {
             controller: context.controller,
             registry: context.registry,
             stages: context.stages,
+            metadata: context.metadata,
         }
     }
 
@@ -43,6 +47,21 @@ impl<T: Send + Sync + 'static> Context<T> {
             controller: Arc::new(controller),
             registry: Registry::new(),
             stages: Vec::new(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_controller_and_metadata(
+        current: T,
+        controller: Controller,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Context {
+            current,
+            controller: Arc::new(controller),
+            registry: Registry::new(),
+            stages: Vec::new(),
+            metadata,
         }
     }
 
@@ -52,6 +71,21 @@ impl<T: Send + Sync + 'static> Context<T> {
             controller: Arc::new(Controller::new(id)),
             registry: Registry::new(),
             stages: Vec::new(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_id_and_metadata(
+        current: T,
+        id: String,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Context {
+            current,
+            controller: Arc::new(Controller::new(id)),
+            registry: Registry::new(),
+            stages: Vec::new(),
+            metadata,
         }
     }
 
@@ -67,6 +101,22 @@ impl<T: Send + Sync + 'static> Context<T> {
 
     pub fn controller(&self) -> &Controller {
         &self.controller
+    }
+
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        &self.metadata
+    }
+
+    pub fn metadata_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.metadata
+    }
+
+    pub fn set_metadata(&mut self, metadata: BTreeMap<String, String>) {
+        self.metadata = metadata;
+    }
+
+    pub fn insert_metadata<K: Into<String>, V: Into<String>>(&mut self, key: K, value: V) {
+        self.metadata.insert(key.into(), value.into());
     }
 
     /// Insert an object into the registry with a specific key.
@@ -104,6 +154,7 @@ impl<T: Send + Sync + 'static> Context<T> {
                 controller: self.controller,
                 registry: self.registry,
                 stages: self.stages,
+                metadata: self.metadata,
             },
         )
     }
@@ -213,14 +264,20 @@ pub struct StreamContext {
     controller: Arc<Controller>,
     registry: Arc<Registry>,
     stages: Vec<String>,
+    metadata: BTreeMap<String, String>,
 }
 
 impl StreamContext {
-    fn new(controller: Arc<Controller>, registry: Registry) -> Self {
+    fn new(
+        controller: Arc<Controller>,
+        registry: Registry,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
         StreamContext {
             controller,
             registry: Arc::new(registry),
             stages: Vec::new(),
+            metadata,
         }
     }
 
@@ -244,6 +301,10 @@ impl StreamContext {
 
     pub fn add_stage(&mut self, stage: &str) {
         self.stages.push(stage.to_string());
+    }
+
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        &self.metadata
     }
 }
 
@@ -294,7 +355,7 @@ impl AsyncEngineContextProvider for StreamContext {
 
 impl<T: Send + Sync + 'static> From<Context<T>> for StreamContext {
     fn from(value: Context<T>) -> Self {
-        StreamContext::new(value.controller, value.registry)
+        StreamContext::new(value.controller, value.registry, value.metadata)
     }
 }
 
@@ -477,6 +538,67 @@ mod tests {
         assert_eq!(*ctx.get::<i32>("key1").unwrap(), 42);
         assert_eq!(*ctx.get::<String>("key2").unwrap(), "some data");
         assert!(ctx.get::<f64>("key1").is_err()); // Testing a downcast failure
+    }
+
+    #[test]
+    fn test_metadata_preserved_across_transfers() {
+        let mut ctx = Context::new(Input {
+            value: "Hello".to_string(),
+        });
+        ctx.insert_metadata("tenant", "alpha");
+
+        let (_, transferred) = ctx.transfer(Processed { length: 5 });
+        assert_eq!(
+            transferred.metadata().get("tenant").map(String::as_str),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn test_with_id_and_metadata_constructor() {
+        let metadata = BTreeMap::from([("tenant".to_string(), "alpha".to_string())]);
+        let ctx = Context::with_id_and_metadata(
+            Input {
+                value: "Hello".to_string(),
+            },
+            "request-123".to_string(),
+            metadata,
+        );
+
+        assert_eq!(ctx.id(), "request-123");
+        assert_eq!(
+            ctx.metadata().get("tenant").map(String::as_str),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn test_metadata_preserved_across_rejoin() {
+        let mut ctx = Context::new(Input {
+            value: "Hello".to_string(),
+        });
+        ctx.insert_metadata("tenant", "alpha");
+
+        let (input, empty_ctx) = ctx.into_parts();
+        let rejoined = Context::rejoin(input, empty_ctx);
+        assert_eq!(
+            rejoined.metadata().get("tenant").map(String::as_str),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn test_metadata_preserved_in_stream_context() {
+        let mut ctx = Context::new(Input {
+            value: "Hello".to_string(),
+        });
+        ctx.insert_metadata("tenant", "alpha");
+
+        let stream_ctx = StreamContext::from(ctx);
+        assert_eq!(
+            stream_ctx.metadata().get("tenant").map(String::as_str),
+            Some("alpha")
+        );
     }
 
     #[test]

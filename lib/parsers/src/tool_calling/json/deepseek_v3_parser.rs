@@ -274,6 +274,7 @@ mod tests {
         (call.function.name, args)
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b in tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.2.yaml.
     #[test] // PARSER.batch.2
     fn test_parse_tool_calls_deepseek_v3_basic() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
@@ -298,6 +299,7 @@ mod tests {
         assert_eq!(args["location"], "Paris");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.8
     fn test_parse_tool_calls_deepseek_v3_with_normal_text() {
         let text = r#"The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
@@ -319,6 +321,7 @@ mod tests {
         assert_eq!(args["location"], "New York");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4 — recovery from missing start
     fn test_parse_tool_calls_deepseek_v3_without_tool_call_start_token() {
         let text = r#"<｜tool▁call▁begin｜>function宽带}{location": "HongKong"}
@@ -334,6 +337,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a, PARSER.batch.7.d in tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.2.yaml, tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.2, PARSER.batch.7
     fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_multiple_args() {
         let text = r#"<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather
@@ -368,6 +372,7 @@ mod tests {
         assert_eq!(args["radius"], 50);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4
     fn test_parse_tool_calls_deepseek_v3_with_invalid_json() {
         // Everything is normal text in case of invalid json
@@ -384,6 +389,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.c, PARSER.batch.8.a in tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.2.yaml, tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.2, PARSER.batch.8
     fn test_parse_tool_calls_deepseek_v3_with_multi_tool_calls_with_normal_text() {
         // Everything is normal text in case of invalid json
@@ -406,6 +412,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/deepseek_v3/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7, PARSER.fmt.2
     fn test_parse_tool_calls_deepseek_v3_with_multiline_json() {
         let text = r#"I'll help you understand this Xiaohongshu codebase. Let me start by exploring the structure

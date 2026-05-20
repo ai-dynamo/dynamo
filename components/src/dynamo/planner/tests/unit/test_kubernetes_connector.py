@@ -1122,10 +1122,10 @@ def test_get_actual_worker_counts_no_components(kubernetes_connector, mock_kube_
 # against ``expected_component`` must use the lowercase backend-default
 # name (what the Rust runtime writes to MDC), NOT the DGD ``spec.services``
 # dict key. The DGD key is typically PascalCase (``VllmPrefillWorker``)
-# while MDC carries the Endpoint name (``prefill`` / ``backend`` /
-# ``tensorrt_llm``); returning the DGD key for the filter would cause
-# every real-world MDC entry to be skipped, leaving WorkerInfo without
-# ``context_length`` and silently breaking easy-mode load scaling.
+# while MDC carries the Endpoint name (``prefill`` / ``backend``);
+# returning the DGD key for the filter would cause every real-world MDC
+# entry to be skipped, leaving WorkerInfo without ``context_length`` and
+# silently breaking easy-mode load scaling.
 
 
 def test_resolve_dgd_service_prefill_uses_backend_default_for_filter(
@@ -1184,10 +1184,10 @@ def test_resolve_dgd_service_decode_uses_backend_default_for_filter(
     assert expected_component == "backend"
 
 
-def test_resolve_dgd_service_trtllm_decode_uses_tensorrt_llm_name(
+def test_resolve_dgd_service_trtllm_decode_uses_backend_name(
     kubernetes_connector, mock_kube_api
 ):
-    """TRT-LLM decode: MDC carries "tensorrt_llm"; filter must match."""
+    """TRT-LLM decode: MDC carries "backend" (matches vLLM/SGLang); filter must match."""
     mock_deployment = {
         "metadata": {"name": "test-graph"},
         "spec": {
@@ -1205,7 +1205,7 @@ def test_resolve_dgd_service_trtllm_decode_uses_tensorrt_llm_name(
         SubComponentType.DECODE, backend="trtllm"
     )
 
-    assert expected_component == "tensorrt_llm"
+    assert expected_component == "backend"
 
 
 def test_resolve_dgd_service_missing_dgd_still_returns_backend_default(

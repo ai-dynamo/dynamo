@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_1
+model_label: DeepSeek V3.1
+mode: stream
+cases:
+  PARSER.stream.1.a:
+    description: Complete tool-call payload delivered in one content chunk
+    ref: derived from PARSER.batch.1
+    chunks:
+    - delta_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools: &id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang: *id001
+      vllm:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+  PARSER.stream.1.b:
+    description: Complete tool call split across parser-significant boundaries
+    ref: derived from PARSER.batch.1
+    chunks:
+    - delta_text: <｜tool▁calls▁begin｜>
+    - delta_text: <｜tool▁call▁begin｜>
+    - delta_text: get_weather
+    - delta_text: <｜tool▁sep｜>
+    - delta_text: '{"location":"NYC"}'
+    - delta_text: <｜tool▁call▁end｜>
+    - delta_text: <｜tool▁calls▁end｜>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools: *id002
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang: *id003
+      vllm:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>

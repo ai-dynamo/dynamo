@@ -770,6 +770,7 @@ mod tests {
         assert_eq!(html_unescape(input), expected);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.yaml.
     #[test] // PARSER.batch.1
     fn test_parse_simple_tool_call() {
         let input = r#"<tool_call>
@@ -790,6 +791,7 @@ pwd && ls
         assert_eq!(args["command"], "pwd && ls");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1, PARSER.batch.7.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.7.yaml, tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.yaml.
     #[test] // PARSER.batch.1, PARSER.batch.7
     fn test_parse_multiple_parameters() {
         let input = r#"<tool_call>
@@ -816,6 +818,7 @@ fahrenheit
         assert_eq!(args["unit"], "fahrenheit");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.c in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.8.yaml.
     #[test] // PARSER.batch.8
     fn test_parse_with_normal_text() {
         let input = r#"I'll help you with that. <tool_call>
@@ -833,6 +836,7 @@ Dallas
         assert_eq!(normal, Some("I'll help you with that. ".to_string()));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.2.yaml.
     #[test] // PARSER.batch.2
     fn test_parse_multiple_tool_calls() {
         let input = r#"<tool_call>
@@ -861,6 +865,7 @@ Orlando
         assert_eq!(args1["city"], "Orlando");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7
     fn test_parse_json_parameter_value() {
         // With schema-aware parsing, we need to provide a schema to parse JSON objects
@@ -901,6 +906,7 @@ Orlando
         assert_eq!(normal, Some(input.to_string()));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4
     fn test_parse_malformed_tool_call() {
         let input = r#"<tool_call>
@@ -914,6 +920,7 @@ value
         assert!(result.is_ok());
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4
     fn test_parse_missing_parameter_closing_tag() {
         let input = r#"<tool_call>
@@ -931,6 +938,7 @@ ls -la
         assert_eq!(args["command"], "ls -la");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4
     fn test_parse_missing_function_closing_tag() {
         let input = r#"<tool_call>
@@ -948,6 +956,7 @@ Boston
         assert_eq!(args["city"], "Boston");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4
     fn test_parse_missing_both_closing_tags() {
         let input = r#"<tool_call>
@@ -965,6 +974,7 @@ SELECT * FROM users
         assert_eq!(args["sql"], "SELECT * FROM users\n</tool_call>");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4
     fn test_parse_multiple_parameters_missing_closing_tags() {
         let input = r#"<tool_call>
@@ -990,6 +1000,7 @@ rust programming
     // token and extract the call. Recovery is gated on a function-start
     // opener in the trailing slice so plain text that happens to start with
     // `<tool_call>` is preserved verbatim.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.5 — qwen3_coder
     fn test_parse_qwen3_no_outer_close_recovers() {
         let input = r#"<tool_call>
@@ -1306,6 +1317,7 @@ NYC
 
     /// PARSER.batch.6 — empty args. A no-arg call (no `<parameter=...>` block)
     /// must still surface the function name with empty arguments.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.6.yaml.
     #[test] // PARSER.batch.6 — qwen3_coder
     fn test_parse_qwen3_empty_args() {
         let input = r#"<tool_call>
@@ -1320,6 +1332,7 @@ NYC
     }
 
     /// PARSER.batch.6 — empty args, minimax_m2 format.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/minimax_m2/PARSER.batch.6.yaml.
     #[test] // PARSER.batch.6 — minimax_m2
     fn test_parse_minimax_m2_empty_args() {
         let config = minimax_m2_config();
@@ -1365,6 +1378,7 @@ NYC
     /// and whitespace-only inputs must yield no tool calls; normal_text
     /// collapses to the empty string. Tested under both qwen3_coder and
     /// minimax_m2 configs.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.yaml.
     #[test] // PARSER.batch.9 — qwen3_coder
     fn test_parse_qwen3_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
@@ -1384,6 +1398,7 @@ NYC
         }
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/minimax_m2/PARSER.batch.yaml.
     #[test] // PARSER.batch.9 — minimax_m2
     fn test_parse_minimax_m2_empty_and_whitespace_inputs() {
         let config = minimax_m2_config();
@@ -1406,6 +1421,7 @@ NYC
     /// PARSER.batch.10 — duplicate calls (same function name twice). qwen3_coder
     /// format; pin parser-level behavior — both calls must come back with
     /// distinct ids.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/qwen3_coder/PARSER.batch.yaml.
     #[test] // PARSER.batch.10 — qwen3_coder
     fn test_parse_qwen3_duplicate_calls_same_name() {
         let input = r#"<tool_call>
@@ -1437,6 +1453,7 @@ LA
     /// PARSER.batch.10 — duplicate calls (same function name twice). minimax_m2
     /// format; pin parser-level behavior — both calls must come back with
     /// distinct ids.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/minimax_m2/PARSER.batch.yaml.
     #[test] // PARSER.batch.10 — minimax_m2
     fn test_parse_minimax_m2_duplicate_calls_same_name() {
         let config = minimax_m2_config();

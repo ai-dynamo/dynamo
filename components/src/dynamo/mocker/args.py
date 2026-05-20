@@ -18,6 +18,26 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 logger = logging.getLogger(__name__)
 
 
+def non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
+    return parsed
+
+
+def non_negative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
+    return parsed
+
+
 class ProfileDataResult:
     """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion."""
 
@@ -508,6 +528,50 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="KV cache bytes per token. If not specified, auto-computed from model config "
         "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
     )
+    parser.add_argument(
+        "--num-g2-blocks",
+        type=non_negative_int,
+        default=None,
+        help="Enable KVBM mock offload with this many per-worker G2 host blocks. "
+        "Set to 0 to disable.",
+    )
+    parser.add_argument(
+        "--num-g3-blocks",
+        type=non_negative_int,
+        default=None,
+        help="Enable shared KVBM mock G3 with this many process-local shared blocks. "
+        "Set to 0 to disable.",
+    )
+    parser.add_argument(
+        "--offload-batch-size",
+        type=non_negative_int,
+        default=None,
+        help="Batch size for the mock G1->G2 offload pipeline. Set to 0 to use the default.",
+    )
+    parser.add_argument(
+        "--bandwidth-g1-to-g2-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock G1->G2 offload bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g2-to-g1-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock G2->G1 onboard bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g2-to-g3-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock shared G2->G3 offload bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g3-to-g2-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock shared G3->G2 staging bandwidth in GB/s.",
+    )
 
     parser.add_argument(
         "--stagger-delay",
@@ -530,9 +594,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--request-plane",
         type=str,
-        choices=["nats", "http", "tcp"],
+        choices=["nats", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
-        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
     )
     parser.add_argument(
         "--event-plane",
