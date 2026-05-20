@@ -281,7 +281,19 @@ impl<
             }
             let entry = heap.pop().expect("heap front vanished before pop");
             drop(heap);
+            let current_pending_count = self.pending_count.load(AtomicOrdering::Relaxed);
+            debug_assert!(
+                current_pending_count > 0,
+                "pending_count underflow on queue drain"
+            );
             self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+            let current_pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
+            debug_assert!(
+                current_pending_isl_tokens >= entry.request.isl_tokens,
+                "pending_isl_tokens underflow: pending={} request_isl_tokens={}",
+                current_pending_isl_tokens,
+                entry.request.isl_tokens
+            );
             self.pending_isl_tokens
                 .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
