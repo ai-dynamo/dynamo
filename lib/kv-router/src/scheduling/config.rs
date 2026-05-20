@@ -23,9 +23,9 @@ pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS
 
 /// Default pending ISL token tiers per worker for `router_queue_by_incoming_missing_isl`.
 /// - Cheap requests (0-2047 cache miss): 4M ISL tokens per worker
-/// - Expensive requests (2048+ cache miss): 512K ISL tokens per worker
+/// - Expensive requests (2048+ cache miss): 1M ISL tokens per worker
 pub const DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS: &[(usize, usize)] =
-    &[(0, 4 * 1024 * 1024), (2048, 512 * 1024)];
+    &[(0, 4 * 1024 * 1024), (2048, 1024 * 1024)];
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -188,7 +188,7 @@ impl RouterQueueDepthTiers {
     /// Default tiers for ISL token caps per worker.
     ///
     /// - Cheap requests (0-2047 cache miss): 4M ISL tokens per worker
-    /// - Expensive requests (2048+ cache miss): 512K ISL tokens per worker
+    /// - Expensive requests (2048+ cache miss): 1M ISL tokens per worker
     ///
     /// See [`DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS`].
     pub fn default_per_worker() -> Self {
@@ -239,6 +239,16 @@ impl RouterQueueDepthTiers {
             .collect();
         Self::try_from(tiers)
     }
+}
+
+fn default_router_queue_depth_by_incoming_missing_isl() -> Vec<RouterQueueDepthByMissingIslTier> {
+    DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS
+        .iter()
+        .map(|&(floor, cap)| RouterQueueDepthByMissingIslTier {
+            missing_cache_tokens_floor: floor,
+            max_queue_depth: cap,
+        })
+        .collect()
 }
 
 impl Default for RouterQueueDepthTiers {
@@ -458,7 +468,7 @@ struct KvRouterConfigSerde {
     router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
-    #[serde(default)]
+    #[serde(default = "default_router_queue_depth_by_incoming_missing_isl")]
     #[serde(alias = "router_queue_depth_by_missing_isl")]
     router_queue_by_incoming_missing_isl: Vec<RouterQueueDepthByMissingIslTier>,
     router_event_threads: u32,
@@ -592,14 +602,17 @@ pub struct KvRouterConfig {
     /// parked in the pending queue.
     ///
     /// Example with 4 workers:
-    ///   [(0, 4194304), (2048, 524288)]  # 4M and 512K ISL tokens per worker
+    ///   [(0, 4194304), (2048, 1048576)]  # 4M and 1M ISL tokens per worker
     /// - request missing 500 tokens  → matches (0, 4194304)    → cap = 4M*4 = 16M tokens
-    /// - request missing 3000 tokens → matches (2048, 524288)  → cap = 512K*4 = 2M tokens
+    /// - request missing 3000 tokens → matches (2048, 1048576) → cap = 1M*4 = 4M tokens
     ///
-    /// Default: `[(0, 4194304), (2048, 524288)]` — 4M ISL tokens per worker for cheap
-    /// requests (low cache miss), 512K for expensive requests (high cache miss).
+    /// Default: `[(0, 4194304), (2048, 1048576)]` — 4M ISL tokens per worker for cheap
+    /// requests (low cache miss), 1M for expensive requests (high cache miss).
     /// This allows more queued ISL tokens for cheap requests and fewer for expensive ones.
-    /// Empty vec means unbounded queue (no ISL token capping).
+    ///
+    /// Semantics across config surfaces:
+    /// - omitted / `None` means "use the built-in default tier list above"
+    /// - empty vec / `[]` means "disable ISL-token capping" (unbounded queue cap)
     ///
     /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
     /// buffers. The TCP request plane has a fixed 1024-slot buffer per

@@ -1378,7 +1378,7 @@ class KvRouterConfig:
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
-        router_queue_by_incoming_missing_isl: Optional[list[tuple[int, int]]] = None,
+        router_queue_by_incoming_missing_isl: list[tuple[int, int]] = [(0, 4194304), (2048, 1048576)],
     ) -> None:
         """
         Create a KV router configuration.
@@ -1413,7 +1413,7 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
-            router_queue_by_incoming_missing_isl: Optional tiered per-worker pending ISL token caps
+            router_queue_by_incoming_missing_isl: Tiered per-worker pending ISL token caps
                 keyed on the request's incoming missing ISL
                 (ISL minus best cached tokens across eligible workers). Each
                 entry is a `(missing_isl_floor, max_isl_tokens)` tuple; the
@@ -1424,9 +1424,10 @@ class KvRouterConfig:
                     in floor, and have `max_isl_tokens > 0` for each tier.
                 The cap is compared against the sum of ISL tokens for all requests
                 currently parked in the pending queue.
-                Default: `None`, which uses the Rust default
-                `[(0, 4194304), (2048, 524288)]` — 4M ISL tokens per worker
-                for cheap requests (low cache miss), 512K for expensive requests.
+                `[]` disables ISL-token capping entirely (unbounded queue cap).
+                Default:
+                `[(0, 4194304), (2048, 1048576)]` — 4M ISL tokens per worker
+                for cheap requests (low cache miss), 1M for expensive requests.
                 Backpressure (ResourceExhausted) is returned when the cap is reached.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
