@@ -51,7 +51,9 @@ class Program:
 @dataclass
 class ProgramTable:
     programs: dict[str, Program] = field(default_factory=dict)
-    paused: set[str] = field(default_factory=set)
+    # Insertion-ordered: ties in `_greedy_resume`'s sort resolve oldest-paused
+    # first, mirroring upstream TA. Values are unused.
+    paused: dict[str, None] = field(default_factory=dict)
 
     def begin_request(
         self, program_id: str, estimated_prompt_tokens: int = 0

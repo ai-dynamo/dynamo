@@ -275,8 +275,10 @@ async def test_pause_drives_util_to_pause_target_not_threshold():
         for p in router._table.programs.values()
         if p.lifecycle == ProgramLifecycle.PAUSED
     )
-    # 10 * 100k = 1.0M; target 0.80M needs 2 paused. Old behavior paused 1.
-    assert 2 <= paused <= 3, f"paused={paused}"
+    # 10 programs * (100k tokens + 100 buffer) = 1.0010M; target 0.80M.
+    # Each pause releases (100k + 100). Pause 2 -> 0.8008M (still over),
+    # pause 3 -> 0.7007M (under). Anything else means over- or under-shoot.
+    assert paused == 3, f"paused={paused}"
 
 
 @pytest.mark.asyncio

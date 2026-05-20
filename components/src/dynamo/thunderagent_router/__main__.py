@@ -85,17 +85,11 @@ class ThunderAgentRouterHandler:
         self._kv_router: Optional[KvRouter] = None
         self._capacity: Optional[WorkerCapacityProvider] = None
         self._scheduler: Optional[ThunderAgentScheduler] = None
-        # First-chunk binding-shape sanity, logged once if the
-        # disaggregated_params.worker_id shape changes upstream.
         self._worker_id_extract_warned = False
 
     async def initialize(self) -> None:
-        if self._config.endpoint.count(".") != 2:
-            raise ValueError(
-                f"Invalid --endpoint {self._config.endpoint!r}; "
-                "expected namespace.component.endpoint"
-            )
-
+        # Endpoint shape was validated by ThunderAgentRouterConfig.validate()
+        # in parse_args; it also populates ``config.namespace``.
         worker_endpoint = self._runtime.endpoint(self._config.endpoint)
 
         self._kv_router = KvRouter(
@@ -121,7 +115,10 @@ class ThunderAgentRouterHandler:
             self._capacity.stop()
 
     async def generate(self, request: dict[str, Any]):
-        assert self._scheduler is not None and self._kv_router is not None
+        if self._scheduler is None or self._kv_router is None:
+            raise RuntimeError(
+                "ThunderAgentRouterHandler used before initialize() was called"
+            )
         program_id = _extract_program_id(request)
 
         # Path A: no program_id -> behave like the standalone router.
@@ -222,9 +219,9 @@ class ThunderAgentRouterHandler:
             return
         self._worker_id_extract_warned = True
         logger.warning(
-            "ThunderAgent worker-id extraction failed (%s); sticky pinning is "
-            "off for this request. The disaggregated_params binding shape "
-            "may have changed.",
+            "ThunderAgent worker-id extraction failed (%s); subsequent "
+            "requests will lose sticky pinning until the binding shape is "
+            "fixed.",
             reason,
         )
 

@@ -173,7 +173,7 @@ class ThunderAgentScheduler:
         # All workers full: queue until the scheduler tick resumes us.
         program.waiting = program.waiting or asyncio.Event()
         program.lifecycle = ProgramLifecycle.PAUSED
-        self._table.paused.add(program_id)
+        self._table.paused[program_id] = None
         logger.debug(
             "Queued new program %s (tokens=%d)",
             program_id,
@@ -182,8 +182,9 @@ class ThunderAgentScheduler:
         return program.waiting, True
 
     def record_output_tokens(self, program_id: str, delta_tokens: int) -> None:
-        # Lock-free: int += under GIL is atomic; scheduler tick tolerates
-        # a one-tick-stale token_total.
+        # No-await fast path on the streaming chunk loop. Safe because the
+        # event loop is single-task; the scheduler tick tolerates a stale
+        # token_total by one tick.
         program = self._table.programs.get(program_id)
         if program is not None and program.status == ProgramStatus.REASONING:
             program.token_total += delta_tokens
@@ -222,9 +223,9 @@ class ThunderAgentScheduler:
                 try:
                     await self._scheduler_tick()
                     consecutive_failures = 0
-                except Exception as exc:
+                except Exception:
                     consecutive_failures += 1
-                    logger.exception("ThunderAgent scheduler tick error: %s", exc)
+                    logger.exception("ThunderAgent scheduler tick error")
                     if consecutive_failures >= 10:
                         logger.error(
                             "Scheduler tick failed %d times in a row; halting loop",
@@ -317,36 +318,39 @@ class ThunderAgentScheduler:
         pause_target = min(self._cfg.pause_target, threshold)
 
         for worker_id, capacity in capacities.items():
-            base_used = self._worker_used(worker_id)
-            if base_used <= capacity * threshold:
-                continue
+            # Hold the lock for the entire per-worker decision so the snapshot
+            # of program state used by _smallest_candidates / _worker_used
+            # cannot race with concurrent before_request admissions.
+            async with self._lock:
+                base_used = self._worker_used(worker_id)
+                if base_used <= capacity * threshold:
+                    continue
 
-            target_limit = capacity * pause_target
-            paused_this_tick = 0
-            marked_this_tick = 0
-            # Bound the inner loop by total program count so a candidate that
-            # transitions out from under us can't spin the tick.
-            for _ in range(len(self._table.programs) + 1):
-                if self._worker_used(worker_id) <= target_limit:
-                    break
-                acting, reasoning = self._smallest_candidates(worker_id)
-                if acting is not None:
-                    if await self._pause_acting(acting.program_id):
-                        paused_this_tick += 1
-                    continue
-                if reasoning is not None:
-                    async with self._lock:
-                        target = self._table.programs.get(reasoning.program_id)
+                target_limit = capacity * pause_target
+                paused_this_tick = 0
+                marked_this_tick = 0
+                # Bound the inner loop by total program count so a candidate
+                # transitioning out from under us can't spin the tick.
+                for _ in range(len(self._table.programs) + 1):
+                    if self._worker_used(worker_id) <= target_limit:
+                        break
+                    acting, reasoning = self._smallest_candidates(worker_id)
+                    if acting is not None:
+                        if self._pause_acting_locked(acting.program_id):
+                            paused_this_tick += 1
+                        continue
+                    if reasoning is not None:
                         if (
-                            target is not None
-                            and not target.marked_for_pause
-                            and target.lifecycle == ProgramLifecycle.ACTIVE
-                            and target.status == ProgramStatus.REASONING
+                            not reasoning.marked_for_pause
+                            and reasoning.lifecycle == ProgramLifecycle.ACTIVE
+                            and reasoning.status == ProgramStatus.REASONING
                         ):
-                            target.marked_for_pause = True
+                            reasoning.marked_for_pause = True
                             marked_this_tick += 1
-                    continue
-                break
+                        continue
+                    break
+
+                final_used = self._worker_used(worker_id)
 
             if paused_this_tick or marked_this_tick:
                 logger.info(
@@ -355,7 +359,7 @@ class ThunderAgentScheduler:
                     paused_this_tick,
                     marked_this_tick,
                     base_used / capacity,
-                    self._worker_used(worker_id) / capacity,
+                    final_used / capacity,
                 )
 
     def _smallest_candidates(
@@ -386,24 +390,26 @@ class ThunderAgentScheduler:
 
     async def _pause_acting(self, program_id: str) -> bool:
         async with self._lock:
-            program = self._table.programs.get(program_id)
-            if program is None:
-                return False
-            if program.lifecycle == ProgramLifecycle.PAUSED:
-                return False
-            if program.status != ProgramStatus.ACTING:
-                return False
-            program.lifecycle = ProgramLifecycle.PAUSED
-            program.assigned_worker_id = None
-            if program.waiting is None:
-                program.waiting = asyncio.Event()
-            else:
-                program.waiting.clear()
-            self._table.paused.add(program_id)
-            logger.debug(
-                "Paused program %s (tokens=%d)", program_id, program.token_total
-            )
-            return True
+            return self._pause_acting_locked(program_id)
+
+    def _pause_acting_locked(self, program_id: str) -> bool:
+        # Caller holds self._lock.
+        program = self._table.programs.get(program_id)
+        if program is None:
+            return False
+        if program.lifecycle == ProgramLifecycle.PAUSED:
+            return False
+        if program.status != ProgramStatus.ACTING:
+            return False
+        program.lifecycle = ProgramLifecycle.PAUSED
+        program.assigned_worker_id = None
+        if program.waiting is None:
+            program.waiting = asyncio.Event()
+        else:
+            program.waiting.clear()
+        self._table.paused[program_id] = None
+        logger.debug("Paused program %s (tokens=%d)", program_id, program.token_total)
+        return True
 
     async def _greedy_resume(self, capacities: dict[int, int]) -> None:
         if not self._table.paused:
@@ -487,7 +493,7 @@ class ThunderAgentScheduler:
         program.assigned_worker_id = target_worker_id
         notify = program.waiting
         program.waiting = None
-        self._table.paused.discard(program.program_id)
+        self._table.paused.pop(program.program_id, None)
         if notify is not None:
             notify.set()
         logger.debug(
