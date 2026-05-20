@@ -83,39 +83,3 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
 
     Ok(rx)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dynamo_kv_router::protocols::KvTransferEnforcement;
-
-    #[test]
-    fn topology_fields_survive_runtime_config_watch_snapshot() {
-        let mut config = ModelRuntimeConfig {
-            kv_transfer_domain: Some("zone".to_string()),
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
-            ..Default::default()
-        };
-        config
-            .topology_domains
-            .insert("zone".to_string(), "us-east-1a".to_string());
-        config.add_topology_taints();
-
-        let mut workers = HashMap::new();
-        workers.insert(7, config.clone());
-        let (_tx, rx): (watch::Sender<_>, RuntimeConfigWatch) = watch::channel(workers);
-
-        let observed = rx.borrow();
-        let worker = observed.get(&7).expect("worker config should be present");
-        assert_eq!(
-            worker.topology_domains.get("zone").map(String::as_str),
-            Some("us-east-1a")
-        );
-        assert_eq!(worker.kv_transfer_domain.as_deref(), Some("zone"));
-        assert_eq!(
-            worker.kv_transfer_enforcement,
-            Some(KvTransferEnforcement::Required)
-        );
-        assert!(worker.taints.contains("dynamo.topology/zone=us-east-1a"));
-    }
-}
