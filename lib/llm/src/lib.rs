@@ -39,12 +39,6 @@ pub mod tokens;
 pub mod types;
 pub mod utils;
 
-#[cfg(feature = "block-manager")]
-pub mod block_manager;
-
-#[cfg(feature = "cuda")]
-pub mod cuda;
-
 #[cfg(test)]
 mod file_json_field_tests {
     use super::file_json_field;

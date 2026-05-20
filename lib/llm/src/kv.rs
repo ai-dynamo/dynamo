@@ -8,9 +8,6 @@ pub mod reuse;
 pub mod sequence;
 pub mod storage;
 
-// #[cfg(feature = "cuda_kv")]
-// pub mod storage;
-
 use reserved::*;
 
 use std::{

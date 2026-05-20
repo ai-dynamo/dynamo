@@ -13,20 +13,15 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = ["block-manager"]
-# todo(ops): get this working in CI as a default.
-# default = ["block-manager", "testing-full"]
+default = []
 
 testing-full = ["testing-cuda", "testing-nixl"]
-testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
+testing-cuda = ["dynamo-memory/testing-cuda"]
 testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
 testing-etcd = []
 # Forward the NVTX feature to dynamo-runtime (build with --features nvtx or dynamo-llm/nvtx)
 nvtx = ["dynamo-runtime/nvtx"]
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
-nccl = ["dep:cudarc", "cudarc/nccl"]  # Enable NCCL collective operations
-block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
-cuda = ["dep:cudarc"]
+nccl = ["cudarc/nccl"]  # Enable NCCL collective operations
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
@@ -40,11 +35,6 @@ harness = false
 [[bench]]
 name = "tokenizer_dataset"
 harness = false
-
-[[bench]]
-name = "transfer_context_v2"
-harness = false
-required-features = ["block-manager", "testing-cuda"]
 
 [[bench]]
 name = "kv_router_bench"
@@ -120,16 +110,12 @@ dialoguer = { version = "0.11", default-features = false, features = [
   "history",
 ] }
 
-# block_manager
-aligned-vec = { version = "0.6.4", optional = true }
 nixl-sys = { version = "=0.10.1", optional = true }
-cudarc = { workspace = true, optional = true }
-nix = { version = "0.26", optional = true }
+cudarc = { workspace = true }
 
 # media (zlib compression for NIXL metadata)
 flate2 = { version = "1" }
 
-# block_manager_bench
 clap = { version = "4.5.49", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 
@@ -222,7 +208,3 @@ path = "src/bin/generate_frontend_openapi.rs"
 [build-dependencies]
 tonic-build = { version = "0.13.1" }
 
-[[bin]]
-name = "bench_local_transfer_v2"
-path = "bin/bench_local_transfer_v2.rs"
-required-features = ["block-manager-bench"]
