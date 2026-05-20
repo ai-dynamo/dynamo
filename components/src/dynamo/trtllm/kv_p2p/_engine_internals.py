@@ -20,7 +20,10 @@ def kv_cache_manager(engine: Any) -> Optional[Any]:
     Returns None when not reachable (older TRT-LLM, ENCODE worker, etc.);
     caller should treat that as "remote-G2 not enabled here".
     """
-    llm = getattr(engine, "llm", None)
+    # `TensorRTLLMEngine` (dynamo wrapper) stores the underlying TRT-LLM
+    # `LLM` instance as `_llm` (underscored). Fall through to a `llm`
+    # attribute if a future wrapper exposes it as a property.
+    llm = getattr(engine, "_llm", None) or getattr(engine, "llm", None)
     if llm is None:
         return None
     executor = getattr(llm, "_executor", None)
