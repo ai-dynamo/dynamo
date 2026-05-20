@@ -339,9 +339,35 @@ impl Indexer {
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self {
-            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
-                let device = self.find_match_details(sequence.clone()).await?;
-                let lt = query_lower_tiers(lower_tier, &sequence, &device);
+            Self::KvIndexer {
+                lower_tier, approx, ..
+            }
+            | Self::Concurrent {
+                lower_tier, approx, ..
+            } => {
+                // Seed lower-tier continuations from confirmed primary matches
+                // only. Predict-on-route side scores are unconfirmed; using
+                // them as lower-tier anchors would over-credit host/disk cache
+                // hits and break the score/hash lockstep `query_lower_tiers`
+                // expects.
+                let primary_device = self.find_primary_match_details(sequence.clone()).await?;
+                let lt = query_lower_tiers(lower_tier, &sequence, &primary_device);
+
+                let device = if let Some(approx) = approx.as_ref() {
+                    match approx.find_matches(sequence).await {
+                        Ok(side) => merge_overlap_scores(primary_device, side),
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "predict-on-route side indexer query failed; using primary only"
+                            );
+                            primary_device
+                        }
+                    }
+                } else {
+                    primary_device
+                };
+
                 Ok(TieredMatchDetails {
                     device,
                     lower_tier: lt,
@@ -647,6 +673,14 @@ impl Indexer {
 /// we use whichever indexer saw the longer prefix. `last_matched_hashes`,
 /// `frequencies`, and `tree_sizes` come from the primary — the side
 /// indexer's short-TTL view isn't meaningful for those signals.
+///
+/// IMPORTANT: the returned `MatchDetails` is no longer guaranteed to satisfy
+/// `overlap_scores.scores` <-> `last_matched_hashes` lockstep — side-only
+/// workers gain a score with no paired hash by design. The result is safe
+/// for scheduling / cache-hit signal but MUST NOT be used to seed
+/// `query_lower_tiers`, which assumes the lockstep invariant. The local
+/// arm of `find_matches_by_tier` enforces this by running the lower-tier
+/// query against primary-only `MatchDetails` before merging side scores.
 fn merge_overlap_scores(mut primary: MatchDetails, side: OverlapScores) -> MatchDetails {
     for (worker, side_score) in side.scores {
         primary
@@ -1008,6 +1042,139 @@ mod tests {
 
         let matches = indexer.find_matches_by_tier(block_hashes).await.unwrap();
         assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn side_only_worker_scored_but_not_used_as_lower_tier_anchor() {
+        // Build an Indexer::Concurrent with a real side indexer so
+        // `record_hashed_routing_decision` populates only the side path.
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+        ));
+        // PruneConfig is required to enable routing-decision recording on the
+        // side indexer; without it the routing-decision path is a no-op.
+        let side = Arc::new(ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            1,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        ));
+        let side_for_flush = side.clone();
+        let indexer = Indexer::Concurrent {
+            primary,
+            lower_tier: LowerTierIndexers::new(2, 4),
+            approx: Some(super::SideIndexer::Concurrent(side)),
+        };
+
+        let primary_worker = WorkerWithDpRank::new(10, 0);
+        let side_only_worker = WorkerWithDpRank::new(20, 0);
+
+        // Primary sees blocks [11, 12, 13] on Device for primary_worker;
+        // extension block [14] on HostPinned for primary_worker.
+        indexer
+            .apply_event(store_event(
+                10,
+                0,
+                1,
+                &[],
+                &[11, 12, 13],
+                StorageTier::Device,
+            ))
+            .await;
+        indexer
+            .apply_event(store_event(
+                10,
+                0,
+                2,
+                &[11, 12, 13],
+                &[14],
+                StorageTier::HostPinned,
+            ))
+            .await;
+        // Crucially, also give side_only_worker a HostPinned extension at
+        // block 14 anchored on the same prefix [11, 12, 13]. If the lower
+        // tier were seeded from the side-merged device score, the host walk
+        // would find this and credit a hit; with the reorder it should not.
+        indexer
+            .apply_event(store_event(
+                20,
+                0,
+                3,
+                &[11, 12, 13],
+                &[14],
+                StorageTier::HostPinned,
+            ))
+            .await;
+
+        // Side-only: route a decision so the side indexer learns
+        // side_only_worker for the same device prefix. Primary never sees it.
+        let block_hashes: Vec<LocalBlockHash> =
+            [11, 12, 13].iter().copied().map(LocalBlockHash).collect();
+        let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
+        indexer
+            .record_hashed_routing_decision(side_only_worker, block_hashes.clone(), sequence_hashes)
+            .await
+            .unwrap();
+
+        flush_indexer(&indexer).await;
+        side_for_flush.flush().await;
+
+        let matches = indexer
+            .find_matches_by_tier(vec![
+                LocalBlockHash(11),
+                LocalBlockHash(12),
+                LocalBlockHash(13),
+                LocalBlockHash(14),
+            ])
+            .await
+            .unwrap();
+
+        // Merge worked: both workers carry device scores.
+        assert_eq!(
+            matches
+                .device
+                .overlap_scores
+                .scores
+                .get(&primary_worker)
+                .copied(),
+            Some(3)
+        );
+        assert_eq!(
+            matches
+                .device
+                .overlap_scores
+                .scores
+                .get(&side_only_worker)
+                .copied(),
+            Some(3),
+            "side-only worker should appear in merged device scores"
+        );
+
+        // Reorder enforced: lower-tier was seeded from primary only.
+        // primary_worker still extends into HostPinned via its own device
+        // anchor. side_only_worker's HostPinned extension exists in the
+        // host tier, but because the side score wasn't used as a device
+        // anchor, the host walk does not start for it and its host hit is
+        // not credited.
+        let host = matches
+            .lower_tier
+            .get(&StorageTier::HostPinned)
+            .expect("host-pinned tier should have been allocated");
+        assert_eq!(host.hits.get(&primary_worker).copied(), Some(1));
+        assert_eq!(
+            host.hits.get(&side_only_worker).copied().unwrap_or(0),
+            0,
+            "side-only worker's host extension must not be credited \
+             when lower-tier seeding is primary-only"
+        );
+        assert!(
+            !host.next_continuations.contains_key(&side_only_worker),
+            "side-only worker must not appear in lower-tier continuations"
+        );
     }
 
     #[tokio::test]
