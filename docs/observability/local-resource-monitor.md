@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Dynamo Local Resource Monitor (Prometheus Exporter)
+# Dynamo Local Resource Monitor
 
-[`dynamo_local_resource_monitor.py`](../../dev/observability/dynamo_local_resource_monitor.py) is a Dynamo-specific Prometheus exporter that tracks per-process resource usage (VRAM, GPU utilization, PCIe bandwidth, CPU, disk I/O, network I/O) for Dynamo inference processes — labeled by model name, process identity, and PID.
+[`dynamo_local_resource_monitor.py`](../../dev/observability/dynamo_local_resource_monitor.py) is a Dynamo-specific resource monitor that tracks per-process resource usage (VRAM, GPU utilization, PCIe bandwidth, CPU, disk I/O, network I/O) for Dynamo inference processes — labeled by model name, process identity, and PID. It always exposes Prometheus metrics at `/metrics`; when the dashboard dependencies are installed, the same endpoint also serves a WebSocket dashboard at `/`.
 
 ## Why this and not the existing observability tools?
 
@@ -19,7 +19,7 @@ Design context lives in [DEP #9065](https://github.com/ai-dynamo/dynamo/issues/9
 
 This exporter samples at 200 ms (PCIe internally at 10/s), groups subprocesses into one logical worker per engine, and labels each per-engine PID with framework + model + test name (e.g. `VLLM::EngineCore, Qwen3-0.6B, test_serve_deployment[aggregated_unified]`) — so Grafana renders parallel engines bin-packed onto one GPU as separate side-by-side series instead of one summed line. That's what makes flaky one-of-N-tests failures diagnosable.
 
-## Enabling the exporter
+## Prometheus + Grafana
 
 The Prometheus instance that scrapes this exporter is gated behind the `resource-monitor` Docker Compose profile, so the main observability stack comes up without it. To enable it, pass `--profile resource-monitor`:
 
@@ -38,7 +38,7 @@ python3 dev/observability/dynamo_local_resource_monitor.py --host 0.0.0.0 --port
 
 Then verify metrics at `http://<host>:8051/metrics`.
 
-If any dependencies are missing, the script prints the exact `pip install` command needed and exits.
+If any required dependencies are missing, the script prints the exact `pip install` command needed and exits.
 
 > **Firewall note:** If your host runs UFW (or similar), you must allow port 8051 from the Docker Compose bridge network for `dynamo-resource-monitor` to scrape the exporter:
 >
@@ -48,3 +48,16 @@ If any dependencies are missing, the script prints the exact `pip install` comma
 > ```
 >
 > Verify the scrape target is healthy with `curl -s http://localhost:9091/api/v1/targets | jq '.data.activeTargets[] | {job, health}'`.
+
+## WebSocket Dashboard
+
+For one-off profiling without Grafana, install the dashboard dependencies too. The same command then starts a Flask-SocketIO server, serves a Plotly dashboard at `/`, and keeps Prometheus metrics available at `/metrics`:
+
+```bash
+pip install psutil nvidia-ml-py prometheus-client flask flask-socketio simple-websocket
+python3 dev/observability/dynamo_local_resource_monitor.py --host 0.0.0.0 --port 8051
+```
+
+Open `http://<host>:8051/` in a browser. The dashboard keeps a rolling window in memory, saves it under `~/.cache/dynamo_local_resource_monitor/metrics.json` on shutdown, and restores it on restart when the GPU count still matches.
+
+Without the dashboard packages, the monitor still starts the Prometheus `/metrics` exporter. Visiting `/` shows the `pip install` command needed to enable the dashboard.
