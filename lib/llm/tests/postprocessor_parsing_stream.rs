@@ -868,13 +868,19 @@ async fn postprocessor_parsing_stream_minimax_required_bypasses_reasoning() {
 /// Mirrors dynamo-deploy smoke_test.py::case_completions_tool_call_required:
 /// "What is the weather in San Francisco?" with `tool_choice="required"` and
 /// the `get_weather` tool. The backend emits a bare guided-decoding JSON
-/// payload, so the postprocessor must bypass reasoning extraction even when
-/// both a Nemotron reasoning parser and a Nemotron tool parser are configured.
-/// The JSON must be consumed by the tool jail, not surfaced as content or
-/// `reasoning_content`.
+/// payload; the JSON must be consumed by the tool jail, not surfaced as
+/// content or `reasoning_content`. Two parser families:
+///   * `nemotron_nano` is force-reasoning, so the preprocessor skips reasoning
+///     parsing entirely under `tool_choice=required`. `prompt_injected_reasoning`
+///     is moot.
+///   * `nemotron_deci` is non-force-reasoning (alias for the basic_parser shape
+///     also used by `glm45`).
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_required_smoke_case() {
-    for (case, parser) in [("nano", "nemotron_nano"), ("super/deci", "nemotron_deci")] {
+    for (case, parser, prompt_injected_reasoning) in [
+        ("nano", "nemotron_nano", true),
+        ("super/deci", "nemotron_deci", false),
+    ] {
         let preprocessor = build_preprocessor(Some(parser), Some(parser));
 
         let mut request: NvCreateChatCompletionRequest =
@@ -914,7 +920,7 @@ async fn postprocessor_parsing_stream_nemotron_required_smoke_case() {
 
         let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
         let output_stream = preprocessor
-            .postprocessor_parsing_stream(input_stream, &request, true)
+            .postprocessor_parsing_stream(input_stream, &request, prompt_injected_reasoning)
             .expect("postprocessor_parsing_stream should build");
 
         let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
