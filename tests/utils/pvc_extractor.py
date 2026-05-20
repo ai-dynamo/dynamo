@@ -155,22 +155,26 @@ fi
             )
 
             # Step 5: Download and extract tar
+            #
+            # IMPORTANT: a single `pod.exec(["cat", <tar>])` buffers the
+            # entire tar in the kr8s/k8s python client's response and
+            # rides on one long-lived WebSocket. Through Teleport-proxied
+            # kubectl streams, that connection dies with "websocket:
+            # close 1006 (abnormal closure): unexpected EOF" for tars
+            # over ~150 MB — we lost 10/10 long-run rungs (~645 MB each)
+            # to this on 2026-05-19. The fix is split-server-side +
+            # per-chunk fetch: each chunk's transfer is short enough to
+            # dodge the Teleport WebSocket close, and a failed chunk can
+            # be retried without redownloading the whole archive.
             extracted_files = []
             if file_count > 0 and tar_created:
-                cat_result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        pod.exec, ["cat", "/tmp/download/archive.tar.gz"]
-                    ),
-                    timeout=cat_timeout,
-                )
-
-                if cat_result.returncode != 0:
-                    raise RuntimeError(
-                        f"Failed to download archive (exit code {cat_result.returncode})"
-                    )
-
                 local_archive = Path(local_output_dir) / "archive.tar.gz"
-                local_archive.write_bytes(cat_result.stdout)
+                await self._download_archive_chunked(
+                    pod=pod,
+                    remote_path="/tmp/download/archive.tar.gz",
+                    local_path=local_archive,
+                    cat_timeout=cat_timeout,
+                )
 
                 with tarfile.open(local_archive, "r:gz") as tar:
                     tar.extractall(path=local_output_dir, filter="data")
@@ -210,6 +214,113 @@ fi
             await self._delete_job(job_name)
 
     # --- Internal methods ---
+
+    # Chunk size for the split-then-fetch download path. 100 MiB keeps
+    # each chunk's transfer under the Teleport-proxied WebSocket's
+    # working window (we lost 150+ MB single-shot streams on
+    # 2026-05-19). Smaller = more chunks = more pod.exec round-trips;
+    # larger = closer to the failure mode we're avoiding.
+    _CHUNK_BYTES = 100 * 1024 * 1024
+
+    # Per-chunk retry budget. Each failed chunk gets re-fetched
+    # independently — the archive is not rebuilt.
+    _CHUNK_MAX_RETRIES = 4
+
+    async def _download_archive_chunked(
+        self,
+        pod,
+        remote_path: str,
+        local_path: Path,
+        cat_timeout: int,
+    ) -> None:
+        """Download a remote archive in chunks and reassemble locally.
+
+        Step A: split the archive server-side into 100 MiB parts.
+        Step B: cat each part separately via pod.exec, with per-chunk
+                retry. Each chunk is short enough that the Teleport
+                proxied WebSocket survives.
+        Step C: concatenate parts into ``local_path``.
+        Step D: clean up parts on the pod.
+
+        Replaces a single ``cat`` of the full archive, which buffers
+        the entire tar in memory and rides one long-lived WebSocket
+        — that stream dies for ~150+ MB tars through Teleport.
+        """
+
+        # Step A: split server-side
+        split_script = (
+            "set -e\n"
+            f"split -b {self._CHUNK_BYTES} {remote_path} {remote_path}.part-\n"
+            f"ls {remote_path}.part-* | sort\n"
+        )
+        split_result = await asyncio.wait_for(
+            asyncio.to_thread(pod.exec, ["sh", "-c", split_script]),
+            timeout=60,
+        )
+        if split_result.returncode != 0:
+            err = (split_result.stderr or b"").decode("utf-8", errors="replace")
+            raise RuntimeError(f"split failed (rc={split_result.returncode}): {err}")
+        part_names = [
+            line.strip()
+            for line in split_result.stdout.decode(
+                "utf-8", errors="replace"
+            ).splitlines()
+            if line.strip()
+        ]
+        self._logger.info(
+            f"_download_archive_chunked: split into {len(part_names)} part(s)"
+        )
+
+        # Step B: cat each part separately with retry
+        try:
+            # Truncate the local file before appending parts
+            local_path.write_bytes(b"")
+            for idx, part_name in enumerate(part_names):
+                last_err: Optional[Exception] = None
+                for attempt in range(1, self._CHUNK_MAX_RETRIES + 1):
+                    try:
+                        cat_result = await asyncio.wait_for(
+                            asyncio.to_thread(pod.exec, ["cat", part_name]),
+                            timeout=cat_timeout,
+                        )
+                        if cat_result.returncode != 0:
+                            raise RuntimeError(
+                                f"cat returned rc={cat_result.returncode}"
+                            )
+                        # Append this chunk to the local archive
+                        with local_path.open("ab") as fh:
+                            fh.write(cat_result.stdout)
+                        self._logger.debug(
+                            f"  chunk {idx + 1}/{len(part_names)} "
+                            f"({len(cat_result.stdout)} bytes) try {attempt} ✓"
+                        )
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        last_err = e
+                        self._logger.warning(
+                            f"  chunk {idx + 1}/{len(part_names)} attempt {attempt} "
+                            f"failed: {type(e).__name__}: {e}"
+                        )
+                        if attempt < self._CHUNK_MAX_RETRIES:
+                            await asyncio.sleep(2 * attempt)
+                else:
+                    raise RuntimeError(
+                        f"chunk {idx + 1}/{len(part_names)} ({part_name}) failed "
+                        f"after {self._CHUNK_MAX_RETRIES} attempts: {last_err}"
+                    )
+        finally:
+            # Step D: best-effort cleanup of the parts on the pod
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        pod.exec, ["sh", "-c", f"rm -f {remote_path}.part-*"]
+                    ),
+                    timeout=30,
+                )
+            except Exception as e:  # noqa: BLE001
+                self._logger.debug(
+                    f"_download_archive_chunked: cleanup of parts failed (non-fatal): {e}"
+                )
 
     @staticmethod
     def _build_find_expr(patterns: list[str]) -> str:

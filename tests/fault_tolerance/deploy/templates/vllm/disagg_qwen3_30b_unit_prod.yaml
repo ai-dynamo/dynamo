@@ -19,9 +19,9 @@
 #       `disagg_qwen3_30b_4p2d_2f_prod.yaml`
 #     - N=3 → 3 FE / 6 PF / 3 DE (18 GPUs)
 #   Same PF:DE ratio as prod at every N.
-# - Image: prod runs a custom lise-dynamo image off vllm 1.0.1
-#   (vllm_1.0.1_0.16.0). We use the released vllm-runtime:1.0.1 — same
-#   vllm + Dynamo base, missing only prod's custom patches.
+# - Image: this template targets the released vllm-runtime:1.0.1
+#   (vllm_1.0.1_0.16.0). Fork builds tracking the same vllm + Dynamo
+#   base will run with the same args.
 #
 # Everything else (model, args, FP8 GEMM env, UCX/NCCL tuning) is
 # copied verbatim from the prod DGD spec.
@@ -94,9 +94,8 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
-            # vllm-runtime:1.0.1 uses --disaggregation-mode; the customer's
-            # lise-dynamo fork uses --is-prefill-worker (both functionally
-            # equivalent for vLLM disagg).
+            # vllm-runtime:1.0.1 uses --disaggregation-mode; some forks
+            # use --is-prefill-worker (functionally equivalent for vLLM disagg).
             - --disaggregation-mode
             - prefill
             - --tensor-parallel-size

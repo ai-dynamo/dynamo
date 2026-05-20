@@ -3,9 +3,7 @@
 #
 # v1.1.0 head-to-head — three arms covering routing + threshold space.
 #
-# Per the dynamo-observe KV-routing test plan
-# (deployments/amazon-ads/2026-05-16-kv-routing-test-plan.md), the
-# rejection-thresholds env vars alone CAN'T prevent per-worker KV
+# Rejection-thresholds env vars alone CAN'T prevent per-worker KV
 # imbalance: under the default `round-robin` (or `least-loaded`) router,
 # requests are dispatched by stream count, not actual KV pressure. One
 # decode pod can sit at 100% KV while peers stay cool — the all-busy
@@ -27,7 +25,7 @@
 #   C. kv_route_threshold      | kv             | 0.85/0.85  | yes (overlap=0, T=0)
 #
 # All three: vllm-runtime:1.1.0, kv-events OFF on all workers
-# (matches the production AZ-c configuration).
+# (matches the prefill-events-disabled production config under test).
 #
 # Ladder per arm:
 #   1. Pre-warm phase (2 min, c=30, ISL=8K low-OSL) to bias KV pressure

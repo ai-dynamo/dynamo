@@ -4,8 +4,8 @@
 # Decode-worker overload reproduction — disagg-cascade shape.
 #
 # Mirrors a production-shape workload (ISL p50≈1600 / p99≈7000, OSL≈200,
-# prefix-cache hit ~37%) on the 1-FE : 2-P : 1-D unit topology that matches
-# a customer per-set design point. Six parametrized arms.
+# prefix-cache hit ~37%) on the 1-FE : 2-P : 1-D unit topology. Six
+# parametrized arms.
 #
 # Phase 1 — overload-only (decode-side pressure without fault injection)
 #   A — c=96 sustained ramp + 30 s SLA timeout.
@@ -331,7 +331,7 @@ async def test_decode_overload_disagg(runtime_env, request, arm):
             ]
         )
     elif arm == "P2":
-        # Abrupt prefill pod kill mid-sustain — 5/1 production class.
+        # Abrupt prefill pod kill mid-sustain — peer-disappearance class.
         # At peak load decode has a deep queue of inflight requests, each
         # waiting on an outstanding NIXL pull from a prefill peer.
         # SIGKILLing the prefill rips its NIXL endpoint mid-handshake →

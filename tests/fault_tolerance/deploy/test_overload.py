@@ -48,8 +48,8 @@ dgd = "disagg_qwen3_30b_unit_prod"
 
 _DEFAULT_IMAGE = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
-# Prod-shaped traffic distribution (ISL/OSL pairs, from the 2026-05-16
-# reproducer). Same as the n3 routing-threshold test.
+# Production-shaped traffic distribution (ISL/OSL pairs with realistic
+# long-tail mix). Same distribution as the n3 routing-threshold test.
 _PROD_SEQ_DIST = "100,200:5;500,200:15;1000,200:20;1600,200:30;3400,200:20;7000,200:10"
 _NUM_PREFIX_PROMPTS = 15
 _PREFIX_PROMPT_LENGTH = 600
@@ -106,6 +106,27 @@ def add_cli_options(parser):
         type=float,
         default=_DEFAULT_RUNG_MINUTES,
         help=f"Minutes per rung. Default: {_DEFAULT_RUNG_MINUTES}",
+    )
+    g.addoption(
+        "--router-mode",
+        default="kv",
+        choices=[
+            "kv",
+            "least-loaded",
+            "round-robin",
+            "random",
+            "power-of-two",
+            "direct",
+        ],
+        help="Router mode applied to Frontend (DYN_ROUTER_MODE). Default: kv",
+    )
+    g.addoption(
+        "--model-cache-pvc",
+        default="",
+        help="Mount this RWX PVC on workers as the HuggingFace model cache "
+        "(skips re-downloading 30+GB model weights on every pod restart). "
+        "On aws-dev-02 the conventional name is 'shared-model-cache' (already "
+        "provisioned in neelays-test and neelays-test-b). Empty string disables.",
     )
 
 
@@ -206,13 +227,16 @@ def _apply_cluster_portability(spec):
         caps.setdefault("add", []).append("IPC_LOCK")
         spec[svc].set_env_var("DYN_TEST_MEMLOCK_UNLIMITED", "1")
 
-    # Pod-level fsGroup=1000 on every service: k8s recursively chowns the
-    # mounted PVC to gid 1000 (the `dynamo` user's group in the runtime
-    # image) and SGID-bits the directories. That way, when one pod
-    # (workers, running as root) creates the per-test sub-path on a
-    # reused log PVC, the other pods (Frontend, running as uid=1000) can
-    # still write under it as group members. Avoids the perm-collision
-    # race described in dynamo-observe/.../2026-05-03-cascade-repro-results/.
+    # Pod-level fsGroup=1000 on every service + Frontend runAsUser=0.
+    # The prior working DGD (dynamo-observe/.../2026-05-03-cascade-repro-
+    # results/) set BOTH. Reasoning:
+    #   - fsGroup=1000 makes k8s recursively chown the mounted volume to
+    #     gid 1000 (dynamo user's group) and SGID-bit the dirs — but
+    #     that's only group membership; write is still owner-only under
+    #     default umask 022 (mode 755).
+    #   - To actually let Frontend write under root-owned parent dirs
+    #     created by workers (which need runAsUser=0 for UCX/IB), the
+    #     Frontend must also be root. fsGroup is then defense-in-depth.
     for svc in ("Frontend", "VllmPrefillWorker", "VllmDecodeWorker"):
         pod_sec = (
             spec[svc]
@@ -220,6 +244,12 @@ def _apply_cluster_portability(spec):
             .setdefault("securityContext", {})
         )
         pod_sec.setdefault("fsGroup", 1000)
+    fe_main = (
+        spec["Frontend"]
+        ._spec.setdefault("extraPodSpec", {})
+        .setdefault("mainContainer", {})
+    )
+    fe_main.setdefault("securityContext", {})["runAsUser"] = 0
 
     # Prod runs A100-40GB; both shared clusters above run 80GB cards.
     # Halve gpu-memory-utilization to match prod KV envelope.
@@ -321,7 +351,11 @@ async def test_decode_overload(runtime_env, request):
         spec[svc].image = image
 
     _apply_cluster_portability(spec)
-    _apply_router_config(spec)
+    _apply_router_config(spec, router_mode=cfg.getoption("--router-mode"))
+
+    model_cache_pvc = cfg.getoption("--model-cache-pvc")
+    if model_cache_pvc:
+        spec.enable_model_cache(model_cache_pvc)
 
     served_model = spec["VllmDecodeWorker"].model
 

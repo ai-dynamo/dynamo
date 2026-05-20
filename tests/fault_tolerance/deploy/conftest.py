@@ -322,6 +322,20 @@ def pytest_addoption(parser):
     except Exception:
         # Test module not importable in this environment — skip gracefully.
         pass
+    try:
+        from tests.fault_tolerance.deploy import (
+            test_worker_death_kv_transfer as _wdkt_mod,
+        )
+
+        _wdkt_mod.add_cli_options(parser)
+    except Exception:
+        pass
+    try:
+        from tests.fault_tolerance.deploy import test_endurance as _endurance_mod
+
+        _endurance_mod.add_cli_options(parser)
+    except Exception:
+        pass
 
     # ---- fault_tolerance-specific options ----
     parser.addoption(

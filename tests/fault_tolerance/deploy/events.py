@@ -255,19 +255,53 @@ class StartLoad(Event):
         if self.load_config.extra_server_metrics_urls is None:
             spec = ctx.deployment.deployment_spec
             urls: list[str] = []
+            shortfall: list[str] = []
             for service in spec.services:
-                pods_by_service = await asyncio.to_thread(
-                    ctx.deployment.get_pods, [service.name]
-                )
+                expected = service.replicas
+                if expected <= 0:
+                    continue
+                # Retry once with a short backoff to tolerate a transient
+                # missing podIP — pods are Ready by here, but the kr8s
+                # snapshot can race the status subresource update.
+                pods: list = []
+                for attempt in range(2):
+                    pods_by_service = await asyncio.to_thread(
+                        ctx.deployment.get_pods, [service.name]
+                    )
+                    pods = pods_by_service.get(service.name) or []
+                    ready_with_ip = [
+                        p for p in pods if p.raw.get("status", {}).get("podIP")
+                    ]
+                    if len(ready_with_ip) >= expected:
+                        pods = ready_with_ip
+                        break
+                    if attempt == 0:
+                        await asyncio.sleep(2)
                 metrics_port = (
                     spec.port
                     if service.component_type == "frontend"
                     else spec.system_port
                 )
-                for pod in pods_by_service.get(service.name) or []:
+                seen_for_service = 0
+                for pod in pods:
                     pod_ip = pod.raw.get("status", {}).get("podIP")
                     if pod_ip:
                         urls.append(f"http://{pod_ip}:{metrics_port}/metrics")
+                        seen_for_service += 1
+                ctx.logger.info(
+                    f"StartLoad: service={service.name} "
+                    f"expected_replicas={expected} pods_with_podIP={seen_for_service}"
+                )
+                if seen_for_service < expected:
+                    shortfall.append(f"{service.name}: {seen_for_service}/{expected}")
+            if shortfall:
+                raise RuntimeError(
+                    "StartLoad: auto-discovery undercount — some replicas "
+                    "missing /metrics URLs. AIPerf cannot scrape full fleet. "
+                    f"Shortfalls: {shortfall}. "
+                    "Pass an explicit LoadConfig.extra_server_metrics_urls "
+                    "or wait for all pods Ready before this event."
+                )
             if urls:
                 ctx.logger.info(f"StartLoad: auto-discovered /metrics URLs: {urls}")
                 self.load_config.extra_server_metrics_urls = urls

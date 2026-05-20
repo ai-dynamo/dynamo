@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# dynamo-ft — standalone uv project for the Dynamo deploy fault-tolerance test
+# harness. Lets you `uv sync` and `uv run pytest ...` against a live cluster
+# without building the full Dynamo dev container. The harness drives a remote
+# k8s namespace and reads aiperf JSON artifacts; it has no `dynamo.*` imports.
+
+[project]
+name = "dynamo-ft"
+version = "0.1.0"
+description = "Dynamo deploy fault-tolerance test harness (standalone runner)."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" }]
+
+dependencies = [
+    "aiohttp>=3.9",
+    "kr8s>=0.20",
+    "kubernetes>=32.0.1,<33.0.0",
+    "kubernetes_asyncio>=32.0.0,<33.0.0",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "requests>=2.31",
+    "tabulate>=0.9",
+    "tomli>=2; python_version < '3.11'",
+    "typing_extensions>=4.9; python_version < '3.11'",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "ipython>=8",
+]
+
+[tool.uv]
+package = false
+managed = true
+
+[tool.pytest.ini_options]
+# Marker list is auto-imported from the root pyproject.toml in conftest.py's
+# pytest_configure, so --strict-markers stays useful without duplication here.
+addopts = ["--strict-markers", "--strict-config"]
+asyncio_mode = "auto"
+testpaths = ["."]
+log_cli = true
+log_cli_level = "INFO"

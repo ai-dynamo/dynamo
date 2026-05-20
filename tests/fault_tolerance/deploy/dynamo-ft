@@ -27,6 +27,12 @@
 #                                   or --no-log-pvc for fresh per-test PVC.)
 #       --no-log-pvc               (disable reuse — fresh PVC per run, auto-deleted)
 #       --recreate-log-pvc         (delete + recreate the reused PVC first)
+#       --model-cache-pvc <name>   (RWX PVC mounted on workers as HF model cache;
+#                                   default shared-model-cache. Skips HF download
+#                                   race on multi-pod startup. Override with
+#                                   $DYNAMO_FT_MODEL_CACHE_PVC or --no-model-cache.)
+#       --no-model-cache           (don't mount any model-cache PVC; workers
+#                                   re-download model weights from HF every restart)
 #       --no-prefetch-model        (skip prefetch; default is to prefetch)
 #       --no-skip-service-restart  (do restart NATS/etcd; default skips)
 #       --bg                       (run in background, write PID + log path)
@@ -50,6 +56,12 @@ STORAGE_CLASS="${DYNAMO_FT_STORAGE_CLASS:-}"
 # unless --recreate-log-pvc is passed explicitly.
 LOG_PVC="${DYNAMO_FT_LOG_PVC:-dynamo-ft-logs}"
 RECREATE_LOG_PVC=0
+# Default to a stable shared HF model cache PVC. Workers mount it and skip
+# re-downloading 30+GB model weights on every pod restart — fixes the
+# thundering-herd HF download race on multi-pod startup (units >= 2). The
+# PVC is conventionally `shared-model-cache` in neelays-test{,*-b}; users
+# can override via $DYNAMO_FT_MODEL_CACHE_PVC or disable with --no-model-cache.
+MODEL_CACHE_PVC="${DYNAMO_FT_MODEL_CACHE_PVC:-shared-model-cache}"
 LOG_FILE=""
 PREFETCH_MODEL=1
 SKIP_SERVICE_RESTART=1
@@ -84,6 +96,8 @@ while (($# > 0)); do
         --log-pvc) LOG_PVC="$2"; shift 2 ;;
         --no-log-pvc) LOG_PVC=""; shift ;;
         --recreate-log-pvc) RECREATE_LOG_PVC=1; shift ;;
+        --model-cache-pvc) MODEL_CACHE_PVC="$2"; shift 2 ;;
+        --no-model-cache) MODEL_CACHE_PVC=""; shift ;;
         --no-prefetch-model) PREFETCH_MODEL=0; shift ;;
         --no-skip-service-restart) SKIP_SERVICE_RESTART=0; shift ;;
         --bg) BG=1; shift ;;
@@ -122,6 +136,7 @@ ARGS=( "$NODEID" --namespace "$NAMESPACE" -s -v )
 [[ -n "$STORAGE_CLASS" ]]      && ARGS+=( --storage-class "$STORAGE_CLASS" )
 [[ -n "$LOG_PVC" ]]            && ARGS+=( --log-pvc "$LOG_PVC" )
 ((RECREATE_LOG_PVC))           && ARGS+=( --recreate-log-pvc )
+[[ -n "$MODEL_CACHE_PVC" ]]    && ARGS+=( --model-cache-pvc "$MODEL_CACHE_PVC" )
 ((PREFETCH_MODEL))             && ARGS+=( --prefetch-model )
 ((SKIP_SERVICE_RESTART))       && ARGS+=( --skip-service-restart )
 ARGS+=( "${EXTRA[@]}" )
