@@ -53,7 +53,7 @@ pub use config::{
 };
 #[allow(deprecated)]
 pub use indexer::{
-    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, AsyncShardHandle, BranchShardedIndexer,
+    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
     LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
     ThreadPoolIndexer,
 };

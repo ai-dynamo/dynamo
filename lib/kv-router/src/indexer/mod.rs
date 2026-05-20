@@ -68,7 +68,6 @@ pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
 pub use metrics::*;
-pub use shard_handle::AsyncShardHandle;
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;

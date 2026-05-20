@@ -390,7 +390,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             Vec::new()
         };
         let shard = Arc::clone(&self.shards[shard_idx]);
-        let mut shard_scores = shard.find_matches_from_anchor(anchor, suffix).await?;
+        let mut shard_scores = shard.as_ref().find_matches_from_anchor(anchor, suffix).await?;
         for (worker, shard_score) in shard_scores.scores.drain() {
             if !active.contains(&worker) {
                 continue;
@@ -671,7 +671,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                     }),
                 },
             };
-            self.shards[shard_idx].apply_event(shard_event).await;
+            self.shards[shard_idx].as_ref().apply_event(shard_event).await;
         }
 
         if !broadcast_blocks.is_empty() {
@@ -687,7 +687,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                         }),
                     },
                 };
-                shard.apply_event(broadcast_event).await;
+                shard.as_ref().apply_event(broadcast_event).await;
             }
         }
     }
@@ -805,7 +805,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
                     self.remove_worker_entries(worker);
                 }
                 for shard in &self.shards {
-                    shard.apply_event(event.clone()).await;
+                    shard.as_ref().apply_event(event.clone()).await;
                 }
             }
         }
@@ -816,20 +816,20 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             self.remove_worker_entries(worker);
         }
         for shard in &self.shards {
-            shard.remove_worker(worker_id).await;
+            shard.as_ref().remove_worker(worker_id).await;
         }
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
         self.remove_worker_entries(WorkerWithDpRank::new(worker_id, dp_rank));
         for shard in &self.shards {
-            shard.remove_worker_dp_rank(worker_id, dp_rank).await;
+            shard.as_ref().remove_worker_dp_rank(worker_id, dp_rank).await;
         }
     }
 
     fn shutdown(&self) {
         for shard in &self.shards {
-            shard.shutdown();
+            shard.as_ref().shutdown();
         }
     }
 
@@ -839,7 +839,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             Self::append_reachable_shard_events(
                 &mut all_events,
                 &mut dumped_blocks,
-                shard.dump_events().await?,
+                shard.as_ref().dump_events().await?,
             );
         }
         for (idx, event) in all_events.iter_mut().enumerate() {
@@ -860,11 +860,14 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         let mut set = tokio::task::JoinSet::new();
         for shard in &self.shards {
             let shard = Arc::clone(shard);
-            set.spawn(async move { shard.flush().await });
+            set.spawn(async move { shard.as_ref().flush().await });
         }
         let mut total = 0;
-        while let Some(Ok(n)) = set.join_next().await {
-            total += n;
+        while let Some(result) = set.join_next().await {
+            match result {
+                Ok(n) => total += n,
+                Err(e) => tracing::warn!("shard flush task panicked: {e}"),
+            }
         }
         total
     }
@@ -874,12 +877,17 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             tokio::task::JoinSet::new();
         for (idx, shard) in self.shards.iter().enumerate() {
             let shard = Arc::clone(shard);
-            set.spawn(async move { (idx, shard.shard_sizes().await) });
+            set.spawn(async move { (idx, shard.as_ref().shard_sizes().await) });
         }
         let mut sizes = Vec::with_capacity(self.shards.len());
-        while let Some(Ok((idx, mut snapshot))) = set.join_next().await {
-            snapshot.shard_idx = idx;
-            sizes.push(snapshot);
+        while let Some(result) = set.join_next().await {
+            match result {
+                Ok((idx, mut snapshot)) => {
+                    snapshot.shard_idx = idx;
+                    sizes.push(snapshot);
+                }
+                Err(e) => tracing::warn!("shard_sizes task panicked: {e}"),
+            }
         }
         sizes.sort_by_key(|s| s.shard_idx);
         sizes
@@ -891,7 +899,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         // trie; remote shard handles return an empty `Vec` for this call.
         self.shards
             .iter()
-            .flat_map(|shard| shard.node_edge_lengths())
+            .flat_map(|shard| shard.as_ref().node_edge_lengths())
             .collect()
     }
 

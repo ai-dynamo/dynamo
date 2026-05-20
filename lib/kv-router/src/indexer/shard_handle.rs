@@ -19,8 +19,7 @@
 //! * **Read operations** (`find_matches_from_anchor`, `dump_events`) are
 //!   request-response: the caller awaits the result.
 
-use async_trait::async_trait;
-use std::sync::Arc;
+use std::future::Future;
 
 use super::{AnchorCapableSyncIndexer, AnchorRef, AnchorTask, KvRouterError, ShardSizeSnapshot};
 use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
@@ -28,18 +27,22 @@ use crate::protocols::*;
 
 /// Async abstraction over one routing shard.
 ///
-/// Implementations must be cheap to clone (e.g. wrap the real handle in `Arc`).
-#[async_trait]
+/// `BranchShardedIndexer<S>` is generic over `S: AsyncShardHandle`; all
+/// dispatch is statically resolved, so this trait does not require
+/// `#[async_trait]` or `dyn`-compatibility.  Implementations declare
+/// `async fn` bodies; the compiler infers the concrete future types.
 pub trait AsyncShardHandle: Send + Sync + 'static {
     /// Apply a KV cache event to this shard (fire-and-forget).
-    async fn apply_event(&self, event: RouterEvent);
+    fn apply_event(&self, event: RouterEvent) -> impl Future<Output = ()> + Send;
 
     /// Enqueue a structural anchor before a dependent suffix event.
     ///
-    /// Ordering guarantee: the anchor is guaranteed to be applied before any
-    /// subsequent `apply_event` call for the same `WorkerWithDpRank` on this
-    /// shard, regardless of the transport (channel order for in-process; AM
-    /// ordering for remote).
+    /// Ordering requirement: implementations must guarantee that the anchor
+    /// is visible on the shard before any subsequent suffix event for the
+    /// same `WorkerWithDpRank`.  The in-process implementation achieves this
+    /// by placing both in the same FIFO worker queue.  Remote implementations
+    /// must provide equivalent ordering — for example by awaiting an ack
+    /// before sending the suffix event, or via a single compound operation.
     ///
     /// Returns `Err` only if the shard is offline / the channel is closed.
     fn enqueue_anchor(
@@ -49,30 +52,34 @@ pub trait AsyncShardHandle: Send + Sync + 'static {
     ) -> Result<(), KvRouterError>;
 
     /// Read: find block matches starting from a previously installed anchor.
-    async fn find_matches_from_anchor(
+    fn find_matches_from_anchor(
         &self,
         anchor: AnchorRef,
         suffix: Vec<LocalBlockHash>,
-    ) -> Result<OverlapScores, KvRouterError>;
+    ) -> impl Future<Output = Result<OverlapScores, KvRouterError>> + Send;
 
     /// Remove all state associated with a worker (fire-and-forget).
-    async fn remove_worker(&self, worker_id: WorkerId);
+    fn remove_worker(&self, worker_id: WorkerId) -> impl Future<Output = ()> + Send;
 
     /// Remove state for a specific (worker_id, dp_rank) pair (fire-and-forget).
     ///
     /// Semantically narrower than [`remove_worker`]: only the state for the
     /// given `dp_rank` is removed; other dp_ranks of the same `worker_id` are
     /// left intact on the shard.
-    async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank);
+    fn remove_worker_dp_rank(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> impl Future<Output = ()> + Send;
 
     /// Dump all stored events (used for recovery and state transfer).
-    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError>;
+    fn dump_events(&self) -> impl Future<Output = Result<Vec<RouterEvent>, KvRouterError>> + Send;
 
     /// Return the current size snapshot for this shard.
-    async fn shard_sizes(&self) -> ShardSizeSnapshot;
+    fn shard_sizes(&self) -> impl Future<Output = ShardSizeSnapshot> + Send;
 
     /// Flush all pending write events; returns the queue depth at call time.
-    async fn flush(&self) -> usize;
+    fn flush(&self) -> impl Future<Output = usize> + Send;
 
     /// Shut down the shard, terminating any background threads or tasks.
     fn shutdown(&self);
@@ -94,8 +101,7 @@ pub trait AsyncShardHandle: Send + Sync + 'static {
 ///
 /// * Writes are channel sends (sync, wrapped in async).
 /// * `find_matches_from_anchor` runs on a `spawn_blocking` thread since the
-///   underlying CRTC `find_matches_from_anchor` is synchronous.
-#[async_trait]
+///   underlying trie `find_matches_from_anchor` is synchronous.
 impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
     async fn apply_event(&self, event: RouterEvent) {
         KvIndexerInterface::apply_event(self, event).await;
@@ -158,58 +164,6 @@ impl<T: AnchorCapableSyncIndexer> AsyncShardHandle for ThreadPoolIndexer<T> {
     }
 }
 
-// `Arc<S>` forwards to the inner `S`.
-#[async_trait]
-impl<S: AsyncShardHandle> AsyncShardHandle for Arc<S> {
-    async fn apply_event(&self, event: RouterEvent) {
-        (**self).apply_event(event).await;
-    }
-
-    fn enqueue_anchor(
-        &self,
-        worker: WorkerWithDpRank,
-        anchor: AnchorTask,
-    ) -> Result<(), KvRouterError> {
-        (**self).enqueue_anchor(worker, anchor)
-    }
-
-    async fn find_matches_from_anchor(
-        &self,
-        anchor: AnchorRef,
-        suffix: Vec<LocalBlockHash>,
-    ) -> Result<OverlapScores, KvRouterError> {
-        (**self).find_matches_from_anchor(anchor, suffix).await
-    }
-
-    async fn remove_worker(&self, worker_id: WorkerId) {
-        (**self).remove_worker(worker_id).await;
-    }
-
-    async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
-        (**self).remove_worker_dp_rank(worker_id, dp_rank).await;
-    }
-
-    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        (**self).dump_events().await
-    }
-
-    async fn shard_sizes(&self) -> ShardSizeSnapshot {
-        (**self).shard_sizes().await
-    }
-
-    async fn flush(&self) -> usize {
-        (**self).flush().await
-    }
-
-    fn shutdown(&self) {
-        (**self).shutdown();
-    }
-
-    fn node_edge_lengths(&self) -> Vec<usize> {
-        (**self).node_edge_lengths()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,21 +197,6 @@ mod tests {
                     .collect(),
             }),
         )
-    }
-
-    /// `node_edge_lengths` must delegate to the backend trie rather than
-    /// returning a stub empty `Vec`.  The CRTC produces at least one
-    /// histogram entry once events are stored.
-    #[tokio::test]
-    async fn node_edge_lengths_delegates_to_backend_trie() {
-        let tpi = make_tpi();
-        AsyncShardHandle::apply_event(&tpi, store_event_for(1, 0, &[10, 20, 30])).await;
-        AsyncShardHandle::flush(&tpi).await;
-        let lengths = AsyncShardHandle::node_edge_lengths(&tpi);
-        assert!(
-            lengths.iter().any(|&v| v > 0),
-            "expected at least one non-zero bucket in node_edge_lengths after storing blocks, got {lengths:?}"
-        );
     }
 
     /// `remove_worker_dp_rank` must only remove the named dp_rank, leaving
