@@ -4,10 +4,11 @@
 //! Bootstrap rendezvous for disaggregated mocker testing.
 //!
 //! Simulates the SGLang disaggregated serving handshake for KV transfer coordination.
-//! Either prefill or decode can arrive first; the rendezvous completes when both are ready.
+//! Either prefill or decode can arrive first; prefill waits for decode metadata before
+//! emitting output, and decode waits for prefill completion before generating.
 //!
-//! - Prefill: calls `complete_room(room_id)` after first token (KV cache ready)
-//! - Decode: connects to prefill's bootstrap server, blocks until prefill completes
+//! - Prefill: waits for decode metadata, then calls `complete_room(room_id)` after first token
+//! - Decode: connects to prefill's bootstrap server, sends metadata, then waits for completion
 //!
 //! Wire protocol:
 //! - Decode -> Prefill: room_id (8 bytes, little-endian u64)
@@ -32,8 +33,12 @@ const ACK_BYTE: u8 = 0x01;
 
 /// State for a room in the rendezvous.
 struct RoomState {
+    /// True if decode has sent receiver metadata for this room
+    decode_ready: bool,
     /// True if prefill has completed (KV cache ready)
     prefill_completed: bool,
+    /// Channel to notify prefill when decode metadata arrives
+    prefill_waiting: Option<oneshot::Sender<()>>,
     /// Channel to notify decode when prefill completes (if decode is waiting)
     decode_waiting: Option<oneshot::Sender<()>>,
 }
@@ -90,7 +95,7 @@ impl BootstrapServer {
         Ok(server)
     }
 
-    /// Handle a connection from decode. Blocks until prefill completes for this room.
+    /// Handle a connection from decode. Marks decode ready, then blocks until prefill completes.
     async fn handle_connection(
         mut stream: TcpStream,
         rooms: Arc<DashMap<u64, RoomState>>,
@@ -102,30 +107,38 @@ impl BootstrapServer {
 
         tracing::debug!("Bootstrap: decode connected for room {room_id}");
 
-        // Check room state and wait if needed
+        // Register decode metadata, wake prefill if it is waiting, then wait for prefill completion.
         let rx = match rooms.entry(room_id) {
             Entry::Occupied(mut entry) => {
+                entry.get_mut().decode_ready = true;
+                if let Some(sender) = entry.get_mut().prefill_waiting.take() {
+                    let _ = sender.send(());
+                    tracing::debug!("Bootstrap: room {room_id} decode metadata unblocked prefill");
+                }
+
                 if entry.get().prefill_completed {
                     // Prefill already done, immediate ACK
                     entry.remove();
                     tracing::debug!("Bootstrap: room {room_id} already completed, immediate ACK");
                     None
                 } else {
-                    // Prefill registered but not completed, wait
+                    // Decode metadata is registered, but prefill has not completed yet.
                     let (tx, rx) = oneshot::channel();
                     entry.get_mut().decode_waiting = Some(tx);
-                    tracing::debug!("Bootstrap: room {room_id} waiting for prefill to complete");
+                    tracing::debug!("Bootstrap: room {room_id} decode waiting for prefill");
                     Some(rx)
                 }
             }
             Entry::Vacant(entry) => {
-                // Decode arrived first, create entry and wait
+                // Decode arrived first, record metadata and wait for prefill completion.
                 let (tx, rx) = oneshot::channel();
                 entry.insert(RoomState {
+                    decode_ready: true,
                     prefill_completed: false,
+                    prefill_waiting: None,
                     decode_waiting: Some(tx),
                 });
-                tracing::debug!("Bootstrap: room {room_id} decode arrived first, waiting");
+                tracing::debug!("Bootstrap: room {room_id} decode arrived first");
                 Some(rx)
             }
         };
@@ -151,6 +164,53 @@ impl BootstrapServer {
         Ok(())
     }
 
+    /// Wait until decode has sent receiver metadata for this room.
+    pub async fn wait_for_decode_ready(&self, room_id: u64) -> Result<()> {
+        let rx = match self.rooms.entry(room_id) {
+            Entry::Occupied(mut entry) => {
+                if entry.get().decode_ready {
+                    tracing::debug!("Bootstrap: room {room_id} decode already ready");
+                    None
+                } else {
+                    let (tx, rx) = oneshot::channel();
+                    entry.get_mut().prefill_waiting = Some(tx);
+                    tracing::debug!(
+                        "Bootstrap: room {room_id} prefill waiting for decode metadata"
+                    );
+                    Some(rx)
+                }
+            }
+            Entry::Vacant(entry) => {
+                let (tx, rx) = oneshot::channel();
+                entry.insert(RoomState {
+                    decode_ready: false,
+                    prefill_completed: false,
+                    prefill_waiting: Some(tx),
+                    decode_waiting: None,
+                });
+                tracing::debug!("Bootstrap: room {room_id} prefill arrived first");
+                Some(rx)
+            }
+        };
+
+        if let Some(rx) = rx {
+            match tokio::time::timeout(RENDEZVOUS_TIMEOUT, rx).await {
+                Ok(Ok(())) => {
+                    tracing::debug!("Bootstrap: room {room_id} decode metadata received");
+                }
+                Ok(Err(_)) => {
+                    bail!("Bootstrap: room {room_id} decode metadata waiter dropped");
+                }
+                Err(_) => {
+                    self.rooms.remove(&room_id);
+                    bail!("Bootstrap: room {room_id} timeout waiting for decode metadata");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Mark a room as completed (prefill finished, KV cache ready).
     /// If decode is already waiting, unblocks it.
     pub fn complete_room(&self, room_id: u64) {
@@ -170,7 +230,9 @@ impl BootstrapServer {
             Entry::Vacant(entry) => {
                 // Decode hasn't connected yet
                 entry.insert(RoomState {
+                    decode_ready: false,
                     prefill_completed: true,
+                    prefill_waiting: None,
                     decode_waiting: None,
                 });
                 tracing::debug!("Bootstrap: room {room_id} completed (no decode yet)");
@@ -184,7 +246,7 @@ impl BootstrapServer {
     }
 }
 
-/// Connect to a prefill worker's bootstrap server and wait for KV to be ready.
+/// Send decode receiver metadata to a prefill worker, then wait for KV to be ready.
 pub async fn connect_to_prefill(host: &str, port: u16, room_id: u64) -> Result<()> {
     let host = host.trim_matches(|c| c == '[' || c == ']');
     let addr = format!("{host}:{port}");
@@ -263,6 +325,59 @@ mod tests {
         server.complete_room(room_id);
 
         let result = decode_handle.await.unwrap();
+        assert!(result.is_ok(), "Decode should succeed: {result:?}");
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_prefill_waits_for_decode_metadata_before_completion() {
+        let cancel_token = CancellationToken::new();
+        let server = BootstrapServer::start(0, cancel_token.clone())
+            .await
+            .unwrap();
+
+        let port = server.port();
+        let room_id = 1004u64;
+
+        let (prefill_entered_tx, prefill_entered_rx) = tokio::sync::oneshot::channel();
+        let mut prefill_ready = tokio::spawn({
+            let server = server.clone();
+            async move {
+                let _ = prefill_entered_tx.send(());
+                server.wait_for_decode_ready(room_id).await
+            }
+        });
+
+        prefill_entered_rx.await.unwrap();
+        assert!(
+            !prefill_ready.is_finished(),
+            "Prefill should wait until decode metadata arrives"
+        );
+
+        let decode_handle =
+            tokio::spawn(async move { connect_to_prefill("127.0.0.1", port, room_id).await });
+
+        let result = tokio::time::timeout(Duration::from_secs(1), &mut prefill_ready)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.is_ok(),
+            "Prefill should see decode metadata: {result:?}"
+        );
+
+        assert!(
+            !decode_handle.is_finished(),
+            "Decode should wait until prefill marks the room complete"
+        );
+
+        server.complete_room(room_id);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), decode_handle)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(result.is_ok(), "Decode should succeed: {result:?}");
 
         cancel_token.cancel();

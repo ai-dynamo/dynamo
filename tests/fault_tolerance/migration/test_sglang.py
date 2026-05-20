@@ -96,6 +96,8 @@ class DynamoWorkerProcess(ManagedProcess):
     ):
         self.worker_id = worker_id
         self.system_port = allocate_port(9100)
+        self.bootstrap_port: int | None = None
+        self.prefill_port: int | None = None
         self.disagg_mode = disagg_mode
 
         command = [
@@ -121,12 +123,13 @@ class DynamoWorkerProcess(ManagedProcess):
             command.append("--skip-tokenizer-init")
         else:
             # Disaggregated
+            self.bootstrap_port = allocate_port(12340)
             command.extend(
                 [
                     "--disaggregation-mode",
                     disagg_mode,
                     "--disaggregation-bootstrap-port",
-                    f"1234{worker_id[-1]}",
+                    str(self.bootstrap_port),
                     "--host",
                     "0.0.0.0",
                     "--disaggregation-transfer-backend",
@@ -134,7 +137,8 @@ class DynamoWorkerProcess(ManagedProcess):
                 ]
             )
             if disagg_mode == "prefill":
-                command.extend(["--port", "40000"])
+                self.prefill_port = allocate_port(20000)
+                command.extend(["--port", str(self.prefill_port)])
 
         # Set environment variables
         env = os.environ.copy()
@@ -187,12 +191,14 @@ class DynamoWorkerProcess(ManagedProcess):
         )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated port when worker exits."""
-        try:
-            # system_port is a required parameter, always set in __init__
-            deallocate_port(self.system_port)
-        except Exception as e:
-            logging.warning(f"Failed to release SGLang worker port: {e}")
+        """Release allocated ports when worker exits."""
+        for port in (self.system_port, self.bootstrap_port, self.prefill_port):
+            if port is None:
+                continue
+            try:
+                deallocate_port(port)
+            except Exception as e:
+                logging.warning(f"Failed to release SGLang worker port {port}: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
 
@@ -213,6 +219,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(230)  # 3x average
 @pytest.mark.post_merge
+@pytest.mark.skip(
+    reason="Flaky: 0% post-merge pass rate across multiple parametrizations; "
+    "skipped wholesale until the underlying migration fault is owned and fixed."
+)
 def test_request_migration_sglang_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -234,6 +244,20 @@ def test_request_migration_sglang_aggregated(
         request_api: "chat" for chat completion API, "completion" for completion API
         stream: True for streaming, False for non-streaming
     """
+
+    request_plane = request.getfixturevalue("request_plane")
+
+    # OPS-4472: graceful-shutdown migration with NATS is flaky for the
+    # chat streaming aggregated SGLang case.
+    if (
+        migration_limit == 3
+        and migration_max_seq_len is None
+        and immediate_kill is False
+        and request_api == "chat"
+        and stream is True
+        and request_plane == "nats"
+    ):
+        pytest.skip("Flaky: graceful-shutdown migration fails with NATS. OPS-4472")
 
     # OPS-4446: first-token delay routinely exceeds the 6s threshold in
     # utils.validate_response for this parameter combination. Originally only

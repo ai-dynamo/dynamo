@@ -255,7 +255,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 
 ### Parameters
 
-The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/qwen3_tts/) API format. All TTS-specific parameters are top-level fields:
+The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/) API format. All TTS-specific parameters are top-level fields:
 
 | Field | Description | Default |
 |---|---|---|

@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v4
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing </｜DSML｜tool_calls> end marker
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: |-
+          <｜DSML｜tool_calls>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.5.b:
+    description: Closing </｜DSML｜tool_calls> without matching open
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls>
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_5_b
+        reason: "Dynamo's DSML parser leaves <｜DSML｜…> envelope in normal_text on missing/orphan end marker (impl-defined recovery)"
+        calls: []
+        normal_text: |-
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          </｜DSML｜tool_calls>
+      vllm: *d_5_b
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.5.c:
+    description: Truncation mid-parameter value
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NY
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: |-
+          <｜DSML｜tool_calls>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NY
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
+      </｜DSML｜invoke>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+      vllm:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <｜DSML｜tool_calls>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
+          </｜DSML｜invoke>
+        reason: "vLLM leaks the unterminated DSML block into normal_text on the recovery path"
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">New York
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+      vllm:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <｜DSML｜tool_calls>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">New York
+        reason: "vLLM leaks the unterminated DSML block into normal_text on the recovery path"

@@ -117,9 +117,6 @@ pub(crate) fn replay_router_config(
     config
 }
 
-pub(super) fn replay_policy(
-    config: &KvRouterConfig,
-    args: &MockEngineArgs,
-) -> RouterSchedulingPolicy {
-    RouterSchedulingPolicy::new(config.router_queue_policy, args.block_size)
+pub(super) fn replay_policy(config: &KvRouterConfig) -> RouterSchedulingPolicy {
+    RouterSchedulingPolicy::new(config.router_queue_policy)
 }

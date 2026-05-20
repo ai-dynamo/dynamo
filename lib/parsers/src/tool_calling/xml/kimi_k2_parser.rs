@@ -26,8 +26,13 @@ static TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 /// support function names with dashes (common in MCP tools, e.g. `mcp__portal__search-documents`).
 fn get_tool_call_regex(config: &KimiK2ParserConfig) -> &'static Regex {
     TOOL_CALL_REGEX.get_or_init(|| {
+        // Arguments capture is intentionally permissive (`.*?`) rather than
+        // `\{...\}` so that truncated JSON (e.g. `{"location":"NYC` from
+        // max_tokens / EOS) still matches. The downstream `serde_json::from_str`
+        // is the validator: well-formed payloads parse, malformed/truncated
+        // ones fall back to the raw-string arguments path.
         let pattern = format!(
-            r"(?s){}\s*(?P<function_id>[\w.\-]+:\d+)\s*{}\s*(?P<arguments>\{{.*?\}})\s*{}",
+            r"(?s){}\s*(?P<function_id>[\w.\-]+:\d+)\s*{}\s*(?P<arguments>.*?)\s*{}",
             regex::escape(&config.call_start),
             regex::escape(&config.argument_begin),
             regex::escape(&config.call_end),
@@ -147,6 +152,44 @@ fn find_section_end(
     best
 }
 
+/// True for prefix-only narration before a tool section where vLLM preserves
+/// the wrapper-adjacent trailing space (PARSER.batch.8.a).
+fn should_preserve_vllm_prefix_trailing_space(normal_parts: &[&str]) -> bool {
+    let mut non_empty_parts = normal_parts
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| !part.trim().is_empty());
+
+    matches!(
+        non_empty_parts.next(),
+        Some((0, part)) if part.chars().next_back().is_some_and(|ch| ch.is_whitespace())
+    ) && non_empty_parts.next().is_none()
+}
+
+/// True when the first visible normal text appears only after a parsed tool
+/// section, so the intermediate Kimi tool-call turn should expose no content
+/// (PARSER.batch.8.b).
+fn should_drop_post_tool_text_without_prefix(normal_parts: &[&str]) -> bool {
+    normal_parts
+        .iter()
+        .enumerate()
+        .find(|(_, part)| !part.trim().is_empty())
+        .is_some_and(|(idx, _)| idx != 0)
+}
+
+/// True when there is prefix narration before the first tool section plus
+/// post-wrapper or inter-wrapper narration that should be dropped for Kimi
+/// tool-call turns (PARSER.batch.2.c, 8.c, 8.d).
+fn should_drop_post_tool_text_after_prefix(normal_parts: &[&str]) -> bool {
+    normal_parts
+        .first()
+        .is_some_and(|prefix| !prefix.trim().is_empty())
+        && normal_parts
+            .iter()
+            .skip(1)
+            .any(|part| !part.trim().is_empty())
+}
+
 /// Extract tool calls and normal text from message.
 ///
 /// ## Difference from Moonshot's reference implementation
@@ -213,7 +256,31 @@ fn extract_tool_calls(
         }
     }
 
-    let normal_text = normal_parts.join("").trim().to_string();
+    let joined_normal_text = normal_parts.join("");
+    let normal_text =
+        if !calls.is_empty() && should_drop_post_tool_text_without_prefix(&normal_parts) {
+            // Kimi tool-call responses are intermediate assistant turns: the
+            // official API flow treats content as empty while tool_calls are
+            // emitted, then asks the client to execute tools before returning
+            // final user-facing content. Match vLLM/SGLang by not surfacing
+            // post-wrapper text when there is no prefix narration.
+            String::new()
+        } else if !calls.is_empty() && should_drop_post_tool_text_after_prefix(&normal_parts) {
+            // Kimi tool-call responses are intermediate assistant turns even
+            // when a single section contains multiple calls or a turn contains
+            // multiple sections. Preserve only the prefix emitted before the
+            // first tool section and drop post-wrapper/inter-wrapper text;
+            // final user-facing content should be produced after tool results.
+            normal_parts[0].trim_start().to_string()
+        } else if !calls.is_empty() && should_preserve_vllm_prefix_trailing_space(&normal_parts) {
+            // vLLM preserves wrapper-adjacent trailing whitespace when the
+            // response has only prefix narration before a Kimi tool section.
+            // Keep this compatibility path narrow to avoid changing Dynamo's
+            // existing handling of post-wrapper/inter-wrapper narration.
+            normal_parts[0].trim_start().to_string()
+        } else {
+            joined_normal_text.trim().to_string()
+        };
     Ok((normal_text, calls))
 }
 
@@ -307,7 +374,7 @@ mod tests {
         KimiK2ParserConfig::default()
     }
 
-    #[test]
+    #[test] // detection helper
     fn test_detect_tool_call_start() {
         let config = default_config();
         assert!(detect_tool_call_start_kimi_k2(
@@ -329,7 +396,7 @@ mod tests {
         assert!(!detect_tool_call_start_kimi_k2("toolcall", &config));
     }
 
-    #[test]
+    #[test] // detection helper
     fn test_find_tool_call_end_position() {
         let config = default_config();
         let text = "<|tool_calls_section_begin|><|tool_call_begin|>functions.test:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>more text";
@@ -342,7 +409,8 @@ mod tests {
         assert_eq!(pos, None, "should return None when section_end is missing");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.yaml.
+    #[test] // PARSER.batch.1
     fn test_parse_simple_tool_call() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -356,7 +424,8 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1, PARSER.batch.7.d in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.7.yaml, tests/parity/parser/fixtures/kimi_k2/PARSER.batch.yaml.
+    #[test] // PARSER.batch.1, PARSER.batch.7
     fn test_parse_multiple_args() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"San Francisco, CA","unit":"fahrenheit"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -370,7 +439,8 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.2.yaml.
+    #[test] // PARSER.batch.2
     fn test_parse_multiple_tool_calls() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -387,21 +457,77 @@ mod tests {
         assert_eq!(args1["timezone"], "EST");
     }
 
-    #[test]
-    fn test_parse_with_normal_text() {
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.c in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.8.yaml.
+    #[test] // PARSER.batch.8.c
+    fn test_parse_keeps_prefix_drops_post_tool_text() {
         let config = default_config();
         let input = r#"I'll help you with that. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check."#;
 
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
-        assert_eq!(
-            normal,
-            Some("I'll help you with that.  Let me check.".to_string())
-        );
+        assert_eq!(normal, Some("I'll help you with that. ".to_string()));
     }
 
-    #[test]
+    #[test] // PARSER.batch.8.a
+    fn test_parse_preserves_vllm_prefix_trailing_space() {
+        let config = default_config();
+        let input = r#"I'll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("I'll check the weather. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.8.a
+    fn test_parse_prefix_only_ignores_post_wrapper_whitespace() {
+        let config = default_config();
+        let input = r#"I'll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>   "#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("I'll check the weather. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.2.c
+    fn test_parse_parallel_calls_with_surrounding_text() {
+        let config = default_config();
+        let input = r#"I will check both. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|> Done."#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_time");
+        assert_eq!(normal, Some("I will check both. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.8.d
+    fn test_parse_multiple_sections_drops_inter_wrapper_text() {
+        let config = default_config();
+        let input = r#"First check Dallas. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Then check NYC. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_eq!(normal, Some("First check Dallas. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.8.b
+    fn test_parse_drops_post_tool_text_without_prefix() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check."#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("".to_string()));
+    }
+
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.6.yaml.
+    #[test] // PARSER.batch.6
     fn test_parse_no_arg_call() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_current_time:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -414,7 +540,7 @@ mod tests {
         assert!(args.as_object().unwrap().is_empty());
     }
 
-    #[test]
+    #[test] // PARSER.batch.3
     fn test_parse_no_tool_calls() {
         let config = default_config();
         let input = "This is just normal text without any tool calls.";
@@ -424,7 +550,7 @@ mod tests {
         assert_eq!(normal, Some(input.to_string()));
     }
 
-    #[test]
+    #[test] // PARSER.fmt.1 — function-name conventions (`functions.X` vs bare `X`)
     fn test_parse_without_functions_prefix() {
         let config = default_config();
         // Some models may emit without the "functions." prefix
@@ -435,7 +561,8 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.yaml.
+    #[test] // PARSER.batch.1 (with declared `ToolDefinition` tools provided)
     fn test_parse_with_tool_validation() {
         let config = default_config();
         let tools = vec![ToolDefinition {
@@ -455,7 +582,28 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test]
+    // Recovery for truncated JSON args inside complete fences (e.g.
+    // max_tokens fires inside `"location":"NYC` with no closing quote).
+    // The arg-capture regex now accepts any payload between
+    // `<|tool_call_argument_begin|>` and `<|tool_call_end|>`; downstream
+    // `serde_json::from_str` falls back to raw-string arguments when the
+    // payload doesn't parse, matching the behavior of the existing
+    // `test_parse_invalid_json_falls_back_to_raw_string` case.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.4.yaml.
+    #[test] // PARSER.batch.4
+    fn test_parse_truncated_json_inside_complete_fences_recovers() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        // Truncated JSON falls back to raw-string arguments.
+        assert_eq!(calls[0].function.arguments, r#"{"location":"NYC"#);
+    }
+
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.a in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.5.yaml.
+    #[test] // PARSER.batch.5 (PR #8208)
     fn test_parse_malformed_no_section_end() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|>"#;
@@ -472,7 +620,8 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b, PARSER.batch.5.c in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.4.yaml, tests/parity/parser/fixtures/kimi_k2/PARSER.batch.5.yaml.
+    #[test] // PARSER.batch.4, PARSER.batch.5
     fn test_parse_truncated_mid_argument_no_section_end() {
         let config = default_config();
         // Model hit max_tokens mid-argument — no call_end, no section_end.
@@ -491,7 +640,8 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a, PARSER.batch.5.a in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.2.yaml, tests/parity/parser/fixtures/kimi_k2/PARSER.batch.5.yaml.
+    #[test] // PARSER.batch.2, PARSER.batch.5
     fn test_parse_multiple_calls_no_section_end() {
         let config = default_config();
         // Two complete individual tool calls, but model stopped before section_end.
@@ -507,7 +657,8 @@ mod tests {
         assert_eq!(calls[1].function.name, "get_time");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b, PARSER.batch.4.b, PARSER.batch.5.c in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.2.yaml, tests/parity/parser/fixtures/kimi_k2/PARSER.batch.4.yaml, tests/parity/parser/fixtures/kimi_k2/PARSER.batch.5.yaml.
+    #[test] // PARSER.batch.2, PARSER.batch.4, PARSER.batch.5
     fn test_parse_complete_plus_truncated_no_section_end() {
         let config = default_config();
         // First call is complete, second is truncated mid-argument.
@@ -522,7 +673,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
     }
 
-    #[test]
+    #[test] // PARSER.fmt.2 — whitespace tolerance
     fn test_parse_with_whitespace() {
         let config = default_config();
         let input = "<|tool_calls_section_begin|>\n<|tool_call_begin|> functions.search:0 <|tool_call_argument_begin|> {\"query\":\"rust programming\"} <|tool_call_end|>\n<|tool_calls_section_end|>";
@@ -535,7 +686,8 @@ mod tests {
         assert_eq!(args["query"], "rust programming");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.7.yaml.
+    #[test] // PARSER.batch.7
     fn test_parse_complex_json_arguments() {
         let config = default_config();
         let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.process_data:0<|tool_call_argument_begin|>{"items":[1,2,3],"config":{"nested":true}}<|tool_call_end|><|tool_calls_section_end|>"#;
@@ -549,7 +701,8 @@ mod tests {
         assert_eq!(args["config"]["nested"], true);
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.a, PARSER.batch.7.d in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.2.yaml, tests/parity/parser/fixtures/kimi_k2/PARSER.batch.7.yaml.
+    #[test] // PARSER.batch.2, PARSER.batch.7
     fn test_parse_deeply_nested_json_multiple_calls() {
         let config = default_config();
         // Multiple tool calls with deeply nested JSON - stress test for regex backtracking
@@ -576,7 +729,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test]
+    #[test] // helper, PARSER.fmt.3 — detection helper, singular section-token variant
     fn test_detect_singular_section_start() {
         let config = default_config();
         // Singular variant: <|tool_call_section_begin|> (without 's')
@@ -591,7 +744,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[test] // PARSER.fmt.3 — singular section-token variant
     fn test_parse_with_singular_section_tokens() {
         let config = default_config();
         // Use singular form: tool_call_section_begin/end (without 's')
@@ -603,7 +756,7 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test]
+    #[test] // helper, PARSER.fmt.3 — detection helper, singular section-token variant
     fn test_find_end_position_singular_variant() {
         let config = default_config();
         // Singular variant end token
@@ -614,7 +767,8 @@ mod tests {
 
     // --- Tests inspired by vllm/sglang coverage gaps ---
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.b in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.4.yaml.
+    #[test] // PARSER.batch.4
     fn test_parse_invalid_json_falls_back_to_raw_string() {
         // vllm: test_extract_tool_calls_invalid_json
         // Invalid JSON in arguments should fall back to raw string, not panic
@@ -628,7 +782,7 @@ mod tests {
         assert_eq!(calls[0].function.arguments, "{invalid json here}");
     }
 
-    #[test]
+    #[test] // PARSER.fmt.1 — function-name conventions (ID regex validation)
     fn test_parse_invalid_function_id_rejected_by_regex() {
         // vllm: test_extract_tool_calls_invalid_funcall
         // sglang: test_invalid_tool_call
@@ -657,7 +811,8 @@ mod tests {
         assert_eq!(calls[0].function.name, "valid");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.7.yaml.
+    #[test] // PARSER.batch.7 — special characters in arg values
     fn test_parse_angle_brackets_in_json_arguments() {
         // vllm: angle_brackets_in_json
         // JSON values containing <tag> constructs should not confuse the parser,
@@ -675,7 +830,8 @@ mod tests {
         assert_eq!(args["format"], "html");
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.2.yaml.
+    #[test] // PARSER.batch.2 — parallel calls, zero-spacing edge case
     fn test_parse_three_concatenated_calls_no_spacing() {
         // vllm: concatenated_tool_calls_bug_fix, three_concatenated_tool_calls
         // Three tool calls concatenated with zero whitespace between them
@@ -704,7 +860,8 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test]
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.7.yaml.
+    #[test] // PARSER.batch.7 — newlines in arg values
     fn test_parse_newlines_in_json_arguments() {
         // vllm: newlines_in_json
         // Multi-line formatted JSON arguments (model may emit pretty-printed JSON)
@@ -721,7 +878,7 @@ mod tests {
         assert_eq!(args["tags"], serde_json::json!(["admin", "active"]));
     }
 
-    #[test]
+    #[test] // PARSER.fmt.4 — empty wrapper (start+end with no calls between)
     fn test_parse_empty_tool_section() {
         // vllm: test_empty_tool_section
         // Section begin immediately followed by section end, no tool calls inside
@@ -737,7 +894,7 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[rstest] // PARSER.fmt.1 — function-name conventions (hyphens, double-underscores)
     #[case(
         r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.list-tasklists:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>"#,
         "list-tasklists",
@@ -759,5 +916,135 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, name);
         assert_eq!(calls[0].id, id);
+    }
+
+    /// `PARSER.batch.4` — call missing its `<|tool_call_end|>` while the outer
+    /// `<|tool_calls_section_end|>` IS present. Per-call delimiter is the
+    /// regex anchor; without it the call cannot be matched even though
+    /// the block fences are intact. Pin the silent-drop.
+    ///
+    /// TODO(PARSER.batch.4) — BUG, NEEDS FIX: a real call is silently dropped when
+    /// `<|tool_call_end|>` is missing and section fences are complete. Fix:
+    /// anchor on the next `<|tool_call_begin|>` or `<|tool_calls_section_end|>`
+    /// to terminate the args region. Flip this test once fixed.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.d in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.4.yaml.
+    #[test] // PARSER.batch.4
+    fn test_parse_missing_call_end_inside_complete_section_silent_drop() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_calls_section_end|>"#;
+
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(
+            calls.len(),
+            0,
+            "Missing per-call <|tool_call_end|> drops the call even when \
+             section fences are complete"
+        );
+    }
+
+    /// `PARSER.batch.4` — middle-call truncation. Three calls A, B, C inside a
+    /// complete section; B is missing its `<|tool_call_end|>`. Does B's
+    /// body bleed into C, or are both lost? Pin whichever today does.
+    ///
+    /// TODO(PARSER.batch.4) — BUG, NEEDS FIX: B's args swallow all of C's raw
+    /// markup, and C is dropped — caller gets garbage args for B and
+    /// never sees C. Fix: same anchor on `<|tool_call_begin|>` as the
+    /// silent-drop case above. Flip this test once fixed.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b, PARSER.batch.4.d in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.2.yaml, tests/parity/parser/fixtures/kimi_k2/PARSER.batch.4.yaml.
+    #[test] // PARSER.batch.2, PARSER.batch.4
+    fn test_parse_middle_call_missing_end_corrupts_next() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.a:0<|tool_call_argument_begin|>{"x":"1"}<|tool_call_end|><|tool_call_begin|>functions.b:1<|tool_call_argument_begin|>{"y":"2"}<|tool_call_begin|>functions.c:2<|tool_call_argument_begin|>{"z":"3"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        // Today: A parses cleanly. B's args regex is non-greedy `\{.*?\}` and
+        // tries to match `{...}` followed by `<|tool_call_end|>`; since B has
+        // no end token, the regex extends until it finds C's closing `}` AND
+        // C's `<|tool_call_end|>`. Result: B keeps its name but its args
+        // string contains all of C's raw markup; C is consumed and dropped.
+        assert_eq!(calls.len(), 2, "A and corrupted-B; C is consumed by B");
+        assert_eq!(calls[0].function.name, "a");
+        assert_eq!(calls[0].function.arguments, r#"{"x":"1"}"#);
+        assert_eq!(calls[1].function.name, "b");
+        assert!(
+            calls[1].function.arguments.contains("functions.c:2"),
+            "BUG: B's args swallowed C's markup verbatim; got {}",
+            calls[1].function.arguments
+        );
+    }
+
+    /// Parser-level invariant: the kimi_k2 parser does NOT filter by
+    /// `tool_choice` — it returns every well-formed call it sees, and the
+    /// jail / response builder above this layer is responsible for filtering
+    /// per `tool_choice=named`/`required`/`none`. This test exists to
+    /// catch accidental in-parser filtering. Real FRONTEND.tool_choice coverage lives at
+    /// the integration layer (`lib/llm/tests/tool_choice.rs`).
+    #[test]
+    fn test_parser_does_not_filter_by_tool_choice() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_time:1<|tool_call_argument_begin|>{"timezone":"EST"}<|tool_call_end|><|tool_calls_section_end|>"#;
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        // Parser returns BOTH calls; tool_choice="get_weather" filtering would
+        // happen above this layer. Pin the parser-level invariant.
+        assert_eq!(calls.len(), 2);
+    }
+
+    /// Parser-level invariant: the kimi_k2 parser is byte-stable — it doesn't
+    /// see `finish_reason` and produces the same output for any upstream
+    /// stream-end reason. Real PIPELINE.finish_reason coverage (stop / tool_calls / length
+    /// mapping) lives in `lib/llm/tests/test_streaming_tool_parsers.rs` and
+    /// belongs in cross-parser finish_reason mapping work-item (tracked separately).
+    #[test]
+    fn test_parser_output_independent_of_upstream_finish() {
+        let config = default_config();
+        // Same payload, two "logical" finish_reasons (stop vs length truncation):
+        // the parser sees only the bytes, so behavior must be identical.
+        let stop_input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>"#;
+        let (calls_stop, _) = try_tool_call_parse_kimi_k2(stop_input, &config, None).unwrap();
+        assert_eq!(calls_stop.len(), 1);
+    }
+
+    /// `PARSER.batch.9` — empty / null content variants. Empty section already
+    /// covered by `test_parse_empty_tool_section`; this pins the
+    /// truly-empty (zero bytes) and null-ish ("\n", whitespace-only) inputs.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.yaml.
+    #[test] // PARSER.batch.9
+    fn test_parse_empty_and_whitespace_inputs() {
+        let config = default_config();
+        for input in &["", " ", "\n", "\t\n  \t"] {
+            let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+            assert!(
+                calls.is_empty(),
+                "Empty/whitespace input must yield no calls (input={:?})",
+                input
+            );
+            // Whitespace is trimmed; normal_text is the empty string.
+            assert_eq!(
+                normal.as_deref(),
+                Some(""),
+                "Empty/whitespace input collapses to empty normal_text"
+            );
+        }
+    }
+
+    /// `PARSER.batch.10` — duplicate calls (same function name twice in one section).
+    /// Universal gap noted in the test taxonomy; first parser to land coverage.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/kimi_k2/PARSER.batch.yaml.
+    #[test] // PARSER.batch.10
+    fn test_parse_duplicate_calls_same_name() {
+        let config = default_config();
+        let input = r#"<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"LA"}<|tool_call_end|><|tool_calls_section_end|>"#;
+        let (calls, _) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 2, "Both duplicate-name calls must be returned");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "Duplicate calls must have distinct ids"
+        );
+        let args0: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: serde_json::Value = serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(args0["location"], "NYC");
+        assert_eq!(args1["location"], "LA");
     }
 }

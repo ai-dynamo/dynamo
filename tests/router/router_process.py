@@ -23,9 +23,10 @@ class FrontendRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         enforce_disagg: bool = False,
-        blocks_threshold: float | None = None,
-        tokens_threshold: float | None = None,
-        tokens_threshold_frac: float | None = None,
+        blocks_threshold: float | str | None = None,
+        tokens_threshold: int | str | None = None,
+        tokens_threshold_frac: float | str | None = None,
+        router_queue_threshold: float | str | None = None,
         request_plane: str = "nats",
         durable_kv_events: bool = False,
         router_mode: str = "kv",
@@ -64,6 +65,9 @@ class FrontendRouterProcess(ManagedProcess):
             command.extend(
                 ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
             )
+
+        if router_queue_threshold is not None:
+            command.extend(["--router-queue-threshold", str(router_queue_threshold)])
 
         if durable_kv_events:
             command.append("--router-durable-kv-events")

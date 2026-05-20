@@ -53,7 +53,7 @@ When using Kubernetes discovery, the KV store backend automatically switches to 
 - `DistributedRuntime`: When a `DistributedRuntime` object is created, it establishes connections based on the discovery backend:
     - **Kubernetes mode**: Uses K8s API for service registration via DynamoWorkerMetadata CRD. No external dependencies required.
     - **KV Store mode**: Connects to etcd for service discovery. Creates a primary lease with a background keep-alive task. All objects registered under this `DistributedRuntime` use this lease_id to maintain their lifecycle.
-    - **NATS** (optional): Used for KV event messaging when using KV-aware routing. Can be disabled via `--no-kv-events` flag, which enables prediction-based routing without event persistence.
+    - **NATS** (optional): Used for KV event messaging when using KV-aware routing. Can be disabled via `--no-router-kv-events`, which enables prediction-based routing without event persistence.
     - **Request Plane**: TCP by default. Can be configured to use HTTP or NATS via `DYN_REQUEST_PLANE` environment variable.
 - `Namespace`: `Namespace`s are primarily a logical grouping mechanism. They provide the root path for all components under this `Namespace`.
 - `Component`: When a `Component` object is created, it registers a service in the internal registry of the `DistributedRuntime`, which tracks all services and endpoints.
@@ -88,5 +88,4 @@ We provide native rust and python (through binding) examples for basic usage of 
 
 - Rust: `/lib/runtime/examples/`
 - Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `components/src/dynamo` for full implementation details.
-
 

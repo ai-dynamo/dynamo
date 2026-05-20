@@ -10,7 +10,20 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+func TestGetContainerGPUsRecognizesMIGResources(t *testing.T) {
+	resources := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceName("nvidia.com/mig-3g.20gb"): resource.MustParse("2"),
+		},
+	}
+
+	if got := getContainerGPUs(resources); got != 2 {
+		t.Fatalf("getContainerGPUs() = %d, want 2", got)
+	}
+}
 
 func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	backend := &VLLMBackend{}
@@ -192,7 +205,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			}
 
 			// Call UpdateContainer
-			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
 
 			if tt.expectNotModified {
 				// Args should not have changed
@@ -290,7 +303,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 				}
 			}
 
-			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
 
 			if !reflect.DeepEqual(tt.initialContainer.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", tt.initialContainer.Args, tt.expectedArgs)
@@ -380,7 +393,7 @@ func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			}
 
 			// Call UpdateContainer
-			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+			backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{})
 
 			if tt.expectCacheEnvVar {
 				// Check that the VLLM_CACHE_ROOT environment variable is set
@@ -654,7 +667,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			}
 
 			// Call updateVLLMMultinodeArgs with annotations
-			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, resources, 2, tt.annotations)
+			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, betaResourceRequirements(t, resources), 2, tt.annotations)
 
 			if tt.expectNotModified {
 				// Args should not have changed
@@ -838,6 +851,49 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			expectInitContainer: false,
 		},
+		{
+			name:          "elastic EP worker command in pod spec: no MP init container injected",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:latest",
+						Command: []string{"python3 -m dynamo.vllm --model test --enable-elastic-ep"},
+					},
+				},
+			},
+			expectInitContainer: false,
+		},
+		{
+			name:          "elastic EP worker command in component: no MP init container injected",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Command: []string{"python3 -m dynamo.vllm --model test --enable-elastic-ep"},
+					},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
+				},
+			},
+			expectInitContainer: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -846,7 +902,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 
 			initialInitCount := len(tt.initialPodSpec.InitContainers)
 			initialVolCount := len(tt.initialPodSpec.Volumes)
-			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
+			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
 
 			if tt.expectInitContainer {
 				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount + 1))
@@ -978,5 +1034,75 @@ func TestShouldUseMpBackend(t *testing.T) {
 				t.Errorf("shouldUseMpBackend() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestVLLMBackend_UpdateContainer_InterPodGMS asserts that when the inter-pod
+// GMS layout is enabled (gpuMemoryService.mode=interPod, with or without
+// failover), the vLLM backend is the one responsible for injecting both the
+// --load-format=gms flag and the DYN_VLLM_GMS_SHADOW_MODE env var. These are
+// vLLM-runtime switches and must live in the backend adapter, not in the
+// backend-agnostic GMS helpers (see gmsEngineEnvVars).
+func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
+	backend := &VLLMBackend{}
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+		Failover: &v1alpha1.FailoverSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+	})
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.vllm"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	// --load-format gms flag must be injected into the container args.
+	joined := ""
+	for _, a := range container.Args {
+		joined += " " + a
+	}
+	if !reflect.DeepEqual(containerHasArg(container, "--load-format", "gms"), true) {
+		t.Errorf("expected --load-format gms to be injected; got args=%q", joined)
+	}
+
+	// DYN_VLLM_GMS_SHADOW_MODE must be set exactly once.
+	count := 0
+	for _, e := range container.Env {
+		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
+			count++
+			if e.Value != "true" {
+				t.Errorf("DYN_VLLM_GMS_SHADOW_MODE value = %q, want %q", e.Value, "true")
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("DYN_VLLM_GMS_SHADOW_MODE env var count = %d, want 1", count)
+	}
+}
+
+// TestVLLMBackend_UpdateContainer_NoInterPodGMS asserts the complementary
+// invariant: when inter-pod GMS failover is NOT enabled, the vLLM backend
+// must not inject the GMS-specific env var (it is meaningless outside the
+// inter-pod layout).
+func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
+	backend := &VLLMBackend{}
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.vllm"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	for _, e := range container.Env {
+		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
+			t.Errorf("DYN_VLLM_GMS_SHADOW_MODE must not be injected when inter-pod GMS is disabled")
+		}
 	}
 }
