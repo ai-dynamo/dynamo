@@ -126,9 +126,9 @@ impl PrefillRouter {
     ///
     /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization).
     ///
-    /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
-    /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
-    /// the prefill route must finish worker recording before the phase can change to Decode.
+    /// If `phase_transition_permit` is provided, it is held until the first prefill stream item
+    /// arrives (i.e. until the SGLang worker has registered its NIXL bootstrap room), then dropped
+    /// to allow subsequent `set_phase(Decode)` calls to proceed.
     ///
     /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
@@ -151,8 +151,14 @@ impl PrefillRouter {
                 )
             })?;
 
-        // Release the phase barrier now that routing completed and worker recording already ran.
-        // Decode may proceed without waiting for prefill output streaming to finish.
+        // Release the phase barrier now that routing has completed.
+        // The prefill engine wrapper (llm_engine.py) ensures the NIXL room is
+        // registered before yielding the bootstrap chunk via asyncio.sleep(0),
+        // so decode cannot connect before the room exists regardless of when
+        // this permit is dropped relative to first_output arriving.
+        // Dropping here (before next().await) avoids holding the barrier while
+        // waiting for the first stream item, which would deadlock mocker-based
+        // tests where the prefill stream blocks until decode connects.
         drop(phase_transition_permit);
 
         let Some(first_output) = prefill_response.next().await else {
@@ -163,7 +169,6 @@ impl PrefillRouter {
         };
 
         // Record when prefill result arrived at the router (for KV transfer latency metric).
-        // This is after drop(phase_transition_permit) and after first_output is received.
         if let Some(ref tracker) = tracker {
             tracker.record_prefill_complete();
         }
@@ -231,8 +236,8 @@ impl PrefillRouter {
     ///
     /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization).
     ///
-    /// The `phase_transition_permit` is passed to the spawned task and released after routing
-    /// completes, allowing the main task's `set_phase(Decode)` to proceed.
+    /// The `phase_transition_permit` is passed to the spawned task and held until the first
+    /// prefill stream item arrives, then released to allow `set_phase(Decode)` to proceed.
     pub(super) fn spawn_prefill_task(
         &self,
         prefill_request: SingleIn<PreprocessedRequest>,
