@@ -314,6 +314,10 @@ where
         self.queue.pending_isl_tokens()
     }
 
+    pub fn supports_overlap_refresh(&self) -> bool {
+        self.queue.supports_overlap_refresh()
+    }
+
     pub fn worker_type(&self) -> &'static str {
         self.worker_type
     }

@@ -5,13 +5,14 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::time::Duration;
-
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
+use super::overlap_refresh::{
+    NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
+    should_refresh_overlap,
+};
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
@@ -24,57 +25,7 @@ use crate::protocols::{
 };
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
-/// Default wait threshold after which a dequeued request gets a fresh overlap-score lookup.
-/// Override with `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS`. A value of `0` disables refresh.
-const DEFAULT_OVERLAP_REFRESH_AFTER_SECS: f64 = 10.0;
-
-fn default_overlap_refresh_after() -> Duration {
-    // DEFAULT_OVERLAP_REFRESH_AFTER_SECS is a small finite literal; try_from_secs_f64
-    // cannot fail here but we still avoid the panicking constructor for consistency.
-    Duration::try_from_secs_f64(DEFAULT_OVERLAP_REFRESH_AFTER_SECS)
-        .unwrap_or(Duration::from_secs(10))
-}
-
-fn read_overlap_refresh_after() -> Option<Duration> {
-    let raw = match std::env::var("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS") {
-        Ok(v) => v,
-        Err(_) => return Some(default_overlap_refresh_after()),
-    };
-    let parsed: f64 = match raw.parse() {
-        Ok(v) => v,
-        Err(_) => {
-            tracing::warn!(
-                value = %raw,
-                "invalid DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS, falling back to default {DEFAULT_OVERLAP_REFRESH_AFTER_SECS}s"
-            );
-            return Some(default_overlap_refresh_after());
-        }
-    };
-    if !parsed.is_finite() {
-        tracing::warn!(
-            value = %raw,
-            "non-finite DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS, disabling overlap refresh"
-        );
-        return None;
-    }
-    if parsed <= 0.0 {
-        // Explicit disable (e.g. `0` or a negative value).
-        return None;
-    }
-    // try_from_secs_f64 also rejects values that don't fit in u64 seconds, so an env value
-    // like 1e100 disables the refresh instead of panicking in Duration::from_secs_f64.
-    match Duration::try_from_secs_f64(parsed) {
-        Ok(d) => Some(d),
-        Err(err) => {
-            tracing::warn!(
-                value = %raw,
-                error = %err,
-                "DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS is out of range; disabling overlap refresh"
-            );
-            None
-        }
-    }
-}
+use std::time::Duration;
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
@@ -293,6 +244,7 @@ impl<
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
     ) {
+        let block_hashes = self.prepare_block_hashes_for_refresh(block_hashes);
         let eligibility = request.eligibility();
 
         if let Err(error) = eligibility.validate_pinned_worker_allowed() {
@@ -372,7 +324,7 @@ impl<
         }
 
         loop {
-            let admission = self.admission_gate.lock().await;
+            let _admission = self.admission_gate.lock().await;
             let decay_now = Instant::now();
             let mut heap = self.pending.lock().await;
             let Some(front) = heap.peek() else {
@@ -385,132 +337,73 @@ impl<
             if self.all_workers_prefill_busy(threshold, front.request.eligibility(), decay_now) {
                 break;
             }
+            let front_hashes = front.block_hashes.as_deref();
+            let enqueue_at = front.enqueue_at;
+            let request_id = front
+                .request
+                .maybe_request_id
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_string();
+            let refreshed = if should_refresh_overlap(
+                self.overlap_scores_refresh.is_some(),
+                self.overlap_refresh_after,
+                front_hashes,
+                enqueue_at,
+                decay_now,
+            ) {
+                let refresh_inputs = front_hashes.map(|hashes| hashes.to_vec());
+                drop(heap);
+                let refreshed = refresh_overlap(
+                    self.overlap_scores_refresh.as_deref(),
+                    self.overlap_refresh_after,
+                    refresh_inputs.as_deref(),
+                    enqueue_at,
+                    decay_now,
+                )
+                .await;
+                let wait_ms = enqueue_at.elapsed().as_millis() as u64;
+                if refreshed.is_some() {
+                    tracing::info!(
+                        request_id,
+                        wait_ms,
+                        "refreshed overlap scores after long queue wait"
+                    );
+                } else {
+                    tracing::debug!(
+                        request_id,
+                        wait_ms,
+                        "overlap refresh returned None; dispatching with stale scores"
+                    );
+                }
+                heap = self.pending.lock().await;
+                refreshed
+            } else {
+                None
+            };
+
             let entry = heap.pop().expect("heap front vanished before pop");
             drop(heap);
             self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
             self.pending_isl_tokens
                 .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             let mut request = entry.request;
-            let block_hashes = entry.block_hashes;
-            let enqueue_at = entry.enqueue_at;
-
-            if self.should_refresh_overlap(block_hashes.as_deref(), enqueue_at, decay_now) {
-                // The indexer lookup may take milliseconds; release the admission gate so
-                // concurrent `enqueue` calls aren't stalled behind this request's refresh.
-                drop(admission);
-                self.maybe_refresh_overlap(
-                    &mut request,
-                    block_hashes.as_deref(),
-                    enqueue_at,
-                    decay_now,
-                )
-                .await;
-                // Reacquire the gate before admit_one so worker-state mutations stay serialized.
-                // Use a fresh decay_now and recheck capacity for visibility — we already
-                // committed to admitting this entry, but a concurrent enqueue may have filled
-                // the slot while we awaited the refresh.
-                let _admission = self.admission_gate.lock().await;
-                let admit_now = Instant::now();
-                if self.all_workers_prefill_busy(threshold, request.eligibility(), admit_now) {
-                    tracing::debug!(
-                        "all workers prefill-busy after overlap refresh; admitting refreshed request anyway"
-                    );
-                }
-                tracing::debug!("scheduling refreshed request from pending queue");
-                self.admit_one(request, admit_now).await;
-            } else {
-                tracing::debug!("scheduling request from pending queue");
-                self.admit_one(request, decay_now).await;
+            if let Some(refreshed) = refreshed {
+                request.tier_overlap_blocks = refreshed.tier_overlap_blocks;
+                request.effective_overlap_blocks = refreshed.effective_overlap_blocks;
+                request.effective_cached_tokens = refreshed.effective_cached_tokens;
             }
+            tracing::debug!("scheduling request from pending queue");
+            self.admit_one(request, Instant::now()).await;
         }
     }
 
-    /// Cheap predicate that mirrors the conditions inside [`Self::maybe_refresh_overlap`].
-    /// Used by [`Self::update`] to decide whether to drop the admission gate around the
-    /// (potentially slow) indexer lookup.
-    fn should_refresh_overlap(
+    fn prepare_block_hashes_for_refresh(
         &self,
-        block_hashes: Option<&[LocalBlockHash]>,
-        enqueue_at: Instant,
-        decay_now: Instant,
-    ) -> bool {
-        let Some(refresh_after) = self.overlap_refresh_after else {
-            return false;
-        };
-        if self.overlap_scores_refresh.is_none() {
-            return false;
-        }
-        let Some(block_hashes) = block_hashes else {
-            return false;
-        };
-        if block_hashes.is_empty() {
-            return false;
-        }
-        decay_now.saturating_duration_since(enqueue_at) >= refresh_after
-    }
-
-    /// If the queue is configured for overlap-score refresh and the dequeued request waited
-    /// long enough, re-query the indexer and overwrite the request's overlap fields.
-    /// Refresh failures are non-fatal: the request still dispatches, just with stale scores.
-    ///
-    /// Self-contained: re-checks every precondition (refresher present, threshold met,
-    /// non-empty block hashes) so callers can invoke it unconditionally. `should_refresh_overlap`
-    /// is a cheap mirror of these checks used by `update()` to avoid a pointless gate cycle.
-    ///
-    /// Note: `request.shared_cache_hits` is intentionally **not** refreshed. Shared-cache hits
-    /// are computed by a separate `shared_cache.check_blocks(tokens, ...)` query that needs the
-    /// original tokens, not just block hashes; re-running it would double the per-request
-    /// router latency. Refreshing only the indexer-derived fields is correct as long as
-    /// shared-cache state doesn't change as rapidly as the radix tree (the common case).
-    async fn maybe_refresh_overlap(
-        &self,
-        request: &mut SchedulingRequest,
-        block_hashes: Option<&[LocalBlockHash]>,
-        enqueue_at: Instant,
-        decay_now: Instant,
-    ) {
-        let Some(refresh_after) = self.overlap_refresh_after else {
-            return;
-        };
-        let Some(refresher) = &self.overlap_scores_refresh else {
-            return;
-        };
-        let Some(block_hashes) = block_hashes else {
-            return;
-        };
-        // Defensive: an empty slice would overwrite valid overlap data with empty maps.
-        // `should_refresh_overlap` already filters this out for update(), but external callers
-        // (and the unit tests) reach this entry point directly.
-        if block_hashes.is_empty() {
-            return;
-        }
-        let wait = decay_now.saturating_duration_since(enqueue_at);
-        if wait < refresh_after {
-            return;
-        }
-
-        let Some(refreshed) = refresher.refresh(block_hashes).await else {
-            // wait_ms here reflects total time from enqueue to now (after the refresh await),
-            // so the log captures admission-gate wait + refresh duration.
-            let wait_ms = enqueue_at.elapsed().as_millis() as u64;
-            tracing::debug!(
-                request_id = request.maybe_request_id.as_deref().unwrap_or("unknown"),
-                wait_ms = wait_ms,
-                "overlap refresh returned None; dispatching with stale scores"
-            );
-            return;
-        };
-
-        let wait_ms = enqueue_at.elapsed().as_millis() as u64;
-        tracing::info!(
-            request_id = request.maybe_request_id.as_deref().unwrap_or("unknown"),
-            wait_ms = wait_ms,
-            "refreshed overlap scores after long queue wait"
-        );
-        request.tier_overlap_blocks = refreshed.tier_overlap_blocks;
-        request.effective_overlap_blocks = refreshed.effective_overlap_blocks;
-        request.effective_cached_tokens = refreshed.effective_cached_tokens;
-        // shared_cache_hits intentionally left alone — see function-level doc.
+        block_hashes: Option<Vec<LocalBlockHash>>,
+    ) -> Option<Vec<LocalBlockHash>> {
+        self.overlap_scores_refresh.as_ref()?;
+        block_hashes.filter(|hashes| !hashes.is_empty())
     }
 
     /// Run the full scheduling pipeline for a single request:
@@ -626,6 +519,12 @@ impl<
     /// Sum of `isl_tokens` for requests currently parked in the pending queue (lock-free).
     pub fn pending_isl_tokens(&self) -> usize {
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
+    }
+
+    pub fn supports_overlap_refresh(&self) -> bool {
+        self.threshold_frac.is_some()
+            && self.overlap_scores_refresh.is_some()
+            && self.overlap_refresh_after.is_some()
     }
 
     /// Check if all eligible workers are prefill-busy based on threshold.
@@ -1620,40 +1519,40 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn maybe_refresh_overwrites_overlap_fields_after_threshold() {
-        let mut tier = crate::scheduling::types::TierOverlapBlocks::default();
-        tier.device.insert(WorkerWithDpRank::new(0, 0), 7);
         let refresher = Arc::new(CountingRefresher {
             calls: std::sync::atomic::AtomicUsize::new(0),
             response: super::super::overlap_refresh::RefreshedOverlap {
-                tier_overlap_blocks: tier.clone(),
+                tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks: HashMap::from([(WorkerWithDpRank::new(0, 0), 7.0)]),
                 effective_cached_tokens: HashMap::from([(WorkerWithDpRank::new(0, 0), 112)]),
             },
         });
-        let queue = refresh_test_queue(Some(refresher.clone()), Some(Duration::from_millis(10)));
-
-        let (mut request, _rx) = make_request("req", 256);
         let hashes = [LocalBlockHash(42)];
         let enqueue_at = Instant::now();
         let decay_now = enqueue_at + Duration::from_millis(20);
-        queue
-            .maybe_refresh_overlap(&mut request, Some(&hashes), enqueue_at, decay_now)
-            .await;
+        let refreshed = super::super::overlap_refresh::refresh_overlap(
+            Some(refresher.as_ref()),
+            Some(Duration::from_millis(10)),
+            Some(&hashes),
+            enqueue_at,
+            decay_now,
+        )
+        .await
+        .expect("refresh should succeed");
 
         assert_eq!(
             refresher.calls.load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-        assert_eq!(request.tier_overlap_blocks.device.len(), 1);
         assert_eq!(
-            *request
+            *refreshed
                 .effective_overlap_blocks
                 .get(&WorkerWithDpRank::new(0, 0))
                 .unwrap(),
             7.0
         );
         assert_eq!(
-            *request
+            *refreshed
                 .effective_cached_tokens
                 .get(&WorkerWithDpRank::new(0, 0))
                 .unwrap(),
@@ -1667,21 +1566,25 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
             response: super::super::overlap_refresh::RefreshedOverlap::default(),
         });
-        let queue = refresh_test_queue(Some(refresher.clone()), Some(Duration::from_secs(10)));
-
-        let (mut request, _rx) = make_request("req", 256);
-        let original_overlap = request.effective_overlap_blocks.clone();
+        let hashes = [LocalBlockHash(42)];
         let enqueue_at = Instant::now();
         let decay_now = enqueue_at + Duration::from_millis(5);
-        queue
-            .maybe_refresh_overlap(&mut request, Some(&[]), enqueue_at, decay_now)
-            .await;
+        assert!(
+            super::super::overlap_refresh::refresh_overlap(
+                Some(refresher.as_ref()),
+                Some(Duration::from_secs(10)),
+                Some(&hashes),
+                enqueue_at,
+                decay_now,
+            )
+            .await
+            .is_none()
+        );
 
         assert_eq!(
             refresher.calls.load(std::sync::atomic::Ordering::Relaxed),
             0
         );
-        assert_eq!(request.effective_overlap_blocks, original_overlap);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1690,14 +1593,19 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
             response: super::super::overlap_refresh::RefreshedOverlap::default(),
         });
-        let queue = refresh_test_queue(Some(refresher.clone()), Some(Duration::from_millis(10)));
-
-        let (mut request, _rx) = make_request("req", 256);
         let enqueue_at = Instant::now();
         let decay_now = enqueue_at + Duration::from_millis(20);
-        queue
-            .maybe_refresh_overlap(&mut request, None, enqueue_at, decay_now)
-            .await;
+        assert!(
+            super::super::overlap_refresh::refresh_overlap(
+                Some(refresher.as_ref()),
+                Some(Duration::from_millis(10)),
+                None,
+                enqueue_at,
+                decay_now,
+            )
+            .await
+            .is_none()
+        );
 
         assert_eq!(
             refresher.calls.load(std::sync::atomic::Ordering::Relaxed),
@@ -1707,18 +1615,22 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn maybe_refresh_is_noop_without_refresher() {
-        let queue = refresh_test_queue::<super::super::overlap_refresh::NoopOverlapScoresRefresh>(
-            None,
-            Some(Duration::from_millis(10)),
-        );
-        let (mut request, _rx) = make_request("req", 256);
-        let original_overlap = request.effective_overlap_blocks.clone();
+        let hashes = [LocalBlockHash(42)];
         let enqueue_at = Instant::now();
         let decay_now = enqueue_at + Duration::from_millis(20);
-        queue
-            .maybe_refresh_overlap(&mut request, Some(&[]), enqueue_at, decay_now)
-            .await;
-        assert_eq!(request.effective_overlap_blocks, original_overlap);
+        assert!(
+            super::super::overlap_refresh::refresh_overlap::<
+                super::super::overlap_refresh::NoopOverlapScoresRefresh,
+            >(
+                None,
+                Some(Duration::from_millis(10)),
+                Some(&hashes),
+                enqueue_at,
+                decay_now,
+            )
+            .await
+            .is_none()
+        );
     }
 
     struct FailingRefresher;
@@ -1734,21 +1646,20 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn maybe_refresh_returns_none_keeps_original_scores() {
-        let queue = refresh_test_queue(
-            Some(Arc::new(FailingRefresher)),
-            Some(Duration::from_millis(10)),
-        );
-        let (mut request, _rx) = make_request("req", 256);
-        let original_overlap = request.effective_overlap_blocks.clone();
-        let original_tier = request.tier_overlap_blocks.clone();
         let hashes = [LocalBlockHash(42)];
         let enqueue_at = Instant::now();
         let decay_now = enqueue_at + Duration::from_millis(20);
-        queue
-            .maybe_refresh_overlap(&mut request, Some(&hashes), enqueue_at, decay_now)
-            .await;
-        assert_eq!(request.effective_overlap_blocks, original_overlap);
-        assert_eq!(request.tier_overlap_blocks.device, original_tier.device);
+        assert!(
+            super::super::overlap_refresh::refresh_overlap(
+                Some(&FailingRefresher),
+                Some(Duration::from_millis(10)),
+                Some(&hashes),
+                enqueue_at,
+                decay_now,
+            )
+            .await
+            .is_none()
+        );
     }
 
     /// End-to-end coverage of the production refresh path: enqueue with `block_hashes`,
@@ -1757,7 +1668,7 @@ mod tests {
     /// that actually matters in production (admission gate drop+reacquire, capacity
     /// recheck, fresh `Instant` for admit_one); the other refresh tests exercise the
     /// inner function in isolation.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn update_drains_via_full_refresh_path() {
         use std::sync::atomic::Ordering as AtomicOrd;
 
@@ -1824,8 +1735,9 @@ mod tests {
             "refresh must not fire at enqueue time"
         );
 
-        // Cross the refresh threshold while req-2 is parked.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Advancing time alone does nothing; refresh is lazy and only happens when update()
+        // examines the front entry.
+        tokio::time::advance(Duration::from_millis(50)).await;
 
         // Free req-1 so the worker is no longer busy, then drive update().
         slots.free(&"req-1".to_string(), decay_now()).unwrap();
@@ -1845,24 +1757,27 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn maybe_refresh_skips_when_block_hashes_empty() {
-        // Defensive guard: an empty slice would overwrite valid overlap data with empty maps.
         let refresher = Arc::new(CountingRefresher {
             calls: std::sync::atomic::AtomicUsize::new(0),
             response: super::super::overlap_refresh::RefreshedOverlap::default(),
         });
-        let queue = refresh_test_queue(Some(refresher.clone()), Some(Duration::from_millis(10)));
-        let (mut request, _rx) = make_request("req", 256);
-        let original_overlap = request.effective_overlap_blocks.clone();
         let enqueue_at = Instant::now();
         let decay_now = enqueue_at + Duration::from_millis(20);
-        queue
-            .maybe_refresh_overlap(&mut request, Some(&[]), enqueue_at, decay_now)
-            .await;
+        assert!(
+            super::super::overlap_refresh::refresh_overlap(
+                Some(refresher.as_ref()),
+                Some(Duration::from_millis(10)),
+                Some(&[]),
+                enqueue_at,
+                decay_now,
+            )
+            .await
+            .is_none()
+        );
         assert_eq!(
             refresher.calls.load(std::sync::atomic::Ordering::Relaxed),
             0,
             "refresher must not be called for empty block_hashes"
         );
-        assert_eq!(request.effective_overlap_blocks, original_overlap);
     }
 }

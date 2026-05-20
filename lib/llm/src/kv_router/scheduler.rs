@@ -292,4 +292,8 @@ where
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.inner.get_active_lora_counts()
     }
+
+    pub fn supports_overlap_refresh(&self) -> bool {
+        self.inner.supports_overlap_refresh()
+    }
 }

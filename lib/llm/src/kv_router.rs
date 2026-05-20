@@ -657,9 +657,12 @@ where
         });
         let seq_hash_elapsed = start.elapsed();
 
-        // Retain a copy of the block hashes so the scheduler queue can re-query the
-        // indexer for fresh overlap scores at dequeue time on long waits.
-        let block_hashes_for_refresh = block_hashes.clone();
+        // Only retain a copy of the block hashes when this scheduler can actually use
+        // them for dequeue-time overlap refresh.
+        let block_hashes_for_refresh = self
+            .scheduler
+            .supports_overlap_refresh()
+            .then(|| block_hashes.clone());
 
         // Query indexer (tiered) and shared cache in parallel when shared cache is configured.
         // Time each independently so metrics can separate indexer vs shared cache latency.
@@ -725,7 +728,7 @@ where
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
-                Some(block_hashes_for_refresh),
+                block_hashes_for_refresh,
                 tier_overlap_blocks,
                 cache_hit_estimates.effective_overlap_blocks,
                 cache_hit_estimates.cached_tokens,
