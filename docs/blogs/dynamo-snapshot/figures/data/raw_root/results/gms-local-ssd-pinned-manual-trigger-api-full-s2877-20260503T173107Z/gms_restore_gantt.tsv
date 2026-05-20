@@ -1,0 +1,127 @@
+model_key	model_id	run_dir	lane	phase	start_ts	end_ts	start_s	duration_s	source	detail
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	snapshot-agent	criu_restore	2026-05-03T17:32:56.774Z	2026-05-03T17:32:58.861Z	0.145	2.087	snapshot-agent nsrestore timing summary	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	snapshot-agent	cuda_restore	2026-05-03T17:32:58.861Z	2026-05-03T17:32:59.465Z	2.231	0.604	snapshot-agent nsrestore timing summary	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/gms-server	k8s_pod_to_gms_server	2026-05-03T17:32:52.000Z	2026-05-03T17:32:53.000Z	-4.630	1.000	restore pod yaml	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/gms-loader	gms_loader_pod_to_container	2026-05-03T17:32:52.000Z	2026-05-03T17:32:54.000Z	-4.630	2.000	restore pod yaml	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-03T17:32:55.974Z	2026-05-03T17:32:56.739Z	-0.656	0.765	benchmark harness	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/gms-loader	gms_load_wait_for_rw	2026-05-03T17:32:56.651Z	2026-05-03T17:32:56.942Z	0.021	0.291	gms-loader log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-03T17:32:56.942Z	2026-05-03T17:32:56.993Z	0.312	0.051	gms-loader log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-03T17:32:56.993Z	2026-05-03T17:32:57.239Z	0.363	0.246	gms-loader log	59 allocations
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/gms-loader	gms_load_metadata_commit	2026-05-03T17:32:57.239Z	2026-05-03T17:32:57.253Z	0.609	0.014	gms-loader log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/gms-loader	gms_load_sentinel	2026-05-03T17:32:57.256Z	2026-05-03T17:32:57.261Z	0.626	0.005	gms-loader log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/main	main_pod_to_container	2026-05-03T17:32:52.000Z	2026-05-03T17:32:54.000Z	-4.630	2.000	restore pod yaml	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	snapshot-agent	restore_agent_to_nsrestore	2026-05-03T17:32:56.630Z	2026-05-03T17:32:56.763Z	0.000	0.134	snapshot-agent	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/main	main_gms_remap	2026-05-03T17:32:59.524Z	2026-05-03T17:32:59.563Z	2.894	0.039	worker main log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/main	registration_to_generate_endpoint	2026-05-03T17:32:59.578Z	2026-05-03T17:33:00.201Z	2.948	0.623	worker main log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-03T17:33:00.201Z	2026-05-03T17:33:01.298Z	3.571	1.097	worker main log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-03T17:33:00.000Z	2026-05-03T17:33:01.298Z	3.370	1.298	pod yaml + worker main log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	frontend/main	frontend_discovers_worker	2026-05-03T17:33:01.298Z	2026-05-03T17:33:01.298Z	4.668	0.000	worker/frontend logs	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-local-ssd-pinned-manu-0503173108	frontend/main	first_inference	2026-05-03T17:33:10.759Z	2026-05-03T17:33:11.364Z	14.129	0.605	frontend log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	snapshot-agent	criu_restore	2026-05-03T17:36:11.835Z	2026-05-03T17:36:14.035Z	0.148	2.200	snapshot-agent nsrestore timing summary	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	snapshot-agent	cuda_restore	2026-05-03T17:36:14.035Z	2026-05-03T17:36:14.604Z	2.349	0.569	snapshot-agent nsrestore timing summary	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/gms-server	k8s_pod_to_gms_server	2026-05-03T17:36:08.000Z	2026-05-03T17:36:09.000Z	-3.687	1.000	restore pod yaml	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/gms-loader	gms_loader_pod_to_container	2026-05-03T17:36:08.000Z	2026-05-03T17:36:09.000Z	-3.687	1.000	restore pod yaml	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-03T17:36:11.148Z	2026-05-03T17:36:11.786Z	-0.539	0.638	benchmark harness	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/gms-loader	gms_load_wait_for_rw	2026-05-03T17:36:11.714Z	2026-05-03T17:36:12.013Z	0.027	0.299	gms-loader log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-03T17:36:12.013Z	2026-05-03T17:36:12.106Z	0.326	0.093	gms-loader log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-03T17:36:12.106Z	2026-05-03T17:36:12.762Z	0.419	0.656	gms-loader log	151 allocations
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/gms-loader	gms_load_metadata_commit	2026-05-03T17:36:12.762Z	2026-05-03T17:36:12.784Z	1.075	0.022	gms-loader log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/gms-loader	gms_load_sentinel	2026-05-03T17:36:12.789Z	2026-05-03T17:36:12.793Z	1.102	0.004	gms-loader log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/main	main_pod_to_container	2026-05-03T17:36:08.000Z	2026-05-03T17:36:09.000Z	-3.687	1.000	restore pod yaml	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	snapshot-agent	restore_agent_to_nsrestore	2026-05-03T17:36:11.687Z	2026-05-03T17:36:11.823Z	0.000	0.137	snapshot-agent	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/main	main_gms_remap	2026-05-03T17:36:14.669Z	2026-05-03T17:36:14.757Z	2.982	0.088	worker main log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/main	registration_to_generate_endpoint	2026-05-03T17:36:14.773Z	2026-05-03T17:36:16.946Z	3.086	2.173	worker main log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-03T17:36:16.946Z	2026-05-03T17:36:18.358Z	5.259	1.412	worker main log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-03T17:36:17.000Z	2026-05-03T17:36:18.358Z	5.313	1.358	pod yaml + worker main log	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	frontend/main	frontend_discovers_worker	2026-05-03T17:36:18.358Z	2026-05-03T17:36:18.358Z	6.671	0.000	worker/frontend logs	
+qwen3-8b	Qwen/Qwen3-8B	gms-local-ssd-pinned-manu-0503173412	frontend/main	first_inference	2026-05-03T17:36:25.509Z	2026-05-03T17:36:26.176Z	13.822	0.667	frontend log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	snapshot-agent	criu_restore	2026-05-03T17:39:28.619Z	2026-05-03T17:39:30.911Z	0.149	2.292	snapshot-agent nsrestore timing summary	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	snapshot-agent	cuda_restore	2026-05-03T17:39:30.911Z	2026-05-03T17:39:31.489Z	2.441	0.578	snapshot-agent nsrestore timing summary	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/gms-server	k8s_pod_to_gms_server	2026-05-03T17:39:24.000Z	2026-05-03T17:39:25.000Z	-4.471	1.000	restore pod yaml	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/gms-loader	gms_loader_pod_to_container	2026-05-03T17:39:24.000Z	2026-05-03T17:39:26.000Z	-4.471	2.000	restore pod yaml	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-03T17:39:27.815Z	2026-05-03T17:39:28.578Z	-0.656	0.763	benchmark harness	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/gms-loader	gms_load_wait_for_rw	2026-05-03T17:39:28.502Z	2026-05-03T17:39:28.796Z	0.031	0.294	gms-loader log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-03T17:39:28.796Z	2026-05-03T17:39:28.895Z	0.325	0.099	gms-loader log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-03T17:39:28.895Z	2026-05-03T17:39:29.902Z	0.424	1.007	gms-loader log	167 allocations
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/gms-loader	gms_load_metadata_commit	2026-05-03T17:39:29.902Z	2026-05-03T17:39:29.926Z	1.431	0.024	gms-loader log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/gms-loader	gms_load_sentinel	2026-05-03T17:39:29.930Z	2026-05-03T17:39:29.935Z	1.459	0.005	gms-loader log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/main	main_pod_to_container	2026-05-03T17:39:24.000Z	2026-05-03T17:39:26.000Z	-4.471	2.000	restore pod yaml	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	snapshot-agent	restore_agent_to_nsrestore	2026-05-03T17:39:28.471Z	2026-05-03T17:39:28.607Z	0.000	0.137	snapshot-agent	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/main	main_gms_remap	2026-05-03T17:39:31.556Z	2026-05-03T17:39:31.593Z	3.085	0.037	worker main log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/main	registration_to_generate_endpoint	2026-05-03T17:39:31.609Z	2026-05-03T17:39:32.107Z	3.138	0.498	worker main log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-03T17:39:32.107Z	2026-05-03T17:39:33.259Z	3.636	1.152	worker main log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-03T17:39:32.000Z	2026-05-03T17:39:33.259Z	3.529	1.259	pod yaml + worker main log	
+qwen3-14b	Qwen/Qwen3-14B	gms-local-ssd-pinned-manu-0503173729	frontend/main	first_inference	2026-05-03T17:39:52.391Z	2026-05-03T17:39:53.168Z	23.920	0.777	frontend log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	snapshot-agent	criu_restore	2026-05-03T17:43:17.438Z	2026-05-03T17:43:19.889Z	0.150	2.450	snapshot-agent nsrestore timing summary	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	snapshot-agent	cuda_restore	2026-05-03T17:43:19.889Z	2026-05-03T17:43:20.604Z	2.600	0.716	snapshot-agent nsrestore timing summary	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/gms-server	k8s_pod_to_gms_server	2026-05-03T17:43:13.000Z	2026-05-03T17:43:14.000Z	-4.289	1.000	restore pod yaml	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/gms-loader	gms_loader_pod_to_container	2026-05-03T17:43:13.000Z	2026-05-03T17:43:15.000Z	-4.289	2.000	restore pod yaml	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-03T17:43:16.621Z	2026-05-03T17:43:17.415Z	-0.668	0.794	benchmark harness	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/gms-loader	gms_load_wait_for_rw	2026-05-03T17:43:17.292Z	2026-05-03T17:43:17.590Z	0.003	0.298	gms-loader log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-03T17:43:17.590Z	2026-05-03T17:43:17.738Z	0.301	0.148	gms-loader log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-03T17:43:17.738Z	2026-05-03T17:43:19.452Z	0.449	1.714	gms-loader log	263 allocations
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/gms-loader	gms_load_metadata_commit	2026-05-03T17:43:19.452Z	2026-05-03T17:43:19.491Z	2.163	0.039	gms-loader log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/gms-loader	gms_load_sentinel	2026-05-03T17:43:19.495Z	2026-05-03T17:43:19.500Z	2.206	0.005	gms-loader log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/main	main_pod_to_container	2026-05-03T17:43:13.000Z	2026-05-03T17:43:14.000Z	-4.289	1.000	restore pod yaml	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	snapshot-agent	restore_agent_to_nsrestore	2026-05-03T17:43:17.289Z	2026-05-03T17:43:17.426Z	0.000	0.138	snapshot-agent	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/main	main_gms_remap	2026-05-03T17:43:20.712Z	2026-05-03T17:43:20.769Z	3.423	0.057	worker main log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/main	registration_to_generate_endpoint	2026-05-03T17:43:20.785Z	2026-05-03T17:43:21.203Z	3.496	0.418	worker main log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-03T17:43:21.203Z	2026-05-03T17:43:22.693Z	3.914	1.490	worker main log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-03T17:43:22.000Z	2026-05-03T17:43:22.693Z	4.711	0.693	pod yaml + worker main log	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	frontend/main	frontend_discovers_worker	2026-05-03T17:43:22.693Z	2026-05-03T17:43:22.693Z	5.404	0.000	worker/frontend logs	
+qwen3-32b	Qwen/Qwen3-32B	gms-local-ssd-pinned-manu-0503174057	frontend/main	first_inference	2026-05-03T17:43:42.577Z	2026-05-03T17:43:43.637Z	25.288	1.060	frontend log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	snapshot-agent	criu_restore	2026-05-03T17:56:13.111Z	2026-05-03T17:56:15.814Z	0.147	2.704	snapshot-agent nsrestore timing summary	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	snapshot-agent	cuda_restore	2026-05-03T17:56:15.814Z	2026-05-03T17:56:16.716Z	2.851	0.902	snapshot-agent nsrestore timing summary	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/gms-server	k8s_pod_to_gms_server	2026-05-03T17:56:08.000Z	2026-05-03T17:56:10.000Z	-4.964	2.000	restore pod yaml	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/gms-loader	gms_loader_pod_to_container	2026-05-03T17:56:08.000Z	2026-05-03T17:56:11.000Z	-4.964	3.000	restore pod yaml	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-03T17:56:12.417Z	2026-05-03T17:56:13.064Z	-0.547	0.647	benchmark harness	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/gms-loader	gms_load_wait_for_rw	2026-05-03T17:56:12.986Z	2026-05-03T17:56:13.284Z	0.022	0.298	gms-loader log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-03T17:56:13.284Z	2026-05-03T17:56:13.473Z	0.320	0.189	gms-loader log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-03T17:56:13.473Z	2026-05-03T17:56:18.287Z	0.509	4.814	gms-loader log	328 allocations
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/gms-loader	gms_load_metadata_commit	2026-05-03T17:56:18.287Z	2026-05-03T17:56:18.338Z	5.323	0.051	gms-loader log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/gms-loader	gms_load_sentinel	2026-05-03T17:56:18.344Z	2026-05-03T17:56:18.349Z	5.380	0.005	gms-loader log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/main	main_pod_to_container	2026-05-03T17:56:08.000Z	2026-05-03T17:56:11.000Z	-4.964	3.000	restore pod yaml	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	snapshot-agent	restore_agent_to_nsrestore	2026-05-03T17:56:12.964Z	2026-05-03T17:56:13.099Z	0.000	0.136	snapshot-agent	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	snapshot-agent	agent_wait_after_nsrestore_for_gms	2026-05-03T17:56:16.719Z	2026-05-03T17:56:18.349Z	3.755	1.630	snapshot-agent + gms-loader	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/main	main_gms_remap	2026-05-03T17:56:18.520Z	2026-05-03T17:56:18.574Z	5.556	0.054	worker main log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/main	registration_to_generate_endpoint	2026-05-03T17:56:18.589Z	2026-05-03T17:56:19.096Z	5.625	0.507	worker main log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-03T17:56:19.096Z	2026-05-03T17:56:20.045Z	6.132	0.949	worker main log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-03T17:56:19.000Z	2026-05-03T17:56:20.045Z	6.036	1.045	pod yaml + worker main log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	frontend/main	frontend_discovers_worker	2026-05-03T17:56:20.045Z	2026-05-03T17:56:20.045Z	7.081	0.000	worker/frontend logs	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-local-ssd-pinned-manu-0503175308	frontend/main	first_inference	2026-05-03T17:56:27.263Z	2026-05-03T17:56:28.644Z	14.299	1.381	frontend log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	snapshot-agent	criu_restore	2026-05-03T17:47:24.933Z	2026-05-03T17:47:27.986Z	0.150	3.052	snapshot-agent nsrestore timing summary	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	snapshot-agent	cuda_restore	2026-05-03T17:47:27.986Z	2026-05-03T17:47:28.695Z	3.202	0.709	snapshot-agent nsrestore timing summary	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/gms-server	k8s_pod_to_gms_server	2026-05-03T17:47:21.000Z	2026-05-03T17:47:22.000Z	-3.784	1.000	restore pod yaml	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/gms-loader	gms_loader_pod_to_container	2026-05-03T17:47:21.000Z	2026-05-03T17:47:22.000Z	-3.784	1.000	restore pod yaml	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-03T17:47:24.127Z	2026-05-03T17:47:24.889Z	-0.657	0.762	benchmark harness	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/gms-loader	gms_load_wait_for_rw	2026-05-03T17:47:24.795Z	2026-05-03T17:47:25.103Z	0.011	0.308	gms-loader log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-03T17:47:25.103Z	2026-05-03T17:47:25.281Z	0.319	0.178	gms-loader log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-03T17:47:25.281Z	2026-05-03T17:47:27.509Z	0.497	2.228	gms-loader log	328 allocations
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/gms-loader	gms_load_metadata_commit	2026-05-03T17:47:27.509Z	2026-05-03T17:47:27.551Z	2.725	0.042	gms-loader log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/gms-loader	gms_load_sentinel	2026-05-03T17:47:27.555Z	2026-05-03T17:47:27.560Z	2.771	0.005	gms-loader log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/main	main_pod_to_container	2026-05-03T17:47:21.000Z	2026-05-03T17:47:22.000Z	-3.784	1.000	restore pod yaml	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	snapshot-agent	restore_agent_to_nsrestore	2026-05-03T17:47:24.784Z	2026-05-03T17:47:24.920Z	0.000	0.137	snapshot-agent	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/main	main_gms_remap	2026-05-03T17:47:28.825Z	2026-05-03T17:47:28.851Z	4.041	0.026	worker main log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/main	registration_to_generate_endpoint	2026-05-03T17:47:28.867Z	2026-05-03T17:47:29.353Z	4.083	0.486	worker main log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-03T17:47:29.353Z	2026-05-03T17:47:30.436Z	4.569	1.083	worker main log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-03T17:47:29.000Z	2026-05-03T17:47:30.436Z	4.216	1.436	pod yaml + worker main log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	frontend/main	frontend_discovers_worker	2026-05-03T17:47:30.436Z	2026-05-03T17:47:30.451Z	5.652	0.015	worker/frontend logs	
+gpt-oss-120b	openai/gpt-oss-120b	gms-local-ssd-pinned-manu-0503174453	frontend/main	first_inference	2026-05-03T17:47:39.235Z	2026-05-03T17:47:40.459Z	14.451	1.224	frontend log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	snapshot-agent	criu_restore	2026-05-03T17:51:33.654Z	2026-05-03T17:51:36.390Z	0.151	2.736	snapshot-agent nsrestore timing summary	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	snapshot-agent	cuda_restore	2026-05-03T17:51:36.390Z	2026-05-03T17:51:37.117Z	2.886	0.727	snapshot-agent nsrestore timing summary	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/gms-server	k8s_pod_to_gms_server	2026-05-03T17:51:30.000Z	2026-05-03T17:51:31.000Z	-3.504	1.000	restore pod yaml	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/gms-loader	gms_loader_pod_to_container	2026-05-03T17:51:30.000Z	2026-05-03T17:51:31.000Z	-3.504	1.000	restore pod yaml	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-03T17:51:32.836Z	2026-05-03T17:51:33.610Z	-0.668	0.774	benchmark harness	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/gms-loader	gms_load_wait_for_rw	2026-05-03T17:51:33.511Z	2026-05-03T17:51:33.816Z	0.007	0.305	gms-loader log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-03T17:51:33.816Z	2026-05-03T17:51:33.990Z	0.312	0.174	gms-loader log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-03T17:51:33.990Z	2026-05-03T17:51:35.929Z	0.486	1.939	gms-loader log	340 allocations
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/gms-loader	gms_load_metadata_commit	2026-05-03T17:51:35.929Z	2026-05-03T17:51:35.987Z	2.425	0.058	gms-loader log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/gms-loader	gms_load_sentinel	2026-05-03T17:51:35.992Z	2026-05-03T17:51:35.997Z	2.488	0.005	gms-loader log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/main	main_pod_to_container	2026-05-03T17:51:30.000Z	2026-05-03T17:51:31.000Z	-3.504	1.000	restore pod yaml	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	snapshot-agent	restore_agent_to_nsrestore	2026-05-03T17:51:33.504Z	2026-05-03T17:51:33.642Z	0.000	0.139	snapshot-agent	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/main	main_gms_remap	2026-05-03T17:51:37.244Z	2026-05-03T17:51:37.312Z	3.740	0.068	worker main log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/main	registration_to_generate_endpoint	2026-05-03T17:51:37.329Z	2026-05-03T17:51:37.799Z	3.825	0.470	worker main log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-03T17:51:37.799Z	2026-05-03T17:51:39.072Z	4.295	1.273	worker main log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-03T17:51:38.000Z	2026-05-03T17:51:39.072Z	4.496	1.072	pod yaml + worker main log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	frontend/main	frontend_discovers_worker	2026-05-03T17:51:39.072Z	2026-05-03T17:51:39.072Z	5.568	0.000	worker/frontend logs	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-local-ssd-pinned-manu-0503174851	frontend/main	first_inference	2026-05-03T17:51:58.972Z	2026-05-03T17:52:00.087Z	25.468	1.115	frontend log	

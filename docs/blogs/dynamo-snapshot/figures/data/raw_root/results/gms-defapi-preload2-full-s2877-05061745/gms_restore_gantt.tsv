@@ -1,0 +1,130 @@
+model_key	model_id	run_dir	lane	phase	start_ts	end_ts	start_s	duration_s	source	detail
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	snapshot-agent	criu_restore	2026-05-06T17:47:38.982Z	2026-05-06T17:47:41.493Z	0.076	2.511	snapshot-agent nsrestore timing summary	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	snapshot-agent	cuda_restore	2026-05-06T17:47:41.493Z	2026-05-06T17:47:41.954Z	2.587	0.462	snapshot-agent nsrestore timing summary	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/gms-server	k8s_pod_to_gms_server	2026-05-06T17:47:33.000Z	2026-05-06T17:47:34.000Z	-5.906	1.000	restore pod yaml	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/gms-loader	gms_loader_pod_to_container	2026-05-06T17:47:33.000Z	2026-05-06T17:47:37.000Z	-5.906	4.000	restore pod yaml	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-06T17:47:37.970Z	2026-05-06T17:47:39.003Z	-0.936	1.033	benchmark harness	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/gms-loader	gms_load_wait_for_rw	2026-05-06T17:47:38.941Z	2026-05-06T17:47:38.950Z	0.035	0.009	gms-loader log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-06T17:47:38.950Z	2026-05-06T17:47:39.063Z	0.044	0.113	gms-loader log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-06T17:47:39.063Z	2026-05-06T17:47:39.214Z	0.157	0.151	gms-loader log	59 allocations
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/gms-loader	gms_load_metadata_commit	2026-05-06T17:47:39.214Z	2026-05-06T17:47:39.235Z	0.308	0.021	gms-loader log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/gms-loader	gms_load_sentinel	2026-05-06T17:47:39.238Z	2026-05-06T17:47:39.244Z	0.332	0.006	gms-loader log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/main	main_pod_to_container	2026-05-06T17:47:33.000Z	2026-05-06T17:47:36.000Z	-5.906	3.000	restore pod yaml	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	snapshot-agent	restore_agent_to_nsrestore	2026-05-06T17:47:38.906Z	2026-05-06T17:47:38.963Z	0.000	0.057	snapshot-agent	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/main	main_gms_remap	2026-05-06T17:47:42.008Z	2026-05-06T17:47:42.046Z	3.102	0.038	worker main log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/main	registration_to_generate_endpoint	2026-05-06T17:47:42.066Z	2026-05-06T17:47:42.359Z	3.160	0.293	worker main log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-06T17:47:42.359Z	2026-05-06T17:47:43.250Z	3.453	0.891	worker main log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-06T17:47:42.000Z	2026-05-06T17:47:43.250Z	3.094	1.250	pod yaml + worker main log	
+qwen3-06b	Qwen/Qwen3-0.6B	gms-defapi-preload2-q3-06-0506174551	frontend/main	first_inference	2026-05-06T17:47:56.372Z	2026-05-06T17:47:56.900Z	17.466	0.528	frontend log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	snapshot-agent	criu_restore	2026-05-06T17:51:22.207Z	2026-05-06T17:51:25.305Z	0.074	3.097	snapshot-agent nsrestore timing summary	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	snapshot-agent	cuda_restore	2026-05-06T17:51:25.305Z	2026-05-06T17:51:25.803Z	3.171	0.499	snapshot-agent nsrestore timing summary	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/gms-server	k8s_pod_to_gms_server	2026-05-06T17:51:13.000Z	2026-05-06T17:51:14.000Z	-9.134	1.000	restore pod yaml	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/gms-loader	gms_loader_pod_to_container	2026-05-06T17:51:13.000Z	2026-05-06T17:51:19.000Z	-9.134	6.000	restore pod yaml	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-06T17:51:20.638Z	2026-05-06T17:51:22.290Z	-1.496	1.652	benchmark harness	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/gms-loader	gms_load_wait_for_rw	2026-05-06T17:51:22.140Z	2026-05-06T17:51:22.153Z	0.006	0.013	gms-loader log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-06T17:51:22.153Z	2026-05-06T17:51:22.871Z	0.019	0.718	gms-loader log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-06T17:51:22.871Z	2026-05-06T17:51:24.693Z	0.737	1.822	gms-loader log	151 allocations
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/gms-loader	gms_load_metadata_commit	2026-05-06T17:51:24.693Z	2026-05-06T17:51:24.716Z	2.559	0.023	gms-loader log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/gms-loader	gms_load_sentinel	2026-05-06T17:51:24.719Z	2026-05-06T17:51:24.726Z	2.585	0.007	gms-loader log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/main	main_pod_to_container	2026-05-06T17:51:13.000Z	2026-05-06T17:51:19.000Z	-9.134	6.000	restore pod yaml	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	snapshot-agent	restore_agent_to_nsrestore	2026-05-06T17:51:22.134Z	2026-05-06T17:51:22.191Z	0.000	0.057	snapshot-agent	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/main	main_gms_remap	2026-05-06T17:51:25.889Z	2026-05-06T17:51:25.926Z	3.755	0.037	worker main log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/main	registration_to_generate_endpoint	2026-05-06T17:51:25.947Z	2026-05-06T17:51:26.263Z	3.813	0.316	worker main log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-06T17:51:26.263Z	2026-05-06T17:51:27.306Z	4.129	1.043	worker main log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-06T17:51:26.000Z	2026-05-06T17:51:27.306Z	3.866	1.306	pod yaml + worker main log	
+qwen3-8b	Qwen/Qwen3-8B	gms-defapi-preload2-q3-8b-0506174928	frontend/main	first_inference	2026-05-06T17:51:43.991Z	2026-05-06T17:51:44.576Z	21.857	0.585	frontend log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	snapshot-agent	criu_restore	2026-05-06T17:56:07.336Z	2026-05-06T17:56:10.674Z	0.070	3.338	snapshot-agent nsrestore timing summary	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	snapshot-agent	cuda_restore	2026-05-06T17:56:10.674Z	2026-05-06T17:56:11.208Z	3.408	0.534	snapshot-agent nsrestore timing summary	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/gms-server	k8s_pod_to_gms_server	2026-05-06T17:56:01.000Z	2026-05-06T17:56:02.000Z	-6.267	1.000	restore pod yaml	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/gms-loader	gms_loader_pod_to_container	2026-05-06T17:56:01.000Z	2026-05-06T17:56:04.000Z	-6.267	3.000	restore pod yaml	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-06T17:56:06.177Z	2026-05-06T17:56:07.370Z	-1.090	1.193	benchmark harness	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/gms-loader	gms_load_wait_for_rw	2026-05-06T17:56:07.281Z	2026-05-06T17:56:07.295Z	0.014	0.014	gms-loader log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-06T17:56:07.295Z	2026-05-06T17:56:08.018Z	0.028	0.723	gms-loader log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-06T17:56:08.018Z	2026-05-06T17:56:11.513Z	0.751	3.495	gms-loader log	167 allocations
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/gms-loader	gms_load_metadata_commit	2026-05-06T17:56:11.513Z	2026-05-06T17:56:11.540Z	4.246	0.027	gms-loader log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/gms-loader	gms_load_sentinel	2026-05-06T17:56:11.546Z	2026-05-06T17:56:11.553Z	4.279	0.007	gms-loader log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/main	main_pod_to_container	2026-05-06T17:56:01.000Z	2026-05-06T17:56:04.000Z	-6.267	3.000	restore pod yaml	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	snapshot-agent	restore_agent_to_nsrestore	2026-05-06T17:56:07.267Z	2026-05-06T17:56:07.324Z	0.000	0.058	snapshot-agent	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	snapshot-agent	agent_wait_after_nsrestore_for_gms	2026-05-06T17:56:11.211Z	2026-05-06T17:56:11.553Z	3.944	0.342	snapshot-agent + gms-loader	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/main	main_gms_remap	2026-05-06T17:56:11.620Z	2026-05-06T17:56:11.656Z	4.353	0.036	worker main log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/main	registration_to_generate_endpoint	2026-05-06T17:56:11.676Z	2026-05-06T17:56:11.988Z	4.409	0.312	worker main log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-06T17:56:11.988Z	2026-05-06T17:56:13.130Z	4.721	1.142	worker main log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-06T17:56:12.000Z	2026-05-06T17:56:13.130Z	4.733	1.130	pod yaml + worker main log	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	frontend/main	frontend_discovers_worker	2026-05-06T17:56:13.130Z	2026-05-06T17:56:13.130Z	5.863	0.000	worker/frontend logs	
+qwen3-14b	Qwen/Qwen3-14B	gms-defapi-preload2-q3-14-0506175351	frontend/main	first_inference	2026-05-06T17:56:28.582Z	2026-05-06T17:56:29.271Z	21.315	0.689	frontend log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	snapshot-agent	criu_restore	2026-05-06T18:00:25.916Z	2026-05-06T18:00:29.434Z	0.071	3.519	snapshot-agent nsrestore timing summary	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	snapshot-agent	cuda_restore	2026-05-06T18:00:29.434Z	2026-05-06T18:00:30.051Z	3.590	0.617	snapshot-agent nsrestore timing summary	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/gms-server	k8s_pod_to_gms_server	2026-05-06T18:00:18.000Z	2026-05-06T18:00:20.000Z	-7.845	2.000	restore pod yaml	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/gms-loader	gms_loader_pod_to_container	2026-05-06T18:00:18.000Z	2026-05-06T18:00:23.000Z	-7.845	5.000	restore pod yaml	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-06T18:00:24.335Z	2026-05-06T18:00:25.997Z	-1.510	1.662	benchmark harness	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/gms-loader	gms_load_wait_for_rw	2026-05-06T18:00:25.851Z	2026-05-06T18:00:25.866Z	0.006	0.015	gms-loader log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-06T18:00:25.866Z	2026-05-06T18:00:26.800Z	0.021	0.934	gms-loader log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-06T18:00:26.800Z	2026-05-06T18:00:34.109Z	0.955	7.309	gms-loader log	263 allocations
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/gms-loader	gms_load_metadata_commit	2026-05-06T18:00:34.109Z	2026-05-06T18:00:34.150Z	8.264	0.041	gms-loader log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/gms-loader	gms_load_sentinel	2026-05-06T18:00:34.157Z	2026-05-06T18:00:34.163Z	8.312	0.006	gms-loader log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/main	main_pod_to_container	2026-05-06T18:00:18.000Z	2026-05-06T18:00:23.000Z	-7.845	5.000	restore pod yaml	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	snapshot-agent	restore_agent_to_nsrestore	2026-05-06T18:00:25.845Z	2026-05-06T18:00:25.903Z	0.000	0.059	snapshot-agent	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	snapshot-agent	agent_wait_after_nsrestore_for_gms	2026-05-06T18:00:30.054Z	2026-05-06T18:00:34.163Z	4.209	4.109	snapshot-agent + gms-loader	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/main	main_gms_remap	2026-05-06T18:00:34.315Z	2026-05-06T18:00:34.374Z	8.470	0.059	worker main log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/main	registration_to_generate_endpoint	2026-05-06T18:00:34.396Z	2026-05-06T18:00:34.718Z	8.551	0.322	worker main log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-06T18:00:34.718Z	2026-05-06T18:00:35.978Z	8.873	1.260	worker main log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-06T18:00:35.000Z	2026-05-06T18:00:35.978Z	9.155	0.978	pod yaml + worker main log	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	frontend/main	frontend_discovers_worker	2026-05-06T18:00:35.978Z	2026-05-06T18:00:35.979Z	10.133	0.001	worker/frontend logs	
+qwen3-32b	Qwen/Qwen3-32B	gms-defapi-preload2-q3-32-0506175807	frontend/main	first_inference	2026-05-06T18:00:46.965Z	2026-05-06T18:00:47.937Z	21.120	0.972	frontend log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	snapshot-agent	criu_restore	2026-05-06T18:13:55.294Z	2026-05-06T18:13:59.403Z	0.069	4.110	snapshot-agent nsrestore timing summary	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	snapshot-agent	cuda_restore	2026-05-06T18:13:59.403Z	2026-05-06T18:14:00.004Z	4.179	0.601	snapshot-agent nsrestore timing summary	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/gms-server	k8s_pod_to_gms_server	2026-05-06T18:13:46.000Z	2026-05-06T18:13:49.000Z	-9.225	3.000	restore pod yaml	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/gms-loader	gms_loader_pod_to_container	2026-05-06T18:13:46.000Z	2026-05-06T18:13:52.000Z	-9.225	6.000	restore pod yaml	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-06T18:13:54.293Z	2026-05-06T18:13:55.322Z	-0.932	1.029	benchmark harness	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/gms-loader	gms_load_wait_for_rw	2026-05-06T18:13:55.257Z	2026-05-06T18:13:55.272Z	0.032	0.015	gms-loader log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-06T18:13:55.272Z	2026-05-06T18:13:56.595Z	0.047	1.323	gms-loader log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-06T18:13:56.595Z	2026-05-06T18:14:14.499Z	1.370	17.904	gms-loader log	328 allocations
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/gms-loader	gms_load_metadata_commit	2026-05-06T18:14:14.499Z	2026-05-06T18:14:14.550Z	19.274	0.051	gms-loader log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/gms-loader	gms_load_sentinel	2026-05-06T18:14:14.555Z	2026-05-06T18:14:14.561Z	19.330	0.006	gms-loader log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/main	main_pod_to_container	2026-05-06T18:13:46.000Z	2026-05-06T18:13:52.000Z	-9.225	6.000	restore pod yaml	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	snapshot-agent	restore_agent_to_nsrestore	2026-05-06T18:13:55.225Z	2026-05-06T18:13:55.279Z	0.000	0.054	snapshot-agent	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	snapshot-agent	agent_wait_after_nsrestore_for_gms	2026-05-06T18:14:00.007Z	2026-05-06T18:14:14.561Z	4.782	14.554	snapshot-agent + gms-loader	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/main	main_gms_remap	2026-05-06T18:14:14.751Z	2026-05-06T18:14:14.809Z	19.526	0.058	worker main log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/main	registration_to_generate_endpoint	2026-05-06T18:14:14.831Z	2026-05-06T18:14:15.140Z	19.606	0.309	worker main log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-06T18:14:15.140Z	2026-05-06T18:14:15.361Z	19.915	0.221	worker main log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-06T18:14:15.000Z	2026-05-06T18:14:15.361Z	19.775	0.361	pod yaml + worker main log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	frontend/main	frontend_discovers_worker	2026-05-06T18:14:15.361Z	2026-05-06T18:14:15.365Z	20.136	0.004	worker/frontend logs	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	gms-defapi-preload2-q25-7-0506181104	frontend/main	first_inference	2026-05-06T18:14:24.410Z	2026-05-06T18:14:25.668Z	29.185	1.258	frontend log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	snapshot-agent	criu_restore	2026-05-06T18:04:39.968Z	2026-05-06T18:04:44.480Z	0.074	4.511	snapshot-agent nsrestore timing summary	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	snapshot-agent	cuda_restore	2026-05-06T18:04:44.480Z	2026-05-06T18:04:45.233Z	4.585	0.754	snapshot-agent nsrestore timing summary	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/gms-server	k8s_pod_to_gms_server	2026-05-06T18:04:32.000Z	2026-05-06T18:04:33.000Z	-7.895	1.000	restore pod yaml	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/gms-loader	gms_loader_pod_to_container	2026-05-06T18:04:32.000Z	2026-05-06T18:04:37.000Z	-7.895	5.000	restore pod yaml	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-06T18:04:38.950Z	2026-05-06T18:04:39.991Z	-0.945	1.041	benchmark harness	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/gms-loader	gms_load_wait_for_rw	2026-05-06T18:04:39.918Z	2026-05-06T18:04:39.933Z	0.023	0.015	gms-loader log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-06T18:04:39.933Z	2026-05-06T18:04:40.952Z	0.038	1.019	gms-loader log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-06T18:04:40.952Z	2026-05-06T18:04:50.175Z	1.057	9.223	gms-loader log	328 allocations
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/gms-loader	gms_load_metadata_commit	2026-05-06T18:04:50.175Z	2026-05-06T18:04:50.217Z	10.280	0.042	gms-loader log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/gms-loader	gms_load_sentinel	2026-05-06T18:04:50.221Z	2026-05-06T18:04:50.229Z	10.326	0.008	gms-loader log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/main	main_pod_to_container	2026-05-06T18:04:32.000Z	2026-05-06T18:04:37.000Z	-7.895	5.000	restore pod yaml	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	snapshot-agent	restore_agent_to_nsrestore	2026-05-06T18:04:39.895Z	2026-05-06T18:04:39.954Z	0.000	0.060	snapshot-agent	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	snapshot-agent	agent_wait_after_nsrestore_for_gms	2026-05-06T18:04:45.237Z	2026-05-06T18:04:50.229Z	5.342	4.992	snapshot-agent + gms-loader	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/main	main_gms_remap	2026-05-06T18:04:50.328Z	2026-05-06T18:04:50.352Z	10.433	0.024	worker main log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/main	registration_to_generate_endpoint	2026-05-06T18:04:50.374Z	2026-05-06T18:04:50.699Z	10.479	0.325	worker main log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-06T18:04:50.699Z	2026-05-06T18:04:51.851Z	10.804	1.152	worker main log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-06T18:04:51.000Z	2026-05-06T18:04:51.851Z	11.105	0.851	pod yaml + worker main log	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	frontend/main	frontend_discovers_worker	2026-05-06T18:04:51.851Z	2026-05-06T18:04:51.851Z	11.956	0.000	worker/frontend logs	
+gpt-oss-120b	openai/gpt-oss-120b	gms-defapi-preload2-gpt12-0506180226	frontend/main	first_inference	2026-05-06T18:04:57.523Z	2026-05-06T18:04:58.581Z	17.628	1.058	frontend log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	snapshot-agent	criu_restore	2026-05-06T18:09:12.385Z	2026-05-06T18:09:16.042Z	0.068	3.657	snapshot-agent nsrestore timing summary	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	snapshot-agent	cuda_restore	2026-05-06T18:09:16.042Z	2026-05-06T18:09:16.716Z	3.726	0.674	snapshot-agent nsrestore timing summary	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/gms-server	k8s_pod_to_gms_server	2026-05-06T18:09:05.000Z	2026-05-06T18:09:06.000Z	-7.317	1.000	restore pod yaml	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/gms-loader	gms_loader_pod_to_container	2026-05-06T18:09:05.000Z	2026-05-06T18:09:09.000Z	-7.317	4.000	restore pod yaml	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	orchestration/manual-trigger	manual_restore_trigger_patch	2026-05-06T18:09:11.238Z	2026-05-06T18:09:12.417Z	-1.079	1.179	benchmark harness	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/gms-loader	gms_load_wait_for_rw	2026-05-06T18:09:12.324Z	2026-05-06T18:09:12.340Z	0.007	0.016	gms-loader log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/gms-loader	gms_load_phase_a_allocate_va	2026-05-06T18:09:12.340Z	2026-05-06T18:09:13.236Z	0.023	0.896	gms-loader log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/gms-loader	gms_load_phase_b_stream_to_gpu	2026-05-06T18:09:13.236Z	2026-05-06T18:09:21.657Z	0.919	8.421	gms-loader log	340 allocations
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/gms-loader	gms_load_metadata_commit	2026-05-06T18:09:21.657Z	2026-05-06T18:09:21.714Z	9.340	0.057	gms-loader log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/gms-loader	gms_load_sentinel	2026-05-06T18:09:21.718Z	2026-05-06T18:09:21.725Z	9.401	0.007	gms-loader log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/main	main_pod_to_container	2026-05-06T18:09:05.000Z	2026-05-06T18:09:09.000Z	-7.317	4.000	restore pod yaml	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	snapshot-agent	restore_agent_to_nsrestore	2026-05-06T18:09:12.317Z	2026-05-06T18:09:12.371Z	0.000	0.054	snapshot-agent	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	snapshot-agent	agent_wait_after_nsrestore_for_gms	2026-05-06T18:09:16.719Z	2026-05-06T18:09:21.725Z	4.402	5.006	snapshot-agent + gms-loader	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/main	main_gms_remap	2026-05-06T18:09:21.923Z	2026-05-06T18:09:21.995Z	9.606	0.072	worker main log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/main	registration_to_generate_endpoint	2026-05-06T18:09:22.017Z	2026-05-06T18:09:22.340Z	9.700	0.323	worker main log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	worker/main	generate_endpoint_to_metadata_snapshot	2026-05-06T18:09:22.340Z	2026-05-06T18:09:23.688Z	10.023	1.348	worker main log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	kube/discovery	pod_ready_to_metadata_snapshot	2026-05-06T18:09:23.000Z	2026-05-06T18:09:23.688Z	10.683	0.688	pod yaml + worker main log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	frontend/main	frontend_discovers_worker	2026-05-06T18:09:23.688Z	2026-05-06T18:09:23.689Z	11.371	0.001	worker/frontend logs	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	gms-defapi-preload2-llama-0506180639	frontend/main	first_inference	2026-05-06T18:09:29.805Z	2026-05-06T18:09:30.812Z	17.488	1.007	frontend log	

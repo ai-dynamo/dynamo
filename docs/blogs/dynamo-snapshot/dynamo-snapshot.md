@@ -21,9 +21,9 @@ Steady-state throughput metrics, while useful, capture only a narrow slice of th
 
 Crucially, the system's responsiveness to these disruptions becomes a first-order concern. Bringing up a new inference instance, even for a single GPU under a fixed model and configuration, can take on the order of minutes. During this prolonged interval of resource underutilization, expensive GPU capacity is allocated but not generating tokens, and thereby not generating revenue.
 
-Here is a breakdown of the cold start time of various models for a single-GPU workload:
+Here is a breakdown of the cold start time of various models for a single-GPU workload. The measurement starts at the first Python/vLLM worker log, so it excludes Kubernetes scheduling, image pull, and the base container startup gap before the worker process begins executing:
 
-![Cold start time breakdown across model sizes on a single B200 GPU.](./figures/cold_start_bench.svg)
+![Cold start time breakdown across model sizes on a single B200 GPU, excluding base container startup.](./figures/cold_start_bench.svg)
 
 In our setup, weights are loaded from high-bandwidth network-attached storage. For smaller models, the majority of cold-start time is consumed by initialization overhead rather than weight loading itself; with lower-bandwidth storage, the weight-loading contribution grows and dominates. Even under "warm start" conditions — where artifacts from torch.compile, kernel warmup etc are cached — the observed reduction in startup time is modest.
 

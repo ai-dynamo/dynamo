@@ -1,0 +1,134 @@
+model_key	model_id	run_dir	lane	phase	start_ts	end_ts	start_s	duration_s	source	detail
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	frontend/main	frontend_pod_to_container	2026-05-03T22:24:44.000Z	2026-05-03T22:24:47.000Z	-1.788	3.000	k8s pod watch	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	frontend/main	frontend_start_to_discovery	2026-05-03T22:24:47.000Z	2026-05-03T22:24:48.248Z	1.212	1.248	frontend log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	frontend/main	frontend_discovery_to_metadata_snapshot	2026-05-03T22:24:48.248Z	2026-05-03T22:24:55.621Z	2.460	7.373	frontend log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	frontend/main	frontend_metadata_to_ready	2026-05-03T22:24:55.621Z	2026-05-03T22:24:59.000Z	9.833	3.379	frontend log + k8s pod watch	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	frontend/main	frontend_ready_to_first_request	2026-05-03T22:24:59.000Z	2026-05-03T22:25:09.893Z	13.212	10.893	frontend log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	frontend/main	frontend_inference_request	2026-05-03T22:25:09.893Z	2026-05-03T22:25:10.496Z	24.105	0.603	frontend log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	worker/main	restore_pod_to_container	2026-05-03T22:24:44.000Z	2026-05-03T22:24:45.000Z	-1.788	1.000	k8s pod watch	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	worker/main	restore_complete_to_sentinel	2026-05-03T22:24:53.640Z	2026-05-03T22:24:53.649Z	7.852	0.009	restore-worker log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	worker/main	worker_wake_up	2026-05-03T22:24:53.649Z	2026-05-03T22:24:53.815Z	7.861	0.166	restore-worker log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	worker/main	worker_after_wake_to_discovery	2026-05-03T22:24:53.815Z	2026-05-03T22:24:53.830Z	8.027	0.015	restore-worker log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	worker/main	worker_register_model	2026-05-03T22:24:53.865Z	2026-05-03T22:24:54.131Z	8.077	0.266	restore-worker log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	worker/main	worker_endpoint_to_metadata_snapshot	2026-05-03T22:24:54.131Z	2026-05-03T22:24:55.622Z	8.343	1.491	restore-worker log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	snapshot-agent	agent_detect_to_restore_start	2026-05-03T22:24:45.788Z	2026-05-03T22:24:45.812Z	0.000	0.024	snapshot-agent log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	snapshot-agent	host_inspect	2026-05-03T22:24:45.812Z	2026-05-03T22:24:45.824Z	0.024	0.012	snapshot-agent Restore timing summary	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	snapshot-agent	agent_nsrestore_launch	2026-05-03T22:24:45.824Z	2026-05-03T22:24:45.845Z	0.036	0.021	snapshot-agent log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	snapshot-agent	nsrestore_setup	2026-05-03T22:24:45.845Z	2026-05-03T22:24:45.857Z	0.058	0.012	snapshot-agent nsrestore timing summary	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	snapshot-agent	criu_restore	2026-05-03T22:24:45.857Z	2026-05-03T22:24:52.650Z	0.069	6.793	snapshot-agent nsrestore timing summary	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	snapshot-agent	cuda_restore	2026-05-03T22:24:52.650Z	2026-05-03T22:24:53.639Z	6.863	0.989	snapshot-agent nsrestore timing summary	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	snapshot-agent	agent_external_complete	2026-05-03T22:24:53.640Z	2026-05-03T22:24:53.642Z	7.852	0.002	snapshot-agent log	
+qwen3-06b	Qwen/Qwen3-0.6B	dckpt-qwen3-06b-0503222312	kube/discovery	worker_pod_ready_condition	2026-05-03T22:24:53.815Z	2026-05-03T22:24:55.000Z	8.027	1.185	k8s pod watch	overlaps worker registration; Kubernetes Ready boundary
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	frontend/main	frontend_pod_to_container	2026-05-03T22:29:16.000Z	2026-05-03T22:29:19.000Z	-1.493	3.000	k8s pod watch	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	frontend/main	frontend_start_to_discovery	2026-05-03T22:29:19.000Z	2026-05-03T22:29:19.983Z	1.507	0.983	frontend log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	frontend/main	frontend_discovery_to_metadata_snapshot	2026-05-03T22:29:19.983Z	2026-05-03T22:29:47.176Z	2.490	27.193	frontend log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	frontend/main	frontend_ready_to_first_request	2026-05-03T22:29:31.000Z	2026-05-03T22:29:52.554Z	13.507	21.554	frontend log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	frontend/main	frontend_inference_request	2026-05-03T22:29:52.554Z	2026-05-03T22:29:53.237Z	35.061	0.683	frontend log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	worker/main	restore_pod_to_container	2026-05-03T22:29:15.000Z	2026-05-03T22:29:17.000Z	-2.493	2.000	k8s pod watch	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	worker/main	restore_complete_to_sentinel	2026-05-03T22:29:44.989Z	2026-05-03T22:29:45.001Z	27.496	0.012	restore-worker log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	worker/main	worker_wake_up	2026-05-03T22:29:45.001Z	2026-05-03T22:29:45.453Z	27.508	0.452	restore-worker log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	worker/main	worker_after_wake_to_discovery	2026-05-03T22:29:45.453Z	2026-05-03T22:29:45.488Z	27.960	0.035	restore-worker log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	worker/main	worker_register_model	2026-05-03T22:29:45.524Z	2026-05-03T22:29:45.802Z	28.031	0.278	restore-worker log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	worker/main	worker_endpoint_to_metadata_snapshot	2026-05-03T22:29:45.802Z	2026-05-03T22:29:47.176Z	28.309	1.374	restore-worker log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	snapshot-agent	agent_detect_to_restore_start	2026-05-03T22:29:17.493Z	2026-05-03T22:29:17.524Z	0.000	0.031	snapshot-agent log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	snapshot-agent	host_inspect	2026-05-03T22:29:17.524Z	2026-05-03T22:29:17.533Z	0.031	0.010	snapshot-agent Restore timing summary	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	snapshot-agent	agent_nsrestore_launch	2026-05-03T22:29:17.533Z	2026-05-03T22:29:17.554Z	0.041	0.020	snapshot-agent log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	snapshot-agent	nsrestore_setup	2026-05-03T22:29:17.554Z	2026-05-03T22:29:17.566Z	0.061	0.012	snapshot-agent nsrestore timing summary	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	snapshot-agent	criu_restore	2026-05-03T22:29:17.566Z	2026-05-03T22:29:41.949Z	0.073	24.383	snapshot-agent nsrestore timing summary	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	snapshot-agent	cuda_restore	2026-05-03T22:29:41.949Z	2026-05-03T22:29:44.988Z	24.457	3.039	snapshot-agent nsrestore timing summary	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	snapshot-agent	agent_external_complete	2026-05-03T22:29:44.989Z	2026-05-03T22:29:44.992Z	27.496	0.003	snapshot-agent log	
+qwen3-8b	Qwen/Qwen3-8B	dckpt-qwen3-8b-0503222711	kube/discovery	worker_pod_ready_condition	2026-05-03T22:29:45.453Z	2026-05-03T22:29:46.000Z	27.960	0.547	k8s pod watch	overlaps worker registration; Kubernetes Ready boundary
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	frontend/main	frontend_pod_to_container	2026-05-03T22:57:04.000Z	2026-05-03T22:57:06.000Z	-1.623	2.000	k8s pod watch	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	frontend/main	frontend_start_to_discovery	2026-05-03T22:57:06.000Z	2026-05-03T22:57:07.421Z	0.377	1.421	frontend log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	frontend/main	frontend_discovery_to_metadata_snapshot	2026-05-03T22:57:07.421Z	2026-05-03T22:57:57.379Z	1.798	49.958	frontend log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	frontend/main	frontend_ready_to_first_request	2026-05-03T22:57:18.000Z	2026-05-03T22:58:02.717Z	12.377	44.717	frontend log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	frontend/main	frontend_inference_request	2026-05-03T22:58:02.717Z	2026-05-03T22:58:03.526Z	57.094	0.809	frontend log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	worker/main	restore_pod_to_container	2026-05-03T22:57:04.000Z	2026-05-03T22:57:05.000Z	-1.623	1.000	k8s pod watch	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	worker/main	restore_complete_to_sentinel	2026-05-03T22:57:54.879Z	2026-05-03T22:57:54.882Z	49.256	0.003	restore-worker log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	worker/main	worker_wake_up	2026-05-03T22:57:54.882Z	2026-05-03T22:57:55.573Z	49.259	0.691	restore-worker log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	worker/main	worker_after_wake_to_discovery	2026-05-03T22:57:55.573Z	2026-05-03T22:57:55.610Z	49.950	0.037	restore-worker log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	worker/main	worker_register_model	2026-05-03T22:57:55.645Z	2026-05-03T22:57:55.969Z	50.022	0.324	restore-worker log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	worker/main	worker_endpoint_to_metadata_snapshot	2026-05-03T22:57:55.969Z	2026-05-03T22:57:57.378Z	50.346	1.409	restore-worker log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	snapshot-agent	agent_detect_to_restore_start	2026-05-03T22:57:05.623Z	2026-05-03T22:57:05.647Z	0.000	0.024	snapshot-agent log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	snapshot-agent	host_inspect	2026-05-03T22:57:05.647Z	2026-05-03T22:57:05.659Z	0.024	0.013	snapshot-agent Restore timing summary	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	snapshot-agent	agent_nsrestore_launch	2026-05-03T22:57:05.659Z	2026-05-03T22:57:05.681Z	0.037	0.022	snapshot-agent log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	snapshot-agent	nsrestore_setup	2026-05-03T22:57:05.681Z	2026-05-03T22:57:05.693Z	0.059	0.012	snapshot-agent nsrestore timing summary	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	snapshot-agent	criu_restore	2026-05-03T22:57:05.693Z	2026-05-03T22:57:50.078Z	0.071	44.385	snapshot-agent nsrestore timing summary	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	snapshot-agent	cuda_restore	2026-05-03T22:57:50.078Z	2026-05-03T22:57:54.878Z	44.456	4.800	snapshot-agent nsrestore timing summary	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	snapshot-agent	agent_external_complete	2026-05-03T22:57:54.879Z	2026-05-03T22:57:54.881Z	49.256	0.002	snapshot-agent log	
+qwen3-14b	Qwen/Qwen3-14B	dckpt-qwen3-14b-0503225426	kube/discovery	worker_pod_ready_condition	2026-05-03T22:57:55.573Z	2026-05-03T22:57:56.000Z	49.950	0.427	k8s pod watch	overlaps worker registration; Kubernetes Ready boundary
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	frontend/main	frontend_pod_to_container	2026-05-03T23:03:19.000Z	2026-05-03T23:03:22.000Z	-2.590	3.000	k8s pod watch	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	frontend/main	frontend_start_to_discovery	2026-05-03T23:03:22.000Z	2026-05-03T23:03:22.555Z	0.410	0.555	frontend log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	frontend/main	frontend_discovery_to_metadata_snapshot	2026-05-03T23:03:22.555Z	2026-05-03T23:04:41.863Z	0.965	79.308	frontend log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	frontend/main	frontend_ready_to_first_request	2026-05-03T23:03:33.000Z	2026-05-03T23:04:51.079Z	11.410	78.079	frontend log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	frontend/main	frontend_inference_request	2026-05-03T23:04:51.079Z	2026-05-03T23:04:52.130Z	89.489	1.051	frontend log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	worker/main	restore_pod_to_container	2026-05-03T23:03:19.000Z	2026-05-03T23:03:20.000Z	-2.590	1.000	k8s pod watch	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	worker/main	restore_complete_to_sentinel	2026-05-03T23:04:38.743Z	2026-05-03T23:04:38.783Z	77.153	0.040	restore-worker log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	worker/main	worker_wake_up	2026-05-03T23:04:38.783Z	2026-05-03T23:04:40.148Z	77.193	1.365	restore-worker log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	worker/main	worker_after_wake_to_discovery	2026-05-03T23:04:40.148Z	2026-05-03T23:04:40.184Z	78.558	0.036	restore-worker log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	worker/main	worker_register_model	2026-05-03T23:04:40.222Z	2026-05-03T23:04:40.514Z	78.632	0.292	restore-worker log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	worker/main	worker_endpoint_to_metadata_snapshot	2026-05-03T23:04:40.514Z	2026-05-03T23:04:41.863Z	78.924	1.349	restore-worker log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	snapshot-agent	agent_detect_to_restore_start	2026-05-03T23:03:21.590Z	2026-05-03T23:03:21.621Z	0.000	0.031	snapshot-agent log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	snapshot-agent	host_inspect	2026-05-03T23:03:21.621Z	2026-05-03T23:03:21.633Z	0.031	0.012	snapshot-agent Restore timing summary	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	snapshot-agent	agent_nsrestore_launch	2026-05-03T23:03:21.633Z	2026-05-03T23:03:21.654Z	0.043	0.021	snapshot-agent log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	snapshot-agent	nsrestore_setup	2026-05-03T23:03:21.654Z	2026-05-03T23:03:21.666Z	0.064	0.012	snapshot-agent nsrestore timing summary	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	snapshot-agent	criu_restore	2026-05-03T23:03:21.666Z	2026-05-03T23:04:31.276Z	0.076	69.610	snapshot-agent nsrestore timing summary	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	snapshot-agent	cuda_restore	2026-05-03T23:04:31.276Z	2026-05-03T23:04:38.742Z	69.686	7.466	snapshot-agent nsrestore timing summary	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	snapshot-agent	agent_external_complete	2026-05-03T23:04:38.743Z	2026-05-03T23:04:38.746Z	77.153	0.003	snapshot-agent log	
+qwen3-32b	Qwen/Qwen3-32B	dckpt-qwen3-32b-0503225936	kube/discovery	worker_pod_ready_condition	2026-05-03T23:04:40.148Z	2026-05-03T23:04:41.000Z	78.558	0.852	k8s pod watch	overlaps worker registration; Kubernetes Ready boundary
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	frontend/main	frontend_pod_to_container	2026-05-04T07:46:59.000Z	2026-05-04T07:47:02.000Z	-1.976	3.000	k8s pod watch	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	frontend/main	frontend_start_to_discovery	2026-05-04T07:47:02.000Z	2026-05-04T07:47:03.199Z	1.024	1.199	frontend log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	frontend/main	frontend_discovery_to_metadata_snapshot	2026-05-04T07:47:03.199Z	2026-05-04T07:49:38.676Z	2.223	155.477	frontend log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	frontend/main	frontend_ready_to_first_request	2026-05-04T07:47:13.000Z	2026-05-04T07:49:47.788Z	12.024	154.788	frontend log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	frontend/main	frontend_inference_request	2026-05-04T07:49:47.788Z	2026-05-04T07:49:49.346Z	166.812	1.558	frontend log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	worker/main	restore_pod_to_container	2026-05-04T07:46:59.000Z	2026-05-04T07:47:00.000Z	-1.976	1.000	k8s pod watch	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	worker/main	restore_complete_to_sentinel	2026-05-04T07:49:33.912Z	2026-05-04T07:49:33.932Z	152.936	0.020	restore-worker log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	worker/main	worker_wake_up	2026-05-04T07:49:33.932Z	2026-05-04T07:49:36.825Z	152.956	2.893	restore-worker log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	worker/main	worker_after_wake_to_discovery	2026-05-04T07:49:36.825Z	2026-05-04T07:49:36.864Z	155.849	0.039	restore-worker log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	worker/main	worker_register_model	2026-05-04T07:49:36.900Z	2026-05-04T07:49:37.249Z	155.924	0.349	restore-worker log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	worker/main	worker_endpoint_to_metadata_snapshot	2026-05-04T07:49:37.249Z	2026-05-04T07:49:38.676Z	156.273	1.427	restore-worker log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	snapshot-agent	agent_detect_to_restore_start	2026-05-04T07:47:00.976Z	2026-05-04T07:47:01.000Z	0.000	0.024	snapshot-agent log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	snapshot-agent	host_inspect	2026-05-04T07:47:01.000Z	2026-05-04T07:47:01.009Z	0.024	0.010	snapshot-agent Restore timing summary	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	snapshot-agent	agent_nsrestore_launch	2026-05-04T07:47:01.009Z	2026-05-04T07:47:01.029Z	0.034	0.019	snapshot-agent log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	snapshot-agent	nsrestore_setup	2026-05-04T07:47:01.029Z	2026-05-04T07:47:01.039Z	0.053	0.010	snapshot-agent nsrestore timing summary	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	snapshot-agent	criu_restore	2026-05-04T07:47:01.039Z	2026-05-04T07:49:07.652Z	0.063	126.613	snapshot-agent nsrestore timing summary	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	snapshot-agent	cuda_restore	2026-05-04T07:49:07.652Z	2026-05-04T07:49:33.911Z	126.677	26.259	snapshot-agent nsrestore timing summary	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	snapshot-agent	agent_external_complete	2026-05-04T07:49:33.912Z	2026-05-04T07:49:33.915Z	152.936	0.003	snapshot-agent log	
+qwen25-72b	Qwen/Qwen2.5-72B-Instruct	dckpt-qwen25-72b-0504074126	kube/discovery	worker_pod_ready_condition	2026-05-04T07:49:36.825Z	2026-05-04T07:49:38.000Z	155.849	1.175	k8s pod watch	overlaps worker registration; Kubernetes Ready boundary
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	frontend/main	frontend_pod_to_container	2026-05-03T23:19:27.000Z	2026-05-03T23:19:29.000Z	-1.995	2.000	k8s pod watch	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	frontend/main	frontend_start_to_discovery	2026-05-03T23:19:29.000Z	2026-05-03T23:19:30.447Z	0.005	1.447	frontend log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	frontend/main	frontend_discovery_to_metadata_snapshot	2026-05-03T23:19:30.447Z	2026-05-03T23:21:45.530Z	1.452	135.083	frontend log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	frontend/main	frontend_ready_to_first_request	2026-05-03T23:19:40.000Z	2026-05-03T23:21:53.295Z	11.005	133.295	frontend log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	frontend/main	frontend_inference_request	2026-05-03T23:21:53.295Z	2026-05-03T23:21:54.431Z	144.300	1.136	frontend log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	worker/main	restore_pod_to_container	2026-05-03T23:19:27.000Z	2026-05-03T23:19:28.000Z	-1.995	1.000	k8s pod watch	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	worker/main	restore_complete_to_sentinel	2026-05-03T23:21:42.556Z	2026-05-03T23:21:42.563Z	133.561	0.007	restore-worker log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	worker/main	worker_wake_up	2026-05-03T23:21:42.563Z	2026-05-03T23:21:44.168Z	133.568	1.605	restore-worker log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	worker/main	worker_after_wake_to_discovery	2026-05-03T23:21:44.168Z	2026-05-03T23:21:44.206Z	135.173	0.038	restore-worker log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	worker/main	worker_register_model	2026-05-03T23:21:44.243Z	2026-05-03T23:21:44.724Z	135.248	0.481	restore-worker log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	worker/main	worker_endpoint_to_metadata_snapshot	2026-05-03T23:21:44.724Z	2026-05-03T23:21:45.531Z	135.729	0.807	restore-worker log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	snapshot-agent	agent_detect_to_restore_start	2026-05-03T23:19:28.995Z	2026-05-03T23:19:29.029Z	0.000	0.034	snapshot-agent log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	snapshot-agent	host_inspect	2026-05-03T23:19:29.029Z	2026-05-03T23:19:29.042Z	0.034	0.014	snapshot-agent Restore timing summary	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	snapshot-agent	agent_nsrestore_launch	2026-05-03T23:19:29.042Z	2026-05-03T23:19:29.062Z	0.048	0.020	snapshot-agent log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	snapshot-agent	nsrestore_setup	2026-05-03T23:19:29.062Z	2026-05-03T23:19:29.076Z	0.068	0.014	snapshot-agent nsrestore timing summary	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	snapshot-agent	criu_restore	2026-05-03T23:19:29.076Z	2026-05-03T23:21:28.393Z	0.082	119.317	snapshot-agent nsrestore timing summary	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	snapshot-agent	cuda_restore	2026-05-03T23:21:28.393Z	2026-05-03T23:21:42.555Z	119.399	14.162	snapshot-agent nsrestore timing summary	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	snapshot-agent	agent_external_complete	2026-05-03T23:21:42.556Z	2026-05-03T23:21:42.559Z	133.561	0.003	snapshot-agent log	
+gpt-oss-120b	openai/gpt-oss-120b	dckpt-gpt-oss-120b-0503231427	kube/discovery	worker_pod_ready_condition	2026-05-03T23:21:44.168Z	2026-05-03T23:21:45.000Z	135.173	0.832	k8s pod watch	overlaps worker registration; Kubernetes Ready boundary
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	frontend/main	frontend_pod_to_container	2026-05-03T23:11:07.000Z	2026-05-03T23:11:10.000Z	-1.748	3.000	k8s pod watch	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	frontend/main	frontend_start_to_discovery	2026-05-03T23:11:10.000Z	2026-05-03T23:11:10.962Z	1.252	0.962	frontend log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	frontend/main	frontend_discovery_to_metadata_snapshot	2026-05-03T23:11:10.962Z	2026-05-03T23:12:42.524Z	2.214	91.562	frontend log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	frontend/main	frontend_ready_to_first_request	2026-05-03T23:11:21.000Z	2026-05-03T23:12:48.890Z	12.252	87.890	frontend log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	frontend/main	frontend_inference_request	2026-05-03T23:12:48.890Z	2026-05-03T23:12:49.980Z	100.142	1.090	frontend log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	worker/main	restore_pod_to_container	2026-05-03T23:11:07.000Z	2026-05-03T23:11:08.000Z	-1.748	1.000	k8s pod watch	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	worker/main	restore_complete_to_sentinel	2026-05-03T23:12:39.723Z	2026-05-03T23:12:39.754Z	90.975	0.031	restore-worker log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	worker/main	worker_wake_up	2026-05-03T23:12:39.754Z	2026-05-03T23:12:41.268Z	91.006	1.514	restore-worker log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	worker/main	worker_after_wake_to_discovery	2026-05-03T23:12:41.268Z	2026-05-03T23:12:41.306Z	92.520	0.038	restore-worker log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	worker/main	worker_register_model	2026-05-03T23:12:41.341Z	2026-05-03T23:12:41.630Z	92.593	0.289	restore-worker log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	worker/main	worker_endpoint_to_metadata_snapshot	2026-05-03T23:12:41.630Z	2026-05-03T23:12:42.524Z	92.882	0.894	restore-worker log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	snapshot-agent	agent_detect_to_restore_start	2026-05-03T23:11:08.748Z	2026-05-03T23:11:08.780Z	0.000	0.032	snapshot-agent log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	snapshot-agent	host_inspect	2026-05-03T23:11:08.780Z	2026-05-03T23:11:08.794Z	0.032	0.014	snapshot-agent Restore timing summary	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	snapshot-agent	agent_nsrestore_launch	2026-05-03T23:11:08.794Z	2026-05-03T23:11:08.815Z	0.046	0.021	snapshot-agent log	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	snapshot-agent	nsrestore_setup	2026-05-03T23:11:08.815Z	2026-05-03T23:11:08.828Z	0.068	0.012	snapshot-agent nsrestore timing summary	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	snapshot-agent	criu_restore	2026-05-03T23:11:08.828Z	2026-05-03T23:12:30.345Z	0.080	81.517	snapshot-agent nsrestore timing summary	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	snapshot-agent	cuda_restore	2026-05-03T23:12:30.345Z	2026-05-03T23:12:39.722Z	81.597	9.378	snapshot-agent nsrestore timing summary	
+llama33-70b-fp8	RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic	dckpt-llama33-70b-fp8-0503230640	snapshot-agent	agent_external_complete	2026-05-03T23:12:39.723Z	2026-05-03T23:12:39.726Z	90.975	0.003	snapshot-agent log	
