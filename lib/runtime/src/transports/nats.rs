@@ -322,6 +322,15 @@ impl ClientOptions {
             }
         };
 
+        let client = if let Some(secs) = std::env::var(env_nats::DYN_NATS_REQUEST_TIMEOUT_SECS)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            client.request_timeout(Some(time::Duration::from_secs(secs)))
+        } else {
+            client
+        };
+
         let (client, _) = build_in_runtime(
             async move {
                 client

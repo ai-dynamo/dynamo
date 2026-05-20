@@ -125,6 +125,12 @@ pub mod nats {
     /// NATS server address (e.g., "nats://localhost:4222")
     pub const NATS_SERVER: &str = "NATS_SERVER";
 
+    /// Request/reply timeout in seconds for the NATS client. When unset, the
+    /// underlying async-nats default applies. Increase for workloads whose
+    /// handlers can legitimately exceed the default (e.g. long-running LLM
+    /// inference requests over request/reply).
+    pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
