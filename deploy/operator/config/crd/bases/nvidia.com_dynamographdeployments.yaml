@@ -278,9 +278,10 @@ spec:
                           type: number
                       required:
                         - domain
-                        - labelKey
                       type: object
                       x-kubernetes-validations:
+                        - message: labelKey is required until alternate topology sources are supported
+                          rule: has(self.labelKey)
                         - message: preferredWeight is required when enforcement is preferred
                           rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
                         - message: preferredWeight may only be set when enforcement is preferred
@@ -20679,9 +20680,10 @@ spec:
                           type: number
                       required:
                         - domain
-                        - labelKey
                       type: object
                       x-kubernetes-validations:
+                        - message: labelKey is required until alternate topology sources are supported
+                          rule: has(self.labelKey)
                         - message: preferredWeight is required when enforcement is preferred
                           rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
                         - message: preferredWeight may only be set when enforcement is preferred

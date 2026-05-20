@@ -96,6 +96,7 @@ const (
 // KvTransferPolicy configures topology-aware routing for KV-cache transfers
 // between prefill and decode workers. This graph-wide policy lives under
 // `spec.experimental` while the API is incubating.
+// +kubebuilder:validation:XValidation:rule="has(self.labelKey)",message="labelKey is required until alternate topology sources are supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.enforcement) || self.enforcement != 'preferred' || has(self.preferredWeight)",message="preferredWeight is required when enforcement is preferred"
 // +kubebuilder:validation:XValidation:rule="!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == 'preferred')",message="preferredWeight may only be set when enforcement is preferred"
 type KvTransferPolicy struct {
@@ -104,11 +105,12 @@ type KvTransferPolicy struct {
 	// domain for each worker. The operator copies the node label onto worker
 	// pods so the runtime can publish it as worker metadata. The label
 	// should correspond to the topology level named in `domain`.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=317
 	// +kubebuilder:validation:Pattern=`^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$`
 	// +kubebuilder:validation:XValidation:rule="!self.contains('/') || self.split('/')[0].size() <= 253",message="labelKey prefix must be 253 characters or less"
-	LabelKey string `json:"labelKey"`
+	LabelKey string `json:"labelKey,omitempty"`
 
 	// Domain is the logical name for the topology level to enforce
 	// (e.g. "zone", "rack"). The router uses this to match workers that
