@@ -194,13 +194,14 @@ impl ConditionalDisaggCoordinator {
         observer.install_commit_fn(Arc::new(
             move |request_id: &str, blocks: Vec<ImmutableBlock<G2>>| {
                 if let Some(coord) = weak_coord.upgrade()
-                    && let Err(err) = coord.commit_output_blocks(request_id, blocks) {
-                        tracing::error!(
-                            request_id,
-                            error = %err,
-                            "commit_output_blocks failed from observer"
-                        );
-                    }
+                    && let Err(err) = coord.commit_output_blocks(request_id, blocks)
+                {
+                    tracing::error!(
+                        request_id,
+                        error = %err,
+                        "commit_output_blocks failed from observer"
+                    );
+                }
             },
         ));
         coord
@@ -1086,10 +1087,8 @@ impl ConditionalDisaggCoordinator {
             Vec::with_capacity(prefix_hashes.len() + local_match_hashes.len());
         session_hashes.extend_from_slice(&prefix_hashes);
         session_hashes.extend_from_slice(&local_match_hashes);
-        let session_g2: Vec<ImmutableBlock<G2>> = prefix_g2
-            .into_iter()
-            .chain(local_match_g2)
-            .collect();
+        let session_g2: Vec<ImmutableBlock<G2>> =
+            prefix_g2.into_iter().chain(local_match_g2).collect();
 
         let session_id = uuid::Uuid::new_v4();
         let session = self.session_factory.open(session_id)?;
@@ -1252,12 +1251,13 @@ impl ConditionalDisaggCoordinator {
         if found {
             let sink_handle = self.failure_sink.lock().clone();
             if let Some(sink_weak) = sink_handle
-                && let Some(sink) = sink_weak.upgrade() {
-                    let request_id_owned = request_id.to_string();
-                    self.runtime.spawn(async move {
-                        sink.on_session_failure(request_id_owned, reason).await;
-                    });
-                }
+                && let Some(sink) = sink_weak.upgrade()
+            {
+                let request_id_owned = request_id.to_string();
+                self.runtime.spawn(async move {
+                    sink.on_session_failure(request_id_owned, reason).await;
+                });
+            }
         }
     }
 }
@@ -1399,10 +1399,11 @@ impl ConditionalDisaggCoordinator {
         // payload install to the wrapper's inner-passthrough path; the
         // coordinator state still tracks for observer-side output flow.
         if num_external_tokens > 0
-            && let Err(err) = install_payload(request_id) {
-                self.states.remove(request_id);
-                return Err(err);
-            }
+            && let Err(err) = install_payload(request_id)
+        {
+            self.states.remove(request_id);
+            return Err(err);
+        }
 
         let coord = self
             .arc_self()

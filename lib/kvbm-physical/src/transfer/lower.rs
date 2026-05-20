@@ -364,9 +364,10 @@ pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>)
     // the bonus — we still guard on base < 0 in the caller's filter.
     if base >= 0
         && let Some(ref outcome) = ctx.benchmark_outcome
-            && outcome.winner == candidate.class_name() {
-                return base + BENCHMARK_WINNER_BONUS;
-            }
+        && outcome.winner == candidate.class_name()
+    {
+        return base + BENCHMARK_WINNER_BONUS;
+    }
     base
 }
 

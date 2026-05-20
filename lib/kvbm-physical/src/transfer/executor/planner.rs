@@ -874,32 +874,34 @@ fn plan_and_lower(
             // gives CudaGraphReplay a higher score (1050) than DirectDma (1000),
             // so select_candidate picks it when the cap is on. The ops are shared
             // with the DirectDma candidate; rebinding happens per-launch.
-            if capabilities.cuda_graph_replay && strategy.is_cuda_family()
-                && let [Candidate::DirectDma { ops }] = &candidates[..] {
-                    let route_family = match strategy {
-                        TransferStrategy::CudaAsyncH2D => 0u8,
-                        TransferStrategy::CudaAsyncD2H => 1u8,
-                        TransferStrategy::CudaAsyncD2D => 2u8,
-                        _ => 3u8,
-                    };
-                    // `dtype_width_bytes` from LayoutConfig is always set
-                    // (defaults to 2 if not explicitly configured). We use it
-                    // as the dtype discriminant, keeping the cache key
-                    // consistent regardless of whether `LayoutConfig::dtype`
-                    // is populated.
-                    let cache_key = GraphCacheKey {
-                        descriptor_count: ops.len(),
-                        total_bytes,
-                        dtype_width_bytes: Some(src.layout().config().dtype_width_bytes as u32),
-                        route_family,
-                        candidate_class: 0, // DirectDma-shaped
-                    };
-                    let replay_ops = ops.clone();
-                    candidates.push(Candidate::CudaGraphReplay {
-                        cache_key,
-                        ops: replay_ops,
-                    });
-                }
+            if capabilities.cuda_graph_replay
+                && strategy.is_cuda_family()
+                && let [Candidate::DirectDma { ops }] = &candidates[..]
+            {
+                let route_family = match strategy {
+                    TransferStrategy::CudaAsyncH2D => 0u8,
+                    TransferStrategy::CudaAsyncD2H => 1u8,
+                    TransferStrategy::CudaAsyncD2D => 2u8,
+                    _ => 3u8,
+                };
+                // `dtype_width_bytes` from LayoutConfig is always set
+                // (defaults to 2 if not explicitly configured). We use it
+                // as the dtype discriminant, keeping the cache key
+                // consistent regardless of whether `LayoutConfig::dtype`
+                // is populated.
+                let cache_key = GraphCacheKey {
+                    descriptor_count: ops.len(),
+                    total_bytes,
+                    dtype_width_bytes: Some(src.layout().config().dtype_width_bytes as u32),
+                    route_family,
+                    candidate_class: 0, // DirectDma-shaped
+                };
+                let replay_ops = ops.clone();
+                candidates.push(Candidate::CudaGraphReplay {
+                    cache_key,
+                    ops: replay_ops,
+                });
+            }
             let sel_ctx = SelectionContext {
                 strategy,
                 descriptor_count: candidates.len(),

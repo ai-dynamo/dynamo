@@ -803,10 +803,9 @@ impl Session for MockSession {
         };
         // Paired mode: deliver Finished to partner so its
         // peer_finished + maybe_finalize fire.
-        if need_signal
-            && let Some(partner) = self.partner() {
-                partner.inject_peer_finished();
-            }
+        if need_signal && let Some(partner) = self.partner() {
+            partner.inject_peer_finished();
+        }
         self.maybe_finalize_paired();
     }
 
@@ -994,13 +993,14 @@ impl SessionFactory for MockSessionFactory {
             Some(Arc::clone(&self.active_count)),
         );
         if let Some(registry) = &self.paired_registry
-            && let Some(holder) = registry.get(&session_id).map(|e| Arc::clone(e.value())) {
-                session.pair_with(&holder);
-                // Mirror velo: holder receives `Frame::Attach` →
-                // pushes `LifecycleEvent::Attached` on its own
-                // lifecycle stream.
-                holder.inject_lifecycle(LifecycleEvent::Attached { peer_instance_id });
-            }
+            && let Some(holder) = registry.get(&session_id).map(|e| Arc::clone(e.value()))
+        {
+            session.pair_with(&holder);
+            // Mirror velo: holder receives `Frame::Attach` →
+            // pushes `LifecycleEvent::Attached` on its own
+            // lifecycle stream.
+            holder.inject_lifecycle(LifecycleEvent::Attached { peer_instance_id });
+        }
         *self.last_attached.lock() = Some(Arc::clone(&session));
         self.attach_records.lock().push(AttachRecord {
             session_id,
