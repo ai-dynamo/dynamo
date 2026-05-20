@@ -10,9 +10,16 @@ error on the decode peer, or worse, garbage tokens.
 
 from __future__ import annotations
 
-import importlib.util
-
 import pytest
+
+try:
+    from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+
+    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
+except ImportError as e:
+    if "tensorrt_llm" in str(e) or "libcuda.so.1" in str(e):
+        pytest.skip(f"tensorrt_llm import failed: {e}", allow_module_level=True)
+    raise
 
 pytestmark = [
     pytest.mark.unit,
@@ -20,10 +27,6 @@ pytestmark = [
     pytest.mark.unified,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
-    pytest.mark.skipif(
-        importlib.util.find_spec("tensorrt_llm") is None,
-        reason="tensorrt_llm not installed in this container",
-    ),
 ]
 
 
@@ -34,10 +37,6 @@ class _StubGenOutput:
 
 
 def test_prefill_handoff_codec_round_trip_preserves_opaque_state():
-    from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
-
-    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-
     input_params = LlmDisaggregatedParams(
         request_type="context_only",
         disagg_request_id=0xDEADBEEF,
@@ -63,10 +62,6 @@ def test_decode_handoff_strips_router_worker_id():
     # The Rust router stamps `worker_id` onto the wire dict for routing;
     # it's not a DisaggregatedParams constructor arg, so decode must drop
     # it before the dataclass call or TRT-LLM raises TypeError.
-    from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
-
-    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-
     input_params = LlmDisaggregatedParams(
         request_type="context_only",
         disagg_request_id=1,
@@ -84,7 +79,5 @@ def test_decode_handoff_strips_router_worker_id():
 
 
 def test_decode_handoff_rejects_empty_payload():
-    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
-
     with pytest.raises(ValueError, match="prefill_result"):
         TrtllmLLMEngine._decode_prefill_handoff({"disaggregated_params": {}})
