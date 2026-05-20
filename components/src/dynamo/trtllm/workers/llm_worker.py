@@ -623,8 +623,11 @@ async def init_llm_worker(
         # in the same namespace).
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
             # Topology readiness role + DNF needs, derived literally per branch.
-            # `--encode-endpoint` is non-empty when this worker talks to a
-            # separate encode worker; that adds Encode to its needs.
+            # Encode is omitted from `needs` even when `--encode-endpoint` is
+            # set — encode workers don't register a card in this PR (see the
+            # block comment above), so advertising the dependency would leave
+            # the deployment perma-not-ready. Encode lands with the worker_set
+            # _key migration in a follow-up.
             if config.disaggregation_mode == DisaggregationMode.PREFILL:
                 worker_type = WorkerType.Prefill
                 needs_set: list[WorkerType] = [WorkerType.Decode]
@@ -635,8 +638,6 @@ async def init_llm_worker(
                 # AGGREGATED ("prefill_and_decode")
                 worker_type = WorkerType.Aggregated
                 needs_set = []
-            if config.encode_endpoint:
-                needs_set.append(WorkerType.Encode)
             needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
             await register_model(
