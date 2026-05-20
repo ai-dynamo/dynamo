@@ -156,35 +156,9 @@ class ThunderAgentRouterHandler:
         token_ids = request["token_ids"]
         estimated_prompt_tokens = len(token_ids) if isinstance(token_ids, list) else 0
 
-        # When cache-aware admission is on, query the KvRouter for per-worker
-        # prefix-cache overlap. Used by the scheduler only on new-program
-        # admission; subsequent turns are pinned to a worker already.
-        worker_cached_tokens: Optional[dict[int, int]] = None
-        if self._config.cache_aware_admission and isinstance(token_ids, list):
-            try:
-                loads = await self._kv_router.get_potential_loads(token_ids)
-            except Exception as exc:
-                logger.debug("get_potential_loads failed: %s", exc)
-                loads = []
-            worker_cached_tokens = {}
-            for entry in loads:
-                worker_id = entry.get("worker_id") if isinstance(entry, dict) else None
-                potential_prefill = (
-                    entry.get("potential_prefill_tokens")
-                    if isinstance(entry, dict)
-                    else None
-                )
-                if isinstance(worker_id, int) and isinstance(potential_prefill, int):
-                    cached = max(0, estimated_prompt_tokens - potential_prefill)
-                    # Multiple dp_ranks per worker_id collapse: keep the max.
-                    worker_cached_tokens[worker_id] = max(
-                        worker_cached_tokens.get(worker_id, 0), cached
-                    )
-
         decision = await self._scheduler.before_request(
             program_id,
             estimated_prompt_tokens=estimated_prompt_tokens,
-            worker_cached_tokens=worker_cached_tokens,
         )
         worker_pin = decision.assigned_worker_hint
 
@@ -202,7 +176,6 @@ class ThunderAgentRouterHandler:
 
         prompt_tokens_seen = 0
         completion_tokens_seen = 0
-        cached_tokens_seen = 0
         first_chunk = True
         try:
             async for chunk in await self._kv_router.generate_from_request(
@@ -224,11 +197,6 @@ class ThunderAgentRouterHandler:
                     completion_tokens_seen = int(
                         usage.get("completion_tokens", completion_tokens_seen)
                     )
-                    details = usage.get("prompt_tokens_details")
-                    if isinstance(details, dict):
-                        cached = details.get("cached_tokens")
-                        if isinstance(cached, int):
-                            cached_tokens_seen = cached
                 token_ids_out = (
                     chunk.get("token_ids", []) if isinstance(chunk, dict) else []
                 )
@@ -242,14 +210,6 @@ class ThunderAgentRouterHandler:
             # which is still better than upstream's chars/5 estimator.
             if prompt_tokens_seen == 0 and isinstance(token_ids, list):
                 prompt_tokens_seen = len(token_ids)
-            # Update per-worker prefix-cache hit-rate EMA from this turn.
-            program = self._scheduler._table.programs.get(program_id)
-            if program is not None and program.assigned_worker_id is not None:
-                self._scheduler.update_cache_hit_rate(
-                    program.assigned_worker_id,
-                    cached_tokens_seen,
-                    prompt_tokens_seen,
-                )
             await self._scheduler.after_request(
                 program_id,
                 prompt_tokens_seen,

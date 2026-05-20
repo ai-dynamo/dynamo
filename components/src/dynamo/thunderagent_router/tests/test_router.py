@@ -178,58 +178,6 @@ async def test_soft_demote_marks_borderline_workers():
 
 
 @pytest.mark.asyncio
-async def test_scheduling_disabled_records_lifecycle_without_pausing():
-    cfg = ThunderAgentConfig(
-        scheduler_interval_seconds=10.0,
-        scheduling_enabled=False,
-        pause_threshold=0.50,
-    )
-    router, _ = make_router(config=cfg)
-
-    decision = await router.before_request("p1")
-    assert decision.was_paused is False
-    assert decision.priority_jump == 0.0
-
-    program = router._table.programs["p1"]
-    assert program.lifecycle == ProgramLifecycle.ACTIVE
-
-    program.marked_for_pause = True
-    await router.after_request("p1", prompt_tokens=120, completion_tokens=30)
-    assert program.token_total == 150
-    assert program.lifecycle == ProgramLifecycle.ACTIVE
-    assert router._scheduler_task is None
-
-
-@pytest.mark.asyncio
-async def test_cache_aware_admission_prefers_prefix_local_worker():
-    """With cache_aware_admission, the worker holding more of the prompt's
-    prefix wins admission even when it is the more loaded backend."""
-    cfg = ThunderAgentConfig(
-        scheduler_interval_seconds=10.0,
-        resume_timeout_seconds=2.0,
-        pause_threshold=1.0,
-        cache_aware_admission=True,
-    )
-    workers = {1: 10_000, 2: 10_000}
-    router, _ = make_router(capacity_workers=workers, config=cfg)
-
-    # Worker 1 carries 500 tokens of existing load; worker 2 is empty.
-    await router.before_request("anchor", estimated_prompt_tokens=500)
-    router.assign_worker("anchor", 1)
-
-    # New program: 1000-token prompt; 800 of those cached on worker 1, 0 on 2.
-    decision = await router.before_request(
-        "new",
-        estimated_prompt_tokens=1000,
-        worker_cached_tokens={1: 800, 2: 0},
-    )
-    # Without cache awareness the scheduler would pick worker 2 (lower load);
-    # with it on, worker 1 wins because its effective load (used - cached)
-    # is lower and the prompt's effective requirement is smaller there.
-    assert decision.assigned_worker_hint == 1
-
-
-@pytest.mark.asyncio
 async def test_pause_until_safe_pauses_smallest_acting_first():
     cfg = ThunderAgentConfig(
         pause_threshold=0.80,
