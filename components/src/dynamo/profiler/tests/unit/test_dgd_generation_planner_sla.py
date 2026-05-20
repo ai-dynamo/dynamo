@@ -147,3 +147,23 @@ class TestPlannerSLAPropagation:
 
         assert cfg.ttft_ms == SLAPlannerDefaults.ttft_ms
         assert cfg.itl_ms == SLAPlannerDefaults.itl_ms
+
+    def test_partial_sla_ttft_only_propagates_effective_values(self):
+        """only ttft → effective (ttft, sla-default itl) both propagated"""
+
+        dgdr = _sla_dgdr(sla=SLASpec(ttft=300.0))
+
+        cfg = _build(dgdr)
+
+        assert cfg.ttft_ms == 300.0
+        assert cfg.itl_ms == 30.0  # SLASpec default
+
+    def test_partial_sla_itl_only_propagates_effective_values(self):
+        """only itl → effective (sla-default ttft, itl) both propagated"""
+
+        dgdr = _sla_dgdr(sla=SLASpec(itl=15.0))
+
+        cfg = _build(dgdr)
+
+        assert cfg.ttft_ms == 2000.0  # SLASpec default
+        assert cfg.itl_ms == 15.0

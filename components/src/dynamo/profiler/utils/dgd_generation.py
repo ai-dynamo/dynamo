@@ -603,8 +603,7 @@ def _build_planner_config(
     if (
         sla is not None
         and sla.e2eLatency is None
-        and "ttft" in sla.model_fields_set
-        and "itl" in sla.model_fields_set
+        and ("ttft" in sla.model_fields_set or "itl" in sla.model_fields_set)
     ):
         explicit = (
             dgdr.features.planner.model_fields_set
