@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_1
+model_label: DeepSeek V3.1
+mode: stream
+cases:
+  PARSER.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from PARSER.batch.1
+    chunks:
+    - delta_text: <｜
+    - delta_text: too
+    - delta_text: l▁cal
+    - delta_text: ls▁begin｜><
+    - delta_text: ｜tool▁call▁begin｜>g
+    - delta_text: et
+    - delta_text: _we
+    - delta_text: ather
+    - delta_text: <｜tool▁sep｜
+    - delta_text: '>{"location":"NYC"}'
+    - delta_text: <｜
+    - delta_text: too
+    - delta_text: l▁cal
+    - delta_text: l▁end｜><｜to
+    - delta_text: ol▁calls▁end｜>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
