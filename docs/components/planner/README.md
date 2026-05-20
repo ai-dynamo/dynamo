@@ -188,7 +188,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 Deploy the planner dashboard:
 
 ```bash
-kubectl apply -n monitoring -f deploy/observability/k8s/grafana-planner-dashboard-configmap.yaml
+kubectl apply -n monitoring -f deploy/observability/grafana-planner-dashboard-configmap.yaml
 ```
 
 The dashboard shows:

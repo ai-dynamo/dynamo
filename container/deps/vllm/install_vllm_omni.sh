@@ -35,5 +35,6 @@ for raw_line in Path(sys.argv[1]).read_text().splitlines():
 PY
 
 uv pip install --system \
+  --prerelease=allow \
   --constraints "${PROTECTED_CONSTRAINTS}" \
   "vllm-omni==${VLLM_OMNI_VERSION}"

@@ -4,6 +4,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+#[cfg(feature = "kvbm-offload")]
+use dynamo_kv_router::protocols::RouterEvent;
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_tokens::blocks::UniqueBlock;
 #[cfg(feature = "kvbm-offload")]
@@ -392,6 +394,20 @@ impl VllmCore {
         }
     }
 
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn tick_offload_only(&mut self, now_ms: f64) -> Vec<RouterEvent> {
+        self.tick_and_promote_swap_ins(now_ms);
+        self.kv_event_buffer
+            .as_ref()
+            .map(CapturedRouterEventBuffer::drain)
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn earliest_offload_deadline(&self) -> Option<f64> {
+        self.kv_manager.earliest_offload_deadline()
+    }
+
     /// Register the onboard'd PLHs into G1 inactive (so the request's
     /// next `process_use` sees `InactiveHit`) and re-queue the request at
     /// the front for admission. The swap-in covers
@@ -485,7 +501,22 @@ impl VllmCore {
         let block_size = request.sequence.block_size();
         let skip_blocks = cost.cached_tokens / block_size;
         let plhs = request.sequence.positional_lineage_hashes();
+        tracing::trace!(
+            %uuid,
+            now_ms,
+            cached_tokens = cost.cached_tokens,
+            skip_blocks,
+            plhs_len = plhs.len(),
+            "kvbm-offload: swap-in admission probe"
+        );
         if skip_blocks >= plhs.len() {
+            tracing::trace!(
+                %uuid,
+                now_ms,
+                skip_blocks,
+                plhs_len = plhs.len(),
+                "kvbm-offload: swap-in skipped; G1 prefix covers request"
+            );
             return SwapInAdmissionAttempt::NoHit;
         }
         let remaining_plhs = &plhs[skip_blocks..];
@@ -494,7 +525,15 @@ impl VllmCore {
         }
         let prefix_pins = match self.kv_manager.try_pin_g1_prefix(&plhs[..skip_blocks]) {
             Some(pins) => pins,
-            None => return SwapInAdmissionAttempt::NoHit,
+            None => {
+                tracing::trace!(
+                    %uuid,
+                    now_ms,
+                    skip_blocks,
+                    "kvbm-offload: swap-in skipped; failed to pin G1 prefix"
+                );
+                return SwapInAdmissionAttempt::NoHit;
+            }
         };
         let (handle, destination_slots) = match self
             .kv_manager
@@ -503,11 +542,36 @@ impl VllmCore {
             BatchSwapInOutcome::Scheduled {
                 handle,
                 destination_slots,
-            } => (handle, destination_slots),
+            } => {
+                tracing::debug!(
+                    %uuid,
+                    now_ms,
+                    skip_blocks,
+                    remaining_blocks = remaining_plhs.len(),
+                    "kvbm-offload: swap-in admission parked"
+                );
+                (handle, destination_slots)
+            }
             BatchSwapInOutcome::BlockedOnG1Offload => {
+                tracing::debug!(
+                    %uuid,
+                    now_ms,
+                    skip_blocks,
+                    remaining_blocks = remaining_plhs.len(),
+                    "kvbm-offload: swap-in blocked on G1 offload"
+                );
                 return SwapInAdmissionAttempt::BlockedOnG1Offload;
             }
-            BatchSwapInOutcome::NoHits => return SwapInAdmissionAttempt::NoHit,
+            BatchSwapInOutcome::NoHits => {
+                tracing::trace!(
+                    %uuid,
+                    now_ms,
+                    skip_blocks,
+                    remaining_blocks = remaining_plhs.len(),
+                    "kvbm-offload: swap-in lower-tier miss"
+                );
+                return SwapInAdmissionAttempt::NoHit;
+            }
         };
         self.state.remove_from_waiting(uuid);
         self.requests_awaiting_swap_in.push(AwaitingSwapIn {
