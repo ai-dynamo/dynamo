@@ -16,6 +16,7 @@ use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::local_model::LocalModelBuilder;
 use dynamo_llm::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
 use dynamo_llm::model_type::{ModelInput, ModelType};
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -52,8 +53,7 @@ pub struct RuntimeConfig {
     /// Discovery backend selector — e.g. `"etcd"`, `"kubernetes"`, `"file"`,
     /// `"mem"`. Maps to `DYN_DISCOVERY_BACKEND`.
     pub discovery_backend: Option<String>,
-    /// Request-plane transport — e.g. `"tcp"`, `"nats"`, `"http"`. Maps to
-    /// `DYN_REQUEST_PLANE`.
+    /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
     pub request_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
     /// derives a default from the discovery backend. Maps to `DYN_EVENT_PLANE`.
@@ -525,11 +525,19 @@ impl Worker {
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         let model_type = resolve_model_type(&self.config)?;
+        let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
 
         let mut local_model = build_local_model(&self.config, engine_config).await?;
         tracing::debug!("local model built");
         local_model
-            .attach(&endpoint, model_type, self.config.model_input, None)
+            .attach(
+                &endpoint,
+                model_type,
+                self.config.model_input,
+                None,
+                Some(worker_type),
+                needs,
+            )
             .await
             .map_err(|e| {
                 err(
@@ -826,6 +834,17 @@ fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     parse_endpoint_types(&config.endpoint_types)
 }
 
+/// Derive the topology-readiness fields (`worker_type`, `needs`) for the
+/// worker's disaggregation role. Prefill workers need a Decode peer, Decode
+/// workers need a Prefill peer, and Aggregated workers stand alone.
+fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<WorkerType>>) {
+    match config.disaggregation_mode {
+        DisaggregationMode::Prefill => (WorkerType::Prefill, vec![vec![WorkerType::Decode]]),
+        DisaggregationMode::Decode => (WorkerType::Decode, vec![vec![WorkerType::Prefill]]),
+        DisaggregationMode::Aggregated => (WorkerType::Aggregated, Vec::new()),
+    }
+}
+
 fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
     let mut out = ModelType::empty();
     let mut any = false;
@@ -920,6 +939,7 @@ async fn build_local_model(
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
         enable_local_indexer,
         disaggregated_endpoint,
+        runtime_data: engine_config.runtime_data.clone(),
         ..ModelRuntimeConfig::default()
     };
 
@@ -1048,6 +1068,11 @@ mod tests {
             total_kv_blocks: Some(100),
             max_num_seqs: Some(16),
             max_num_batched_tokens: Some(8192),
+            runtime_data: [(
+                "sglang_worker_group_id".to_string(),
+                serde_json::json!("group-a"),
+            )]
+            .into(),
             ..EngineConfig::default()
         };
 
@@ -1061,6 +1086,13 @@ mod tests {
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
         assert!(!runtime_config.enable_local_indexer);
+        assert_eq!(
+            runtime_config
+                .runtime_data
+                .get("sglang_worker_group_id")
+                .and_then(|value| value.as_str()),
+            Some("group-a")
+        );
     }
 
     #[test]

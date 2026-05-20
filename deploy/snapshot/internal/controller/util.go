@@ -48,13 +48,13 @@ func podFromInformerObj(obj interface{}) (*corev1.Pod, bool) {
 	return pod, ok
 }
 
-func isPodReady(pod *corev1.Pod) bool {
+func isContainerReady(pod *corev1.Pod, containerName string) bool {
 	if pod.Status.Phase != corev1.PodRunning {
 		return false
 	}
-	for _, cond := range pod.Status.Conditions {
-		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-			return true
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == containerName {
+			return status.Ready
 		}
 	}
 	return false

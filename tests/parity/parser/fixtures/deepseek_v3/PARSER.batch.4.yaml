@@ -18,16 +18,15 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
       vllm:
         calls: []
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: ''
-        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
   PARSER.batch.4.b:
     description: Missing close brace inside fenced JSON
     ref: dynamo
@@ -39,7 +38,8 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_4_b
+      dynamo: &id002
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
@@ -48,11 +48,10 @@ cases:
           ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm:
         calls:
-        - arguments: '{"location": "NYC"'
-          name: get_weather
+        - name: get_weather
+          arguments: '{"location": "NYC"'
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
-      sglang: *d_4_b
+      sglang: *id002
   PARSER.batch.4.c:
     description: Missing function name token
     ref: dynamo
@@ -65,6 +64,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
@@ -73,15 +73,13 @@ cases:
           ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm:
         calls:
-        - arguments:
+        - name: ''
+          arguments:
             location: NYC
-          name: ''
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: ''
-        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
   PARSER.batch.4.d:
     description: Missing fenced JSON block (no ```json)
     ref: dynamo
@@ -100,10 +98,12 @@ cases:
       vllm:
         calls: []
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
-        normal_text: '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-
-          {"location": "NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>'
-        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          {"location": "NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+  PARSER.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in PARSER.batch.4.a through 4.d.

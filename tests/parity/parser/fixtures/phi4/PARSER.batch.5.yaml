@@ -23,7 +23,6 @@ cases:
       vllm:
         calls: []
         normal_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.5.b:
@@ -42,7 +41,6 @@ cases:
       vllm:
         calls: []
         normal_text: 'functools{"name": "get_weather", "arguments": {"location": "NYC"}}]'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.5.c:
@@ -58,6 +56,39 @@ cases:
       vllm:
         calls: []
         normal_text: 'functools[{"name": "get_weather", "arguments": {"loc'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!functools[{"name": "get_weather",
+      "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York"}}'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!functools[{"name":
+          "get_weather", "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York"}}'
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!functools[{"name": "get_weather",
+      "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!functools[{"name":
+          "get_weather", "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York'
       sglang:
         unavailable: SGLang has no detector for family='phi4'

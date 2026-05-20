@@ -53,13 +53,13 @@ class SGLangComponentName(ComponentName):
 class TrtllmComponentName(ComponentName):
     # Unified frontend architecture (consistent with vLLM/SGLang):
     # - Prefill workers use "prefill" component
-    # - Decode workers use "tensorrt_llm" component
+    # - Decode workers use "backend" component
     # Use short k8s names to stay within Grove's 45-char resource name limit
     prefill_worker_k8s_name = "prefill"
     prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
     decode_worker_k8s_name = "decode"
-    decode_worker_component_name = "tensorrt_llm"
+    decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
 
 

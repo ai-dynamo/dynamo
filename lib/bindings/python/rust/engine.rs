@@ -167,6 +167,7 @@ where
         let event_loop = self.event_loop.clone();
         let ctx_python = ctx.clone();
         let has_context = self.has_context;
+        let metadata = context.metadata().clone();
 
         // Acquiring the GIL is similar to acquiring a standard lock/mutex
         // Performing this in an tokio async task could block the thread for an undefined amount of time
@@ -185,7 +186,7 @@ where
                 // Create context with trace information
                 let py_ctx = Py::new(
                     py,
-                    Context::new(ctx_python.clone(), current_trace_context, None),
+                    Context::new(ctx_python.clone(), current_trace_context, None, metadata),
                 )?;
 
                 let gen_result = if has_context {

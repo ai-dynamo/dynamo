@@ -48,7 +48,6 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
@@ -62,6 +61,10 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.kv_connector_protocols import (
+    KvConnectorProtocol,
+    make_kv_connector_protocol,
+)
 
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
@@ -263,7 +266,7 @@ class LoRAInfo:
 
 
 def _compute_mm_uuids(
-    multi_modal_data: Dict[str, Any] | None
+    multi_modal_data: Dict[str, Any] | None,
 ) -> Dict[str, list[str]] | None:
     """
     Compute multi_modal_uuids from multi_modal_data.
@@ -369,6 +372,15 @@ def build_sampling_params(
         ):
             existing = sampling_params.stop_token_ids or []
             sampling_params.stop_token_ids = list(set(existing).union(value))
+        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
+        # the same concept as `thinking_token_budget` on SamplingParams and
+        # enforces it via the builtin thinking-budget logits processor.
+        if (
+            key == "max_thinking_tokens"
+            and value is not None
+            and hasattr(sampling_params, "thinking_token_budget")
+        ):
+            sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
     output_options = request.get("output_options", {})
@@ -2387,7 +2399,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
@@ -2452,7 +2464,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -2611,22 +2623,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params, self.model_max_len
         )
 
-        # Configure for prefill-only mode with remote decode
+        # One protocol instance per request; carries per-request state
+        # (e.g. Mooncake's transfer_id) into the response loop below.
+        kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
+            self.engine_client.vllm_config
+        )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
-        sampling_params.extra_args["kv_transfer_params"] = {
-            "do_remote_decode": True,
-        }
-        sampling_params_defaults = {
-            "do_remote_prefill": False,
-            "remote_engine_id": None,
-            "remote_block_ids": None,
-            "remote_host": None,
-            "remote_port": None,
-        }
-        # Add only missing keys
-        for k, v in sampling_params_defaults.items():
-            sampling_params.extra_args["kv_transfer_params"].setdefault(k, v)
+        sampling_params.extra_args[
+            "kv_transfer_params"
+        ] = kv_protocol.prefill_request_kv_transfer_params()
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -2648,7 +2654,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
@@ -2683,10 +2689,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 embedding_params = self._build_embedding_params(
                     multi_modal_data or {}, res.prompt_token_ids
                 )
+
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
-                        res.kv_transfer_params,
+                        kv_protocol.decode_request_kv_transfer_params(res),
                         embedding_params,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(

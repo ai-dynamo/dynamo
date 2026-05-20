@@ -149,11 +149,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 		// Update Ready condition
 		dynamoDeployment.AddStatusCondition(metav1.Condition{
-			Type:               "Ready",
-			Status:             readyStatus,
-			Reason:             string(reason),
-			Message:            string(message),
-			LastTransitionTime: metav1.Now(),
+			Type:    "Ready",
+			Status:  readyStatus,
+			Reason:  string(reason),
+			Message: string(message),
 		})
 
 		// Only set ObservedGeneration when reconciliation succeeded (no error),
@@ -544,11 +543,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	if groveTopoCond == nil {
 		// No topology condition from Grove yet — don't assume healthy.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionUnknown,
-			Reason:             nvidiacomv1beta1.ConditionReasonTopologyConditionPending,
-			Message:            "Waiting for topology condition from the scheduling framework",
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionUnknown,
+			Reason:  nvidiacomv1beta1.ConditionReasonTopologyConditionPending,
+			Message: "Waiting for topology condition from the scheduling framework",
 		}
 	} else if groveTopoCond.Status == metav1.ConditionTrue {
 		// Grove reports topology levels are unavailable.
@@ -557,11 +555,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 			reason = nvidiacomv1beta1.ConditionReasonTopologyDefinitionNotFound
 		}
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            groveTopoCond.Message,
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionFalse,
+			Reason:  reason,
+			Message: groveTopoCond.Message,
 		}
 		prev := meta.FindStatusCondition(dgd.Status.Conditions, nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable)
 		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != groveTopoCond.Message {
@@ -571,11 +568,10 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	} else {
 		// Grove's TopologyLevelsUnavailable is False → all levels available.
 		dynamoCond = metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-			Status:             metav1.ConditionTrue,
-			Reason:             nvidiacomv1beta1.ConditionReasonAllTopologyLevelsAvailable,
-			Message:            "All required topology levels are available in the cluster topology",
-			LastTransitionTime: metav1.Now(),
+			Type:    nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
+			Status:  metav1.ConditionTrue,
+			Reason:  nvidiacomv1beta1.ConditionReasonAllTopologyLevelsAvailable,
+			Message: "All required topology levels are available in the cluster topology",
 		}
 	}
 
@@ -649,6 +645,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
 	preserveGrovePodCliqueSetOrder(grovePodCliqueSet, existingPodCliqueSet)
+	preserveGrovePodCliqueSetReplicas(grovePodCliqueSet, existingPodCliqueSet)
 	_, syncedGrovePodCliqueSet, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
 		return grovePodCliqueSet, false, nil
 	})
@@ -710,6 +707,55 @@ func preserveGrovePodCliqueSetOrder(desired *grovev1alpha1.PodCliqueSet, existin
 	desired.Spec.Template.Cliques = orderLikeExisting(existing.Spec.Template.Cliques, desired.Spec.Template.Cliques, podCliqueTemplateName)
 	desired.Spec.Template.PodCliqueScalingGroupConfigs = orderLikeExisting(existing.Spec.Template.PodCliqueScalingGroupConfigs, desired.Spec.Template.PodCliqueScalingGroupConfigs, podCliqueScalingGroupConfigName)
 	desired.Spec.Template.ResourceClaimTemplates = orderLikeExisting(existing.Spec.Template.ResourceClaimTemplates, desired.Spec.Template.ResourceClaimTemplates, resourceClaimTemplateConfigName)
+}
+
+// Grove horizontal replicas are driven through scale subresources after creation;
+// keep existing template values so DGD replica changes do not update the PCS spec.
+func preserveGrovePodCliqueSetReplicas(desired *grovev1alpha1.PodCliqueSet, existing *grovev1alpha1.PodCliqueSet) {
+	if desired == nil || existing == nil {
+		return
+	}
+
+	cliquesInScalingGroups := make(map[string]struct{})
+	for _, config := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		for _, cliqueName := range config.CliqueNames {
+			cliquesInScalingGroups[cliqueName] = struct{}{}
+		}
+	}
+
+	cliqueReplicasByName := make(map[string]int32, len(existing.Spec.Template.Cliques))
+	for _, clique := range existing.Spec.Template.Cliques {
+		if clique == nil || clique.Name == "" {
+			continue
+		}
+		cliqueReplicasByName[clique.Name] = clique.Spec.Replicas
+	}
+	for _, clique := range desired.Spec.Template.Cliques {
+		if clique == nil {
+			continue
+		}
+		if _, inScalingGroup := cliquesInScalingGroups[clique.Name]; inScalingGroup {
+			continue
+		}
+		if replicas, ok := cliqueReplicasByName[clique.Name]; ok {
+			clique.Spec.Replicas = replicas
+		}
+	}
+
+	scalingGroupReplicasByName := make(map[string]*int32, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
+	for _, config := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
+		if config.Name == "" {
+			// Defensive only; generated PCSG configs always have names.
+			continue
+		}
+		scalingGroupReplicasByName[config.Name] = config.Replicas
+	}
+	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		if replicas, ok := scalingGroupReplicasByName[config.Name]; ok {
+			config.Replicas = replicas
+		}
+	}
 }
 
 func orderLikeExisting[T any](existing []T, desired []T, nameOf func(T) string) []T {

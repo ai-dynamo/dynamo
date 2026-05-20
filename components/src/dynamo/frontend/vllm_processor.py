@@ -366,6 +366,15 @@ class VllmProcessor:
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
+        # nvext.max_thinking_tokens is enforced on the worker, not here. The
+        # frontend's InputProcessor is built without reasoning_config (it only
+        # tokenizes), so setting sampling_params.thinking_token_budget would
+        # cause process_inputs._validate_params to reject the request. Pluck
+        # the value out of nvext and pass it directly into dynamo_preproc
+        # below.
+        nvext_max_thinking_tokens = (request.get("nvext") or {}).get(
+            "max_thinking_tokens"
+        )
         logprobs = request_for_sampling.logprobs
         top_logprobs = request_for_sampling.top_logprobs
         if logprobs is True:
@@ -423,6 +432,7 @@ class VllmProcessor:
                 "stop_token_ids": sp.stop_token_ids,
                 "min_tokens": sp.min_tokens,
                 "ignore_eos": sp.ignore_eos,
+                "max_thinking_tokens": nvext_max_thinking_tokens,
             },
             "sampling_options": {
                 "n": sp.n,

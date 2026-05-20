@@ -34,7 +34,7 @@ pub struct Annotated<R> {
 
 impl<R> Annotated<R> {
     /// Create a new annotated stream from the given error string
-    pub fn from_error(error: String) -> Self {
+    pub fn from_error(error: impl Into<String>) -> Self {
         Self {
             data: None,
             id: None,

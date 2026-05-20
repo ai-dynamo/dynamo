@@ -173,10 +173,8 @@ Values you will see in the `dynamo_component` label on `dynamo_component_*` seri
 | `router` | The standalone KV router (`python -m dynamo.router`). |
 | `Planner` | The planner component (`python -m dynamo.planner`). Note the capital `P`. |
 | `prefill` | The prefill worker in disaggregated serving (all backends). |
-| `backend` | The decode worker in disaggregated serving for vLLM, SGLang, and the mocker, **and** the combined worker for vLLM in aggregated mode. |
-| `tensorrt_llm` | The decode worker in disaggregated serving for TRT-LLM. |
-| `tensorrt_llm_encode` | The encode worker for TRT-LLM. |
-| `encode` | The encode worker for vLLM. |
+| `backend` | The decode worker in disaggregated serving for all backends, **and** the combined worker for vLLM in aggregated mode. |
+| `encode` | The encode worker for vLLM, SGLang, and TRT-LLM. |
 | `diffusion` | The diffusion worker for TRT-LLM. |
 
 Internal subsystems (e.g. `kvbm` from the block manager, `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.

@@ -4,6 +4,16 @@ Shared test infrastructure for diffing parser / preprocess / postprocess
 behavior across Dynamo, vLLM, and SGLang. Today only the parser stage
 is populated (`parser/`); other stages slot in as siblings as they land.
 
+> **Triaging a tool-call issue from a user?** Before stepping into the
+> parity harness, point them at
+> [docs/tool-calling/troubleshooting.md](../../docs/tool-calling/troubleshooting.md).
+> That page asks users to re-run with `logprobs: true` and share the
+> response, which carries the engine's raw token stream. With that captured
+> output, the failure usually localizes to one of three causes: the
+> **model** emitted bad tokens, the **parser was not configured**
+> (`--dyn-tool-call-parser` missing or wrong family), or the **parser** ran
+> and produced the wrong output. Only the third class lands here.
+
 ## Layout
 
 ```
@@ -15,7 +25,7 @@ tests/parity/
     ├── fixtures/                   ← static YAML, generated from Dynamo as oracle
     │   └── <family>/PARSER.batch.yaml         (and per-top-level-case files like PARSER.batch.8.yaml; see Fixture file schema)
     ├── capture_parser_outputs.py     ← drift-check (default) or merge any impl's output into `expected.{dynamo,vllm,sglang}`
-    ├── generate_parity_chart.py    ← print the parity-status chart (run on demand; not checked in)
+    ├── generate_parity_chart.py    ← print the parity-status table (run on demand; not checked in)
     │
     ├── dynamo.py                   ← M2 in-process wrapper (PyO3 binding)
     ├── vllm.py                     ← M2 in-process wrapper (ToolParserManager)
@@ -131,18 +141,19 @@ PR description.
 Cell values show how each engine's recorded `expected.<impl>` block relates to Dynamo (the oracle). **Convention:** a divergent peer block carries a `reason:` field iff the divergence is *intentional* (documented contract difference, vendor behavior, etc.). No `reason:` = **research-needed** — we observed the divergence but haven't classified it yet.
 
 - `=` — both engines match Dynamo (peer block is an anchor ref `*d_<case>` to dynamo's).
-- `V` — vLLM diverges, **intentional** (engine block has `reason:` field). Rendered the same color as = in the HTML chart since the divergence is accounted for.
+- `V` — vLLM diverges, **intentional** (engine block has `reason:` field). Rendered the same color as = in the HTML table since the divergence is accounted for.
 - `V?` — vLLM diverges, **research-needed** (engine block has no `reason:` yet; we observed the divergence but haven't classified it).
 - `V!` — vLLM is expected to crash; `expected.vllm.error: <substring>` records the matching error.
 - `S`, `S?`, `S!` — same as V/V?/V! for SGLang.
 - `VS`, `VS?`, `V?S`, `V!S`, `VS!`, `V?S?`, `V!S!`, … — combinations (both engines diverge with any mix of intentional/research-needed/error).
 - `n/a` — **not applicable**: engine marked `unavailable` (no parser registered for that family), OR the sub-case shape doesn't apply to this grammar (e.g. attribute-encoded DSML families have no `4.b` because there's no embedded JSON to malform).
+- `—` — **missing fixture coverage**: no fixture entry exists for that family/case yet. If the case is intentionally not applicable, add an explicit table-only n/a stub with `description:` and `reason:` so the table can explain it.
 
 19 parsers total — split into the **Top-N models** we prioritize and
 **Others** wired into the harness for completeness. Both sections sorted
 alphabetically within themselves.
 
-The chart isn't checked in — it would drift behind the YAML every time a
+The table isn't checked in — it would drift behind the YAML every time a
 case is added or a peer block flips. Generate it on demand and save it
 somewhere you can browse:
 
@@ -165,7 +176,7 @@ generator reads every `fixtures/<family>/PARSER.*.yaml` and emits one
 cell per `(family, sub-case)` using the legend above.
 
 **Example output** (illustrative — cell values are made up, **not** a
-snapshot of current fixtures; run the script for the real chart):
+snapshot of current fixtures; run the script for the real table):
 
 ```text
 | model       | parser     | 1 | 2.a | 2.b | 2.c | 2.d | 3 | ... | 9 | 10 |
@@ -178,7 +189,7 @@ snapshot of current fixtures; run the script for the real chart):
 
 Read a row left-to-right: `=` = both engines match Dynamo, `V` / `S` =
 that engine diverges with a documented reason (rendered same color as =
-in the HTML chart), `V?` / `S?` = divergence not yet classified
+in the HTML table), `V?` / `S?` = divergence not yet classified
 (research-needed), `n/a` = case doesn't apply or peer is unavailable.
 
 ### Footnotes
@@ -186,13 +197,41 @@ in the HTML chart), `V?` / `S?` = divergence not yet classified
 † vLLM has no engine peer (or returns `UNAVAILABLE` at runtime, e.g.
   `harmony#vllm` requires token IDs not text). Cells show SGLang status
   only when SGLang is wired; otherwise the row is fully `n/a`.
-§ SGLang has no engine peer for this family. Cells show vLLM status
-  only when vLLM is wired; otherwise the row is fully `n/a`.
+§ SGLang `v0.5.10.post1` (the version pinned in `container/context.yaml`)
+  has no peer detector for this family. Cells show vLLM status only when
+  vLLM is wired; otherwise the row is fully `n/a`. **This may change with
+  future SGLang releases** — re-audit on each version bump.
 
 `nemotron_deci` and `nemotron_nano` carry both daggers (`†§`) — neither
-upstream has a peer parser, so the rows are fully `n/a`. Listed here for
-completeness; Dynamo-only self-parity could be added in a follow-up but
-yields no cross-impl signal.
+upstream has a peer parser, so the rows are fully `n/a`. They live under
+**Others** for completeness; Dynamo-only self-parity could be added in a
+follow-up but yields no cross-impl signal.
+
+### Coverage gaps — missing upstream peer parsers
+
+Snapshot pinned to **SGLang `v0.5.10.post1`** (per `container/context.yaml`)
+and the vLLM version installed in the parity dev image. **This may change
+with future releases** — re-audit on every SGLang / vLLM bump.
+
+**SGLang `v0.5.10.post1` has no detector for 4 families that DO have a vLLM peer (`§` in matrix):**
+`deepseek_v4`, `gemma4`, `jamba`, `phi4`. The harness skips the SGLang side
+of these rows at runtime (`UNAVAILABLE: SGLang has no detector for
+family='<name>'`); cells carry vLLM-only signal.
+
+**`llama3_json` is also `§` in the matrix but for a different reason** —
+SGLang does ship a Llama 3 detector ([sglang tool-parser docs](https://sgl-project.github.io/advanced_features/tool_parser.html));
+we just haven't wired it in `_FAMILY_TO_SGLANG_DETECTOR` yet. TODO follow-up
+to add it and regenerate the `llama3_json` SGLang fixtures.
+
+**Neither upstream has a peer parser for 2 families (`†§` in matrix):**
+`nemotron_deci`, `nemotron_nano`. Rows are fully `n/a`.
+
+Wrapper enumeration: `tests/parity/parser/sglang.py::_FAMILY_TO_SGLANG_DETECTOR`
+(missing keys = missing detectors). Adding an SGLang detector for any
+`§`-marked family above (either upstream-shipped in a newer SGLang release,
+or by us standing up a Dynamo-side stub) would let the harness surface
+`S`/`VS` divergences on those rows; today they carry only `V`/`✓`
+(vLLM-side).
 
 **Hot columns:**
 - `PARSER.batch.4` (malformed JSON) and `PARSER.batch.5` (missing
@@ -251,7 +290,7 @@ fixture).
 
 ## Resolving divergences (8 steps)
 
-Each non-`=` cell in the generated chart is a divergent `expected.<impl>` block
+Each non-`=` cell in the generated table is a divergent `expected.<impl>` block
 in the family's YAML fixture (concrete `calls` + `normal_text`, or
 `{error: <substring>}`, or `{unavailable: <reason>}`). Cells that
 match Dynamo are stored as anchor refs `*d_<case>` to the dynamo
@@ -306,13 +345,57 @@ PYTHONPATH=lib/bindings/python/src python3 -m pytest \
 
 Impl tag is `#vllm` or `#sglang`.
 
-### 4. Decide who's right
+### 4. Pick an alignment target
 
-- **Dynamo wrong, impl right** → fix Dynamo (step 5).
-- **Dynamo right, impl wrong intentionally** → leave the entry, file
-  an upstream bug at `vllm-project/vllm` or `sgl-project/sglang`, link
-  it from the divergence reason.
-- **Both wrong / spec-ambiguous** → discuss before touching code.
+Parity isn't about declaring a winner. It's about picking what
+Dynamo should align *to* for this (family, case) so the fix has a
+clear oracle. Apply the priorities below in order: the first matching
+rule wins, and the chosen target is recorded in
+`reason:` (or `spec_ref:`) so future readers see the trail.
+
+**Alignment-target priority (highest wins):**
+
+0. **Upstream spec, if one exists.** Chat template, tokenizer
+   config, model-card section, vendor docs. Spec is the unambiguous
+   oracle; if both vendors disagree with it, both are upstream bugs
+   to file. Record `spec_ref:` in the fixture (step 8). Rare —
+   most families have no written spec; skip to 1.
+1. **The non-leaking vendor.** Tool-calling tags like `<｜tool_call｜>`,
+   `<tool_call>`, `[TOOL_CALLS]`, etc. must never reach the
+   `message.content` shown to an end user. If one vendor leaks and
+   the other doesn't, align to the non-leaking one.
+2. **The impacted customer's vendor.** If a prod deployment is broken
+   because of a divergence, align to that customer's vendor *now* to
+   unblock. Record incident + vendor chosen in
+   `reason:` (e.g.
+   `"aligned to SGLang per Acme prod report 2026-05-12; vLLM variant leaks <|tool_call|> tag into content"`).
+   Don't re-litigate in the same PR — ship the unblock and follow
+   up separately.
+3. **Vendor consensus.** When vLLM and SGLang agree, that shared
+   shape is the target. When they disagree and none of the above
+   applies, pick the one that better satisfies priority 1 (no leak)
+   and record why in `reason:`.
+
+**Once the target is picked, the action depends on where Dynamo stands:**
+
+- **Spec is the target, a vendor diverges** → file an upstream bug
+  at `vllm-project/vllm` or `sgl-project/sglang`, link from `reason:`.
+- **A vendor is the target, Dynamo diverges** → fix Dynamo (step 5).
+- **A vendor is the target, Dynamo already matches, the *other*
+  vendor diverges intentionally** → leave the divergence entry,
+  file an upstream bug at the disagreeing vendor.
+- **Two customers need different behavior on the same case** → file a
+  follow-up for a parser-side runtime parameter or environment variable,
+  then link that follow-up from `reason:`.
+- **Genuinely ambiguous** (no spec, both vendors leak, no incident)
+  → discuss before touching code.
+
+> **Sad reality:** sometimes the priority chain is unreconcilable
+> across customers — one prod deployment needs vLLM-style output,
+> another needs SGLang-style. We may eventually need a parser-side
+> param or env (e.g. `DYN_PARSER_<family>_MODE=vllm|sglang`) to flip
+> behavior per deployment. Track these cases in `reason:` so the
+> switch can be added later from a known set.
 
 ### 5. Fix the parser
 
@@ -404,13 +487,13 @@ PARSER.batch.8.b:
   - ...
 ```
 
-Then regenerate the chart so the cell flips:
+Then regenerate the table so the cell flips:
 
 ```bash
 python3 tests/parity/parser/generate_parity_chart.py > PARITY.md
 ```
 
-Pytest should now be fully green; the chart cell flips to `=`.
+Pytest should now be fully green; the table cell flips to `=`.
 
 ```bash
 git add lib/parsers/ tests/parity/parser/
@@ -434,7 +517,7 @@ few classes stay recorded forever (intentional, by design):
 
 Everything else is a candidate to fix. Permanent divergences should
 carry a `reason:` field that classifies them as intentional (so the
-chart shows `V`/`S`, not `V?`/`S?`).
+table shows `V`/`S`, not `V?`/`S?`).
 
 ## Fixture file schema
 
@@ -757,5 +840,5 @@ real value-add is the cross-impl half (vLLM and SGLang).
    `{error: <substring>}` so the test asserts on a stable signature
    rather than the full volatile message. Add a `reason:` field to
    intentional divergences so they show as `V`/`S` not `V?`/`S?` in the
-   chart.
-6. Regenerate the chart: `python3 tests/parity/parser/generate_parity_chart.py > PARITY.md`.
+   table.
+6. Regenerate the table: `python3 tests/parity/parser/generate_parity_chart.py > PARITY.md`.

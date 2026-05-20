@@ -93,6 +93,21 @@ async def test_start_populates_registration_metadata(started_engine):
     assert cfg.max_num_seqs == 4
 
 
+async def test_runtime_data_includes_worker_group(monkeypatch):
+    from dynamo.sglang import llm_engine as llm_engine_mod
+    from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY
+
+    monkeypatch.setattr(
+        llm_engine_mod,
+        "get_sglang_worker_group_id",
+        lambda server_args: "dist_init:tcp://10.0.0.1:2345",
+    )
+
+    assert llm_engine_mod._get_runtime_data(object()) == {
+        SGLANG_WORKER_GROUP_ID_KEY: "dist_init:tcp://10.0.0.1:2345"
+    }
+
+
 async def test_generate_streams_chunks_with_coherent_final_usage(started_engine):
     engine, _ = started_engine
     ctx = _FakeContext("gen-1")

@@ -447,7 +447,7 @@ def get_runtime(store_backend="etcd", request_plane="tcp"):
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "tcp".
+        request_plane: How frontend talks to backend ("tcp", "nats"). Defaults to "tcp".
     """
     try:
         # Try to get running loop (works in async context)

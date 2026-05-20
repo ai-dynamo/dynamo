@@ -68,6 +68,14 @@ _ap.add_argument(
     ),
 )
 _ap.add_argument(
+    "--family",
+    action="append",
+    help=(
+        "Limit capture to one parser family. May be repeated. Useful when "
+        "refreshing a newly wired peer without rewriting the full fixture corpus."
+    ),
+)
+_ap.add_argument(
     "--merge",
     action="store_true",
     help=(
@@ -96,9 +104,29 @@ _args = _ap.parse_args()
 IMPL = _args.impl
 MERGE_MODE = _args.merge
 OVERWRITE = _args.overwrite_if_exists
+FAMILY_FILTER = set(_args.family or [])
 
 if OVERWRITE and not MERGE_MODE:
     _ap.error("--overwrite-if-exists requires --merge")
+
+
+def _known_fixture_families() -> set[str]:
+    families = set()
+    for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
+        doc = yaml.safe_load(fp.read_text())
+        families.add(doc["family"])
+    return families
+
+
+if FAMILY_FILTER:
+    known_families = _known_fixture_families()
+    unknown_families = FAMILY_FILTER - known_families
+    if unknown_families:
+        _ap.error(
+            "unknown --family value(s): "
+            f"{', '.join(sorted(unknown_families))}. "
+            f"Known families: {', '.join(sorted(known_families))}"
+        )
 
 wrapper = importlib.import_module(
     f"tests.parity.parser.{IMPL}"
@@ -121,6 +149,14 @@ def normalize_output(d: dict) -> dict:
         "calls": d.get("calls") or [],
         "normal_text": d.get("normal_text") or "",
     }
+
+
+def is_na_stub(case: dict[str, Any]) -> bool:
+    """Explicit table-only n/a stub: no parser input, no expected block."""
+    return set(case) == {"description", "reason"} and all(
+        isinstance(case[key], str) and case[key].strip()
+        for key in ("description", "reason")
+    )
 
 
 def run_parser(family: str, case: dict) -> dict:
@@ -292,10 +328,14 @@ def merge_into_fixtures(
     for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text(encoding="utf-8"))
         family = doc["family"]
+        if FAMILY_FILTER and family not in FAMILY_FILTER:
+            continue
         cases = doc.get("cases") or {}
         changed = False
         for case_id, case in cases.items():
             key = f"{family}/{case_id}"
+            if is_na_stub(case):
+                continue
             got = all_outputs.get(key)
             if got is None:
                 continue
@@ -339,15 +379,20 @@ def merge_into_fixtures(
 
 def main() -> int:
     all_outputs: dict[str, dict] = {}
-    n_total = n_clean = n_err = n_python_exc = 0
+    n_total = n_clean = n_err = n_python_exc = n_skipped_na = 0
     drift: list[tuple[str, str]] = []
 
     for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text())
         family = doc["family"]
+        if FAMILY_FILTER and family not in FAMILY_FILTER:
+            continue
         for case_id, case in doc["cases"].items():
-            n_total += 1
             key = f"{family}/{case_id}"
+            if is_na_stub(case):
+                n_skipped_na += 1
+                continue
+            n_total += 1
             got = run_parser(family, case)
             all_outputs[key] = got
             if got["error"]:
@@ -362,10 +407,17 @@ def main() -> int:
                 if d is not None:
                     drift.append((key, d))
 
+    if FAMILY_FILTER and n_total == 0:
+        print(
+            f"ERROR: --family matched no cases: {', '.join(sorted(FAMILY_FILTER))}",
+            file=sys.stderr,
+        )
+        return 2
+
     mode = "MERGE" if MERGE_MODE else "CHECK"
     print(
         f"IMPL={IMPL} mode={mode} total={n_total} clean={n_clean} "
-        f"wrapper_error={n_err} python_exc={n_python_exc}"
+        f"wrapper_error={n_err} python_exc={n_python_exc} skipped_na={n_skipped_na}"
     )
 
     if _args.dump:

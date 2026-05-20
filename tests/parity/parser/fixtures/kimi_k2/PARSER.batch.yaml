@@ -9,7 +9,7 @@ cases:
     description: Single tool call (happy path)
     model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,43 +17,73 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_1
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_1
-      sglang: *d_1
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_3
+      dynamo: &id003
         calls: []
         normal_text: Hello, how can I help you today?
-      vllm: *d_3
-      sglang: *d_3
-  PARSER.batch.9:
-    description: Empty input
+      vllm: *id003
+      sglang: *id003
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &d_9
+      dynamo:
         calls: []
         normal_text: ''
-      vllm: *d_9
-      sglang: *d_9
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
+      sglang:
+        calls: []
+        normal_text: '   '
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"LA"}<|tool_call_end|><|tool_calls_section_end|>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_10
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -62,5 +92,47 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_10
-      sglang: *d_10
+      vllm: *id005
+      sglang: *id005
+  PARSER.batch.30:
+    description: Separator-character case not applicable
+    reason: |-
+      This case is not applicable to kimi_k2 because it uses section/call/argument sentinel tokens, not delimiter-separated call bodies.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
+    reason: |-
+      This case is not applicable to kimi_k2 because it uses section/call/argument sentinel tokens, not delimiter-separated call bodies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.unknown_tool:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to kimi_k2 because there is no peer mixed known/unknown Kimi K2 parser case to align against.

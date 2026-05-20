@@ -24,6 +24,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
+from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
@@ -291,7 +292,11 @@ class VllmLLMEngine(LLMEngine):
             local_dp_rank = None if rank is None else rank - dp_start
 
         gen = self.engine_client.generate(
-            prompt, sampling_params, request_id, data_parallel_rank=local_dp_rank
+            prompt,
+            sampling_params,
+            request_id,
+            data_parallel_rank=local_dp_rank,
+            **telemetry.engine_trace_kwargs(context),
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL

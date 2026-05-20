@@ -17,6 +17,7 @@ from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import KvEventPublisher
 
+from . import telemetry
 from .disagg import enforce_prefill_max_tokens, require_prefill_result
 from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
 from .health_check import build_health_check_payload, is_probe
@@ -202,8 +203,10 @@ class SampleLLMEngine(LLMEngine):
 
         block_hashes = self._emit_synthetic_events(prompt_len)
         try:
-            async for chunk in self._generate_tokens(prompt_len, max_new, context):
-                yield chunk
+            # Parent-chain pinned in test_unified_worker_otlp_export.
+            with telemetry.start_span(context, "sample.tokens", prompt_len=prompt_len):
+                async for chunk in self._generate_tokens(prompt_len, max_new, context):
+                    yield chunk
         finally:
             self._release_synthetic_blocks(block_hashes)
 

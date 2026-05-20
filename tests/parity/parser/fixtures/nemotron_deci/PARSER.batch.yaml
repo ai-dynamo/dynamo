@@ -27,6 +27,10 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to nemotron_deci because neither vLLM nor SGLang has a peer parser for this family.
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -40,15 +44,39 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
       dynamo:
         calls: []
         normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
       vllm:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
@@ -68,6 +96,36 @@ cases:
         - name: get_weather
           arguments:
             location: LA
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.30:
+    description: Separator-character case not applicable
+    reason: |-
+      This case is not applicable to nemotron_deci because neither vLLM nor SGLang has a peer parser for this family.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
+    reason: |-
+      This case is not applicable to nemotron_deci because neither vLLM nor SGLang has a peer parser for this family.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "unknown_tool", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='nemotron_deci'

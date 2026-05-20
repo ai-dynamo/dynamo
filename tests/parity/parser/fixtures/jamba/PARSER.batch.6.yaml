@@ -9,18 +9,18 @@ cases:
     ref: dynamo
     model_text: '<tool_calls>[{"name": "get_time", "arguments": {}}]</tool_calls>'
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      dynamo: &d_6_a
+      dynamo: &id001
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.6.b:
@@ -28,14 +28,14 @@ cases:
     ref: dynamo
     model_text: '<tool_calls>[{"name": "get_time", "arguments": { }}]</tool_calls>'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_b
+      dynamo: &id003
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_b
+      vllm: *id003
       sglang:
         unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.6.c:
@@ -43,7 +43,7 @@ cases:
     ref: dynamo
     model_text: '<tool_calls>[{"name": "get_time"}]</tool_calls>'
     tools:
-    - *id001
+    - *id002
     expected:
       dynamo:
         calls: []
@@ -51,6 +51,5 @@ cases:
       vllm:
         calls: []
         normal_text: '<tool_calls>[{"name": "get_time"}]</tool_calls>'
-        reason: "both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty"
       sglang:
         unavailable: SGLang has no detector for family='jamba'

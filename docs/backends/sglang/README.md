@@ -137,7 +137,7 @@ pip install -e .
 Start infrastructure services for local development:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 
