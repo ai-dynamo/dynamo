@@ -26,7 +26,7 @@ from typing import Optional
 
 from dynamo._core import backend as _backend
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm import ModelInput
+from dynamo.llm import ModelInput, ModelOutput
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine import LLMEngine
@@ -80,6 +80,7 @@ class WorkerConfig:
     model_name: str = ""
     served_model_name: Optional[str] = None
     model_input: ModelInput = field(default_factory=lambda: ModelInput.Tokens)
+    model_output: ModelOutput = field(default_factory=lambda: ModelOutput.Tokens)
     endpoint_types: str = "chat,completions"
     discovery_backend: str = "etcd"
     request_plane: str = "tcp"
@@ -108,6 +109,7 @@ class WorkerConfig:
         model_name: str,
         served_model_name: Optional[str] = None,
         model_input: Optional[ModelInput] = None,
+        model_output: Optional[ModelOutput] = None,
         **overrides,
     ) -> "WorkerConfig":
         """Build from any object that carries DynamoRuntimeConfig fields.
@@ -152,6 +154,8 @@ class WorkerConfig:
             )
         if model_input is not None:
             kwargs["model_input"] = model_input
+        if model_output is not None:
+            kwargs["model_output"] = model_output
         kwargs.update(overrides)
         return cls(**kwargs)
 

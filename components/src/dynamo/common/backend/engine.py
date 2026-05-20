@@ -48,18 +48,26 @@ class GenerateRequest(TypedDict, total=False):
 class GenerateChunk(TypedDict, total=False):
     """Single chunk yielded by ``LLMEngine.generate()``.
 
-    Every chunk must include ``token_ids`` and ``index``.
-    Use ``index=0`` for single-choice responses. The final chunk must
-    additionally include ``finish_reason`` and ``completion_usage``.
-    Prefill terminals carry ``disaggregated_params`` for the
-    PrefillRouter to forward to the decode peer.
+    Every chunk must include ``index``.
+
+    In token mode (ModelOutput.Tokens, default): ``token_ids`` is required.
+    In text mode (ModelOutput.Text): ``text``, ``tool_calls``, and/or
+    ``reasoning_content`` carry the response content.
+
+    The final chunk must additionally include ``finish_reason`` and
+    ``completion_usage``.
     """
 
-    token_ids: Required[list[int]]
+    token_ids: list[int]
     index: Required[int]
     finish_reason: str
     completion_usage: dict[str, int]
     disaggregated_params: dict[str, Any]
+
+    # Text mode fields (ModelOutput.Text)
+    text: str
+    tool_calls: list[dict[str, Any]]
+    reasoning_content: str
 
 
 @dataclass
