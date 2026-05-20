@@ -263,6 +263,8 @@ async def parse_args(args: list[str]) -> Config:
             endpoint = f"dyn://{namespace}.backend.generate"
         elif dynamo_config.video_generation_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
+        elif dynamo_config.realtime_video_worker:
+            endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
             and parsed_args.disaggregation_mode == "prefill"
@@ -340,11 +342,15 @@ async def parse_args(args: list[str]) -> Config:
     # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
     image_diffusion_worker = dynamo_config.image_diffusion_worker
     video_generation_worker = dynamo_config.video_generation_worker
+    realtime_video_worker = dynamo_config.realtime_video_worker
 
-    if image_diffusion_worker or video_generation_worker:
-        worker_type = (
-            "image diffusion" if image_diffusion_worker else "video generation"
-        )
+    if image_diffusion_worker or video_generation_worker or realtime_video_worker:
+        if image_diffusion_worker:
+            worker_type = "image diffusion"
+        elif video_generation_worker:
+            worker_type = "video generation"
+        else:
+            worker_type = "realtime video"
         logging.info(
             f"{worker_type.title()} worker detected with model: {model_path}, creating minimal ServerArgs stub"
         )

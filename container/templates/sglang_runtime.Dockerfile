@@ -106,6 +106,28 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
             "sglang @ git+${SGLANG_REPO}@${SGLANG_REF}#subdirectory=python"; \
     fi
 
+# Apply patches to the installed sglang.multimodal_gen runtime. Each patch
+# under container/deps/sglang/patches/ is bind-mounted in and applied with
+# `patch -p2` against /usr/local/lib/python3.12/dist-packages/sglang. We
+# require `patch` (apt) — busybox `patch` is missing on the upstream runtime
+# image. The strip prefix is p2 because each patch has paths shaped like
+# a/python/sglang/...; cd-ing into the parent of `sglang/` and stripping two
+# components lands at sglang/multimodal_gen/... relative to the install root.
+RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/sglang-patches \
+    if [ -d /tmp/sglang-patches ] && [ -n "$(ls -A /tmp/sglang-patches 2>/dev/null)" ]; then \
+        if ! command -v patch >/dev/null 2>&1; then \
+            apt-get update && apt-get install -y --no-install-recommends patch && \
+            rm -rf /var/lib/apt/lists/*; \
+        fi && \
+        SGLANG_INSTALL_DIR="$(python3 -c 'import sglang, pathlib; print(pathlib.Path(sglang.__file__).parent.parent)')" && \
+        echo "Applying sglang patches under ${SGLANG_INSTALL_DIR}" && \
+        cd "${SGLANG_INSTALL_DIR}" && \
+        for p in /tmp/sglang-patches/*.patch; do \
+            echo "  ${p}" && \
+            patch -p2 --batch --forward < "${p}"; \
+        done; \
+    fi
+
 # msgpack: required by the realtime WebSocket endpoint added in
 # sgl-project/sglang#19817 (sglang.multimodal_gen.runtime.entrypoints.realtime
 # .realtime_video_api). Not declared in upstream pyproject so we install it

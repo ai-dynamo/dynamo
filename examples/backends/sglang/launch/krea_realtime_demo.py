@@ -27,9 +27,20 @@ Five UI fields propagate end-to-end to the realtime worker:
 
 Routes:
   GET  /            → HTML UI
-  POST /api/video   → POST /v1/videos with stream:true (SSE) → first MP4 chunk
-  GET  /api/next    → returns the next buffered SSE chunk
-  GET  /api/debug   → current request body / response chunks
+  POST /api/video   → POST /v1/videos with stream:true (SSE) and
+                      response_format:"b64_json". The demo decodes each SSE
+                      event's inline base64 once and returns raw MP4 bytes
+                      to the browser with Content-Type: video/mp4. Subsequent
+                      chunks are buffered server-side as bytes.
+  GET  /api/next    → return the next buffered MP4 chunk as raw bytes, or
+                      404 when exhausted.
+  GET  /api/debug   → current request body / response chunks (still JSON).
+
+Demo→browser is always raw video/mp4: the browser does `await resp.blob()`
+and points the <video> element at an Object URL, with no atob() loop. The
+worker→demo hop stays on b64_json so this demo has no filesystem-coupling
+requirement with the worker (works with any --media-output-fs-url, including
+none — only the inline payloads are read).
 
 Usage:
   python krea_realtime_demo.py [--dynamo URL] [--host HOST] [--port PORT]
@@ -39,9 +50,12 @@ Requires: aiohttp (pip install aiohttp).
 
 import argparse
 import asyncio
-import copy
+import base64
 import json
 import logging
+import urllib.parse
+import urllib.request
+from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, web
 
@@ -146,14 +160,6 @@ _HTML = """\
   </div>
 
   <script>
-    function detectMime(bytes) {
-      if (bytes[0] === 0xFF && bytes[1] === 0xD8) return 'image/jpeg';
-      if (bytes.length > 8 &&
-          bytes[4] === 0x66 && bytes[5] === 0x74 &&
-          bytes[6] === 0x79 && bytes[7] === 0x70) return 'video/mp4';
-      return 'application/octet-stream';
-    }
-
     // Build the nvext object that propagates to the realtime worker.
     // Mapping in dynamo.sglang/protocol.py VideoNvExt + the realtime handler's
     // _build_realtime_request: fps, seed, num_inference_steps all flow through
@@ -170,7 +176,17 @@ _HTML = """\
       const model  = document.getElementById('ms-model').value.trim();
       const prompt = document.getElementById('ms-prompt').value.trim();
       if (!model || !prompt) { alert('Model and Prompt are required.'); return null; }
-      const body = { model, prompt, output_format: "mp4", stream: true };
+      // response_format=b64_json keeps the worker→demo hop self-contained: each
+      // SSE event carries the MP4 bytes inline (base64-encoded). The demo
+      // decodes once into raw bytes and serves video/mp4 to the browser, so
+      // no filesystem coordination between worker and demo is required.
+      const body = {
+        model,
+        prompt,
+        output_format: "mp4",
+        stream: true,
+        response_format: "b64_json",
+      };
       const size    = document.getElementById('ms-size').value.trim();
       const seconds = document.getElementById('ms-seconds').value;
       if (size)    body.size    = size;
@@ -193,28 +209,72 @@ _HTML = """\
     const msPh      = document.getElementById('ms-placeholder');
     let msPrevUrl   = null;
 
-    async function playClip(json, videoEl, prevUrlRef) {
-      let url, mime;
-      if (json.b64_json) {
-        const bin   = atob(json.b64_json);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        mime = detectMime(bytes);
-        if (prevUrlRef.value) URL.revokeObjectURL(prevUrlRef.value);
-        url = URL.createObjectURL(new Blob([bytes], { type: mime }));
-        prevUrlRef.value = url;
-      } else if (json.url) {
-        url = json.url;
-        mime = 'video/mp4';
-      } else {
-        throw new Error('Response has no b64_json or url');
-      }
+    // Receive raw video/mp4 bytes from the server, swap them into the <video>
+    // element via an Object URL. The previous Object URL (if any) is revoked
+    // to avoid leaking blob storage on long sessions.
+    async function playChunkBytes(resp, videoEl, prevUrlRef) {
+      const blob = await resp.blob();
+      if (prevUrlRef.value) URL.revokeObjectURL(prevUrlRef.value);
+      const url = URL.createObjectURL(blob);
+      prevUrlRef.value = url;
       videoEl.src = url;
       videoEl.style.display = 'block';
       videoEl.play().catch(() => {});
     }
 
     const msPrevRef = { value: null };
+
+    // Prefetched response for the next chunk. Populated by startPrefetch() the
+    // moment a chunk begins playback, consumed by playNextChunk() when the
+    // current chunk fires `ended`. The server-side long-poll on /api/next
+    // overlaps with playback of the previous chunk, so generation latency is
+    // hidden as long as it's less than the chunk's playback duration. Without
+    // prefetch, the <video> sits on the last frame of chunk N while
+    // /api/next blocks waiting for chunk N+1 to be generated.
+    let msPrefetch = null;
+    let msStreamDone = false;
+
+    function startPrefetch() {
+      if (msStreamDone || msPrefetch) return;
+      msPrefetch = fetch('/api/next').catch((e) => ({ _error: e }));
+    }
+
+    async function playNextChunk() {
+      if (msStreamDone) return;
+      // `ended` shouldn't fire before `playing`, but be defensive in case the
+      // browser fires them out of order on src changes.
+      if (!msPrefetch) startPrefetch();
+      const resp = await msPrefetch;
+      msPrefetch = null;
+
+      if (resp && resp._error) {
+        msStatus.textContent = 'Error: ' + resp._error.message;
+        return;
+      }
+      if (resp.status === 404) {
+        msStreamDone = true;
+        msNext.disabled = true;
+        msStatus.textContent = 'Stream complete.';
+        return;
+      }
+      if (resp.status === 504) {
+        // Long-poll timed out without a chunk; let the user retry manually.
+        msStatus.textContent = 'Timed out waiting for chunk. Click Next to retry.';
+        msNext.disabled = false;
+        return;
+      }
+      if (!resp.ok) {
+        let msg;
+        try { msg = (await resp.json()).error || ('Error ' + resp.status); }
+        catch (_) { msg = 'Error ' + resp.status; }
+        msStatus.textContent = 'Error: ' + msg;
+        return;
+      }
+      const chunkIdx = resp.headers.get('X-Chunk-Index') || '?';
+      await playChunkBytes(resp, msVideo, msPrevRef);
+      msStatus.textContent = `Playing chunk ${parseInt(chunkIdx) + 1}.`;
+      msNext.disabled = false;
+    }
 
     msGen.addEventListener('click', async () => {
       const body = readMsForm();
@@ -224,15 +284,22 @@ _HTML = """\
       msStatus.textContent = 'Generating…';
       msPh.style.display = 'none';
       msVideo.style.display = 'none';
+      msPrefetch = null;
+      msStreamDone = false;
       try {
         const resp = await fetch('/api/video', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-        const j = await resp.json();
-        if (!resp.ok) throw new Error(j.error || 'Dynamo error ' + resp.status);
-        await playClip(j, msVideo, msPrevRef);
+        if (!resp.ok) {
+          // Errors come back as JSON; success comes back as video/mp4 bytes.
+          let msg;
+          try { msg = (await resp.json()).error || ('Dynamo error ' + resp.status); }
+          catch (_) { msg = 'Dynamo error ' + resp.status; }
+          throw new Error(msg);
+        }
+        await playChunkBytes(resp, msVideo, msPrevRef);
         msStatus.textContent = 'Playing chunk 1.';
         msNext.disabled = false;
       } catch (e) {
@@ -243,26 +310,22 @@ _HTML = """\
       }
     });
 
-    async function fetchNextStreamClip() {
-      msNext.disabled = true;
-      try {
-        const resp = await fetch('/api/next');
-        if (resp.status === 404) {
-          msStatus.textContent = 'Stream complete.';
-          return;
-        }
-        const j = await resp.json();
-        if (!resp.ok) throw new Error(j.error || 'Error ' + resp.status);
-        await playClip(j, msVideo, msPrevRef);
-        msStatus.textContent = 'Playing next chunk.';
-        msNext.disabled = false;
-      } catch (e) {
-        msStatus.textContent = 'Error: ' + e.message;
-      }
-    }
+    // Manual Next Chunk button: same as auto-advance but useful for stepping
+    // through or retrying after a 504.
+    msNext.addEventListener('click', () => {
+      if (!msPrefetch) startPrefetch();
+      playNextChunk();
+    });
 
-    msNext.addEventListener('click', fetchNextStreamClip);
-    msVideo.addEventListener('ended', () => { if (!msNext.disabled) fetchNextStreamClip(); });
+    // Auto-advance via prefetch: kick off the next /api/next fetch the moment
+    // a chunk *starts* playing, so the long-poll overlaps with playback. By
+    // the time `ended` fires we usually have the response already.
+    msVideo.addEventListener('playing', () => {
+      if (!msNext.disabled && !msStreamDone) startPrefetch();
+    });
+    msVideo.addEventListener('ended', () => {
+      if (!msNext.disabled && !msStreamDone) playNextChunk();
+    });
 
     // ── Debug panel polling ─────────────────────────────────────────────────
     const reqLog = document.getElementById('ms-req-log');
@@ -297,6 +360,43 @@ async def handle_index(request: web.Request) -> web.Response:
     return web.Response(text=_HTML, content_type="text/html")
 
 
+def _bytes_from_item(item: dict) -> bytes:
+    """Extract raw video bytes from one element of an `NvVideosResponse.data` list.
+
+    Supports both `response_format` values the realtime worker emits:
+      - b64_json: base64-decode the embedded payload.
+      - url: file:// only (the worker's default --media-output-fs-url). Reads
+             the file from disk. http(s):// URLs are fetched via urllib.
+    """
+    if item.get("b64_json"):
+        return base64.b64decode(item["b64_json"])
+    url = item.get("url")
+    if not url:
+        raise ValueError("response item has neither b64_json nor url")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "file":
+        return Path(parsed.path).read_bytes()
+    if parsed.scheme in ("http", "https"):
+        with urllib.request.urlopen(url) as r:  # noqa: S310
+            return r.read()
+    raise ValueError(f"unsupported url scheme: {parsed.scheme!r}")
+
+
+def _mp4_response(data: bytes, chunk_idx: int, total_so_far: int) -> web.Response:
+    """Return raw MP4 bytes with metadata headers so the client can decide
+    whether to fetch /api/next or stop. `total_so_far` is the current count of
+    buffered chunks — it's monotonically non-decreasing while SSE is streaming.
+    """
+    return web.Response(
+        body=data,
+        content_type="video/mp4",
+        headers={
+            "X-Chunk-Index": str(chunk_idx),
+            "X-Total-Chunks-So-Far": str(total_so_far),
+        },
+    )
+
+
 async def handle_video(request: web.Request) -> web.Response:
     """POST /api/video → Dynamo POST /v1/videos.
 
@@ -304,8 +404,19 @@ async def handle_video(request: web.Request) -> web.Response:
     propagate as-is to the realtime worker via Dynamo's CreateVideoRequest.
 
     When body["stream"] is true the upstream is SSE: we consume the event
-    stream into request.app["clips"] and return the first chunk immediately.
-    Subsequent chunks are fetched via /api/next.
+    stream, decode every chunk to raw MP4 bytes into request.app["clips"]
+    (a list[bytes]), and return the first chunk's bytes immediately with
+    Content-Type: video/mp4. Subsequent chunks are fetched via /api/next.
+
+    Two coordination signals shared with /api/next:
+      - request.app["clip_available"]: asyncio.Event — set on every new chunk
+        (cleared after handle_next reads). Lets /api/next long-poll for the
+        next chunk instead of returning 404 prematurely while the worker is
+        still generating later chunks.
+      - request.app["sse_done"]: asyncio.Event — set when the SSE consumer
+        finishes (successfully or with error). Combined with clip_available,
+        /api/next can distinguish "not ready yet, please wait" from "no more
+        chunks are coming."
     """
     body = await request.json()
     streaming = bool(body.get("stream"))
@@ -315,6 +426,8 @@ async def handle_video(request: web.Request) -> web.Response:
     debug["chunks"] = ""
     request.app["clips"] = []
     request.app["next_clip"] = 1
+    request.app["clip_available"] = asyncio.Event()
+    request.app["sse_done"] = asyncio.Event()
 
     dynamo_url = request.app["dynamo_url"]
     timeout = ClientTimeout(total=300, connect=10)
@@ -344,30 +457,45 @@ async def handle_video(request: web.Request) -> web.Response:
                                         continue
                                     try:
                                         event = json.loads(data_str)
-                                        if isinstance(event.get("data"), list):
-                                            for item in event["data"]:
-                                                request.app["clips"].append(item.copy())
-                                                if "b64_json" in item:
-                                                    item[
-                                                        "b64_json"
-                                                    ] = f"<video_data_{len(request.app['clips'])-1}>"
-                                                if "url" in item:
-                                                    item[
-                                                        "url"
-                                                    ] = f"<video_url_{len(request.app['clips'])-1}>"
-                                        elif "b64_json" in event or "url" in event:
-                                            request.app["clips"].append(event.copy())
-                                            if "b64_json" in event:
-                                                event[
-                                                    "b64_json"
-                                                ] = f"<video_data_{len(request.app['clips'])-1}>"
-                                            if "url" in event:
-                                                event[
-                                                    "url"
-                                                ] = f"<video_url_{len(request.app['clips'])-1}>"
-                                        debug["chunks"] += json.dumps(event, indent=2)
                                     except Exception:
-                                        pass
+                                        continue
+                                    items = (
+                                        event.get("data")
+                                        if isinstance(event.get("data"), list)
+                                        else [event]
+                                    )
+                                    new_indices: list[int] = []
+                                    for item in items:
+                                        if not isinstance(item, dict):
+                                            continue
+                                        try:
+                                            chunk_bytes = _bytes_from_item(item)
+                                        except Exception as e:
+                                            logger.warning("Skipping chunk: %s", e)
+                                            continue
+                                        request.app["clips"].append(chunk_bytes)
+                                        new_indices.append(
+                                            len(request.app["clips"]) - 1
+                                        )
+                                    # Wake any /api/next waiter blocked on the
+                                    # next chunk's arrival.
+                                    if new_indices:
+                                        request.app["clip_available"].set()
+                                        await asyncio.sleep(0)
+                                    # Log a sanitized view of the event with
+                                    # placeholders instead of the actual bytes.
+                                    sanitized = json.loads(data_str)
+                                    if isinstance(sanitized.get("data"), list):
+                                        for i, item in enumerate(sanitized["data"]):
+                                            if "b64_json" in item:
+                                                item[
+                                                    "b64_json"
+                                                ] = f"<video_data_{new_indices[i] if i < len(new_indices) else '?'}>"
+                                            if "url" in item:
+                                                item[
+                                                    "url"
+                                                ] = f"<video_url_{new_indices[i] if i < len(new_indices) else '?'}>"
+                                    debug["chunks"] += json.dumps(sanitized, indent=2)
                                     if (
                                         request.app["clips"]
                                         and not first_clip_ready.is_set()
@@ -378,13 +506,22 @@ async def handle_video(request: web.Request) -> web.Response:
                 finally:
                     if not first_clip_ready.is_set():
                         first_clip_ready.set()
+                    # Stream is closed (success or error). Wake any /api/next
+                    # waiter so it can see the final clip count and return
+                    # 404 if it's already drained.
+                    request.app["sse_done"].set()
+                    request.app["clip_available"].set()
 
             asyncio.create_task(consume_sse())
             await first_clip_ready.wait()
 
             if not request.app["clips"]:
                 raise web.HTTPBadGateway(reason="SSE stream ended without a video clip")
-            return web.json_response(request.app["clips"][0])
+            return _mp4_response(
+                request.app["clips"][0],
+                chunk_idx=0,
+                total_so_far=len(request.app["clips"]),
+            )
 
         async with ClientSession(timeout=timeout) as session:
             async with session.post(f"{dynamo_url}/v1/videos", json=body) as upstream:
@@ -394,19 +531,47 @@ async def handle_video(request: web.Request) -> web.Response:
                         reason=f"Dynamo error {upstream.status}: {text}"
                     )
                 json_body = await upstream.json()
-                if isinstance(json_body.get("data"), list):
-                    for item in json_body["data"]:
-                        request.app["clips"].append(item)
-                sanitized = copy.deepcopy(json_body)
-                if isinstance(sanitized.get("data"), list):
-                    for i, item in enumerate(sanitized["data"]):
-                        if "b64_json" in item:
-                            item["b64_json"] = f"<video_data_{i}>"
-                        if "url" in item:
-                            item["url"] = f"<video_url_{i}>"
+                items = (
+                    json_body.get("data")
+                    if isinstance(json_body.get("data"), list)
+                    else []
+                )
+                for item in items:
+                    if isinstance(item, dict):
+                        try:
+                            request.app["clips"].append(_bytes_from_item(item))
+                        except Exception as e:
+                            logger.warning("Skipping non-streaming chunk: %s", e)
+                sanitized = {
+                    **{k: v for k, v in json_body.items() if k != "data"},
+                    "data": [
+                        {
+                            **{
+                                k: v
+                                for k, v in item.items()
+                                if k not in ("b64_json", "url")
+                            },
+                            **(
+                                {"b64_json": f"<video_data_{i}>"}
+                                if isinstance(item, dict) and "b64_json" in item
+                                else {}
+                            ),
+                            **(
+                                {"url": f"<video_url_{i}>"}
+                                if isinstance(item, dict) and "url" in item
+                                else {}
+                            ),
+                        }
+                        for i, item in enumerate(items)
+                    ],
+                }
                 debug["chunks"] = json.dumps(sanitized, indent=2)
-                return web.json_response(
-                    request.app["clips"][0], status=upstream.status
+                if not request.app["clips"]:
+                    raise web.HTTPBadGateway(reason="upstream returned no video data")
+                return _mp4_response(
+                    request.app["clips"][0],
+                    chunk_idx=0,
+                    total_so_far=len(request.app["clips"]),
                 )
     except web.HTTPException:
         raise
@@ -415,14 +580,56 @@ async def handle_video(request: web.Request) -> web.Response:
         raise web.HTTPBadGateway(reason=str(exc))
 
 
+_NEXT_LONG_POLL_TIMEOUT_S = 10.0
+
+
 async def handle_next(request: web.Request) -> web.Response:
-    """GET /api/next → return the next buffered video clip (same shape as /api/video)."""
-    clips = request.app["clips"]
-    if len(clips) == 0 or request.app["next_clip"] >= len(clips):
-        return web.json_response({"error": "No clips available"}, status=404)
-    clip = clips[request.app["next_clip"]]
-    request.app["next_clip"] += 1
-    return web.json_response(clip, status=200)
+    """GET /api/next → return the next buffered MP4 chunk as raw bytes.
+
+    Long-polls if the next chunk hasn't arrived yet. The browser fires the
+    `ended` event the instant a chunk finishes playing (~1 s of video at
+    12 fps), but the worker often hasn't produced the next one yet (~2 s at
+    4 inference steps on H100-class). Returning 404 immediately would cause
+    the client to permanently stop the stream after the first chunk.
+
+    Returns:
+      200 + video/mp4: when the next chunk becomes available.
+      404 + JSON: when the SSE stream has finished AND we've already served
+                  every buffered chunk.
+      504 + JSON: if no chunk arrived within `_NEXT_LONG_POLL_TIMEOUT_S`
+                  (defensive — bounded so the client can retry rather than
+                  hang on a stalled worker).
+    """
+    clip_available: asyncio.Event = request.app["clip_available"]
+    sse_done: asyncio.Event = request.app["sse_done"]
+
+    deadline = asyncio.get_event_loop().time() + _NEXT_LONG_POLL_TIMEOUT_S
+    while True:
+        clips = request.app["clips"]
+        idx = request.app["next_clip"]
+        if idx < len(clips):
+            chunk_bytes = clips[idx]
+            request.app["next_clip"] = idx + 1
+            # If we just drained the buffer and more chunks may still arrive,
+            # clear the event so the next /api/next call blocks again.
+            if (
+                request.app["next_clip"] >= len(request.app["clips"])
+                and not sse_done.is_set()
+            ):
+                clip_available.clear()
+            return _mp4_response(chunk_bytes, chunk_idx=idx, total_so_far=len(clips))
+
+        if sse_done.is_set():
+            return web.json_response(
+                {"error": "stream complete; no more chunks"}, status=404
+            )
+
+        while True:
+            if deadline - asyncio.get_event_loop().time() <= 0:
+                return web.json_response({"error": "timeout"}, status=504)
+            await asyncio.sleep(0.1)
+            if clip_available.is_set():
+                break
 
 
 async def handle_debug(request: web.Request) -> web.Response:

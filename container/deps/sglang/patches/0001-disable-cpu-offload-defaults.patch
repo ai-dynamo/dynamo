@@ -1,0 +1,47 @@
+From: Dynamo <dev@nvidia.com>
+Subject: [PATCH] multimodal_gen: default all CPU offload knobs to False
+
+Flip every `*_cpu_offload` default from `None` (auto-decide) to `False`,
+and flip `pin_cpu_memory` from `True` to `False`. With the previous `None`
+defaults the auto-decide logic in `_adjust_offload` /
+`_adjust_platform_specific` enables offload on GPUs below the memory cutoff
+or for Wan/MOVA pipelines. That auto-enable exposes latent-vs-generator
+device-mismatch failures in the realtime path, since
+`prepare_latents` reads `self.transformer.device` (CPU under offload) while
+`RealtimeVideoGenerationsRequest.generator_device` defaults to "cuda".
+
+Targets: antgroup/sglang `chunk_diffusion` (sgl-project/sglang#19817).
+
+Applied at image build time from the Dynamo SGLang runtime Dockerfile
+(`container/templates/sglang_runtime.Dockerfile`). Callers that still
+want offload can opt in explicitly via `--dit-cpu-offload true` or
+kwargs to `DiffGenerator.from_pretrained(...)`.
+
+---
+ python/sglang/multimodal_gen/runtime/server_args.py | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/python/sglang/multimodal_gen/runtime/server_args.py b/python/sglang/multimodal_gen/runtime/server_args.py
+--- a/python/sglang/multimodal_gen/runtime/server_args.py
++++ b/python/sglang/multimodal_gen/runtime/server_args.py
+@@ -161,14 +161,14 @@
+     lora_target_modules: list[str] | None = None
+
+     # CPU offload parameters
+-    dit_cpu_offload: bool | None = None
+-    dit_layerwise_offload: bool | None = None
++    dit_cpu_offload: bool | None = False
++    dit_layerwise_offload: bool | None = False
+     dit_offload_prefetch_size: float = 0.0
+-    text_encoder_cpu_offload: bool | None = None
+-    image_encoder_cpu_offload: bool | None = None
+-    vae_cpu_offload: bool | None = None
++    text_encoder_cpu_offload: bool | None = False
++    image_encoder_cpu_offload: bool | None = False
++    vae_cpu_offload: bool | None = False
+     use_fsdp_inference: bool = False
+-    pin_cpu_memory: bool = True
++    pin_cpu_memory: bool = False
+
+     # ComfyUI integration
+     comfyui_mode: bool = False

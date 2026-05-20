@@ -300,18 +300,30 @@ async def init_realtime_video_diffusion(
     singleton that is normally initialized by sglang's diffusion FastAPI
     lifespan (sgl-project/sglang#19817 `http_server.py:lifespan`). Dynamo's
     worker bypasses FastAPI, so we replicate that bootstrap here: after
-    `DiffGenerator.from_pretrained` has spawned the scheduler (and populated
-    `get_global_server_args()` via `launch_server`), we call
-    `async_scheduler_client.initialize(...)` and pair it with `close()` on
+    `DiffGenerator.from_pretrained` has spawned the scheduler, we pull the
+    constructed `ServerArgs` off the generator (`generator.server_args`,
+    same instance the sync client already uses), publish it as the
+    process-global via `set_global_server_args`, and feed it to
+    `async_scheduler_client.initialize(...)`, paired with `close()` on
     teardown. The `run_zeromq_broker` background task from the upstream
     lifespan is intentionally omitted — it only services external offline
     clients connecting to the FastAPI process, which doesn't exist here.
+
+    The global publish is load-bearing: antgroup's per-chunk code path
+    (`session.build_sampling_params` → `build_sampling_params` in
+    sglang/multimodal_gen/runtime/entrypoints/openai/utils.py) calls
+    `get_global_server_args()` to read fields like attention backend config.
+    `launch_server(..., launch_http_server=False)` — the path
+    `DiffGenerator.from_pretrained` takes — does NOT set the global in this
+    process; the only call to `set_global_server_args` upstream is inside
+    `launch_http_server_only`. So without this explicit set, requests fail
+    at the first chunk with "Global sgl_diffusion args is not set."
     """
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     from sglang.multimodal_gen import DiffGenerator
     from sglang.multimodal_gen.runtime.scheduler_client import async_scheduler_client
-    from sglang.multimodal_gen.runtime.server_args import get_global_server_args
+    from sglang.multimodal_gen.runtime.server_args import set_global_server_args
 
     if not server_args.model_path:
         raise ValueError("--model is required for realtime video workers")
@@ -322,17 +334,32 @@ async def init_realtime_video_diffusion(
 
     dist_timeout = getattr(server_args, "dist_timeout", None)
 
+    # Disable all CPU offload paths. Antgroup's __post_init__ auto-enables
+    # them on memory-constrained GPUs; we target a GPU that can hold the
+    # full Wan 14B + UMT5 + VAE resident, and the offloaded code paths have
+    # latent-vs-generator device-mismatch issues that surface randomly. The
+    # realtime worker is designed for a large GPU — we own that assumption.
+    # pin_cpu_memory is inert when all offload paths are False (its only
+    # consumers are gated by cpu_offload/use_fsdp_inference/layerwise/comfyui),
+    # but we set it False for symmetry so the server_args dump matches intent.
     generator = DiffGenerator.from_pretrained(
         model_path=server_args.model_path,
         num_gpus=num_gpus,
         tp_size=tp_size,
         dp_size=dp_size,
         dist_timeout=dist_timeout,
+        dit_cpu_offload=False,
+        dit_layerwise_offload=False,
+        text_encoder_cpu_offload=False,
+        image_encoder_cpu_offload=False,
+        vae_cpu_offload=False,
+        pin_cpu_memory=False,
     )
 
-    # DiffGenerator.from_pretrained -> launch_server -> set_global_server_args,
-    # so the global is populated by now. Mirror the FastAPI lifespan init.
-    async_scheduler_client.initialize(get_global_server_args())
+    # Mirror the FastAPI lifespan init, but read the ServerArgs off the
+    # generator (the global is unset in this process — see docstring).
+    set_global_server_args(generator.server_args)
+    async_scheduler_client.initialize(generator.server_args)
 
     fs_url = dynamo_args.media_output_fs_url
 
