@@ -18,7 +18,7 @@ EXAMPLE OUTPUT (truncated; illustrative, NOT a snapshot of current fixtures
 
 ================================================================================
 
-Reads every `tests/parity/parser/fixtures/<family>/PARSER.*.yaml` and emits
+Reads every `tests/parity/parser/fixtures/<family>/PARSER.batch*.yaml` and emits
 the table referenced in `tests/parity/README.md`.
 
 Cell markers (per peer, vllm + sglang):
@@ -476,7 +476,7 @@ def family_suffix(fam: str, no_vllm: set[str], no_sglang: set[str]) -> str:
 
 
 def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
-    """Load every fixture YAML.
+    """Load every batch fixture YAML.
 
     Returns `(cases, labels)`:
       cases  — `{(family, sub_case_id): case_data}`; each case dict gets
@@ -489,8 +489,10 @@ def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
     cases: dict[tuple[str, str], dict] = {}
     labels: dict[str, str] = {}
     script_dir = Path(__file__).resolve().parent
-    for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
+    for fp in sorted(FIXTURES.glob("*/PARSER.batch*.yaml")):
         doc = yaml.safe_load(fp.read_text())
+        if doc.get("mode", "batch") != "batch":
+            continue
         family = doc["family"]
         rel = str(fp.relative_to(script_dir))
         if "model_label" in doc:
