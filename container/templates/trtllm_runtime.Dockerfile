@@ -11,6 +11,7 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
+ARG TARGETARCH
 
 WORKDIR /workspace
 
@@ -19,6 +20,20 @@ WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV HOME=/home/dynamo
 ENV PATH=/usr/local/bin/etcd:${PATH}
+
+# Upstream's /etc/shinit_v2 prepends /usr/local/tensorrt/lib (and others) to
+# LD_LIBRARY_PATH, but only when a shell starts. K8s spawns python3 directly,
+# so the libs aren't found and `import tensorrt` fails. Register the paths
+# with ldconfig instead so they resolve regardless of launch method.
+RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    printf '%s\n' \
+        "/usr/local/tensorrt/lib" \
+        "/usr/local/cuda/lib64" \
+        "/usr/local/ucx/lib" \
+        "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" \
+        "/opt/nvidia/nvda_nixl/lib64" \
+        > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
+    ldconfig
 
 # Upstream ships /usr/local/bin/etcd as a single binary; remove it so we can
 # install dynamo_base's etcd directory (etcd+etcdctl+etcdutl) at the same path.
