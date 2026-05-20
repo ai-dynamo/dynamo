@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen3_coder
+model_label: Qwen 3 Coder
+mode: batch
+cases:
+  PARSER.batch.1:
+    description: Single tool call (happy path)
+    model_text: |-
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </parameter>
+      </function>
+      </tool_call>
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  PARSER.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *id003
+      sglang: *id003
+  PARSER.batch.9.a:
+    description: Empty model text
+    model_text: ''
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
+      sglang:
+        calls: []
+        normal_text: '   '
+  PARSER.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: |-
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </parameter>
+      </function>
+      </tool_call>
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      LA
+      </parameter>
+      </function>
+      </tool_call>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id005
+      sglang: *id005
+  PARSER.batch.30:
+    description: Separator-character case not applicable
+    reason: |-
+      This case is not applicable to qwen3_coder because it uses XML-ish function/parameter tags, not delimiter-separated call bodies.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
+    reason: |-
+      This case is not applicable to qwen3_coder because it uses XML-ish function/parameter tags, not delimiter-separated call bodies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      <function=unknown_tool>
+      <parameter=location>NYC</parameter>
+      </function>
+      </tool_call>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to qwen3_coder because there is no peer mixed known/unknown Qwen 3 Coder parser case to align against.

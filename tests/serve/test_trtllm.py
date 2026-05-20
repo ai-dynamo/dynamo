@@ -24,6 +24,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     metric_payload_default,
     multimodal_payload_default,
+    router_selection_chat_payload_default,
 )
 from tests.utils.payloads import ImageGenerationPayload, VideoGenerationPayload
 
@@ -64,8 +65,19 @@ trtllm_configs = {
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         delayed_start=5,
+        # TRT-LLM blocks greedy n>1 by default. Keep the request OpenAI-shaped
+        # with only "n", and enable TRT-LLM's backend guard for this E2E.
+        env={"TLLM_ALLOW_N_GREEDY_DECODING": "1"},
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="trtllm"),
         ],
@@ -82,6 +94,7 @@ trtllm_configs = {
             pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(300),
             pytest.mark.pre_merge,
+            pytest.mark.unified,
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -192,12 +205,12 @@ trtllm_configs = {
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            chat_payload_default(
+            router_selection_chat_payload_default(
                 expected_log=[
                     r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
-            )
+            ),
         ],
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
@@ -269,6 +282,8 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -286,8 +301,33 @@ trtllm_configs = {
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
-    # Test Encoder with Aggregated PD worker on same GPU
-    # Make this pre-merge after TRTLLM #5938603 is fixed
+    "pd_multimodal": TRTLLMConfig(
+        name="pd_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=120,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "PREFILL_CUDA_VISIBLE_DEVICES": "0",
+            "DECODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
     "e_pd_multimodal": TRTLLMConfig(
         name="e_pd_multimodal",
         directory=trtllm_dir,
@@ -296,7 +336,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -486,6 +528,11 @@ trtllm_configs = {
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
             pytest.mark.timeout(900),
+            # Bisected with tests/utils/profile_pytest.py: minimum = 528 tokens,
+            # 2x safety = 1056. Peak 8.1 GiB at 1056 tokens. Override threads
+            # through agg_multimodal.sh -> KvCacheConfig.max_tokens.
+            pytest.mark.profiled_vram_gib(8.1),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -554,7 +601,9 @@ def test_deployment(
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     # Use per-test ports so tests can run safely under pytest-xdist.
     config = dataclasses.replace(
-        trtllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+        trtllm_config_test,
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+        env=dict(trtllm_config_test.env or {}),
     )
     # Non-port env stays here; ports are wired by run_serve_deployment(ports=...).
     config.env.update(
@@ -609,5 +658,54 @@ def test_chat_only_aggregated_with_test_logits_processor(
             "MODEL_PATH": config.model,
             "SERVED_MODEL_NAME": config.model,
         }
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.trtllm
+@pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(3.9)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("num_system_ports", [1], indirect=True)
+def test_aggregated_health_check_priority(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """
+    Validate the canary health check with priority=1.0 on an aggregated
+    TRT-LLM deployment.
+
+    Starts the engine with DYN_HEALTH_CHECK_ENABLED=true and
+    health_check_workers=True (1 system port). The test passes only if:
+    1. The worker /health endpoint reports ready (canary with priority=1.0
+       was accepted by generate_async and returned a valid response)
+    2. A normal chat request succeeds alongside the canary
+    """
+    base = trtllm_configs["aggregated"]
+    config = TRTLLMConfig(
+        name="aggregated_health_check",
+        directory=base.directory,
+        script_name=base.script_name,
+        marks=[],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+        delayed_start=base.delayed_start,
+        timeout=base.timeout,
+        health_check_workers=True,
+        env={
+            "DYN_HEALTH_CHECK_ENABLED": "true",
+            "DYN_CANARY_WAIT_TIME": "2",
+            "MODEL_PATH": "Qwen/Qwen3-0.6B",
+            "SERVED_MODEL_NAME": "Qwen/Qwen3-0.6B",
+        },
+        request_payloads=[
+            chat_payload_default(),
+        ],
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)

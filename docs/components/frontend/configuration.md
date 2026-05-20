@@ -29,13 +29,13 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct` |
-| `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` | Weight for KV cache overlap in worker scoring. Higher = prefer cache reuse |
-| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for worker sampling. 0 = deterministic |
+| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` |
+| `--load-aware` / `--no-load-aware` | `DYN_ROUTER_LOAD_AWARE` | `false` | Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv` |
+| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
+| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
+| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for normalized worker sampling. 0 = deterministic |
 | `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Enable KV cache state events from workers. Disable for prediction-based routing |
 | `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL when KV events are disabled |
-| `--router-max-tree-size` | `DYN_ROUTER_MAX_TREE_SIZE` | `1048576` | Max radix tree size before pruning (no-events mode) |
-| `--router-prune-target-ratio` | `DYN_ROUTER_PRUNE_TARGET_RATIO` | `0.8` | Target size ratio after pruning (no-events mode) |
 | `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Sync state across multiple router instances |
 | `--router-snapshot-threshold` | `DYN_ROUTER_SNAPSHOT_THRESHOLD` | `1000000` | Messages before triggering a snapshot |
 | `--router-reset-states` / `--no-router-reset-states` | `DYN_ROUTER_RESET_STATES` | `false` | Reset router state on startup. **Warning:** affects existing replicas |
@@ -44,14 +44,14 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-track-output-blocks` / `--no-router-track-output-blocks` | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Track output blocks with fractional decay during generation |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Track prompt-side prefill load in worker load accounting |
 | `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load, `aic` for oldest-prefill decay using an AIC prediction |
-| `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | Event processing threads. >1 enables concurrent radix tree |
-| `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `4.0` | Queue threshold fraction of prefill capacity. Enables priority scheduling |
+| `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. >1 enables the concurrent radix tree, including with `--no-router-kv-events` |
+| `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `16.0` | Queue threshold fraction of prefill capacity. Enables priority scheduling |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers unavailable |
 
 ## AIC Prefill Load Model
 
-These options are used only when `--router-mode kv` and `--router-prefill-load-model aic` are enabled.
+These options are used only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
@@ -60,8 +60,13 @@ These options are used only when `--router-mode kv` and `--router-prefill-load-m
 | `--aic-model-path` | `DYN_AIC_MODEL_PATH` | — | Model path or model identifier used for AIC perf lookup |
 | `--aic-backend-version` | `DYN_AIC_BACKEND_VERSION` | backend-specific | Pinned AIC database version. If omitted, Dynamo uses the backend default |
 | `--aic-tp-size` | `DYN_AIC_TP_SIZE` | `1` | Tensor-parallel size to model in AIC |
+| `--aic-moe-tp-size` | `DYN_AIC_MOE_TP_SIZE` | — | MoE tensor-parallel size for models that require AIC MoE parallelism |
+| `--aic-moe-ep-size` | `DYN_AIC_MOE_EP_SIZE` | — | MoE expert-parallel size for models that require AIC MoE parallelism |
+| `--aic-attention-dp-size` | `DYN_AIC_ATTENTION_DP_SIZE` | — | Attention data-parallel size for models that require AIC MoE parallelism |
 
 When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix. The router then decays only the oldest active prefill request on each worker for prompt-side load accounting.
+
+For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--aic-moe-tp-size` to the same value as `--aic-tp-size`, with `--aic-moe-ep-size 1` and `--aic-attention-dp-size 1`.
 
 ## Fault Tolerance
 
@@ -70,7 +75,8 @@ When enabled, the frontend's embedded KV router predicts one expected prefill du
 | `--migration-limit` | `DYN_MIGRATION_LIMIT` | `0` | Max request migrations per worker disconnect. 0 = disabled |
 | `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` | KV cache utilization fraction (0.0–1.0) for busy detection. Pass `None` to disable |
 | `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` | Absolute token count for prefill busy detection. Pass `None` to disable |
-| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `10.0` | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold. Pass `None` to disable |
+| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `64.0` | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold. Pass `None` to disable |
+| `--admission-control` | `DYN_ADMISSION_CONTROL` | `none` | Admission control mode. `token-capacity` applies the busy thresholds above; `none` clears them. Router queueing remains controlled by `--router-queue-threshold` |
 
 ## Model Discovery
 
@@ -87,7 +93,7 @@ When enabled, the frontend's embedded KV router predicts one expected prefill du
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd` | Service discovery: `kubernetes`, `etcd`, `file`, `mem` |
-| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats`, `http` |
+| `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats` |
 | `--event-plane` | `DYN_EVENT_PLANE` | `nats` | Event publishing: `nats`, `zmq` |
 
 ## KServe gRPC

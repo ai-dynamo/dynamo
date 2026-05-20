@@ -76,6 +76,8 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
+    # Total number of LLM requests accepted by the frontend handler
+    REQUESTS_STARTED_TOTAL = "requests_started_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
@@ -161,6 +163,14 @@ class kv_publisher:
 
     # Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     ENGINES_DROPPED_EVENTS_TOTAL = "kv_publisher_engines_dropped_events_total"
+    # Total number of ZMQ KV events seen by the relay, labeled by stage and event type
+    ZMQ_EVENTS_TOTAL = "kv_publisher_zmq_events_total"
+    # Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
+    ZMQ_FILTERED_EVENTS_TOTAL = "kv_publisher_zmq_filtered_events_total"
+    # Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
+    ZMQ_CONVERSION_ISSUES_TOTAL = "kv_publisher_zmq_conversion_issues_total"
+    # Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    ZMQ_SUSPICIOUS_EVENTS_TOTAL = "kv_publisher_zmq_suspicious_events_total"
 
 
 class kvbm:
@@ -249,7 +259,7 @@ class labels:
     # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
     # When a metric already has a label, injection does not overwrite it (original is preserved).
     MODEL_NAME = "model_name"
-    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"
@@ -423,5 +433,19 @@ class work_handler:
     NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
     # Backend processing: handle_payload entry to first response sent
     TIME_TO_FIRST_RESPONSE_SECONDS = "time_to_first_response_seconds"
+    # Current items in the bounded work queue awaiting dispatcher pickup (gauge)
+    QUEUE_DEPTH = "queue_depth"
+    # Configured capacity of the bounded work queue (gauge, static)
+    QUEUE_CAPACITY = "queue_capacity"
+    # Total times enqueuing work failed because the dispatcher channel was closed.
+    # tokio bounded mpsc applies backpressure on full — saturation shows up as
+    # rising QUEUE_DEPTH toward QUEUE_CAPACITY.
+    ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
+    # Time spent waiting to acquire a worker-pool permit (histogram)
+    PERMIT_WAIT_SECONDS = "permit_wait_seconds"
+    # Current number of active worker-pool tasks holding a permit (gauge)
+    POOL_ACTIVE_TASKS = "pool_active_tasks"
+    # Configured worker-pool size / total permits (gauge, static)
+    POOL_CAPACITY = "pool_capacity"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"

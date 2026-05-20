@@ -72,6 +72,7 @@ def patch_torch_memory_saver() -> None:
             gms_impl = GMSMemorySaverImpl(
                 device_index=device_index,
                 mode=gms_sglang._gms_lock_mode,
+                ro_connect_timeout_ms=gms_sglang._gms_ro_connect_timeout_ms,
             )
 
             # Set _impl directly (accessible via gms_impl property)

@@ -108,6 +108,7 @@ pub(super) async fn run_request_task(
     }
 
     ctx.stats.record_dispatch(worker_idx);
+    tracing::debug!(%uuid, worker_idx, "replay_diag: request dispatched, awaiting completion");
     state.wait_for_completion().await;
     ctx.stats.record_completion();
     ctx.requests.remove(&uuid);

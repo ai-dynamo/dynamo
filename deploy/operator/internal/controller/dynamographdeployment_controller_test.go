@@ -23,6 +23,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -31,7 +32,12 @@ import (
 	"github.com/onsi/gomega"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -42,15 +48,81 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) {
-	// Register custom types with the scheme
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	for _, addToScheme := range []func(*runtime.Scheme) error{
+		corev1.AddToScheme,
+		autoscalingv1.AddToScheme,
+		networkingv1.AddToScheme,
+		resourcev1.AddToScheme,
+		v1alpha1.AddToScheme,
+		v1beta1.AddToScheme,
+		grovev1alpha1.AddToScheme,
+	} {
+		if err := addToScheme(s); err != nil {
+			t.Fatalf("failed to add type to scheme: %v", err)
+		}
 	}
+	return s
+}
+
+func TestDynamoGraphDeploymentReconciler_preserveExistingDCDBackendFramework(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+
+	existing := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vllm-disagg-planner-frontend",
+			Namespace: "jsm",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "Frontend",
+				ComponentType: v1beta1.ComponentTypeFrontend,
+			},
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(existing).
+			Build(),
+	}
+
+	desiredExisting := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      existing.Name,
+			Namespace: existing.Namespace,
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+		},
+	}
+	gomega.NewWithT(t).Expect(reconciler.preserveExistingDCDBackendFramework(ctx, desiredExisting)).To(gomega.Succeed())
+	gomega.NewWithT(t).Expect(desiredExisting.Spec.BackendFramework).To(gomega.Equal(""))
+
+	desiredNew := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
+			Namespace: "jsm",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+		},
+	}
+	gomega.NewWithT(t).Expect(reconciler.preserveExistingDCDBackendFramework(ctx, desiredNew)).To(gomega.Succeed())
+	gomega.NewWithT(t).Expect(desiredNew.Spec.BackendFramework).To(gomega.Equal("vllm"))
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) {
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 
 	tests := []struct {
 		name                 string
-		dgd                  *v1alpha1.DynamoGraphDeployment
+		dgd                  *v1beta1.DynamoGraphDeployment
 		existingAdapters     []v1alpha1.DynamoGraphDeploymentScalingAdapter
 		expectedAdapterCount int
 		expectedAdapters     map[string]int32 // map of adapter name to expected replicas
@@ -58,7 +130,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 	}{
 		{
 			name: "creates adapters for services with scalingAdapter.enabled=true",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -79,7 +151,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						},
 					},
 				},
-			},
+			}),
 			expectedAdapterCount: 2,
 			expectedAdapters: map[string]int32{
 				"test-dgd-frontend": 2,
@@ -88,7 +160,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		},
 		{
 			name: "uses default replicas when not specified",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -102,7 +174,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						},
 					},
 				},
-			},
+			}),
 			expectedAdapterCount: 1,
 			expectedAdapters: map[string]int32{
 				"test-dgd-worker": 1, // default replicas
@@ -110,7 +182,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		},
 		{
 			name: "skips adapter creation when not enabled",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -129,7 +201,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						},
 					},
 				},
-			},
+			}),
 			expectedAdapterCount: 1,
 			expectedAdapters: map[string]int32{
 				"test-dgd-frontend": 2,
@@ -137,7 +209,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		},
 		{
 			name: "deletes adapter when service is removed",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -153,7 +225,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						},
 					},
 				},
-			},
+			}),
 			existingAdapters: []v1alpha1.DynamoGraphDeploymentScalingAdapter{
 				{
 					ObjectMeta: metav1.ObjectMeta{
@@ -212,7 +284,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		},
 		{
 			name: "deletes adapter when scalingAdapter.enabled is not set",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
@@ -226,7 +298,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						},
 					},
 				},
-			},
+			}),
 			existingAdapters: []v1alpha1.DynamoGraphDeploymentScalingAdapter{
 				{
 					ObjectMeta: metav1.ObjectMeta{
@@ -259,7 +331,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		},
 		{
 			name: "adapter name uses lowercase service name",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "my-dgd",
 					Namespace: "default",
@@ -274,7 +346,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 						},
 					},
 				},
-			},
+			}),
 			expectedAdapterCount: 1,
 			expectedAdapters: map[string]int32{
 				"my-dgd-myservice": 1,
@@ -293,7 +365,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 
 			// Create fake client
 			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme.Scheme).
+				WithScheme(testScheme).
 				WithObjects(initObjs...).
 				Build()
 
@@ -345,12 +417,244 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 	}
 }
 
-func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+func TestDynamoGraphDeploymentReconciler_reconcilePVCs(t *testing.T) {
+	newScheme := func(t testing.TB) *runtime.Scheme {
+		t.Helper()
+		s := runtime.NewScheme()
+		g := gomega.NewGomegaWithT(t)
+		g.Expect(corev1.AddToScheme(s)).NotTo(gomega.HaveOccurred())
+		g.Expect(v1alpha1.AddToScheme(s)).NotTo(gomega.HaveOccurred())
+		g.Expect(v1beta1.AddToScheme(s)).NotTo(gomega.HaveOccurred())
+		return s
 	}
 
+	t.Run("native beta DGD is a no-op", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		ctx := context.Background()
+		dgd := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "native", Namespace: "default"},
+		}
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(newScheme(t)).
+			WithObjects(dgd).
+			Build()
+		reconciler := &DynamoGraphDeploymentReconciler{Client: fakeClient}
+
+		g.Expect(reconciler.reconcilePVCs(ctx, dgd)).NotTo(gomega.HaveOccurred())
+
+		pvcs := &corev1.PersistentVolumeClaimList{}
+		g.Expect(fakeClient.List(ctx, pvcs, client.InNamespace("default"))).NotTo(gomega.HaveOccurred())
+		g.Expect(pvcs.Items).To(gomega.BeEmpty())
+	})
+
+	t.Run("converted alpha DGD creates preserved top-level PVC", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		ctx := context.Background()
+		create := true
+		pvcName := "model-cache"
+		storage := resource.MustParse("5Gi")
+		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "converted", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				PVCs: []v1alpha1.PVC{{
+					Create:           &create,
+					Name:             &pvcName,
+					StorageClass:     "standard",
+					Size:             storage,
+					VolumeAccessMode: corev1.ReadWriteOnce,
+				}},
+			},
+		})
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(newScheme(t)).
+			WithObjects(dgd).
+			Build()
+		reconciler := &DynamoGraphDeploymentReconciler{Client: fakeClient}
+
+		g.Expect(reconciler.reconcilePVCs(ctx, dgd)).NotTo(gomega.HaveOccurred())
+
+		pvc := &corev1.PersistentVolumeClaim{}
+		g.Expect(fakeClient.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: "default"}, pvc)).NotTo(gomega.HaveOccurred())
+		g.Expect(pvc.Spec.AccessModes).To(gomega.Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
+		g.Expect(pvc.Spec.StorageClassName).NotTo(gomega.BeNil())
+		g.Expect(*pvc.Spec.StorageClassName).To(gomega.Equal("standard"))
+		gotStorage := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+		g.Expect(gotStorage.Cmp(storage)).To(gomega.Equal(0))
+		g.Expect(metav1.IsControlledBy(pvc, dgd)).To(gomega.BeTrue())
+	})
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DRAValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    v1beta1.DynamoComponentDeploymentSharedSpec
+		wantErr bool
+	}{
+		{
+			name: "intra-pod failover does not require DRA",
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				Experimental: &v1beta1.ExperimentalSpec{
+					Failover: &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod},
+				},
+			},
+		},
+		{
+			name: "inter-pod failover requires DRA",
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				Experimental: &v1beta1.ExperimentalSpec{
+					Failover: &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeInterPod},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "gpu memory service requires DRA",
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				Experimental: &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			r := &DynamoGraphDeploymentReconciler{
+				RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: false},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{tt.spec},
+				},
+			}
+
+			err := r.reconcileGMSResourceClaimTemplates(context.Background(), dgd)
+			if tt.wantErr {
+				g.Expect(err).To(gomega.HaveOccurred())
+				g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
+				return
+			}
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResourceClaimTemplatesBeforePathway(t *testing.T) {
 	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
+					},
+				},
+			},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dgd).
+			Build(),
+		Recorder: record.NewFakeRecorder(100),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: false},
+	}
+
+	_, err := reconciler.reconcileResources(ctx, dgd)
+	g.Expect(err).To(gomega.HaveOccurred())
+	g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
+	g.Expect(err.Error()).To(gomega.ContainSubstring("explicitly disabled"))
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_ToleratesNonGMSComponents(t *testing.T) {
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "frontend",
+					ComponentType: v1beta1.ComponentTypeFrontend,
+				},
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+				},
+			},
+		},
+	}
+	r := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dgd).
+			Build(),
+		Recorder:      record.NewFakeRecorder(100),
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+	}
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dgd); err != nil {
+		t.Fatalf("reconcileGMSResourceClaimTemplates() returned error for non-GMS components: %v", err)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_CleansStaleNonGMSResourceClaimTemplate(t *testing.T) {
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+				},
+			},
+		},
+	}
+	templateName := "test-dgd-decode-gpu"
+	rct := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dgd, rct).
+		Build()
+	r := &DynamoGraphDeploymentReconciler{
+		Client:        cl,
+		Recorder:      record.NewFakeRecorder(100),
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+	}
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dgd); err != nil {
+		t.Fatalf("reconcileGMSResourceClaimTemplates() returned error: %v", err)
+	}
+	got := &resourcev1.ResourceClaimTemplate{}
+	err := cl.Get(ctx, client.ObjectKey{Name: templateName, Namespace: "default"}, got)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale ResourceClaimTemplate to be deleted, got %v", err)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCapture(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
@@ -385,19 +689,19 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithObjects(existing).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
 		Recorder: record.NewFakeRecorder(10),
 	}
 
-	dgd := &v1alpha1.DynamoGraphDeployment{
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
 		},
-	}
+	})
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: string(commonconsts.ComponentTypeWorker),
 		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
@@ -419,7 +723,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 		},
 	}
 
-	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", component)
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
 	if err != nil {
 		t.Fatalf("createCheckpointCR() error = %v", err)
 	}
@@ -440,11 +744,8 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCR_reusesExistingCaptur
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
-	}
-
 	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
@@ -480,7 +781,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
@@ -489,7 +790,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 	}
 
 	ref := friendlyCheckpointName
-	dgd := &v1alpha1.DynamoGraphDeployment{
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
@@ -506,7 +807,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 				},
 			},
 		},
-	}
+	})
 
 	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
 	if err != nil {
@@ -543,6 +844,88 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesReadyReferencedCR(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	referenced := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      friendlyCheckpointName,
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	ref := friendlyCheckpointName
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						Mode:          v1alpha1.CheckpointModeAuto,
+						CheckpointRef: &ref,
+					},
+				},
+			},
+		},
+	})
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	if err != nil {
+		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	}
+
+	info, ok := checkpointInfos["worker"]
+	if !ok {
+		t.Fatalf("expected checkpoint info for worker service")
+	}
+	if !info.Ready {
+		t.Fatalf("expected referenced checkpoint to be ready")
+	}
+	if !info.Exists {
+		t.Fatalf("expected referenced checkpoint to exist")
+	}
+	if info.Hash != hash {
+		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
+	}
+	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
+		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
+	}
+	if !checkpointStatuses["worker"].Ready {
+		t.Fatalf("expected checkpoint status to be ready")
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointStoragePVC(t *testing.T) {
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
 	}
@@ -577,12 +960,26 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
+		Config: &configv1alpha1.OperatorConfiguration{
+			Checkpoint: configv1alpha1.CheckpointConfiguration{
+				Storage: configv1alpha1.CheckpointStorageConfiguration{
+					Type: configv1alpha1.CheckpointStorageTypePVC,
+					PVC: configv1alpha1.CheckpointPVCConfig{
+						PVCName:          "snapshot-pvc",
+						BasePath:         "/checkpoints",
+						Create:           true,
+						Size:             "2Gi",
+						StorageClassName: "efs-sc",
+						AccessMode:       string(corev1.ReadWriteMany),
+					},
+				},
+			},
+		},
 		Recorder: record.NewFakeRecorder(10),
 	}
 
 	ref := friendlyCheckpointName
-	dgd := &v1alpha1.DynamoGraphDeployment{
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
@@ -599,40 +996,31 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 				},
 			},
 		},
-	}
+	})
 
-	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
-	if err != nil {
+	if _, _, err := reconciler.reconcileCheckpoints(ctx, dgd); err != nil {
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
-	info, ok := checkpointInfos["worker"]
-	if !ok {
-		t.Fatalf("expected checkpoint info for worker service")
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: "snapshot-pvc", Namespace: "default"}, pvc); err != nil {
+		t.Fatalf("expected checkpoint storage PVC to be created: %v", err)
 	}
-	if !info.Ready {
-		t.Fatalf("expected referenced checkpoint to be ready")
+	storageRequest := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if storageRequest.String() != "2Gi" {
+		t.Fatalf("PVC storage request = %s, want 2Gi", storageRequest.String())
 	}
-	if !info.Exists {
-		t.Fatalf("expected referenced checkpoint to exist")
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "efs-sc" {
+		t.Fatalf("PVC storageClassName = %v, want efs-sc", pvc.Spec.StorageClassName)
 	}
-	if info.Hash != hash {
-		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
-	}
-	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
-		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
-	}
-	if !checkpointStatuses["worker"].Ready {
-		t.Fatalf("expected checkpoint status to be ready")
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
+		t.Fatalf("PVC accessModes = %v, want [ReadWriteMany]", pvc.Spec.AccessModes)
 	}
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForExistingCreatingCheckpoint(t *testing.T) {
-	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
-	}
-
 	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
@@ -668,7 +1056,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithObjects(existing).
 			WithStatusSubresource(existing).
 			Build(),
@@ -676,7 +1064,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 		Recorder: record.NewFakeRecorder(10),
 	}
 
-	dgd := &v1alpha1.DynamoGraphDeployment{
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
@@ -702,7 +1090,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 				},
 			},
 		},
-	}
+	})
 
 	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
 	if err != nil {
@@ -770,7 +1158,9 @@ func Test_reconcileGroveResources(t *testing.T) {
 		name                   string
 		dgdSpec                v1alpha1.DynamoGraphDeploymentSpec
 		existingGroveResources []client.Object
+		draEnabled             bool
 		wantReconcileResult    ReconcileResult
+		wantErrSubstring       string
 	}{
 		{
 			name: "singular frontend service with 2 replicas - creates a PodClique with 2 replicas - ready",
@@ -801,13 +1191,12 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStateSuccessful,
+				State:   v1beta1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1alpha1.ComponentKindPodClique,
-						ComponentName:   "test-dgd-0-frontend",
+						ComponentKind:   v1beta1.ComponentKindPodClique,
 						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        2,
 						UpdatedReplicas: 2,
@@ -864,21 +1253,19 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStatePending,
+				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1alpha1.ComponentKindPodClique,
-						ComponentName:   "test-dgd-0-frontend",
+						ComponentKind:   v1beta1.ComponentKindPodClique,
 						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
 					},
 					"decode": {
-						ComponentKind:   v1alpha1.ComponentKindPodClique,
-						ComponentName:   "test-dgd-0-decode",
+						ComponentKind:   v1beta1.ComponentKindPodClique,
 						ComponentNames:  []string{"test-dgd-0-decode"},
 						Replicas:        2,
 						UpdatedReplicas: 1,
@@ -941,21 +1328,19 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStateSuccessful,
+				State:   v1beta1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"decode": {
-						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-						ComponentName:     "test-dgd-0-decode",
+						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 						ComponentNames:    []string{"test-dgd-0-decode"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
 					},
 					"prefill": {
-						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-						ComponentName:     "test-dgd-0-prefill",
+						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 						ComponentNames:    []string{"test-dgd-0-prefill"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
@@ -1015,21 +1400,19 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStatePending,
+				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1alpha1.ComponentKindPodClique,
-						ComponentName:   "test-dgd-0-frontend",
+						ComponentKind:   v1beta1.ComponentKindPodClique,
 						ComponentNames:  []string{"test-dgd-0-frontend"},
 						Replicas:        1,
 						UpdatedReplicas: 1,
 						ReadyReplicas:   ptr.To(int32(1)),
 					},
 					"aggregated": {
-						ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-						ComponentName:     "test-dgd-0-aggregated",
+						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 						ComponentNames:    []string{"test-dgd-0-aggregated"},
 						Replicas:          2,
 						UpdatedReplicas:   2,
@@ -1044,19 +1427,15 @@ func Test_reconcileGroveResources(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			s := scheme.Scheme
-			err := v1alpha1.AddToScheme(s)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			err = grovev1alpha1.AddToScheme(s)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
+			s := newDynamoGraphDeploymentControllerTestScheme(t)
 
-			dgd := &v1alpha1.DynamoGraphDeployment{
+			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
 				},
 				Spec: tt.dgdSpec,
-			}
+			})
 
 			var objects []client.Object
 			objects = append(objects, dgd)
@@ -1073,7 +1452,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: tt.draEnabled},
 				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
@@ -1083,11 +1462,87 @@ func Test_reconcileGroveResources(t *testing.T) {
 			}
 
 			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
+			if tt.wantErrSubstring != "" {
+				g.Expect(err).To(gomega.HaveOccurred())
+				g.Expect(err.Error()).To(gomega.ContainSubstring(tt.wantErrSubstring))
+				return
+			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
 		})
 	}
+}
+
+func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+
+	className := "custom-nginx"
+	alpha := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Labels:           map[string]string{"graph-label": "kept"},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+					Labels:        map[string]string{"legacy-label": "kept"},
+					Ingress: &v1alpha1.IngressSpec{
+						Enabled:                    true,
+						Host:                       "legacy-frontend",
+						IngressControllerClassName: &className,
+					},
+				},
+			},
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{}
+	g.Expect(alpha.ConvertTo(dgd)).NotTo(gomega.HaveOccurred())
+
+	s := scheme.Scheme
+	g.Expect(v1alpha1.AddToScheme(s)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1beta1.AddToScheme(s)).NotTo(gomega.HaveOccurred())
+	g.Expect(corev1.AddToScheme(s)).NotTo(gomega.HaveOccurred())
+	g.Expect(networkingv1.AddToScheme(s)).NotTo(gomega.HaveOccurred())
+	g.Expect(grovev1alpha1.AddToScheme(s)).NotTo(gomega.HaveOccurred())
+
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dgd).
+		Build()
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fakeKubeClient,
+		Recorder:      record.NewFakeRecorder(100),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		ScaleClient:   &mockScaleClient{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return []string{}, nil
+			},
+		},
+	}
+
+	_, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	ingress := &networkingv1.Ingress{}
+	g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Name: "test-dgd-frontend", Namespace: "default"}, ingress)).NotTo(gomega.HaveOccurred())
+	g.Expect(ingress.Spec.IngressClassName).NotTo(gomega.BeNil())
+	g.Expect(*ingress.Spec.IngressClassName).To(gomega.Equal(className))
+	g.Expect(ingress.Spec.Rules).To(gomega.HaveLen(1))
+	g.Expect(ingress.Spec.Rules[0].Host).To(gomega.Equal("legacy-frontend.local"))
+
+	service := &corev1.Service{}
+	g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Name: "test-dgd-frontend", Namespace: "default"}, service)).NotTo(gomega.HaveOccurred())
+	g.Expect(service.Labels["graph-label"]).To(gomega.Equal("kept"))
+	g.Expect(service.Labels["legacy-label"]).To(gomega.Equal("kept"))
 }
 
 func Test_computeRestartStatus(t *testing.T) {
@@ -1193,7 +1648,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			existingResources: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-frontend",
 						Namespace:  "default",
@@ -1208,7 +1663,7 @@ func Test_computeRestartStatus(t *testing.T) {
 							},
 						},
 					},
-				},
+				}),
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
@@ -1246,7 +1701,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			existingResources: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-frontend",
 						Namespace:  "default",
@@ -1261,8 +1716,8 @@ func Test_computeRestartStatus(t *testing.T) {
 							},
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-decode",
 						Namespace:  "default",
@@ -1277,7 +1732,7 @@ func Test_computeRestartStatus(t *testing.T) {
 							},
 						},
 					},
-				},
+				}),
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
@@ -1337,7 +1792,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			existingResources: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-frontend",
 						Namespace:  "default",
@@ -1352,7 +1807,7 @@ func Test_computeRestartStatus(t *testing.T) {
 							},
 						},
 					},
-				},
+				}),
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
@@ -1383,7 +1838,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			existingResources: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-frontend",
 						Namespace:  "default",
@@ -1398,11 +1853,58 @@ func Test_computeRestartStatus(t *testing.T) {
 							},
 						},
 					},
-				},
+				}),
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name: "sequential restart - stale in-progress component resets to first service",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type:  v1alpha1.RestartStrategyTypeSequential,
+						Order: []string{"frontend", "decode"},
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"removed"},
+				},
+			},
+			existingResources: []client.Object{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-removed",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
+						},
+					},
+				}),
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
 			},
 		},
 		{
@@ -1442,6 +1944,23 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 		},
 		{
+			name: "sequential restart with empty services - returns completed",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeSequential,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
 			name: "parallel restart - new request with ready resources should NOT complete immediately (race condition fix)",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
@@ -1461,7 +1980,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			existingResources: []client.Object{
 				// DCD is READY - simulating state BEFORE restart annotation is applied
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-frontend",
 						Namespace:  "default",
@@ -1476,7 +1995,7 @@ func Test_computeRestartStatus(t *testing.T) {
 							},
 						},
 					},
-				},
+				}),
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
@@ -1618,7 +2137,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			existingResources: []client.Object{
 				// All services are now ready (simulating state after new restart timestamp is applied)
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-frontend",
 						Namespace:  "default",
@@ -1630,8 +2149,8 @@ func Test_computeRestartStatus(t *testing.T) {
 							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-decode",
 						Namespace:  "default",
@@ -1643,8 +2162,8 @@ func Test_computeRestartStatus(t *testing.T) {
 							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-completed",
 						Namespace:  "default",
@@ -1656,7 +2175,7 @@ func Test_computeRestartStatus(t *testing.T) {
 							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
 						},
 					},
-				},
+				}),
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
@@ -1694,7 +2213,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			existingResources: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-frontend",
 						Namespace:  "default",
@@ -1706,8 +2225,8 @@ func Test_computeRestartStatus(t *testing.T) {
 							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-decode",
 						Namespace:  "default",
@@ -1719,8 +2238,8 @@ func Test_computeRestartStatus(t *testing.T) {
 							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-worker",
 						Namespace:  "default",
@@ -1732,7 +2251,7 @@ func Test_computeRestartStatus(t *testing.T) {
 							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
 						},
 					},
-				},
+				}),
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
 				ObservedID: newID,
@@ -1860,14 +2379,14 @@ func Test_computeRestartStatus(t *testing.T) {
 			err = grovev1alpha1.AddToScheme(s)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			dgd := &v1alpha1.DynamoGraphDeployment{
+			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
 				},
 				Spec:   tt.dgdSpec,
 				Status: tt.dgdStatus,
-			}
+			})
 
 			var objects []client.Object
 			objects = append(objects, dgd)
@@ -1897,7 +2416,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			}
 
 			g.Expect(result).NotTo(gomega.BeNil())
-			g.Expect(result).To(gomega.Equal(tt.wantRestartStatus))
+			g.Expect(result).To(gomega.Equal(betaRestartStatus(tt.wantRestartStatus)))
 		})
 	}
 }
@@ -1925,7 +2444,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			existingDCDs: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
@@ -1946,23 +2465,85 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-deployment",
+							ComponentNames:    []string{"test-dgd-frontend-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   2,
 							ReadyReplicas:     ptr.To(int32(2)),
 							AvailableReplicas: ptr.To(int32(2)),
 						},
 					},
-				},
+				}),
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStateSuccessful,
+				State:   v1beta1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-frontend-deployment"},
+						Replicas:          2,
+						UpdatedReplicas:   2,
+						ReadyReplicas:     ptr.To(int32(2)),
+						AvailableReplicas: ptr.To(int32(2)),
+					},
+				},
+			},
+		},
+		{
+			name: "single service - DCD stale observed generation stays pending",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ServiceName:     "frontend",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeFrontend),
+						Replicas:        ptr.To(int32(2)),
+					},
+				},
+			},
+			existingDCDs: []client.Object{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						BackendFramework: "vllm",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "frontend",
+							Replicas:    ptr.To(int32(2)),
+						},
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionTrue,
+							},
+						},
+						Service: &v1alpha1.ServiceReplicaStatus{
+							ComponentKind:     v1alpha1.ComponentKindDeployment,
+							ComponentNames:    []string{"test-dgd-frontend-deployment"},
+							Replicas:          2,
+							UpdatedReplicas:   2,
+							ReadyReplicas:     ptr.To(int32(2)),
+							AvailableReplicas: ptr.To(int32(2)),
+						},
+					},
+				}),
+			},
+			wantReconcileResult: ReconcileResult{
+				State:   v1beta1.DGDStatePending,
+				Reason:  "some_resources_are_not_ready",
+				Message: "Resources not ready: test-dgd-frontend: spec not yet processed: generation=2, observedGeneration=1",
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
+					"frontend": {
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-frontend-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						ReadyReplicas:     ptr.To(int32(2)),
@@ -1985,7 +2566,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			existingDCDs: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
@@ -2006,23 +2587,23 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-deployment",
+							ComponentNames:    []string{"test-dgd-frontend-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
 							AvailableReplicas: ptr.To(int32(0)),
 						},
 					},
-				},
+				}),
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStatePending,
+				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true",
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-frontend-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -2057,7 +2638,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			existingDCDs: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
@@ -2078,15 +2659,15 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-deployment",
+							ComponentNames:    []string{"test-dgd-frontend-deployment"},
 							Replicas:          1,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
 							AvailableReplicas: ptr.To(int32(1)),
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-decode-e1f2a6fe",
 						Namespace: "default",
@@ -2107,15 +2688,15 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
+							ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   2,
 							ReadyReplicas:     ptr.To(int32(2)),
 							AvailableReplicas: ptr.To(int32(2)),
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-prefill-e1f2a6fe",
 						Namespace: "default",
@@ -2136,39 +2717,39 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
+							ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
 							AvailableReplicas: ptr.To(int32(3)),
 						},
 					},
-				},
+				}),
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStateSuccessful,
+				State:   v1beta1.DGDStateSuccessful,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-frontend-deployment"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
 						AvailableReplicas: ptr.To(int32(1)),
 					},
 					"decode": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						ReadyReplicas:     ptr.To(int32(2)),
 						AvailableReplicas: ptr.To(int32(2)),
 					},
 					"prefill": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -2203,7 +2784,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			existingDCDs: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
@@ -2224,15 +2805,15 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-deployment",
+							ComponentNames:    []string{"test-dgd-frontend-deployment"},
 							Replicas:          1,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
 							AvailableReplicas: ptr.To(int32(1)),
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-decode-e1f2a6fe",
 						Namespace: "default",
@@ -2253,15 +2834,15 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
+							ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
 							AvailableReplicas: ptr.To(int32(0)),
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-prefill-e1f2a6fe",
 						Namespace: "default",
@@ -2282,39 +2863,39 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
+							ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
 							AvailableReplicas: ptr.To(int32(3)),
 						},
 					},
-				},
+				}),
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStatePending,
+				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-decode-e1f2a6fe: Component deployment not ready - Available condition not true",
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-frontend-deployment"},
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
 						AvailableReplicas: ptr.To(int32(1)),
 					},
 					"decode": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-e1f2a6fe-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
 						AvailableReplicas: ptr.To(int32(0)),
 					},
 					"prefill": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-prefill-e1f2a6fe-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -2343,7 +2924,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			existingDCDs: []client.Object{
-				&v1alpha1.DynamoComponentDeployment{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-frontend",
 						Namespace: "default",
@@ -2364,15 +2945,15 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-frontend-deployment",
+							ComponentNames:    []string{"test-dgd-frontend-deployment"},
 							Replicas:          1,
 							UpdatedReplicas:   0,
 							ReadyReplicas:     ptr.To(int32(0)),
 							AvailableReplicas: ptr.To(int32(0)),
 						},
 					},
-				},
-				&v1alpha1.DynamoComponentDeployment{
+				}),
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-decode-5f3d46ba",
 						Namespace: "default",
@@ -2393,31 +2974,31 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentName:     "test-dgd-decode-5f3d46ba-deployment",
+							ComponentNames:    []string{"test-dgd-decode-5f3d46ba-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
 							AvailableReplicas: ptr.To(int32(0)),
 						},
 					},
-				},
+				}),
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   v1alpha1.DGDStatePending,
+				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-decode-5f3d46ba: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
-				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-frontend-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-frontend-deployment"},
 						Replicas:          1,
 						UpdatedReplicas:   0,
 						ReadyReplicas:     ptr.To(int32(0)),
 						AvailableReplicas: ptr.To(int32(0)),
 					},
 					"decode": {
-						ComponentKind:     v1alpha1.ComponentKindDeployment,
-						ComponentName:     "test-dgd-decode-5f3d46ba-deployment",
+						ComponentKind:     v1beta1.ComponentKindDeployment,
+						ComponentNames:    []string{"test-dgd-decode-5f3d46ba-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -2436,13 +3017,13 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			err := v1alpha1.AddToScheme(s)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			dgd := &v1alpha1.DynamoGraphDeployment{
+			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
 					Namespace: "default",
 				},
 				Spec: tt.dgdSpec,
-			}
+			})
 
 			var objects []client.Object
 			objects = append(objects, dgd)
@@ -2473,7 +3054,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 func TestPropagateTopologyCondition(t *testing.T) {
 	tests := []struct {
 		name           string
-		dgd            *v1alpha1.DynamoGraphDeployment
+		dgd            *v1beta1.DynamoGraphDeployment
 		pcs            *grovev1alpha1.PodCliqueSet
 		groveEnabled   bool
 		wantCondition  bool
@@ -2483,20 +3064,20 @@ func TestPropagateTopologyCondition(t *testing.T) {
 	}{
 		{
 			name: "no topology constraints - no condition added",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {},
 					},
 				},
-			},
+			}),
 			groveEnabled:  true,
 			wantCondition: false,
 		},
 		{
 			name: "topology set but Grove not enabled - no condition added",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test", Namespace: "default",
 					Annotations: map[string]string{commonconsts.KubeAnnotationEnableGrove: "false"},
@@ -2504,18 +3085,18 @@ func TestPropagateTopologyCondition(t *testing.T) {
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
-			},
+			}),
 			groveEnabled:  false,
 			wantCondition: false,
 		},
 		{
 			name: "topology set, PCS has no topology condition - unknown",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
-			},
+			}),
 			pcs: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Status:     grovev1alpha1.PodCliqueSetStatus{},
@@ -2527,12 +3108,12 @@ func TestPropagateTopologyCondition(t *testing.T) {
 		},
 		{
 			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyLevelsUnavailable",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
-			},
+			}),
 			pcs: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Status: grovev1alpha1.PodCliqueSetStatus{
@@ -2554,12 +3135,12 @@ func TestPropagateTopologyCondition(t *testing.T) {
 		},
 		{
 			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyNotFound",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
-			},
+			}),
 			pcs: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Status: grovev1alpha1.PodCliqueSetStatus{
@@ -2581,12 +3162,12 @@ func TestPropagateTopologyCondition(t *testing.T) {
 		},
 		{
 			name: "PCS reports TopologyLevelsUnavailable=False - all levels available",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
-			},
+			}),
 			pcs: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Status: grovev1alpha1.PodCliqueSetStatus{
@@ -2607,7 +3188,7 @@ func TestPropagateTopologyCondition(t *testing.T) {
 		},
 		{
 			name: "service-only topology constraint triggers condition propagation",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology"},
@@ -2617,7 +3198,7 @@ func TestPropagateTopologyCondition(t *testing.T) {
 						},
 					},
 				},
-			},
+			}),
 			pcs: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Status:     grovev1alpha1.PodCliqueSetStatus{},
@@ -2629,12 +3210,12 @@ func TestPropagateTopologyCondition(t *testing.T) {
 		},
 		{
 			name: "PCS not found yet - no condition added",
-			dgd: &v1alpha1.DynamoGraphDeployment{
+			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					TopologyConstraint: &v1alpha1.SpecTopologyConstraint{TopologyProfile: "test-topology", PackDomain: v1alpha1.TopologyDomain("rack")},
 				},
-			},
+			}),
 			pcs:           nil,
 			groveEnabled:  true,
 			wantCondition: false,
@@ -2698,9 +3279,15 @@ func TestPropagateTopologyCondition(t *testing.T) {
 }
 
 func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
+	// Register Grove types with the scheme so fake client can handle them
+	if err := grovev1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add grovev1alpha1 to scheme: %v", err)
+	}
+
 	tests := []struct {
 		name         string
 		obj          client.Object
+		existingPCS  *grovev1alpha1.PodCliqueSet // PCS object that exists in the cluster
 		wantRequests int
 		wantName     string
 		wantNs       string
@@ -2721,9 +3308,63 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 					},
 				},
 			},
+			existingPCS: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dynamo-recipe",
+					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "dynamo-recipe",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: v1alpha1.GroupVersion.String(),
+							Kind:       "DynamoGraphDeployment",
+							Name:       "dynamo-recipe",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
 			wantRequests: 1,
 			wantName:     "dynamo-recipe",
 			wantNs:       "mwieczorek-dsv32-trtllm-agg",
+		},
+		{
+			name: "PCSG with truncated PCS name resolves to original DGD name",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "truncated-pcs-0-worker",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "truncated-pcs",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			existingPCS: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "truncated-pcs",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "my-very-long-original-dgd-name",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: v1alpha1.GroupVersion.String(),
+							Kind:       "DynamoGraphDeployment",
+							Name:       "my-very-long-original-dgd-name",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			wantRequests: 1,
+			wantName:     "my-very-long-original-dgd-name",
+			wantNs:       "default",
 		},
 		{
 			name: "PCSG with no ownerRef returns no requests",
@@ -2780,7 +3421,15 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			r := &DynamoGraphDeploymentReconciler{}
+
+			// Build fake client with existing PCS if provided
+			builder := fake.NewClientBuilder().WithScheme(scheme.Scheme)
+			if tt.existingPCS != nil {
+				builder = builder.WithObjects(tt.existingPCS)
+			}
+			r := &DynamoGraphDeploymentReconciler{
+				Client: builder.Build(),
+			}
 			reqs := r.mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
 
 			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))

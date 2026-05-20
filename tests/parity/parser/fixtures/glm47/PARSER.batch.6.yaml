@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: glm47
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: Function-only call (no arg keys)
+    ref: dynamo
+    model_text: <tool_call>get_time</tool_call>
+    tools:
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  PARSER.batch.6.b:
+    description: Function-only with whitespace
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_glm47_moe_tool_parser.py#L68
+    model_text: <tool_call>get_time </tool_call>
+    tools:
+    - *id002
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id003
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang glm47 rejects whitespace between the function name and </tool_call> (`get_time `), emitting no calls; Dynamo and vLLM both tolerate it and extract the empty-args call
+  PARSER.batch.6.c:
+    description: Empty-body variant 6.c — not yet authored for this family
+    reason: |-
+      Empty-body variant 6.c not yet authored for glm47; see 6.a / 6.b for this family's empty / whitespace scenarios.

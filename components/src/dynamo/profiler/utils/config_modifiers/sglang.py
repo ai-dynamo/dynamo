@@ -4,6 +4,7 @@
 import logging
 import re
 from typing import Tuple
+from uuid import uuid4
 
 import yaml
 
@@ -73,7 +74,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         cfg = Config.model_validate(config)
 
         # set metadata name
-        cfg.metadata.name = "sglang-agg"
+        cfg.metadata.name = f"sglang-agg-{uuid4().hex[:8]}"
 
         # disable planner
         if "Planner" in cfg.spec.services:
