@@ -1,11 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Convert Dynamo agent trace JSONL/JSONL.GZ records to Mooncake replay JSONL.
-//!
-//! This binary is intentionally a thin glue layer over the modules in
-//! [`dynamo_bench::agent_trace`]: arg parsing, calling the loader and the
-//! chosen lowering, then writing the JSONL plus printing the tool summary.
+//! CLI entrypoint over the modules in [`dynamo_bench::agent_trace`].
 
 use anyhow::Result;
 use clap::Parser;
@@ -59,19 +55,16 @@ fn main() -> Result<()> {
     };
 
     let stats = writer.finish()?;
-    if args.agentic {
-        println!(
-            "Wrote {} Agentic Mooncake rows to {}",
-            stats.row_count,
-            output_path.display()
-        );
+    let kind = if args.agentic {
+        "Agentic Mooncake"
     } else {
-        println!(
-            "Wrote {} Mooncake rows to {}",
-            stats.row_count,
-            output_path.display()
-        );
-    }
+        "Mooncake"
+    };
+    println!(
+        "Wrote {} {kind} rows to {}",
+        stats.row_count,
+        output_path.display()
+    );
     println!("Trace block size: {trace_block_size}");
     if tool_summary.total_spans > 0 {
         println!();

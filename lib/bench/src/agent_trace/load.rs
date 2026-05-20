@@ -1,13 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Source-format record types and JSONL/gz loader for Dynamo agent traces.
+//! Source-format records and JSONL/gz loader.
 //!
-//! The on-wire records mirror `dynamo.agent.trace.v1` (see
-//! `lib/llm/src/agents/trace/types.rs` for the canonical producer-side schema)
-//! but only deserialize the subset of fields the converter needs. Loading
-//! produces a [`LoadedAgentTrace`] of [`RequestEntry`] and [`ToolEntry`] values
-//! that the lowering modules ([`super::mooncake`], [`super::agentic`]) consume.
+//! Local subset of `dynamo.agent.trace.v1`; the canonical producer-side schema
+//! lives in `lib/llm/src/agents/trace/types.rs`.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -32,8 +29,6 @@ pub(crate) struct AgentTraceRecord {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AgentContextFields {
-    #[serde(rename = "session_id")]
-    pub(crate) _session_id: String,
     pub(crate) trajectory_id: String,
     #[serde(default)]
     pub(crate) parent_trajectory_id: Option<String>,
@@ -111,11 +106,8 @@ pub struct LoadedAgentTrace {
     pub tools: Vec<ToolEntry>,
 }
 
-/// Load every JSONL / `.jsonl.gz` shard at the given paths into a
-/// [`LoadedAgentTrace`].
-///
-/// Records other than `request_end` / `tool_end` / `tool_error` are ignored.
-/// Returns an error if no `request_end` rows were found.
+/// Records other than `request_end` / `tool_end` / `tool_error` are skipped.
+/// Errors if no `request_end` rows were found.
 pub fn load_agent_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
     let mut loaded = LoadedAgentTrace::default();
 

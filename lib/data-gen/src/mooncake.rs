@@ -101,12 +101,8 @@ impl AgenticMooncakeRow {
     }
 }
 
-/// One harness tool span attributed to the LLM request that consumed it.
-///
-/// Mirrors the fields Dynamo's agent trace records for `tool_end` / `tool_error`
-/// so replay-side analyses can group, filter, or mutate by tool class without
-/// re-reading the raw trace. The `tool_wait_ms` field on the parent row is the
-/// parallel-aware union of the spans listed here over the dependency window.
+/// Harness tool span attributed to the LLM request that consumed it. Mirrors
+/// `tool_end` / `tool_error` fields from `dynamo.agent.trace.v1`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgenticToolEvent {
     pub tool_call_id: String,

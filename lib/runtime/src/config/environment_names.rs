@@ -377,12 +377,9 @@ pub mod llm {
 
     /// Agent trace configuration
     pub mod agent_trace {
-        /// Master switch that enables agent tracing with sensible defaults for
-        /// sinks, output path, and the harness tool-event ZMQ endpoint.
-        ///
-        /// When set to a truthy value (`1`, `true`, `yes`, `on`) every unset
-        /// trace variable falls back to its implied default. Any per-variable
-        /// override below still wins.
+        /// Master switch. Truthy enables tracing with defaults for sinks,
+        /// output path, and the ZMQ tool-event endpoint; other variables below
+        /// override individual knobs.
         pub const DYN_AGENT_TRACE: &str = "DYN_AGENT_TRACE";
 
         /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.

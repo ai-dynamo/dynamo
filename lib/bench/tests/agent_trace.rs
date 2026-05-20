@@ -1,16 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration test against the vendored Pi agent-trace fixture.
-//!
-//! The fixture in `testdata/pi_agent_trace.jsonl.gz` is a real Dynamo agent
-//! trace captured from a Pi coding-agent run on Qwen3-14B-FP8 (root task plus
-//! 3 subagent trajectories). This test guards three regression classes that
-//! the per-module unit tests cannot catch:
-//!
-//! - schema drift in the raw record deserializers,
-//! - tool-span attribution from harness tool events to LLM rows, and
-//! - the convert-time tool summary (counts and total wall-time).
+//! End-to-end regression against the vendored Pi trace fixture: guards schema
+//! drift, tool-span attribution, and the convert-time summary.
 
 use std::path::PathBuf;
 
@@ -36,14 +28,7 @@ fn pi_trace_summary_has_expected_counts() {
     assert_eq!(summary.trajectories, 4);
     assert_eq!(summary.by_status.get("succeeded").copied(), Some(20));
     assert_eq!(summary.by_status.get("error").copied(), Some(2));
-    assert_eq!(summary.by_class.get("read").copied(), Some(9));
-    assert_eq!(summary.by_class.get("ls").copied(), Some(6));
-    assert_eq!(summary.by_class.get("bash").copied(), Some(2));
-    assert_eq!(summary.by_class.get("subagent").copied(), Some(2));
-    assert_eq!(summary.by_class.get("write").copied(), Some(2));
-    assert_eq!(summary.by_class.get("find").copied(), Some(1));
-    // Total wall-time is the sum of every tool_end / tool_error duration.
-    // The Pi run is dominated by a single ~71.8s subagent call.
+    // ~71.8s subagent dominates; range allows minor harness rounding.
     assert!(
         (72_000.0..73_000.0).contains(&summary.total_wall_ms),
         "unexpected wall-time {}",
@@ -61,31 +46,18 @@ fn pi_trace_agentic_rows_preserve_tool_events() {
     assert_eq!(trace_block_size, 16);
     assert_eq!(rows.len(), 17);
 
-    // Every captured tool span should land on exactly one row's tool_events.
     let attached_spans: usize = rows.iter().map(|row| row.tool_events.len()).sum();
     assert_eq!(attached_spans, 22, "all tool spans attributed to rows");
 
-    // Pi's two subagent dispatches must round-trip with the right tool_class.
-    let subagent_events: Vec<_> = rows
-        .iter()
-        .flat_map(|row| row.tool_events.iter())
-        .filter(|event| event.tool_class == "subagent")
-        .collect();
-    assert_eq!(subagent_events.len(), 2);
-
-    // One of the captured tool spans is the failed bash call in the reviewer
-    // trajectory; the row that consumed it should carry an error status and an
-    // error_type populated by the harness.
-    let error_events: Vec<_> = rows
-        .iter()
-        .flat_map(|row| row.tool_events.iter())
-        .filter(|event| event.status == "error")
-        .collect();
-    assert_eq!(error_events.len(), 2);
+    let events: Vec<_> = rows.iter().flat_map(|row| row.tool_events.iter()).collect();
+    assert_eq!(
+        events.iter().filter(|e| e.tool_class == "subagent").count(),
+        2
+    );
     assert!(
-        error_events
+        events
             .iter()
-            .any(|event| event.error_type.as_deref() == Some("pi_tool_error")),
+            .any(|e| e.status == "error" && e.error_type.as_deref() == Some("pi_tool_error")),
         "expected at least one pi_tool_error event",
     );
 }

@@ -1,19 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lower [`RequestEntry`] values to the flat (non-agentic) Mooncake row format.
-
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_data_gen::{MooncakeRow, RollingHashIdMapper};
 
 use super::load::RequestEntry;
 
-/// Convert request entries into independent flat Mooncake rows.
-///
-/// Each [`RequestEntry`] becomes one [`MooncakeRow`] whose `timestamp` is its
-/// arrival offset from the earliest request in the trace. There is no
-/// session/workflow structure here -- see [`super::agentic`] for the DAG-aware
-/// lowering.
+/// Each request becomes one independent row whose `timestamp` is its offset
+/// from the earliest request. See [`super::agentic`] for the DAG-aware lowering.
 pub fn build_mooncake_rows(mut requests: Vec<RequestEntry>) -> Result<(usize, Vec<MooncakeRow>)> {
     let global_start_ms = requests
         .iter()

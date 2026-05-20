@@ -14,11 +14,9 @@ const DEFAULT_JSONL_BUFFER_BYTES: usize = 1024 * 1024;
 const DEFAULT_JSONL_FLUSH_INTERVAL_MS: u64 = 1000;
 const DEFAULT_JSONL_GZ_ROLL_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Defaults applied when [`DYN_AGENT_TRACE`] is truthy and the matching
-/// per-variable override is unset.
-const MASTER_DEFAULT_SINK: &str = "jsonl_gz";
-const MASTER_DEFAULT_OUTPUT_PATH: &str = "/tmp/dynamo-agent-trace";
-const MASTER_DEFAULT_TOOL_EVENTS_ZMQ_ENDPOINT: &str = "tcp://127.0.0.1:20390";
+const DEFAULT_SINK: &str = "jsonl_gz";
+const DEFAULT_OUTPUT_PATH: &str = "/tmp/dynamo-agent-trace";
+const DEFAULT_TOOL_EVENTS_ZMQ_ENDPOINT: &str = "tcp://127.0.0.1:20390";
 
 #[derive(Clone, Debug)]
 pub struct AgentTracePolicy {
@@ -38,30 +36,29 @@ pub struct AgentTracePolicy {
 static POLICY: OnceLock<AgentTracePolicy> = OnceLock::new();
 
 fn load_from_env() -> AgentTracePolicy {
-    let master_enabled = env_is_truthy(env_agent_trace::DYN_AGENT_TRACE);
+    let is_on = env_is_truthy(env_agent_trace::DYN_AGENT_TRACE);
 
-    let mut sinks = std::env::var(env_agent_trace::DYN_AGENT_TRACE_SINKS)
+    let sinks = std::env::var(env_agent_trace::DYN_AGENT_TRACE_SINKS)
         .ok()
         .map(|value| parse_sink_names(&value))
-        .unwrap_or_default();
-    if sinks.is_empty() && master_enabled {
-        sinks = vec![MASTER_DEFAULT_SINK.to_string()];
-    }
-    let mut output_path = std::env::var(env_agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH)
+        .unwrap_or_else(|| {
+            if is_on {
+                vec![DEFAULT_SINK.to_string()]
+            } else {
+                Vec::new()
+            }
+        });
+    let output_path = std::env::var(env_agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH)
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if output_path.is_none() && master_enabled {
-        output_path = Some(MASTER_DEFAULT_OUTPUT_PATH.to_string());
-    }
-    let mut tool_events_zmq_endpoint =
+        .filter(|value| !value.is_empty())
+        .or_else(|| is_on.then(|| DEFAULT_OUTPUT_PATH.to_string()));
+    let tool_events_zmq_endpoint =
         std::env::var(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
             .ok()
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-    if tool_events_zmq_endpoint.is_none() && master_enabled {
-        tool_events_zmq_endpoint = Some(MASTER_DEFAULT_TOOL_EVENTS_ZMQ_ENDPOINT.to_string());
-    }
+            .filter(|value| !value.is_empty())
+            .or_else(|| is_on.then(|| DEFAULT_TOOL_EVENTS_ZMQ_ENDPOINT.to_string()));
     let tool_events_zmq_topic =
         std::env::var(env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC)
             .ok()
@@ -92,7 +89,7 @@ fn load_from_env() -> AgentTracePolicy {
     let replay_hashes_enabled = !env_is_falsey(env_agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES);
 
     AgentTracePolicy {
-        enabled: master_enabled || !sinks.is_empty() || tool_events_zmq_endpoint.is_some(),
+        enabled: is_on,
         sinks,
         output_path,
         capacity,
@@ -211,7 +208,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn no_master_switch_keeps_legacy_behavior() {
+    fn disabled_by_default() {
         temp_env::with_vars(
             [
                 (env_agent_trace::DYN_AGENT_TRACE, None::<&str>),
@@ -220,29 +217,6 @@ mod tests {
                 (
                     env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
                     None,
-                ),
-            ],
-            || {
-                let policy = load_from_env();
-                assert!(!policy.enabled);
-                assert!(policy.sinks.is_empty());
-                assert!(policy.output_path.is_none());
-                assert!(policy.tool_events_zmq_endpoint.is_none());
-            },
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn master_switch_falsey_value_does_not_enable() {
-        temp_env::with_vars(
-            [
-                (env_agent_trace::DYN_AGENT_TRACE, Some("0")),
-                (env_agent_trace::DYN_AGENT_TRACE_SINKS, None),
-                (env_agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH, None),
-                (
-                    env_agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
-                    None::<&str>,
                 ),
             ],
             || {

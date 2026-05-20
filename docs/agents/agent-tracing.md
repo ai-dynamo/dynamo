@@ -96,9 +96,8 @@ export DYN_AGENT_TRACE_OUTPUT_PATH=/mnt/captures/run-42
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |           No            | `tcp://127.0.0.1:20390`            | PULL bind address for tool records.                                                  |
 | `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |           No            | unset                              | If set, first ZMQ frame must match.                                                  |
 
-Without `DYN_AGENT_TRACE=1`, tracing is off unless you explicitly set
-`DYN_AGENT_TRACE_SINKS` or `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` -- both
-the legacy enable paths still work.
+Without `DYN_AGENT_TRACE=1`, tracing is off; the other variables only
+take effect once the master switch is on.
 
 </details>
 

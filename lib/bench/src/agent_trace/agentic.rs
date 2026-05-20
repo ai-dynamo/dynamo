@@ -1,23 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lower a [`LoadedAgentTrace`] to agentic Mooncake rows.
-//!
-//! Beyond the per-request row data carried by [`super::mooncake`], this module
-//! infers the workflow DAG (sequential same-trajectory waits, subagent
-//! spawn/join edges, prefix-reset markers) and attributes harness tool spans to
-//! the LLM request that consumed them. It also produces the convert-time
-//! [`ToolSummary`] that the binary prints after writing the JSONL.
+//! Agentic lowering: infer the workflow DAG, attribute tool spans to the LLM
+//! row that consumed them, and produce the convert-time tool summary.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_data_gen::{AgenticMooncakeRow, AgenticToolEvent, RollingHashIdMapper};
 
 use super::load::{LoadedAgentTrace, RequestEntry, ToolEntry};
 
-/// Convert an agent trace into agentic Mooncake rows, inferring trajectory
-/// dependencies and attributing tool spans.
 pub fn build_agentic_mooncake_rows(
     mut loaded: LoadedAgentTrace,
 ) -> Result<(usize, Vec<AgenticMooncakeRow>)> {
@@ -216,8 +209,8 @@ pub fn build_agentic_mooncake_rows(
             hash_ids: Some(hash_ids),
             timestamp: Some((request.start_ms - global_start_ms) as f64),
             delay,
-            wait_for: wait_for[idx].clone(),
-            branches: branches[idx].clone(),
+            wait_for: std::mem::take(&mut wait_for[idx]),
+            branches: std::mem::take(&mut branches[idx]),
             prefix_reset: Some(prefix_reset[idx]),
             tool_wait_ms,
             tool_events,
@@ -259,14 +252,9 @@ fn first_request_starting_after(
         .min_by_key(|idx| requests[*idx].start_ms)
 }
 
-/// Return the parallel-aware tool wall-time over `[start_ms, end_ms]` along
-/// with the originating tool entries whose intervals contribute to it.
-///
-/// The wall-time is computed by clipping each tool span to the window and
-/// sweep-merging overlapping intervals -- two tools that ran concurrently
-/// contribute the union of their durations, not the sum. The returned entries
-/// are the full, unclipped originals so callers can preserve per-tool metadata
-/// without losing the original event times.
+/// Sweep-merge tool spans clipped to `[start_ms, end_ms]`. Wall-time is the
+/// union (concurrent tools contribute once, not twice); the returned entries
+/// are the unclipped originals so callers retain per-tool metadata.
 fn collect_tools_in_window(
     tools: &[ToolEntry],
     start_ms: i64,
@@ -328,7 +316,6 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-/// Aggregate tool-event stats printed by the converter after writing the JSONL.
 #[derive(Debug, Default)]
 pub struct ToolSummary {
     pub total_spans: usize,
@@ -339,7 +326,6 @@ pub struct ToolSummary {
 }
 
 impl ToolSummary {
-    /// Render the summary as the multi-line block printed after conversion.
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
@@ -372,7 +358,6 @@ fn format_counts(counts: &BTreeMap<String, usize>) -> String {
         .join(" ")
 }
 
-/// Aggregate counts and total tool wall-time across all loaded tool entries.
 pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
     let mut summary = ToolSummary::default();
     if tools.is_empty() {
@@ -380,7 +365,7 @@ pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
     }
     summary.total_spans = tools.len();
 
-    let mut trajectories: HashMap<&str, ()> = HashMap::new();
+    let mut trajectories: HashSet<&str> = HashSet::new();
     for tool in tools {
         let status_key = if tool.status.is_empty() {
             tool.terminal_event.clone()
@@ -395,7 +380,7 @@ pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
         };
         *summary.by_class.entry(class_key).or_insert(0) += 1;
         summary.total_wall_ms += tool.duration_ms;
-        trajectories.insert(tool.trajectory_id.as_str(), ());
+        trajectories.insert(tool.trajectory_id.as_str());
     }
     summary.trajectories = trajectories.len();
     summary
@@ -443,7 +428,6 @@ mod tests {
     ) -> RequestEntry {
         let mut entry = request(request_id, start_ms, end_ms, sequence_hashes);
         entry.agent_context = Some(AgentContextFields {
-            _session_id: "session".to_string(),
             trajectory_id: trajectory_id.to_string(),
             parent_trajectory_id: parent_trajectory_id.map(str::to_string),
         });
