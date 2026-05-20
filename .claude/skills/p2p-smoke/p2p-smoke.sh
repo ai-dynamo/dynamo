@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # p2p-smoke.sh — exercise hub-mediated P2P G2 block transfer.
 #
 # Topology:  hub  +  instance_a (port 8000)  +  instance_b (port 8002)

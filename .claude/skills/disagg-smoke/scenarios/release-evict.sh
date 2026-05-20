@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # release-evict.sh — S3 release-evict regression check (anchor: cd20043ca1)
 #
 # Inputs (env vars):

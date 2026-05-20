@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Stream all KVBM disagg smoke logs concurrently, surface errors immediately.
 #
 # Usage: monitor-smoke.sh <experiment_dir> [smoke_log]

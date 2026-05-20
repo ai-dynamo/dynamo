@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Launch a single KVBM-enabled vLLM instance — aggregated (non-disagg) mode.
 # No hub, no prefill/decode CD coordination. The connector runs through
 # `ConnectorLeader::update_state_after_alloc` which honors `onboard.mode`,

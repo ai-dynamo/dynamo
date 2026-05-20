@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # onboarding-cancel.sh — S4 Onboarding cancel regression check (anchor: 0cc11281d9)
 #
 # Inputs (env vars):

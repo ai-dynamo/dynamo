@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # chain-runner.sh — S0 cumulative-cleanup orchestrator (flavor A).
 #
 # Brings up a SHARED hub/prefill/decode trio, then chains scenarios

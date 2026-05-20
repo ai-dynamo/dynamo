@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Start kvbm_hub with the conditional-disagg dispatcher enabled.
 #
 # Always passes `--prefill-vllm-url` and `--prefill-vllm-model` so the

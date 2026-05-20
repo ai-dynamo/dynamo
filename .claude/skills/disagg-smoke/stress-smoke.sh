@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Stress wrapper around two-request-smoke.sh — runs N consecutive iterations
 # against a warm session and reports pass/fail tally. Surfaces intermittent
 # races (e.g. NIXL double-load TOCTOU, observer-before-attach timing) that

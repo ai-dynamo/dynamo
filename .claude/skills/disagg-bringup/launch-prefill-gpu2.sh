@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Launch the Prefill vLLM instance on GPU 2 (TP=1) for the asymmetric
 # TP=2-decode + TP=1-prefill smoke.
 #

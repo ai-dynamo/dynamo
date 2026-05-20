@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # kvbm-v2-agg-matrix — run the 4-cell (G1 LW/FC × G2 Op/Universal) agg
 # determinism matrix on Qwen3-0.6B against the local sandbox venv.
 #

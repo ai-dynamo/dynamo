@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Unit test for verify-block-layout.sh using a mock HTTP server.
 #
 # Spawns a persistent Python HTTP server that serves configurable JSON

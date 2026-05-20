@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Asymmetric-TP smoke: TP=2 decode + TP=1 prefill (cross-GPU).
 #
 # Sibling of two-request-smoke.sh. Same R1+R2 protocol but spawns

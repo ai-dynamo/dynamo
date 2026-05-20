@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # gpu-mem-baseline.sh — S11 GPU memory baseline (Category B: resource accounting)
 #
 # Inputs (env vars):

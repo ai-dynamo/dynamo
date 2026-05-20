@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # multi-turn-r1-r2-r3-r4.sh — multi-turn CD coverage (4 sequential requests)
 #
 # Coverage gap closed:

@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Launch the Dynamo HTTP frontend with the embedded KV-aware router.
 # The frontend serves OpenAI-compatible HTTP and routes to workers
 # discovered via etcd (here: dynamo.backend.generate, two instances).

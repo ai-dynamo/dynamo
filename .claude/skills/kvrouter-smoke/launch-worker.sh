@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Launch a single dynamo.vllm worker with KVBM v2 connector and prefix
 # caching enabled. The worker registers as
 # dyn://dynamo.backend.generate; multiple instances on this endpoint

@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Launch the Prefill vLLM instance for the disagg-bringup smoke.
 # Mirrors .claude/skills/disagg-bringup/SKILL.md step 3.
 #

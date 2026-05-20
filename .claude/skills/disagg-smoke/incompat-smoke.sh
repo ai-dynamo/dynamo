@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # incompat-smoke.sh — hub-side mismatched-layout register smoke.
 #
 # Brings up a fresh `kvbm_hub` binary on alternate ports (so it doesn't

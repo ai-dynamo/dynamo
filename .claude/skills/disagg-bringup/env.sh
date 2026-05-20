@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Source-able environment for dynamo + KVBM builds AND smoke runs.
 # The Bash tool spawns non-interactive bash which does NOT source ~/.bashrc,
 # so we duplicate the CUDA-toolkit + venv + NIXL exports here.

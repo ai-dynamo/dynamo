@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # pool-accounting.sh — S12 pool accounting via proxy events (Category B: resource accounting)
 #
 # Inputs (env vars):

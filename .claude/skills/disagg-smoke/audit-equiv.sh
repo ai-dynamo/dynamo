@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Audit-trace equivalence: run the two-request smoke twice (legacy
 # leader, then unified leader), and run audit_diff on the per-side
 # kvbm_audit streams to assert equivalence.

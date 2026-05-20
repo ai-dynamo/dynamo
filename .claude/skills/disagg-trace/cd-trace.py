@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Render a two-column CD audit timeline as a self-contained HTML file.
 
 Reads kvbm_audit tracing events from hub.log, prefill.log, decode.log

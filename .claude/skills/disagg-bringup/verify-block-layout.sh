@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Assert that a registered instance's G2 block layout matches the requested mode.
 #
 # This is the reproducer for the env-var stripping bug: vLLM's EngineCore

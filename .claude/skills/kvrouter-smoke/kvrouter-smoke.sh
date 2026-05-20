@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # kvrouter-smoke.sh — exercise the embedded KV router in dynamo.frontend
 # with two dynamo.vllm workers under the same component endpoint.
 #

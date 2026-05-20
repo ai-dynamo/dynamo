@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Launch the Decode vLLM instance for the disagg-bringup smoke.
 # Same as launch-prefill.sh but role=decode and port=8001.
 #

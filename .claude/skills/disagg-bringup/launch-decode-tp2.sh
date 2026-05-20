@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Launch the Decode vLLM instance with TP=2 (asymmetric vs TP=1 prefill).
 #
 # Sibling of launch-decode.sh but spans TWO GPUs. Pair with

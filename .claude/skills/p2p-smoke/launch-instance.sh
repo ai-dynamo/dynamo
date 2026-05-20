@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Launch a single Qwen3-0.6B vLLM instance registered with kvbm-hub.
 # Identical to disagg-bringup/launch-prefill.sh except port + role + cache_size
 # are parameterized so we can spin up N independent instances on one GPU

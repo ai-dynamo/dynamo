@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 # Lognormal ISL AIPerf benchmark: 1P+1D KVBM disaggregated serving.
 #
 # Runs prefill on GPU 0 and decode on GPU 1, waits for both to be

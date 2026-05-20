@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Generate a lognormal ISL workload JSONL for AIPerf benchmarking.
 
 Samples input sequence lengths from a lognormal distribution, matching
