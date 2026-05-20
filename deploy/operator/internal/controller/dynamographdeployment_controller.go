@@ -41,7 +41,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -710,11 +709,18 @@ func preserveGrovePodCliqueSetOrder(desired *grovev1alpha1.PodCliqueSet, existin
 	desired.Spec.Template.ResourceClaimTemplates = orderLikeExisting(existing.Spec.Template.ResourceClaimTemplates, desired.Spec.Template.ResourceClaimTemplates, resourceClaimTemplateConfigName)
 }
 
-// Grove replicas are driven through scale subresources after creation; keep
-// existing template values so DGD replica changes do not update the PCS spec.
+// Grove horizontal replicas are driven through scale subresources after creation;
+// keep existing template values so DGD replica changes do not update the PCS spec.
 func preserveGrovePodCliqueSetReplicas(desired *grovev1alpha1.PodCliqueSet, existing *grovev1alpha1.PodCliqueSet) {
 	if desired == nil || existing == nil {
 		return
+	}
+
+	cliquesInScalingGroups := make(map[string]struct{})
+	for _, config := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		for _, cliqueName := range config.CliqueNames {
+			cliquesInScalingGroups[cliqueName] = struct{}{}
+		}
 	}
 
 	cliqueReplicasByName := make(map[string]int32, len(existing.Spec.Template.Cliques))
@@ -728,6 +734,9 @@ func preserveGrovePodCliqueSetReplicas(desired *grovev1alpha1.PodCliqueSet, exis
 		if clique == nil {
 			continue
 		}
+		if _, inScalingGroup := cliquesInScalingGroups[clique.Name]; inScalingGroup {
+			continue
+		}
 		if replicas, ok := cliqueReplicasByName[clique.Name]; ok {
 			clique.Spec.Replicas = replicas
 		}
@@ -736,13 +745,10 @@ func preserveGrovePodCliqueSetReplicas(desired *grovev1alpha1.PodCliqueSet, exis
 	scalingGroupReplicasByName := make(map[string]*int32, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
 	for _, config := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
 		if config.Name == "" {
+			// Defensive only; generated PCSG configs always have names.
 			continue
 		}
-		if config.Replicas == nil {
-			scalingGroupReplicasByName[config.Name] = nil
-		} else {
-			scalingGroupReplicasByName[config.Name] = ptr.To(*config.Replicas)
-		}
+		scalingGroupReplicasByName[config.Name] = config.Replicas
 	}
 	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
 		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]

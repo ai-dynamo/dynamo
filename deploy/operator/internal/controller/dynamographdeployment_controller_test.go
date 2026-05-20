@@ -1670,8 +1670,8 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 					{Name: "new-worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 5}},
 				},
 				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
-					{Name: "decode-group", Replicas: ptr.To(int32(1))},
-					{Name: "prefill-group", Replicas: ptr.To(int32(1))},
+					{Name: "decode-group", CliqueNames: []string{"decode"}, Replicas: ptr.To(int32(1))},
+					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(1))},
 					{Name: "new-group", Replicas: ptr.To(int32(7))},
 				},
 			},
@@ -1681,12 +1681,12 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 		Spec: grovev1alpha1.PodCliqueSetSpec{
 			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
-					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}},
 					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 4}},
 				},
 				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
-					{Name: "decode-group"},
-					{Name: "prefill-group", Replicas: ptr.To(int32(6))},
+					{Name: "decode-group", CliqueNames: []string{"decode"}},
+					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(6))},
 				},
 			},
 		},
@@ -1699,8 +1699,8 @@ func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 		replicasByClique[clique.Name] = clique.Spec.Replicas
 	}
 	g.Expect(replicasByClique).To(gomega.Equal(map[string]int32{
-		"frontend":   1,
-		"prefill":    4,
+		"frontend":   2,
+		"prefill":    1,
 		"new-worker": 5,
 	}))
 	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.BeNil())
