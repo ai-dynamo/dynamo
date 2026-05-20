@@ -104,6 +104,18 @@ def should_enable_consolidator(vllm_config) -> bool:
         )
         return False
 
+    # The consolidator subscribes to vLLM's KV-event ZMQ endpoint, which only
+    # exists when kv_events_config is set (e.g. via --kv-events-config). Without
+    # it, get_consolidator_endpoints would dereference a None kv_events_config
+    # and crash at startup, so disable the consolidator instead.
+    if getattr(vllm_config, "kv_events_config", None) is None:
+        logger.warning(
+            "KV Event Consolidator requires vLLM kv_events_config (e.g. "
+            "--kv-events-config) to subscribe to KV events; none is configured. "
+            "KV Event Consolidator is not enabled."
+        )
+        return False
+
     logger.info(
         "KV Event Consolidator auto-enabled (KVBM connector + prefix caching detected)"
     )
