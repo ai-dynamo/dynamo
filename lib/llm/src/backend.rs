@@ -34,6 +34,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
+use crate::model_type::ModelOutput;
 use crate::protocols::{
     TokenIdType,
     common::{
@@ -60,6 +61,7 @@ pub type ExecutionContext = ServerStreamingEngine<PreprocessedRequest, Execution
 pub struct Backend {
     pub tokenizer: Option<Tokenizer>, // Handles token encoding/decoding
     validate_engine_decode: bool,     // Enable validation of engine decoding
+    model_output: ModelOutput,
 }
 
 /// Internal state for managing token decoding and stream processing
@@ -113,20 +115,52 @@ impl Backend {
         Arc::new(Self {
             tokenizer: Some(tokenizer),
             validate_engine_decode: false,
+            model_output: ModelOutput::Tokens,
         })
     }
 
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Arc<Self> {
+        let model_output = mdc.model_output;
         match mdc.tokenizer() {
-            Ok(tokenizer) => Self::from_tokenizer(tokenizer),
+            Ok(tokenizer) => Arc::new(Self {
+                tokenizer: Some(tokenizer),
+                validate_engine_decode: false,
+                model_output,
+            }),
             Err(err) => {
                 tracing::warn!(%err, "error loading tokenizer from ModelDeploymentCard");
                 Arc::new(Self {
                     tokenizer: None,
                     validate_engine_decode: false,
+                    model_output,
                 })
             }
         }
+    }
+
+    fn passthrough_stream(
+        stream: ManyOut<ExecutionOutputStream>,
+    ) -> impl futures::Stream<Item = Annotated<BackendOutput>> {
+        stream.map(|output| {
+            output.map_data(|data| {
+                Ok(BackendOutput {
+                    token_ids: data.token_ids,
+                    tokens: data.tokens.unwrap_or_default(),
+                    text: data.text,
+                    cum_log_probs: data.cum_log_probs,
+                    log_probs: data.log_probs,
+                    top_logprobs: data.top_logprobs,
+                    finish_reason: data.finish_reason,
+                    stop_reason: data.stop_reason,
+                    index: data.index,
+                    completion_usage: data.completion_usage,
+                    disaggregated_params: data.disaggregated_params,
+                    engine_data: data.engine_data,
+                    tool_calls: data.tool_calls,
+                    reasoning_content: data.reasoning_content,
+                })
+            })
+        })
     }
 
     fn decoder(
@@ -178,9 +212,23 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-        let decoder_params = DecoderParams::from_request(&request);
+        let decoder_params = if self.model_output == ModelOutput::Text {
+            None
+        } else {
+            Some(DecoderParams::from_request(&request))
+        };
 
         let next_stream = next.generate(request).await?;
+
+        // ModelOutput::Text: complete bypass -- engine already provides
+        // text, tool_calls, reasoning_content. Skip decode/parse pipeline.
+        if self.model_output == ModelOutput::Text {
+            let context = next_stream.context();
+            let stream = Self::passthrough_stream(next_stream);
+            return Ok(ResponseStream::new(Box::pin(stream), context));
+        }
+
+        let decoder_params = decoder_params.unwrap();
 
         let context = next_stream.context();
         let state = self.decoder(next_stream, decoder_params)?;
