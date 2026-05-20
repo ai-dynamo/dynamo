@@ -51,7 +51,9 @@ use crate::protocols::common::preprocessor::{
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
-use dynamo_parsers::{ReasoningParser, ReasoningParserType};
+use dynamo_parsers::{
+    ReasoningParser, ReasoningParserType, tool_calling::parsers::get_tool_parser_map,
+};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -59,6 +61,7 @@ use dynamo_runtime::pipeline::{
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
+    TokenIdType,
     common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         DeltaGeneratorExt,
@@ -483,21 +486,26 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
+        let eos_token_ids = self.model_info.eos_token_ids();
+        let hidden_eos_token_ids = eos_token_ids.clone();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            for eos_token in self.model_info.eos_token_ids() {
-                if !stop_tokens.contains(&eos_token) {
-                    stop_tokens.push(eos_token);
+            for eos_token_id in hidden_eos_token_ids {
+                if !stop_tokens.contains(&eos_token_id) {
+                    stop_tokens.push(eos_token_id);
                 }
             }
         } else {
-            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+            stop_conditions.stop_token_ids_hidden = Some(hidden_eos_token_ids);
+        }
+        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
+            self.remove_tool_parser_end_tokens_from_hidden_stops(request, stop_tokens)?;
         }
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
-            builder.eos_token_ids(self.model_info.eos_token_ids());
+            builder.eos_token_ids(eos_token_ids);
         }
 
         builder.stop_conditions(stop_conditions);
@@ -561,6 +569,72 @@ impl OpenAIPreprocessor {
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
+    }
+
+    fn remove_tool_parser_end_tokens_from_hidden_stops<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        hidden_stop_token_ids: &mut Vec<TokenIdType>,
+    ) -> Result<()> {
+        let has_tools = request
+            .tools()
+            .as_ref()
+            .and_then(|tools| tools.len())
+            .is_some_and(|len| len > 0);
+        let tool_choice_none = request
+            .tool_choice()
+            .as_ref()
+            .and_then(|tool_choice| tool_choice.as_str())
+            == Some("none");
+
+        if !Self::should_keep_tool_parser_end_tokens_visible(has_tools, tool_choice_none) {
+            return Ok(());
+        }
+
+        let Some(tool_call_parser) = self.tool_call_parser.as_deref().filter(|p| !p.is_empty())
+        else {
+            return Ok(());
+        };
+        let Some(tool_call_config) = get_tool_parser_map().get(tool_call_parser) else {
+            return Ok(());
+        };
+
+        for end_token in tool_call_config.parser_config.tool_call_end_tokens() {
+            if end_token.is_empty() {
+                continue;
+            }
+            let encoded = self.tokenizer.encode(&end_token).with_context(|| {
+                format!(
+                    "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
+                )
+            })?;
+            if !Self::remove_single_token_marker(hidden_stop_token_ids, encoded.token_ids()) {
+                tracing::debug!(
+                    token_ids = ?encoded.token_ids(),
+                    end_token,
+                    parser = tool_call_parser,
+                    "Tool-call end token was not a single hidden EOS token"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn should_keep_tool_parser_end_tokens_visible(has_tools: bool, tool_choice_none: bool) -> bool {
+        has_tools && !tool_choice_none
+    }
+
+    fn remove_single_token_marker(
+        hidden_eos_token_ids: &mut Vec<TokenIdType>,
+        marker_token_ids: &[TokenIdType],
+    ) -> bool {
+        let [marker_token_id] = marker_token_ids else {
+            return false;
+        };
+        let before = hidden_eos_token_ids.len();
+        hidden_eos_token_ids.retain(|token_id| token_id != marker_token_id);
+        hidden_eos_token_ids.len() != before
     }
 
     pub fn apply_template<
