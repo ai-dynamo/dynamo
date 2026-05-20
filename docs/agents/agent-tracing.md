@@ -242,7 +242,11 @@ Agentic Mooncake rows preserve:
 - `branches`: child request ids spawned from this row.
 - `prefix_reset`: first request in a trajectory.
 - `delay`: non-tool delay after dependencies finish.
-- `tool_wait_ms`: tool time after dependencies finish.
+- `tool_wait_ms`: tool time after dependencies finish, parallel-aware (the union
+  of overlapping spans rather than their sum).
+- `tool_events`: per-tool spans attributed to this LLM request, each carrying
+  `tool_call_id`, `tool_class`, `status`, `started_at_unix_ms`, `ended_at_unix_ms`,
+  `duration_ms`, and optional `output_bytes` / `output_tokens` / `error_type`.
 - `hash_ids`, `input_length`, and `output_length`: prompt-prefix and length data for mocker replay.
 
 Rows with no `wait_for` use their `timestamp` as the replay start time. Rows with dependencies wait

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use dynamo_bench::coding::common::expand_user_path;
-use dynamo_data_gen::{AgenticMooncakeRow, MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper};
+use dynamo_data_gen::{
+    AgenticMooncakeRow, AgenticToolEvent, MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper,
+};
 use flate2::read::MultiGzDecoder;
 use serde::Deserialize;
 use serde_json::Value;
@@ -72,11 +74,23 @@ struct AgentReplayMetrics {
 #[derive(Debug, Clone, Deserialize)]
 struct AgentToolEventMetrics {
     #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    tool_class: Option<String>,
+    #[serde(default)]
     started_at_unix_ms: Option<u64>,
     #[serde(default)]
     ended_at_unix_ms: Option<u64>,
     #[serde(default)]
     duration_ms: Option<f64>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    output_bytes: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    error_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +107,14 @@ struct ToolEntry {
     trajectory_id: String,
     start_ms: i64,
     end_ms: i64,
+    tool_call_id: String,
+    tool_class: String,
+    status: String,
+    duration_ms: f64,
+    output_bytes: Option<u64>,
+    output_tokens: Option<u64>,
+    error_type: Option<String>,
+    terminal_event: String,
 }
 
 #[derive(Debug, Default)]
@@ -111,6 +133,7 @@ fn main() -> Result<()> {
     let output_path = expand_user_path(&args.output_file);
 
     let loaded = load_agent_trace_records(&input_paths)?;
+    let tool_summary = summarize_tools(&loaded.tools);
     let mut writer = MooncakeJsonlWriter::create(&output_path, None)?;
 
     let trace_block_size = if args.agentic {
@@ -142,7 +165,78 @@ fn main() -> Result<()> {
         );
     }
     println!("Trace block size: {trace_block_size}");
+    if tool_summary.total_spans > 0 {
+        println!();
+        print!("{}", tool_summary.render());
+    }
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ToolSummary {
+    total_spans: usize,
+    trajectories: usize,
+    by_status: BTreeMap<String, usize>,
+    by_class: BTreeMap<String, usize>,
+    total_wall_ms: f64,
+}
+
+impl ToolSummary {
+    fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Tool events: {} spans across {} trajectories\n",
+            self.total_spans, self.trajectories
+        ));
+        out.push_str(&format!("  Status:    {}\n", format_counts(&self.by_status)));
+        out.push_str(&format!("  Class:     {}\n", format_counts(&self.by_class)));
+        out.push_str(&format!(
+            "  Wall-time: {:.2}s\n",
+            self.total_wall_ms / 1000.0,
+        ));
+        out
+    }
+}
+
+fn format_counts(counts: &BTreeMap<String, usize>) -> String {
+    if counts.is_empty() {
+        return "(none)".to_string();
+    }
+    let mut pairs: Vec<(&String, &usize)> = counts.iter().collect();
+    pairs.sort_by(|left, right| right.1.cmp(left.1).then_with(|| left.0.cmp(right.0)));
+    pairs
+        .iter()
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
+    let mut summary = ToolSummary::default();
+    if tools.is_empty() {
+        return summary;
+    }
+    summary.total_spans = tools.len();
+
+    let mut trajectories: HashMap<&str, ()> = HashMap::new();
+    for tool in tools {
+        let status_key = if tool.status.is_empty() {
+            tool.terminal_event.clone()
+        } else {
+            tool.status.clone()
+        };
+        *summary.by_status.entry(status_key).or_insert(0) += 1;
+        let class_key = if tool.tool_class.is_empty() {
+            "(unlabeled)".to_string()
+        } else {
+            tool.tool_class.clone()
+        };
+        *summary.by_class.entry(class_key).or_insert(0) += 1;
+        summary.total_wall_ms += tool.duration_ms;
+        trajectories.insert(tool.trajectory_id.as_str(), ());
+    }
+    summary.trajectories = trajectories.len();
+    summary
 }
 
 fn load_agent_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
@@ -170,10 +264,11 @@ fn load_agent_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
                         line_index + 1
                     )
                 })?);
-            } else if matches!(record.event_type.as_str(), "tool_end" | "tool_error")
-                && let Some(tool) = tool_entry(record)
-            {
-                loaded.tools.push(tool);
+            } else if matches!(record.event_type.as_str(), "tool_end" | "tool_error") {
+                let terminal_event = record.event_type.clone();
+                if let Some(tool) = tool_entry(record, terminal_event) {
+                    loaded.tools.push(tool);
+                }
             }
         }
     }
@@ -233,7 +328,7 @@ fn request_entry(record: AgentTraceRecord) -> Result<RequestEntry> {
     })
 }
 
-fn tool_entry(record: AgentTraceRecord) -> Option<ToolEntry> {
+fn tool_entry(record: AgentTraceRecord, terminal_event: String) -> Option<ToolEntry> {
     let context = record.agent_context?;
     let tool = record.tool?;
     let end_ms = tool
@@ -251,10 +346,28 @@ fn tool_entry(record: AgentTraceRecord) -> Option<ToolEntry> {
     if end_ms < start_ms {
         return None;
     }
+    let duration_ms = tool
+        .duration_ms
+        .unwrap_or_else(|| (end_ms - start_ms).max(0) as f64);
+    let status = tool.status.unwrap_or_else(|| {
+        if terminal_event == "tool_error" {
+            "error".to_string()
+        } else {
+            "succeeded".to_string()
+        }
+    });
     Some(ToolEntry {
         trajectory_id: context.trajectory_id,
         start_ms,
         end_ms,
+        tool_call_id: tool.tool_call_id.unwrap_or_default(),
+        tool_class: tool.tool_class.unwrap_or_default(),
+        status,
+        duration_ms,
+        output_bytes: tool.output_bytes,
+        output_tokens: tool.output_tokens,
+        error_type: tool.error_type,
+        terminal_event,
     })
 }
 
@@ -493,20 +606,25 @@ fn build_agentic_mooncake_rows(
             .filter_map(|dependency| id_to_index.get(dependency))
             .map(|dep_idx| loaded.requests[*dep_idx].end_ms)
             .max();
-        let (delay, tool_wait_ms) = if let Some(dep_end_ms) = dep_end_ms {
+        let (delay, tool_wait_ms, tool_events) = if let Some(dep_end_ms) = dep_end_ms {
             let observed_gap_ms = request.start_ms.saturating_sub(dep_end_ms).max(0) as f64;
-            let tool_wait_ms = tools_by_trajectory
+            let (raw_tool_wait_ms, contributing) = tools_by_trajectory
                 .get(&trajectory_id)
-                .map(|tools| tool_wait_between(tools, dep_end_ms, request.start_ms))
-                .unwrap_or(0.0)
-                .min(observed_gap_ms);
+                .map(|tools| collect_tools_in_window(tools, dep_end_ms, request.start_ms))
+                .unwrap_or_else(|| (0.0, Vec::new()));
+            let tool_wait_ms = raw_tool_wait_ms.min(observed_gap_ms);
             let non_tool_wait_ms = (observed_gap_ms - tool_wait_ms).max(0.0);
+            let events = contributing
+                .into_iter()
+                .map(tool_entry_to_event)
+                .collect::<Vec<_>>();
             (
                 Some(non_tool_wait_ms),
                 (tool_wait_ms > 0.0).then_some(tool_wait_ms),
+                events,
             )
         } else {
-            (None, None)
+            (None, None, Vec::new())
         };
 
         rows.push(AgenticMooncakeRow {
@@ -523,6 +641,7 @@ fn build_agentic_mooncake_rows(
             branches: branches[idx].clone(),
             prefix_reset: Some(prefix_reset[idx]),
             tool_wait_ms,
+            tool_events,
         });
     }
 
@@ -561,19 +680,33 @@ fn first_request_starting_after(
         .min_by_key(|idx| requests[*idx].start_ms)
 }
 
-fn tool_wait_between(tools: &[ToolEntry], start_ms: i64, end_ms: i64) -> f64 {
+/// Return the parallel-aware tool wall-time over `[start_ms, end_ms]` along
+/// with the originating tool entries whose intervals contribute to it.
+///
+/// The wall-time is computed by clipping each tool span to the window and
+/// sweep-merging overlapping intervals -- two tools that ran concurrently
+/// contribute the union of their durations, not the sum. The returned entries
+/// are the full, unclipped originals so callers can preserve per-tool metadata
+/// without losing the original event times.
+fn collect_tools_in_window(
+    tools: &[ToolEntry],
+    start_ms: i64,
+    end_ms: i64,
+) -> (f64, Vec<&ToolEntry>) {
     if end_ms <= start_ms {
-        return 0.0;
+        return (0.0, Vec::new());
     }
 
-    let mut intervals = tools
-        .iter()
-        .filter_map(|tool| {
-            let start = tool.start_ms.max(start_ms);
-            let end = tool.end_ms.min(end_ms);
-            (end > start).then_some((start, end))
-        })
-        .collect::<Vec<_>>();
+    let mut contributing: Vec<&ToolEntry> = Vec::new();
+    let mut intervals = Vec::new();
+    for tool in tools {
+        let clipped_start = tool.start_ms.max(start_ms);
+        let clipped_end = tool.end_ms.min(end_ms);
+        if clipped_end > clipped_start {
+            contributing.push(tool);
+            intervals.push((clipped_start, clipped_end));
+        }
+    }
     intervals.sort_unstable();
 
     let mut total = 0_i64;
@@ -593,7 +726,21 @@ fn tool_wait_between(tools: &[ToolEntry], start_ms: i64, end_ms: i64) -> f64 {
     if let Some((current_start, current_end)) = current {
         total += current_end - current_start;
     }
-    total as f64
+    (total as f64, contributing)
+}
+
+fn tool_entry_to_event(entry: &ToolEntry) -> AgenticToolEvent {
+    AgenticToolEvent {
+        tool_call_id: entry.tool_call_id.clone(),
+        tool_class: entry.tool_class.clone(),
+        started_at_unix_ms: entry.start_ms.max(0) as u64,
+        ended_at_unix_ms: entry.end_ms.max(0) as u64,
+        duration_ms: entry.duration_ms,
+        status: entry.status.clone(),
+        output_bytes: entry.output_bytes,
+        output_tokens: entry.output_tokens,
+        error_type: entry.error_type.clone(),
+    }
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -705,6 +852,28 @@ mod tests {
         entry
     }
 
+    fn tool(
+        trajectory_id: &str,
+        tool_call_id: &str,
+        tool_class: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> ToolEntry {
+        ToolEntry {
+            trajectory_id: trajectory_id.to_string(),
+            start_ms,
+            end_ms,
+            tool_call_id: tool_call_id.to_string(),
+            tool_class: tool_class.to_string(),
+            status: "succeeded".to_string(),
+            duration_ms: (end_ms - start_ms).max(0) as f64,
+            output_bytes: None,
+            output_tokens: None,
+            error_type: None,
+            terminal_event: "tool_end".to_string(),
+        }
+    }
+
     #[test]
     fn agentic_converter_builds_sequential_waits_and_tool_wait_components() {
         let loaded = LoadedAgentTrace {
@@ -712,11 +881,7 @@ mod tests {
                 contextual_request("r1", "root", None, 1_000, 1_100, vec![11]),
                 contextual_request("r2", "root", None, 1_300, 1_400, vec![11, 22]),
             ],
-            tools: vec![ToolEntry {
-                trajectory_id: "root".to_string(),
-                start_ms: 1_150,
-                end_ms: 1_250,
-            }],
+            tools: vec![tool("root", "call-1", "ls", 1_150, 1_250)],
         };
 
         let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
@@ -724,10 +889,45 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].wait_for.is_empty());
         assert_eq!(rows[0].prefix_reset, Some(true));
+        assert!(rows[0].tool_events.is_empty());
         assert_eq!(rows[1].wait_for, vec!["r1"]);
         assert_eq!(rows[1].delay, Some(100.0));
         assert_eq!(rows[1].tool_wait_ms, Some(100.0));
         assert_eq!(rows[1].dependency_delay_ms(), 200.0);
+        assert_eq!(rows[1].tool_events.len(), 1);
+        assert_eq!(rows[1].tool_events[0].tool_class, "ls");
+        assert_eq!(rows[1].tool_events[0].tool_call_id, "call-1");
+        assert_eq!(rows[1].tool_events[0].started_at_unix_ms, 1_150);
+        assert_eq!(rows[1].tool_events[0].ended_at_unix_ms, 1_250);
+    }
+
+    #[test]
+    fn agentic_converter_attaches_parallel_tool_events_with_union_wait() {
+        let loaded = LoadedAgentTrace {
+            requests: vec![
+                contextual_request("r1", "root", None, 1_000, 1_100, vec![11]),
+                contextual_request("r2", "root", None, 1_400, 1_500, vec![11, 22]),
+            ],
+            // Two tools that overlap heavily: union is 200ms (1_100..1_300),
+            // naive sum would be 350ms.
+            tools: vec![
+                tool("root", "call-1", "read", 1_100, 1_300),
+                tool("root", "call-2", "read", 1_150, 1_250),
+                tool("root", "call-3", "find", 1_200, 1_250),
+            ],
+        };
+
+        let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
+
+        assert_eq!(rows[1].tool_wait_ms, Some(200.0));
+        assert_eq!(rows[1].tool_events.len(), 3);
+        let classes: Vec<_> = rows[1]
+            .tool_events
+            .iter()
+            .map(|event| event.tool_class.as_str())
+            .collect();
+        assert!(classes.contains(&"read"));
+        assert!(classes.contains(&"find"));
     }
 
     #[test]

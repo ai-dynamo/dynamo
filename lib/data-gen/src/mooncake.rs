@@ -90,6 +90,8 @@ pub struct AgenticMooncakeRow {
     pub prefix_reset: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_wait_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_events: Vec<AgenticToolEvent>,
 }
 
 impl AgenticMooncakeRow {
@@ -97,6 +99,28 @@ impl AgenticMooncakeRow {
     pub fn dependency_delay_ms(&self) -> f64 {
         self.delay.unwrap_or(0.0) + self.tool_wait_ms.unwrap_or(0.0)
     }
+}
+
+/// One harness tool span attributed to the LLM request that consumed it.
+///
+/// Mirrors the fields Dynamo's agent trace records for `tool_end` / `tool_error`
+/// so replay-side analyses can group, filter, or mutate by tool class without
+/// re-reading the raw trace. The `tool_wait_ms` field on the parent row is the
+/// parallel-aware union of the spans listed here over the dependency window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgenticToolEvent {
+    pub tool_call_id: String,
+    pub tool_class: String,
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: u64,
+    pub duration_ms: f64,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
 }
 
 /// Maps sequence-aware block hashes to compact, stable `u64` ids.
@@ -486,6 +510,7 @@ mod tests {
             branches: vec!["r3".to_string()],
             prefix_reset: Some(false),
             tool_wait_ms: Some(7.0),
+            tool_events: Vec::new(),
         };
 
         assert_eq!(row.dependency_delay_ms(), 10.0);
@@ -494,6 +519,41 @@ mod tests {
         assert_eq!(rendered["wait_for"], json!(["r1"]));
         assert_eq!(rendered["branches"], json!(["r3"]));
         assert_eq!(rendered["tool_wait_ms"], json!(7.0));
+        assert!(rendered.get("tool_events").is_none());
+    }
+
+    #[test]
+    fn agentic_row_round_trips_tool_events() {
+        let row = AgenticMooncakeRow {
+            request_id: "r1".to_string(),
+            session_id: Some("trajectory-a".to_string()),
+            input_length: Some(4),
+            output_length: Some(1),
+            hash_ids: Some(vec![0, 1]),
+            timestamp: Some(0.0),
+            delay: Some(0.0),
+            wait_for: Vec::new(),
+            branches: Vec::new(),
+            prefix_reset: Some(true),
+            tool_wait_ms: Some(8.0),
+            tool_events: vec![AgenticToolEvent {
+                tool_call_id: "call-1".to_string(),
+                tool_class: "web_search".to_string(),
+                started_at_unix_ms: 1_000,
+                ended_at_unix_ms: 1_008,
+                duration_ms: 8.0,
+                status: "succeeded".to_string(),
+                output_bytes: Some(512),
+                output_tokens: None,
+                error_type: None,
+            }],
+        };
+
+        let rendered = serde_json::to_string(&row).unwrap();
+        let decoded: AgenticMooncakeRow = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(decoded.tool_events.len(), 1);
+        assert_eq!(decoded.tool_events[0].tool_class, "web_search");
+        assert_eq!(decoded.tool_events[0].output_bytes, Some(512));
     }
 
     #[test]
@@ -553,6 +613,7 @@ mod tests {
                 branches: Vec::new(),
                 prefix_reset: Some(true),
                 tool_wait_ms: None,
+                tool_events: Vec::new(),
             })
             .unwrap();
         let stats = writer.finish().unwrap();
