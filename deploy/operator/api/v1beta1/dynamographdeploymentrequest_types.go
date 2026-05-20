@@ -175,8 +175,9 @@ const (
 	SearchStrategyThorough SearchStrategy = "thorough"
 )
 
-// GPUSKUType is the AIC hardware system identifier for a supported GPU.
-// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+// GPUSKUType is the AIC hardware system identifier for a supported accelerator.
+// Covers NVIDIA, AMD, and Intel XPU SKUs.
+// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300;b60
 type GPUSKUType string
 
 const (
@@ -202,6 +203,28 @@ const (
 	// --- AMD ---
 	GPUSKUTypeMI200 GPUSKUType = "mi200"
 	GPUSKUTypeMI300 GPUSKUType = "mi300"
+	// --- Intel XPU ---
+	GPUSKUTypeIntelArcProB60 GPUSKUType = "b60"
+)
+
+// XPUSKUType is the AIC hardware system identifier for a supported Intel XPU accelerator.
+// +kubebuilder:validation:Enum=b60
+type XPUSKUType string
+
+const (
+	// --- Intel Arc Pro (Xe2 Battlemage) ---
+	XPUSKUTypeIntelArcProB60 XPUSKUType = "b60"
+)
+
+// DeviceType describes the accelerator device category.
+// +kubebuilder:validation:Enum=cuda;xpu
+type DeviceType string
+
+const (
+	// DeviceTypeCuda represents NVIDIA CUDA GPUs (default).
+	DeviceTypeCuda DeviceType = "cuda"
+	// DeviceTypeXPU represents Intel XPU accelerators.
+	DeviceTypeXPU DeviceType = "xpu"
 )
 
 // BackendType specifies the inference backend.
@@ -356,14 +379,26 @@ type FeaturesSpec struct {
 // the other fields are pure overrides passed to the profiler.
 // If all four fields are set, discovery is skipped.
 type HardwareSpec struct {
-	// GPUSKU selects the GPU type to target.
+	// GPUSKU selects the accelerator type to target.
+	// For NVIDIA/AMD GPUs use a GPUSKUType value (e.g. "h200_sxm", "mi300").
+	// For Intel XPU accelerators use an XPUSKUType value (e.g. "b60"); the
+	// deviceType field will be auto-derived to "xpu" when an XPU SKU is set.
 	// When omitted, auto-detected by selecting the GPU with the highest
 	// node count, then highest VRAM. In mixed-GPU clusters, set this to
 	// choose which GPU type to use. Discovery and totalGpus are then
 	// restricted to nodes matching this SKU.
 	// +optional
-	// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
+	// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300;b60
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
+
+	// DeviceType is the accelerator device category.
+	// Supported values: 'cuda' (NVIDIA GPU, default), 'xpu' (Intel XPU).
+	// When omitted and gpuSku identifies an Intel XPU accelerator (e.g. "b60"),
+	// the operator auto-derives deviceType to "xpu".
+	// +optional
+	// +kubebuilder:default=cuda
+	// +kubebuilder:validation:Enum=cuda;xpu
+	DeviceType DeviceType `json:"deviceType,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
 	// When omitted, auto-detected from cluster GPU nodes.

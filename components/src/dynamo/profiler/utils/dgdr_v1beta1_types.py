@@ -22,7 +22,7 @@ DO NOT EDIT MANUALLY - regenerate using the script.
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -74,6 +74,24 @@ class GPUSKUType(str, Enum):
     T4 = "t4"
     MI200 = "mi200"
     MI300 = "mi300"
+
+
+class XPUSKUType(str, Enum):
+    """Intel XPU accelerator SKUs. Values are AIC system identifiers."""
+
+    IntelArcProB60 = "b60"  # Intel Arc Pro B60, Xe2 Battlemage
+
+    @property
+    def aic_system(self) -> str:
+        """Return the AIC system identifier for this XPU SKU."""
+        return self.value
+
+
+class DeviceType(str, Enum):
+    """Device category for the accelerator hardware."""
+
+    Cuda = "cuda"
+    Xpu = "xpu"
 
 
 class BackendType(str, Enum):
@@ -215,10 +233,34 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the GPU hardware for profiling and deployment. All fields are auto-detected from cluster GPU nodes when omitted (requires cluster-wide mode with GPU discovery enabled). gpuSku is a selector (restricts which nodes are considered); the other fields are pure overrides passed to the profiler. If all four fields are set, discovery is skipped."""
 
-    gpuSku: Optional[GPUSKUType] = Field(
+    gpuSku: Optional[Union[GPUSKUType, XPUSKUType]] = Field(
         default=None,
-        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU. Intel XPU SKUs (e.g. 'b60') are also accepted.",
     )
+    deviceType: Optional[DeviceType] = Field(
+        default=None,
+        description="DeviceType is the accelerator device category. Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU). Defaults to 'cuda'. Auto-derived to 'xpu' when an XPUSKUType SKU is specified.",
+    )
+
+    @model_validator(mode="after")
+    def _derive_device_type_from_sku(self) -> "HardwareSpec":
+        """Auto-derive deviceType from gpuSku when not explicitly set.
+
+        If gpuSku identifies an Intel XPU accelerator and deviceType was not
+        explicitly provided by the user, set deviceType to 'xpu'. This
+        prevents the silent misconfiguration where a user specifies an Intel
+        SKU but the default 'cuda' deviceType bypasses all XPU-specific logic.
+        """
+        if isinstance(self.gpuSku, XPUSKUType):
+            if "deviceType" not in self.model_fields_set:
+                # Not explicitly provided — auto-derive from XPU SKU.
+                self.deviceType = DeviceType.Xpu
+            elif self.deviceType != DeviceType.Xpu:
+                raise ValueError(
+                    f"gpuSku '{self.gpuSku}' is an Intel XPU accelerator but deviceType is "
+                    f"'{self.deviceType}'. Set deviceType to 'xpu' or omit it to auto-derive."
+                )
+        return self
     vramMb: Optional[float] = Field(
         default=None,
         description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes.",
