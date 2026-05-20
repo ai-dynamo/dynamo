@@ -15,9 +15,9 @@ use super::client::MooncakeObjectBlockClient;
 
 /// Optimistic lock manager for Mooncake Store.
 ///
-/// Mooncake  is unconditional overwrite (no conditional write semantics).
+/// Mooncake is unconditional overwrite (no conditional write semantics).
 /// Since KVBM block writes are content-deterministically idempotent
-/// (same  always maps to the same content), concurrent writes
+/// (same hash always maps to the same content), concurrent writes
 /// to the same key by multiple workers produce identical results.
 pub struct MooncakeLockManager {
     client: Arc<MooncakeObjectBlockClient>,
@@ -30,6 +30,15 @@ impl MooncakeLockManager {
 }
 
 impl ObjectLockManager for MooncakeLockManager {
+    /// Check if meta file exists (block already offloaded).
+    ///
+    /// **Error handling**: On transient network failures, this method returns
+    /// `Ok(false)` rather than propagating the error. This is an intentional
+    /// design choice: Mooncake operations are idempotent (duplicate uploads of
+    /// the same content-deterministic block produce identical results), so
+    /// treating a failed check as "not found" may cause redundant work but
+    /// cannot cause data corruption. Propagating errors would block the
+    /// offload pipeline for all blocks during temporary outages.
     fn has_meta(
         &self, hash: SequenceHash
     ) -> BoxFuture<'static, Result<bool>> {

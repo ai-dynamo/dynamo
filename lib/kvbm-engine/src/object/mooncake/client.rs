@@ -14,6 +14,21 @@ use crate::{BlockId, SequenceHash};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::transfer::PhysicalLayout;
 
+/// Format a storage key with optional namespace prefix.
+///
+/// Centralizes the key formatting logic used across put, get, and has
+/// operations so the namespace-prefixing pattern isn't duplicated.
+pub(crate) fn format_storage_key(
+    hash: &SequenceHash,
+    namespace: &Option<String>,
+    formatter: &dyn KeyFormatter,
+) -> String {
+    match namespace {
+        Some(ns) => format!("{}/{}", ns, formatter.format_key(hash)),
+        None => formatter.format_key(hash),
+    }
+}
+
 /// Mooncake distributed KV store client for block operations.
 pub struct MooncakeObjectBlockClient {
     pub(crate) store: Arc<mooncake_store::MooncakeStore>,
@@ -37,7 +52,7 @@ impl MooncakeObjectBlockClient {
             &config.metadata_server,
             config.global_segment_size,
             config.local_buffer_size,
-            &config.protocol,
+            &config.protocol.to_mooncake_str(),
             &config.device_name,
             &config.master_server_addr,
         ).map_err(|e| anyhow!("MooncakeStore::setup failed: {}", e))?;
@@ -70,10 +85,7 @@ impl MooncakeObjectBlockClient {
 
     /// Format a key with optional namespace prefix.
     pub(crate) fn format_key(&self, hash: &SequenceHash) -> String {
-        match &self.namespace {
-            Some(ns) => format!("{}/{}", ns, self.key_formatter.format_key(hash)),
-            None => self.key_formatter.format_key(hash),
-        }
+        format_storage_key(hash, &self.namespace, self.key_formatter.as_ref())
     }
 
     /// Register a physical layout's buffers with Mooncake for RDMA zero-copy.
@@ -233,53 +245,56 @@ impl MooncakeObjectBlockClient {
             if is_contiguous && use_zero_copy && !work_items.is_empty() {
                 let keys_str: Vec<String> = work_items
                     .iter()
-                    .map(|(hash, _)| match &namespace {
-                        Some(ns) => format!("{}/{}", ns, formatter.format_key(hash)),
-                        None => formatter.format_key(hash),
-                    })
+                    .map(|(hash, _)| format_storage_key(hash, &namespace, formatter.as_ref()))
                     .collect();
                 let key_refs: Vec<&str> = keys_str.iter().map(|s| s.as_str()).collect();
-                let buffers: Vec<*mut std::ffi::c_void> = work_items
+
+                // Collect buffers; if any memory_region fails, fall through to
+                // the single-block path instead of passing null pointers to the
+                // C library.
+                let buffers: Result<Vec<*mut std::ffi::c_void>> = work_items
                     .iter()
                     .map(|(_, block_id)| {
                         layout.memory_region(*block_id, 0, 0)
                             .map(|r| r.addr as *mut std::ffi::c_void)
-                            .unwrap_or(std::ptr::null_mut())
                     })
                     .collect();
-                let sizes: Vec<usize> = std::iter::repeat(block_size).take(work_items.len()).collect();
 
-                let batch_result = unsafe {
-                    store.batch_put_from(&key_refs, &buffers, &sizes, None)
-                        .map_err(|e| anyhow!("Mooncake batch_put_from failed: {}", e))
-                };
+                if let Ok(buffers) = buffers {
+                    let sizes: Vec<usize> = std::iter::repeat(block_size).take(work_items.len()).collect();
 
-                match batch_result {
-                    Ok(rcodes) => {
-                        return work_items.into_iter().zip(rcodes.into_iter())
-                            .map(|((hash, _), rc)| {
-                                if rc == 0 {
-                                    Ok(hash)
-                                } else {
-                                    tracing::warn!(hash = %hash, rc = rc, "batch_put_from block failed");
-                                    Err(hash)
-                                }
-                            })
-                            .collect();
+                    let batch_result = unsafe {
+                        store.batch_put_from(&key_refs, &buffers, &sizes, None)
+                            .map_err(|e| anyhow!("Mooncake batch_put_from failed: {}", e))
+                    };
+
+                    match batch_result {
+                        Ok(rcodes) => {
+                            return work_items.into_iter().zip(rcodes.into_iter())
+                                .map(|((hash, _), rc)| {
+                                    if rc == 0 {
+                                        Ok(hash)
+                                    } else {
+                                        tracing::warn!(hash = %hash, rc = rc, "batch_put_from block failed");
+                                        Err(hash)
+                                    }
+                                })
+                                .collect();
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "batch_put_from failed, falling back to single-block");
+                            // Fall through to single-block path
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "batch_put_from failed, falling back to single-block");
-                        // Fall through to single-block path
-                    }
+                } else {
+                    tracing::warn!("batch put: memory_region failed for one or more blocks, falling back to single-block");
+                    // Fall through to single-block path
                 }
             }
 
             let tasks = work_items.into_iter().map(|(hash, block_id)| {
                 let store = store.clone();
-                let key = match &namespace {
-                    Some(ns) => format!("{}/{}", ns, formatter.format_key(&hash)),
-                    None => formatter.format_key(&hash),
-                };
+                let key = format_storage_key(&hash, &namespace, formatter.as_ref());
                 let layout = layout.clone();
 
                 async move {
@@ -350,58 +365,61 @@ impl MooncakeObjectBlockClient {
             if is_contiguous && use_zero_copy && !work_items.is_empty() {
                 let keys_str: Vec<String> = work_items
                     .iter()
-                    .map(|(hash, _)| match &namespace {
-                        Some(ns) => format!("{}/{}", ns, formatter.format_key(hash)),
-                        None => formatter.format_key(hash),
-                    })
+                    .map(|(hash, _)| format_storage_key(hash, &namespace, formatter.as_ref()))
                     .collect();
                 let key_refs: Vec<&str> = keys_str.iter().map(|s| s.as_str()).collect();
-                let buffers: Vec<*mut std::ffi::c_void> = work_items
+
+                // Collect buffers; if any memory_region fails, fall through to
+                // the single-block path instead of passing null pointers to the
+                // C library.
+                let buffers: Result<Vec<*mut std::ffi::c_void>> = work_items
                     .iter()
                     .map(|(_, block_id)| {
                         layout.memory_region(*block_id, 0, 0)
                             .map(|r| r.addr as *mut std::ffi::c_void)
-                            .unwrap_or(std::ptr::null_mut())
                     })
                     .collect();
-                let sizes: Vec<usize> = std::iter::repeat(block_size).take(work_items.len()).collect();
 
-                let batch_result = unsafe {
-                    store.batch_get_into(&key_refs, &buffers, &sizes)
-                        .map_err(|e| anyhow!("Mooncake batch_get_into failed: {}", e))
-                };
+                if let Ok(buffers) = buffers {
+                    let sizes: Vec<usize> = std::iter::repeat(block_size).take(work_items.len()).collect();
 
-                match batch_result {
-                    Ok(written_bytes) => {
-                        return work_items.into_iter().zip(written_bytes.into_iter())
-                            .map(|((hash, _), written)| {
-                                if written == block_size as i64 {
-                                    Ok(hash)
-                                } else {
-                                    tracing::warn!(
-                                        hash = %hash,
-                                        expected = block_size,
-                                        got = written,
-                                        "batch_get_into short read"
-                                    );
-                                    Err(hash)
-                                }
-                            })
-                            .collect();
+                    let batch_result = unsafe {
+                        store.batch_get_into(&key_refs, &buffers, &sizes)
+                            .map_err(|e| anyhow!("Mooncake batch_get_into failed: {}", e))
+                    };
+
+                    match batch_result {
+                        Ok(written_bytes) => {
+                            return work_items.into_iter().zip(written_bytes.into_iter())
+                                .map(|((hash, _), written)| {
+                                    if written == block_size as i64 {
+                                        Ok(hash)
+                                    } else {
+                                        tracing::warn!(
+                                            hash = %hash,
+                                            expected = block_size,
+                                            got = written,
+                                            "batch_get_into short read"
+                                        );
+                                        Err(hash)
+                                    }
+                                })
+                                .collect();
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "batch_get_into failed, falling back to single-block");
+                            // Fall through to single-block path
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "batch_get_into failed, falling back to single-block");
-                        // Fall through to single-block path
-                    }
+                } else {
+                    tracing::warn!("batch get: memory_region failed for one or more blocks, falling back to single-block");
+                    // Fall through to single-block path
                 }
             }
 
             let tasks = work_items.into_iter().map(|(hash, block_id)| {
                 let store = store.clone();
-                let key = match &namespace {
-                    Some(ns) => format!("{}/{}", ns, formatter.format_key(&hash)),
-                    None => formatter.format_key(&hash),
-                };
+                let key = format_storage_key(&hash, &namespace, formatter.as_ref());
                 let layout = layout.clone();
 
                 async move {
@@ -468,10 +486,7 @@ impl ObjectBlockOps for MooncakeObjectBlockClient {
             // Format all keys upfront
             let formatted: Vec<String> = keys
                 .iter()
-                .map(|hash| match &namespace {
-                    Some(ns) => format!("{}/{}", ns, formatter.format_key(hash)),
-                    None => formatter.format_key(hash),
-                })
+                .map(|hash| format_storage_key(hash, &namespace, formatter.as_ref()))
                 .collect();
 
             let key_refs: Vec<&str> = formatted.iter().map(|s| s.as_str()).collect();
@@ -485,15 +500,19 @@ impl ObjectBlockOps for MooncakeObjectBlockClient {
                 }
             };
 
-            // Collect hashes that exist so we can query sizes in parallel
-            let existing: Vec<(SequenceHash, String)> = keys
-                .into_iter()
-                .zip(formatted.into_iter())
-                .zip(exist_results.into_iter())
-                .filter_map(|((hash, key), exists)| if exists { Some((hash, key)) } else { None })
-                .collect();
+            // Separate existing (need size query) from non-existing keys.
+            // Non-existing keys must still appear in the result as (hash, None).
+            let mut results: Vec<(SequenceHash, Option<usize>)> = Vec::with_capacity(keys.len());
+            let mut size_queries: Vec<(SequenceHash, String)> = Vec::new();
+            for ((hash, key), exists) in keys.into_iter().zip(formatted).zip(exist_results) {
+                if exists {
+                    size_queries.push((hash, key));
+                } else {
+                    results.push((hash, None));
+                }
+            }
 
-            let tasks = existing.into_iter().map(|(hash, key)| {
+            let tasks = size_queries.into_iter().map(|(hash, key)| {
                 let store = store.clone();
                 async move {
                     match store.get_size(&key) {
@@ -506,10 +525,13 @@ impl ObjectBlockOps for MooncakeObjectBlockClient {
                 }
             });
 
-            futures::stream::iter(tasks)
+            let size_results: Vec<(SequenceHash, Option<usize>)> = futures::stream::iter(tasks)
                 .buffer_unordered(max_concurrent)
                 .collect()
-                .await
+                .await;
+
+            results.extend(size_results);
+            results
         })
     }
 
@@ -561,7 +583,7 @@ impl ObjectBlockOps for MooncakeObjectBlockClient {
 #[cfg(all(test, feature = "mooncake", feature = "testing"))]
 mod tests {
     use super::*;
-    
+
     use kvbm_config::MooncakeObjectConfig;
     use kvbm_physical::testing::{create_fc_layout_system, create_lw_layout_system};
     use kvbm_physical::transfer::{compute_block_checksums, fill_blocks, FillPattern};
@@ -584,7 +606,7 @@ mod tests {
             metadata_server: "http://127.0.0.1:8080/metadata".to_string(),
             master_server_addr: "127.0.0.1:50051".to_string(),
             local_hostname: "localhost".to_string(),
-            protocol: "tcp".to_string(),
+            protocol: kvbm_config::MooncakeProtocol::Tcp,
             device_name: "".to_string(),
             global_segment_size: 512 * 1024 * 1024,
             local_buffer_size: 128 * 1024 * 1024,

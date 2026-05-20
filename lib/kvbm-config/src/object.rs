@@ -104,6 +104,26 @@ impl S3ObjectConfig {
     }
 }
 
+/// Transport protocol for Mooncake Store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MooncakeProtocol {
+    /// TCP transport (no RDMA required).
+    Tcp,
+    /// RDMA transport for zero-copy transfers.
+    Rdma,
+}
+
+impl MooncakeProtocol {
+    /// Convert to the string representation expected by the Mooncake C library.
+    pub fn to_mooncake_str(&self) -> &str {
+        match self {
+            MooncakeProtocol::Tcp => "tcp",
+            MooncakeProtocol::Rdma => "rdma",
+        }
+    }
+}
+
 /// Mooncake distributed KV store configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct MooncakeObjectConfig {
@@ -117,12 +137,15 @@ pub struct MooncakeObjectConfig {
     pub master_server_addr: String,
 
     /// Local hostname for RDMA addressing.
+    ///
+    /// Default reads from `/proc/sys/kernel/hostname` (Linux only).
+    /// Falls back to `"localhost"` on non-Linux platforms.
     #[serde(default = "default_hostname")]
     pub local_hostname: String,
 
     /// Transport protocol: "tcp" or "rdma".
     #[serde(default = "default_mooncake_protocol")]
-    pub protocol: String,
+    pub protocol: MooncakeProtocol,
 
     /// RDMA device name (empty = auto-select).
     #[serde(default)]
@@ -149,6 +172,12 @@ fn default_master_server_addr() -> String {
     "127.0.0.1:50051".to_string()
 }
 
+/// Reads the system hostname from `/proc/sys/kernel/hostname`.
+///
+/// **Linux only**: This path does not exist on macOS or Windows.
+/// On non-Linux platforms the fallback `"localhost"` will be used,
+/// which may cause confusing RDMA addressing errors. For development
+/// on macOS, explicitly set `local_hostname` in your config.
 fn default_hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
@@ -157,8 +186,8 @@ fn default_hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
-fn default_mooncake_protocol() -> String {
-    "tcp".to_string()
+fn default_mooncake_protocol() -> MooncakeProtocol {
+    MooncakeProtocol::Tcp
 }
 
 fn default_segment_size() -> u64 {
