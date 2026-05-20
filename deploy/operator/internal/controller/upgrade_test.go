@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	"sigs.k8s.io/yaml"
 )
 
 var upgradeScheme = k8sruntime.NewScheme()
@@ -120,23 +121,129 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 					},
 				},
 			}
-			dcd := &v1beta1.DynamoComponentDeployment{}
-			require.NoError(t, parent.ConvertTo(dcd))
-			child, toDelete, err := newUpgradeDCDReconciler(t, dcd).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-			require.NoError(t, err)
-			require.False(t, toDelete)
-			child.Spec.Template.Labels = map[string]string{
-				commonconsts.KubeLabelDynamoComponent:           "decode",
-				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
-				commonconsts.KubeLabelDynamoDiscoveryBackend:    commonconsts.DiscoveryBackendKubernetes,
-				commonconsts.KubeLabelDynamoDiscoveryEnabled:    commonconsts.KubeLabelValueTrue,
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
-				commonconsts.KubeLabelDynamoNamespace:           dynamoNamespace,
-				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
-				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
-				commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-				commonconsts.KubeLabelDynamoSelector:            "qwen-decode-db6b6891",
-			}
+			// The child fixture is the persisted pre-upgrade workload the current renderer discovers.
+			child := &appsv1.Deployment{}
+			require.NoError(t, yaml.Unmarshal([]byte(`
+metadata:
+  name: qwen-decode-db6b6891
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      nvidia.com/selector: qwen-decode-db6b6891
+  template:
+    metadata:
+      labels:
+        nvidia.com/dynamo-component: decode
+        nvidia.com/dynamo-component-type: worker
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: "true"
+        nvidia.com/dynamo-graph-deployment-name: qwen
+        nvidia.com/dynamo-namespace: default
+        nvidia.com/dynamo-sub-component-type: decode
+        nvidia.com/dynamo-worker-hash: db6b6891
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: qwen-decode-db6b6891
+    spec:
+      volumes:
+      - name: shared-memory
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi
+      containers:
+      - name: main
+        image: test-image:latest
+        command:
+        - python3
+        args:
+        - -m
+        - dynamo.vllm
+        ports:
+        - name: system
+          containerPort: 9090
+          protocol: TCP
+        - name: nixl
+          containerPort: 19090
+          protocol: TCP
+        env:
+        - name: DYN_COMPONENT
+          value: worker
+        - name: DYN_DISCOVERY_BACKEND
+          value: kubernetes
+        - name: DYN_FORWARDPASS_METRIC_PORT
+          value: "20380"
+        - name: DYN_HEALTH_CHECK_ENABLED
+          value: "false"
+        - name: DYN_NAMESPACE
+          value: default-qwen-decode-db6b6891
+        - name: DYN_NAMESPACE_WORKER_SUFFIX
+          value: db6b6891
+        - name: DYN_PARENT_DGD_K8S_NAME
+          value: qwen-decode-db6b6891
+        - name: DYN_PARENT_DGD_K8S_NAMESPACE
+          value: default
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: '["generate"]'
+        - name: NIXL_TELEMETRY_ENABLE
+          value: "n"
+        - name: NIXL_TELEMETRY_EXPORTER
+          value: prometheus
+        - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+          value: "19090"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: shared-memory
+          mountPath: /dev/shm
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: system
+          timeoutSeconds: 4
+          periodSeconds: 5
+          failureThreshold: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: system
+          timeoutSeconds: 4
+          periodSeconds: 10
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /live
+            port: system
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 720
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: qwen-decode-db6b6891-k8s-service-discovery
+      securityContext:
+        fsGroup: 1000
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "25%"
+      maxSurge: "25%"
+`), child))
 			return upgradeCase{
 				parent: parent,
 				child:  child,
@@ -203,35 +310,213 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 				},
 			}
 			parent.Spec.Multinode = &v1alpha1.MultinodeSpec{NodeCount: 2}
-			dcd := &v1beta1.DynamoComponentDeployment{}
-			require.NoError(t, parent.ConvertTo(dcd))
-			child, toDelete, err := newUpgradeDCDReconciler(t, dcd).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-			require.NoError(t, err)
-			require.False(t, toDelete)
-			child.Spec.LeaderWorkerTemplate.LeaderTemplate.Labels = map[string]string{
-				commonconsts.KubeLabelDynamoComponent:           "decode",
-				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
-				commonconsts.KubeLabelDynamoDiscoveryBackend:    commonconsts.DiscoveryBackendKubernetes,
-				commonconsts.KubeLabelDynamoDiscoveryEnabled:    commonconsts.KubeLabelValueTrue,
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
-				commonconsts.KubeLabelDynamoNamespace:           dynamoNamespace,
-				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
-				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
-				commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-				"role":                                          "leader",
-			}
-			child.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels = map[string]string{
-				commonconsts.KubeLabelDynamoComponent:           "decode",
-				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
-				commonconsts.KubeLabelDynamoDiscoveryBackend:    commonconsts.DiscoveryBackendKubernetes,
-				commonconsts.KubeLabelDynamoDiscoveryEnabled:    commonconsts.KubeLabelValueTrue,
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
-				commonconsts.KubeLabelDynamoNamespace:           dynamoNamespace,
-				commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
-				commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
-				commonconsts.KubeLabelMetricsEnabled:            commonconsts.KubeLabelValueTrue,
-				"role":                                          "worker",
-			}
+			// The child fixture is the persisted pre-upgrade workload the current renderer discovers.
+			child := &leaderworkersetv1.LeaderWorkerSet{}
+			require.NoError(t, yaml.Unmarshal([]byte(`
+metadata:
+  name: qwen-decode-db6b6891-0
+  namespace: default
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    leaderTemplate:
+      metadata:
+        labels:
+          nvidia.com/dynamo-component: decode
+          nvidia.com/dynamo-component-type: worker
+          nvidia.com/dynamo-discovery-backend: kubernetes
+          nvidia.com/dynamo-discovery-enabled: "true"
+          nvidia.com/dynamo-graph-deployment-name: qwen
+          nvidia.com/dynamo-namespace: default
+          nvidia.com/dynamo-sub-component-type: decode
+          nvidia.com/dynamo-worker-hash: db6b6891
+          nvidia.com/metrics-enabled: "true"
+          role: leader
+      spec:
+        volumes:
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        containers:
+        - name: main
+          image: test-image:latest
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.vllm
+          ports:
+          - name: system
+            containerPort: 9090
+            protocol: TCP
+          - name: nixl
+            containerPort: 19090
+            protocol: TCP
+          env:
+          - name: DYN_COMPONENT
+            value: worker
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_FORWARDPASS_METRIC_PORT
+            value: "20380"
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: DYN_NAMESPACE
+            value: default-qwen-decode-db6b6891
+          - name: DYN_NAMESPACE_WORKER_SUFFIX
+            value: db6b6891
+          - name: DYN_PARENT_DGD_K8S_NAME
+            value: qwen-decode-db6b6891
+          - name: DYN_PARENT_DGD_K8S_NAMESPACE
+            value: default
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+            value: '["generate"]'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: "n"
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: "19090"
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: shared-memory
+            mountPath: /dev/shm
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: system
+            timeoutSeconds: 4
+            periodSeconds: 5
+            failureThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: system
+            timeoutSeconds: 4
+            periodSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /live
+              port: system
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 720
+        restartPolicy: Always
+        terminationGracePeriodSeconds: 60
+        serviceAccountName: qwen-decode-db6b6891-k8s-service-discovery
+        securityContext:
+          fsGroup: 1000
+    workerTemplate:
+      metadata:
+        labels:
+          nvidia.com/dynamo-component: decode
+          nvidia.com/dynamo-component-type: worker
+          nvidia.com/dynamo-discovery-backend: kubernetes
+          nvidia.com/dynamo-discovery-enabled: "true"
+          nvidia.com/dynamo-graph-deployment-name: qwen
+          nvidia.com/dynamo-namespace: default
+          nvidia.com/dynamo-sub-component-type: decode
+          nvidia.com/dynamo-worker-hash: db6b6891
+          nvidia.com/metrics-enabled: "true"
+          role: worker
+      spec:
+        volumes:
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        containers:
+        - name: main
+          image: test-image:latest
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.vllm
+          ports:
+          - name: system
+            containerPort: 9090
+            protocol: TCP
+          - name: nixl
+            containerPort: 19090
+            protocol: TCP
+          env:
+          - name: DYN_COMPONENT
+            value: worker
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_FORWARDPASS_METRIC_PORT
+            value: "20380"
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: DYN_NAMESPACE
+            value: default-qwen-decode-db6b6891
+          - name: DYN_NAMESPACE_WORKER_SUFFIX
+            value: db6b6891
+          - name: DYN_PARENT_DGD_K8S_NAME
+            value: qwen-decode-db6b6891
+          - name: DYN_PARENT_DGD_K8S_NAMESPACE
+            value: default
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+            value: '["generate"]'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: "n"
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: "19090"
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: shared-memory
+            mountPath: /dev/shm
+        restartPolicy: Always
+        terminationGracePeriodSeconds: 60
+        serviceAccountName: qwen-decode-db6b6891-k8s-service-discovery
+        securityContext:
+          fsGroup: 1000
+    size: 2
+  rolloutStrategy:
+    type: ""
+  startupPolicy: LeaderCreated
+`), child))
 			return upgradeCase{
 				parent: parent,
 				child:  child,
@@ -270,14 +555,6 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Frontend": {
-							ComponentType: commonconsts.ComponentTypeFrontend,
-							Replicas:      ptr.To(int32(1)),
-						},
-						"Planner": {
-							ComponentType: commonconsts.ComponentTypePlanner,
-							Replicas:      ptr.To(int32(1)),
-						},
 						"VllmDecodeWorker": {
 							ComponentType:    commonconsts.ComponentTypeWorker,
 							SubComponentType: commonconsts.ComponentTypeDecode,
@@ -291,37 +568,222 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 					},
 				},
 			}
-			dgd := &v1beta1.DynamoGraphDeployment{}
-			require.NoError(t, parent.ConvertTo(dgd))
-			_, child := renderGrovePodCliqueSetFromExisting(ctx, t, dgd, &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "vllm-disagg-planner", Namespace: "jsm"},
-				Spec: grovev1alpha1.PodCliqueSetSpec{
-					Template: grovev1alpha1.PodCliqueSetTemplateSpec{
-						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
-							{
-								Name: "vllmprefillworker",
-								Labels: map[string]string{
-									commonconsts.KubeLabelDynamoComponent:        "VllmPrefillWorker",
-									commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
-									commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypePrefill,
-								},
-								Annotations: map[string]string{
-									commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
-								},
-							},
-							{Name: "frontend"},
-							{
-								Name: "vllmdecodeworker",
-								Labels: map[string]string{
-									commonconsts.KubeLabelDynamoComponent:        "VllmDecodeWorker",
-									commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
-									commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypeDecode,
-								},
-							},
-						},
-					},
-				},
-			})
+			// The child fixture is the persisted pre-upgrade workload the current renderer discovers.
+			child := &grovev1alpha1.PodCliqueSet{}
+			require.NoError(t, yaml.Unmarshal([]byte(`
+metadata:
+  name: vllm-disagg-planner
+  namespace: jsm
+spec:
+  replicas: 1
+  template:
+    cliques:
+    - name: vllmprefillworker
+      labels:
+        nvidia.com/dynamo-component: VllmPrefillWorker
+        nvidia.com/dynamo-component-type: worker
+        nvidia.com/dynamo-graph-deployment-name: vllm-disagg-planner
+        nvidia.com/dynamo-namespace: jsm-vllm-disagg-planner
+        nvidia.com/dynamo-sub-component-type: prefill
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: vllm-disagg-planner-vllmprefillworker
+      annotations:
+        nvidia.com/dynamo-operator-origin-version: 1.1.0
+      spec:
+        roleName: vllmprefillworker
+        podSpec:
+          volumes:
+          - name: shared-memory
+            emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+          containers:
+          - name: main
+            command:
+            - /bin/sh
+            - -c
+            ports:
+            - name: system
+              containerPort: 9090
+              protocol: TCP
+            - name: nixl
+              containerPort: 19090
+              protocol: TCP
+            env:
+            - name: DYN_COMPONENT
+              value: worker
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: jsm-vllm-disagg-planner
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: vllm-disagg-planner
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: jsm
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            resources: {}
+            volumeMounts:
+            - name: shared-memory
+              mountPath: /dev/shm
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: system
+              timeoutSeconds: 4
+              periodSeconds: 5
+              failureThreshold: 1
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: system
+              timeoutSeconds: 4
+              periodSeconds: 10
+              failureThreshold: 3
+            startupProbe:
+              httpGet:
+                path: /live
+                port: system
+              timeoutSeconds: 5
+              periodSeconds: 10
+              failureThreshold: 720
+          restartPolicy: Always
+          terminationGracePeriodSeconds: 60
+          securityContext:
+            fsGroup: 1000
+        replicas: 1
+        minAvailable: 1
+    - name: vllmdecodeworker
+      labels:
+        nvidia.com/dynamo-component: VllmDecodeWorker
+        nvidia.com/dynamo-component-type: worker
+        nvidia.com/dynamo-graph-deployment-name: vllm-disagg-planner
+        nvidia.com/dynamo-namespace: jsm-vllm-disagg-planner
+        nvidia.com/dynamo-sub-component-type: decode
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: vllm-disagg-planner-vllmdecodeworker
+      annotations:
+        nvidia.com/dynamo-operator-origin-version: 1.1.0
+      spec:
+        roleName: vllmdecodeworker
+        podSpec:
+          volumes:
+          - name: shared-memory
+            emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+          containers:
+          - name: main
+            command:
+            - /bin/sh
+            - -c
+            ports:
+            - name: system
+              containerPort: 9090
+              protocol: TCP
+            - name: nixl
+              containerPort: 19090
+              protocol: TCP
+            env:
+            - name: DYN_COMPONENT
+              value: worker
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: jsm-vllm-disagg-planner
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: vllm-disagg-planner
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: jsm
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            resources: {}
+            volumeMounts:
+            - name: shared-memory
+              mountPath: /dev/shm
+            livenessProbe:
+              httpGet:
+                path: /live
+                port: system
+              timeoutSeconds: 4
+              periodSeconds: 5
+              failureThreshold: 1
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: system
+              timeoutSeconds: 4
+              periodSeconds: 10
+              failureThreshold: 3
+            startupProbe:
+              httpGet:
+                path: /live
+                port: system
+              timeoutSeconds: 5
+              periodSeconds: 10
+              failureThreshold: 720
+          restartPolicy: Always
+          terminationGracePeriodSeconds: 60
+          securityContext:
+            fsGroup: 1000
+        replicas: 1
+        minAvailable: 1
+    cliqueStartupType: CliqueStartupTypeAnyOrder
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+`), child))
 			return upgradeCase{
 				parent: parent,
 				child:  child,
