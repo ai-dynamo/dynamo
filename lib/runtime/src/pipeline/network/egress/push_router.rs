@@ -1290,7 +1290,12 @@ mod tests {
 
     #[tokio::test]
     async fn round_robin_excludes_overloaded_workers_from_candidates() {
-        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        // Long reconcile interval so the synthetic override below survives
+        // the test. We still register a real endpoint instance up front so
+        // the initial reconcile (which fires immediately when the monitor
+        // task spawns) settles on a non-empty source — without that, the
+        // first reconcile would clobber the override before it takes effect.
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
@@ -1305,11 +1310,22 @@ mod tests {
             .await
             .unwrap();
 
-        // Two workers, mark one overloaded. round_robin must never select
-        // the overloaded one — that's the whole point of selecting from
-        // free_ids instead of routable_ids. The post-selection overload
-        // check in route() would otherwise 503 one of N requests on each
-        // pass, which is the bug this PR closes for non-KV selectors.
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let real_id = instances[0].id();
+        for _ in 0..50 {
+            if client.instance_ids_avail().contains(&real_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Now override with two synthetic IDs and mark one overloaded.
+        // round_robin must never select the overloaded one — that's the
+        // whole point of selecting from free_ids instead of routable_ids.
+        // The post-selection overload check in route() would otherwise 503
+        // one of N requests on each pass, which is the bug this PR closes
+        // for non-KV selectors.
         client.override_instance_avail(vec![1, 2]);
         client.set_overloaded_instances(&[1]);
 

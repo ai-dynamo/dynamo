@@ -241,12 +241,13 @@ impl RoutingInstances {
 
     #[cfg(test)]
     fn override_routable_ids(&self, routable_ids: Vec<u64>) -> Self {
-        Self {
-            discovered_ids: self.discovered_ids.clone(),
+        // Route through from_parts so `free_ids` is recomputed from the new
+        // routable set instead of carrying the stale value forward.
+        Self::from_parts(
+            self.discovered_ids.clone(),
             routable_ids,
-            overloaded_ids: self.overloaded_ids.clone(),
-            free_ids: self.free_ids.clone(),
-        }
+            self.overloaded_ids.clone(),
+        )
     }
 
     fn set_overloaded(&self, overloaded_ids: HashSet<u64>) -> Self {
