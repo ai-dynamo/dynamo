@@ -1540,17 +1540,20 @@ impl OpenAIPreprocessor {
                 Some("kimi_k25")
             );
 
-        // tool_choice=required/named forces the backend into guided decoding,
-        // which constrains output to a bare JSON shape with no reasoning
-        // wrapper. Running the reasoning parser on that output is both
-        // pointless (nothing to extract) and actively harmful for parsers
-        // that inject a `<think>` prefix unconditionally (e.g. MiniMax
-        // append-think), because the prefix would contaminate the
-        // tool-call JSON fed into the jail.
-        let tool_choice_forces_guided_json = matches!(
+        // Under guided-decoding (tool_choice=required/named), only force-
+        // reasoning parsers must skip — they treat the bare JSON output as
+        // reasoning_content and starve the jail. Non-force-reasoning parsers
+        // (qwen3, deepseek_v4, glm45, etc.) are safe to run: vLLM's
+        // reasoner-gate allows free generation during `<think>...</think>`
+        // before clamping to the guided grammar, so the model emits
+        // `<reasoning></think><JSON>` and the parser strips the prefix so the
+        // jail sees pure JSON.
+        let skip_reasoning_for_guided_json = matches!(
             request.inner.tool_choice,
             Some(ChatCompletionToolChoiceOption::Required)
                 | Some(ChatCompletionToolChoiceOption::Named(_))
+        ) && Self::is_force_reasoning_parser(
+            self.runtime_config.reasoning_parser.as_deref(),
         );
 
         let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
@@ -1562,11 +1565,11 @@ impl OpenAIPreprocessor {
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
             && !reasoning_disabled_by_request
             && !suppress_reasoning_after_tool
-            && !tool_choice_forces_guided_json;
+            && !skip_reasoning_for_guided_json;
         let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
             && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
             && !suppress_reasoning_after_tool
-            && !tool_choice_forces_guided_json;
+            && !skip_reasoning_for_guided_json;
 
         // Reasoning Content Parsing Transformation Step
         // Current Solution:
@@ -2060,6 +2063,26 @@ impl OpenAIPreprocessor {
         matches!(
             reasoning_parser,
             Some("nemotron_nano" | "nemotron3" | "nemotron_v3")
+        )
+    }
+
+    /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
+    /// These swallow any leading text without an open `<think>` tag as
+    /// reasoning_content, so they cannot run on guided-decoding output where
+    /// the model emits bare JSON from token 0.
+    fn is_force_reasoning_parser(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some(
+                "deepseek_r1"
+                    | "step3"
+                    | "kimi_k25"
+                    | "mistral"
+                    | "minimax_append_think"
+                    | "nemotron_nano"
+                    | "nemotron3"
+                    | "nemotron_v3"
+            )
         )
     }
 

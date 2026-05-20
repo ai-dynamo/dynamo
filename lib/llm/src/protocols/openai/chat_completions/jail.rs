@@ -563,6 +563,11 @@ impl JailedStream {
         JailedStreamBuilder::new()
     }
 
+    /// Whether the jail starts already-jailed (tool_choice=required/named path).
+    fn is_immediate(&self) -> bool {
+        matches!(self.jail_mode, JailMode::Immediate { .. })
+    }
+
     /// Apply jail stream transformation with finish_reason fix
     /// This is a convenience method that applies both apply() and fix_finish_reason()
     pub fn apply_with_finish_reason<S>(
@@ -630,8 +635,8 @@ impl JailedStream {
                             };
 
                             if let Some(text) = text_content {
-                                let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
-                                let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
+                                let choice_state = choice_states
+                                    .get_or_create_state(choice.index, self.is_immediate());
 
                                 if let Some(reasoning_content) = &choice.delta.reasoning_content {
                                     let pending = choice_state
@@ -663,10 +668,17 @@ impl JailedStream {
                             }
                             // For multimodal content, pass through unchanged (no jailing)
                         } else {
-                            // Handle choices without content (e.g., final chunks with finish_reason)
-                            // Only filter out if this choice was ever jailed and lacks role
-                            // (to avoid aggregator issues with deltas missing role after unjail)
-                            let choice_state = choice_states.get_or_create_state(choice.index, false);
+                            // Handle choices without content (final chunks with finish_reason,
+                            // role-only chunks, or chunks where the upstream reasoning parser
+                            // stripped all content into `reasoning_content`).
+                            //
+                            // `starts_jailed` must reflect the configured jail_mode: if Immediate
+                            // mode is initialized via this branch (e.g., a reasoning-only first
+                            // chunk), hardcoding `false` here silently disables it for the rest
+                            // of the stream — `get_or_create_state` ignores the argument on
+                            // subsequent calls.
+                            let choice_state = choice_states
+                                .get_or_create_state(choice.index, self.is_immediate());
                             // Also track stream finish reason from content-less final chunks
                             // (e.g. finish_reason=Stop arriving in a chunk with content=None) so
                             // the Immediate-mode finalize path can emit the correct finish_reason.
@@ -675,9 +687,12 @@ impl JailedStream {
                             }
                             let was_ever_jailed = !choice_state.accumulated_content.is_empty() || choice_state.is_jailed;
 
+                            // Reasoning-only chunks must pass through even when jailed; only
+                            // `content` is subject to accumulation.
                             let should_emit = choice.delta.role.is_some()
                                 || choice.delta.tool_calls.is_some()
-                                || !was_ever_jailed; // Always pass through if never jailed
+                                || choice.delta.reasoning_content.is_some()
+                                || !was_ever_jailed;
 
                             if should_emit {
                                 let pass_through_choice = ChatChoiceStream {
