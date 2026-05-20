@@ -31,18 +31,14 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// `migration_link`.
 pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
-    fn worker_trace_link(
-        &self,
-    ) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
+    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
 }
 
 impl HasTokenIds for BackendOutput {
     fn token_ids(&self) -> &[TokenIdType] {
         &self.token_ids
     }
-    fn worker_trace_link(
-        &self,
-    ) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
+    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
     }
 }
@@ -51,9 +47,7 @@ impl HasTokenIds for LLMEngineOutput {
     fn token_ids(&self) -> &[TokenIdType] {
         &self.token_ids
     }
-    fn worker_trace_link(
-        &self,
-    ) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
+    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
     }
 }
