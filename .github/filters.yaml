@@ -129,6 +129,7 @@ deploy:
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
+  - 'tests/utils/managed_deployment.py'
   - '!**/*.md'
   - '!**/*.rst'
 

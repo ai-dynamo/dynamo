@@ -47,6 +47,16 @@ features:
     backend: vllm
 ```
 
+To evaluate Planner behavior without changing replica counts, turn on advisory mode:
+
+```yaml
+features:
+  planner:
+    advisory: true
+```
+
+Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment.
+
 ### Optimization Target
 
 | Field | Type | Default | Description |
@@ -102,6 +112,7 @@ When throughput-based scaling is enabled, the planner needs engine performance d
 | `backend` | string | `vllm` | Backend: `vllm`, `sglang`, `trtllm`, or `mocker`. |
 | `environment` | string | `kubernetes` | Runtime environment: `kubernetes`, `virtual`, or `global-planner`. |
 | `namespace` | string | env `DYN_NAMESPACE` | Kubernetes namespace for the deployment. |
+| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. |
 
 ### Traffic Prediction Settings
 
@@ -129,7 +140,9 @@ When throughput-based scaling is enabled, the planner needs engine performance d
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
 | `live_dashboard_port` | int | `8080` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
 
-The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
+The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
+
+The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
 
 ## Integration with Profiler
 

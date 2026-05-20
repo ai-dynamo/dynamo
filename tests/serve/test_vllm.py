@@ -26,13 +26,15 @@ from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
-    cached_tokens_chat_payload,
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
     completion_payload_default,
     completion_payload_with_logprobs,
+    kv_events_metrics_payload,
     metric_payload_default,
+    router_cached_tokens_chat_payload,
+    router_selection_chat_payload_default,
 )
 from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
@@ -271,29 +273,6 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
-    "agg-request-plane-http": VLLMConfig(
-        name="agg-request-plane-http",
-        directory=vllm_dir,
-        script_name="agg_request_planes.sh",
-        marks=[
-            pytest.mark.core,
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                1_119_388_000
-            ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(
-                360
-            ),  # ~8.5x observed 42.3s; bumped for GPU-parallel headroom
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-0.6B",
-        script_args=["--http"],
-        request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
-        ],
-    ),
     "agg-router": VLLMConfig(
         name="agg-router",
         directory=vllm_dir,
@@ -306,17 +285,10 @@ vllm_configs = {
         ],  # TODO: profile to get max_vram and timeout
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
-            chat_payload_default(
-                expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
-                    r"Event processor for worker_id \d+ processing event: Stored\(",
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                ]
-            )
+            router_selection_chat_payload_default(),
+            kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
         ],
-        env={
-            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
     ),
     "agg-router-approx": VLLMConfig(
         name="agg-router-approx",
@@ -331,28 +303,12 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
-            # Repeated requests should show cache-aware routing in logs
-            chat_payload_default(
-                repeat_count=3,
-                expected_log=[
-                    # Verify scheduler is selecting workers with cache awareness
-                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
-                    # After first request, should see cached blocks being tracked
-                    r"with \d+ cached blocks",
-                ],
-            ),
+            # Repeated requests should show cache-aware routing in nvext.
+            router_selection_chat_payload_default(repeat_count=3),
             # Also test with cached tokens payload to verify usage field
-            cached_tokens_chat_payload(
-                repeat_count=3,
-                expected_log=[
-                    # Verify routing decision shows cache hits
-                    r"with \d+ cached blocks",
-                ],
-            ),
+            router_cached_tokens_chat_payload(repeat_count=3),
         ],
-        env={
-            "DYN_LOG": "dynamo_kv_router::scheduling::selector=info",
-        },
+        env={},
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
@@ -658,17 +614,22 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_serve_deployment(
     vllm_config_test,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
+    num_system_ports,
     predownload_models,
     image_server,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )

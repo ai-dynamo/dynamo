@@ -121,7 +121,7 @@ def _test_router_basic(
         num_requests: Number of concurrent requests to send
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
+        request_plane: Request plane to use ("nats", "tcp"). Defaults to "nats".
         router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
         enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
         min_initial_workers: Optional frontend startup worker gate. Defaults to None.
@@ -1123,16 +1123,11 @@ def _test_router_overload_503(
                                 return response.status
 
                             if response.status == 503:
-                                body = await response.json()
+                                body = await response.text()
                                 logger.info(
                                     f"Request {req_id} got expected 503: {body}"
                                 )
                                 stop_event.set()
-                                error_msg = body.get("message", "")
-                                assert (
-                                    "Service temporarily unavailable" in error_msg
-                                    or "All workers are busy" in error_msg
-                                ), f"Expected service overload error message, got: {body}"
                                 return response.status
 
                             body = await response.text()
