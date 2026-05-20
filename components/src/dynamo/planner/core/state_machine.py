@@ -328,13 +328,17 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         if component == "prefill":
             return (
                 self._prefill_scaling_in_progress
-                or self._expected_num_p is not None
-                and self._expected_num_p != self._num_p_workers
+                or (
+                    self._expected_num_p is not None
+                    and self._expected_num_p != self._num_p_workers
+                )
             )
         return (
             self._decode_scaling_in_progress
-            or self._expected_num_d is not None
-            and self._expected_num_d != self._num_d_workers
+            or (
+                self._expected_num_d is not None
+                and self._expected_num_d != self._num_d_workers
+            )
         )
 
     # ------------------------------------------------------------------

@@ -824,6 +824,38 @@ class TestScalingInProgress:
         assert effects.diagnostics.load_decision_reason_prefill == "scaling_in_progress"
         assert effects.diagnostics.load_decision_reason_decode == "scaling_in_progress"
 
+    def test_disagg_resumes_decisions_when_status_stable(self):
+        core = _make_core(mode="disagg", optimization_target="latency")
+        p_fpm = _make_fpm(queued_prefill_tokens=CONTEXT_LENGTH * 2)
+        d_fpm = _make_fpm(sum_decode_kv_tokens=MAX_KV_TOKENS, queued_decode_kv_tokens=0)
+        unstable_tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(
+                prefill={("w1", 0): p_fpm},
+                decode={("w1", 0): d_fpm},
+            ),
+            worker_counts=WorkerCounts(
+                ready_num_prefill=1,
+                ready_num_decode=1,
+                prefill_scaling_in_progress=True,
+            ),
+        )
+        unstable_effects = core.on_tick(_tick_for(unstable_tick), unstable_tick)
+        assert unstable_effects.scale_to is None
+
+        stable_tick = TickInput(
+            now_s=10.0,
+            fpm_observations=FpmObservations(
+                prefill={("w1", 0): p_fpm},
+                decode={("w1", 0): d_fpm},
+            ),
+            worker_counts=WorkerCounts(ready_num_prefill=1, ready_num_decode=1),
+        )
+        stable_effects = core.on_tick(_tick_for(stable_tick), stable_tick)
+        assert stable_effects.scale_to is not None
+        assert stable_effects.scale_to.num_prefill == 2
+        assert stable_effects.diagnostics.load_decision_reason == "scale_up"
+
 
 # ── Budget clamping ──────────────────────────────────────────────────
 
