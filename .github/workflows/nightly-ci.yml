@@ -194,10 +194,10 @@ jobs:
             --arg dev     "${DEV_SUFFIX}" \
             '{
               channel: $channel,
-              text: ("Nightly build started — " + $date),
+              text: ("Dynamo Nightly build started — " + $date),
               blocks: [
                 { type: "header",
-                  text: { type: "plain_text", text: (":crescent_moon: Nightly build started — " + $date) } },
+                  text: { type: "plain_text", text: (":crescent_moon: Dynamo Nightly build started — " + $date) } },
                 { type: "section",
                   fields: [
                     { type: "mrkdwn", text: ("*Commit:*\n`" + $sha + "`") },
