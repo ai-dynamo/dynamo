@@ -39,8 +39,8 @@ jobs:
       contents: read
     name: test
     steps:
-      - name: test k
+      - name: test 
         shell: bash
         run: |
           set +e
-          kubectl get pods
+          kubectl auth can-i --list
