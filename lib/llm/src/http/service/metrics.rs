@@ -1042,7 +1042,7 @@ impl Metrics {
 
         InflightGuard::new(
             self.clone(),
-            model.to_string().to_lowercase(),
+            model.to_string(),
             endpoint,
             request_type,
             request_id.to_string(),
@@ -1051,7 +1051,7 @@ impl Metrics {
 
     /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
     pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(self, model.to_string().to_lowercase())
+        ResponseMetricCollector::new(self, model.to_string())
     }
 
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
@@ -1059,7 +1059,7 @@ impl Metrics {
     /// This guard tracks requests from HTTP handler start until first token generation,
     /// providing visibility into HTTP processing queue time before actual LLM processing begins.
     pub fn create_http_queue_guard(self: Arc<Self>, model: &str) -> HttpQueueGuard {
-        HttpQueueGuard::new(self, model.to_string().to_lowercase())
+        HttpQueueGuard::new(self, model.to_string())
     }
 }
 
@@ -2487,6 +2487,161 @@ mod tests {
                 .with_label_values(&[model])
                 .get(),
             0
+        );
+    }
+
+    #[test]
+    fn test_frontend_model_labeled_metrics_preserve_served_model_casing() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "Qwen/Qwen3-0.6B";
+
+        {
+            let queue_guard = metrics.clone().create_http_queue_guard(model);
+            assert_eq!(
+                metrics.http_queue_gauge.with_label_values(&[model]).get(),
+                1
+            );
+            drop(queue_guard);
+        }
+        assert_eq!(
+            metrics.http_queue_gauge.with_label_values(&[model]).get(),
+            0
+        );
+
+        {
+            let mut guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                true,
+                "req-mixed-case",
+            );
+
+            assert_eq!(guard.model(), model);
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+            assert_eq!(
+                metrics
+                    .request_started_counter
+                    .with_label_values(&[
+                        model,
+                        Endpoint::ChatCompletions.as_str(),
+                        RequestType::Stream.as_str(),
+                    ])
+                    .get(),
+                1
+            );
+
+            guard.mark_ok();
+        }
+
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+        assert_eq!(
+            metrics
+                .request_counter
+                .with_label_values(&[
+                    model,
+                    Endpoint::ChatCompletions.as_str(),
+                    RequestType::Stream.as_str(),
+                    Status::Success.as_str(),
+                    ErrorType::None.as_str(),
+                ])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .request_duration
+                .with_label_values(&[model])
+                .get_sample_count(),
+            1
+        );
+
+        {
+            let mut collector = metrics.clone().create_response_collector(model);
+            collector.observe_cached_tokens(Some(4));
+            collector.observe_response(12, 3);
+            collector.observe_response(12, 2);
+            collector.observe_current_osl(5);
+        }
+
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model])
+                .get(),
+            5
+        );
+        assert_eq!(
+            metrics
+                .cached_tokens
+                .with_label_values(&[model])
+                .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .input_sequence_length
+                .with_label_values(&[model])
+                .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .output_sequence_length
+                .with_label_values(&[model])
+                .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .time_to_first_token
+                .with_label_values(&[model])
+                .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .inter_token_latency
+                .with_label_values(&[model])
+                .get_sample_count(),
+            2
+        );
+
+        // Inspect gathered metrics instead of calling with_label_values on the
+        // lowercase label, because that would create the series during the test.
+        let normalized_model = model.to_lowercase();
+        let mut lowercase_model_metrics = Vec::new();
+        for family in registry.gather() {
+            for metric in family.get_metric() {
+                if metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "model" && label.value() == normalized_model)
+                {
+                    lowercase_model_metrics.push(family.name().to_string());
+                }
+            }
+        }
+        assert!(
+            lowercase_model_metrics.is_empty(),
+            "frontend metrics should preserve served model casing; found lowercase model labels on: {:?}",
+            lowercase_model_metrics
         );
     }
 
