@@ -52,7 +52,7 @@ scan, not the stage; that keeps the response fast even with
 
 ## Populator: find_phase + stage_phase
 
-```
+```text
 find_phase                   stage_phase  (always background)
 ─────────                    ───────────
 G2: match_blocks/scan_matches

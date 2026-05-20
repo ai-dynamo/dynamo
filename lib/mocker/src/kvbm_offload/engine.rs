@@ -702,8 +702,8 @@ impl Drop for MockOffloadEngine {
 /// kvbm-engine's `testing` feature for a ~20 line helper.
 async fn create_local_messenger() -> Result<Arc<velo::Messenger>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
-    let transport: Arc<dyn velo::backend::Transport> = Arc::new(
-        velo::backend::tcp::TcpTransportBuilder::new()
+    let transport: Arc<dyn velo::Transport> = Arc::new(
+        velo::transports::tcp::TcpTransportBuilder::new()
             .from_listener(listener)?
             .build()?,
     );
