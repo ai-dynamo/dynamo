@@ -92,10 +92,7 @@ async fn test_intra_pass_onboard_flag_lifecycle() {
         "intra_pass_onboard_active should be false after clear"
     );
 
-    // Cleanup in spawn_blocking to avoid runtime-in-runtime panic
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
 
 /// Test that start_load_kv with no intra_pass_load returns Ok and doesn't set flag.
@@ -140,9 +137,7 @@ async fn test_intra_pass_onboard_no_metadata() {
         .clear_connector_metadata()
         .expect("Should clear metadata");
 
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
 
 /// Test that wait_for_layer_load returns immediately when flag is false.
@@ -173,9 +168,7 @@ async fn test_wait_for_layer_load_early_exit() {
         .wait_for_layer_load(0, 0)
         .expect("wait_for_layer_load should succeed with early exit");
 
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
 
 // ============================================================================
@@ -238,9 +231,7 @@ async fn test_intra_pass_offload_flag_lifecycle() {
         "intra_pass_offload_active should be None after clear"
     );
 
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
 
 /// Test needs_offload_action returns true for any layer when direct offload is active.
@@ -291,9 +282,7 @@ async fn test_needs_offload_action_direct_offload() {
         .clear_connector_metadata()
         .expect("Should clear metadata");
 
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
 
 /// Test needs_offload_action with only forward_pass_completion_active.
@@ -342,9 +331,7 @@ async fn test_needs_offload_action_forward_pass_only() {
         .forward_pass_completion_active
         .store(false, Ordering::Relaxed);
 
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
 
 /// Test that wait_for_save returns immediately when no offload is active.
@@ -374,9 +361,7 @@ async fn test_wait_for_save_no_offload_active() {
         .wait_for_save()
         .expect("wait_for_save should succeed with early exit");
 
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
 
 /// Test that save_kv_layer returns immediately when no action is needed.
@@ -412,9 +397,7 @@ async fn test_save_kv_layer_early_exit() {
         .save_kv_layer(0, 0)
         .expect("save_kv_layer should succeed with early exit");
 
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
 
 // ============================================================================
@@ -476,7 +459,5 @@ async fn test_full_iteration_lifecycle() {
             .expect("Should clear metadata");
     }
 
-    tokio::task::spawn_blocking(move || drop(instance))
-        .await
-        .expect("Cleanup should succeed");
+    drop(instance);
 }
