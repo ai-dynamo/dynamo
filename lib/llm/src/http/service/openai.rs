@@ -70,6 +70,8 @@ const X_REQUEST_ID_HEADER: &str = "x-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+const ADMISSION_CONTROL_REJECTION_HINT: &str =
+    "If this rejection is not intended, consider passing --admission-control none to the frontend.";
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -227,7 +229,7 @@ impl ErrorMessage {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    message: err.to_string(),
+                    message: format!("{}. {}", err, ADMISSION_CONTROL_REJECTION_HINT),
                     error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
                     code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 }),
@@ -2733,7 +2735,9 @@ mod tests {
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.1.message,
-            "ResourceExhausted: All workers are busy, please retry later"
+            format!(
+                "ResourceExhausted: All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}"
+            )
         );
     }
 
@@ -2874,6 +2878,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -2906,6 +2911,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -2943,6 +2949,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -2967,6 +2974,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -2990,6 +2998,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3013,6 +3022,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3038,6 +3048,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3061,6 +3072,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3092,6 +3104,7 @@ mod tests {
                 "session": {"id": "session-1", "timestamp": 1640995200}
             })
             .into(),
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3122,6 +3135,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3152,6 +3166,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3181,6 +3196,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3210,6 +3226,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3241,6 +3258,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3270,6 +3288,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3745,7 +3764,6 @@ mod tests {
                 reasoning_content: reasoning.map(|s| s.to_string()),
             },
             finish_reason: finish,
-            stop_reason: None,
             logprobs: None,
         }
     }
@@ -3777,7 +3795,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         }
     }
@@ -3879,7 +3896,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -3951,7 +3967,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -3988,7 +4003,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 

@@ -65,6 +65,7 @@ import pytest
 
 from tests.utils.client import send_request
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -163,6 +164,16 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         # --benchmark-mode and so doesn't auto-inject InstrumentedScheduler.
         self.fpm_port = allocate_port(20380)
 
+        env = os.environ.copy()
+        if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in env:
+            kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+            if kv_mark:
+                env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(int(kv_mark.args[0]))
+
+        gpu_mem_args = build_gpu_mem_args("build_vllm_gpu_mem_args", env=env)
+        if not gpu_mem_args:
+            gpu_mem_args = ["--gpu-memory-utilization", _GPU_MEMORY_UTILIZATION]
+
         command = [
             "python3",
             "-m",
@@ -170,8 +181,7 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             "--model",
             FAULT_TOLERANCE_MODEL_NAME,
             "--enforce-eager",
-            "--gpu-memory-utilization",
-            _GPU_MEMORY_UTILIZATION,
+            *gpu_mem_args,
             "--max-model-len",
             _MAX_MODEL_LEN,
             # Benchmark flags
@@ -225,7 +235,6 @@ class _DynamoBenchmarkWorker(ManagedProcess):
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
 
-        env = os.environ.copy()
         env["DYN_LOG"] = "info"
         # Match cancellation tests' config to avoid CI flake from
         # canary health checks during startup.
@@ -338,6 +347,8 @@ def _send_chat_completion(frontend_port: int) -> str:
 
 
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(3.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
 @pytest.mark.timeout(600)
 def test_self_benchmark_agg_serves_after_bench(
     request, runtime_services_dynamic_ports, predownload_models, tmp_path

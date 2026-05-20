@@ -76,6 +76,8 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
+    # Total number of LLM requests accepted by the frontend handler
+    REQUESTS_STARTED_TOTAL = "requests_started_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
@@ -257,7 +259,7 @@ class labels:
     # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
     # When a metric already has a label, injection does not overwrite it (original is preserved).
     MODEL_NAME = "model_name"
-    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"

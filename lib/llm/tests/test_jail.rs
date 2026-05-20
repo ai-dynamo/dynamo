@@ -45,7 +45,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -88,7 +87,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -135,7 +133,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -181,7 +178,6 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: None,
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
@@ -229,7 +225,6 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(FinishReason::Stop),
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
@@ -1879,7 +1874,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_harmony_parser() {
-        // Harmony format with analysis text and a tool call encoded in special tags
+        // With only the Harmony tool parser configured, analysis is unhandled by
+        // a reasoning parser and must be preserved as normal content.
         let chunks = vec![
             create_mock_response_chunk(
                 "<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>"
@@ -1904,22 +1900,16 @@ mod tests {
         let jail = JailedStream::builder().tool_call_parser("harmony").build();
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have at least one output containing both analysis text and parsed tool call
+        // Should have at least one output containing the parsed tool call.
         assert!(!results.is_empty());
 
-        // Verify the analysis text appears as content in one of the outputs
-        let has_analysis_text = results.iter().any(|r| {
-            r.data
-                .as_ref()
-                .and_then(|d| d.inner.choices.first())
-                .and_then(|c| c.delta.content.as_ref())
-                .map(|content| {
-                    test_utils::extract_text(content)
-                        .contains("Need to use function get_current_weather.")
-                })
-                .unwrap_or(false)
-        });
-        assert!(has_analysis_text, "Should contain extracted analysis text");
+        // Verify analysis text is preserved as content when no reasoning parser
+        // is configured.
+        let content = test_utils::reconstruct_content(&results);
+        assert!(
+            content.contains("Need to use function get_current_weather."),
+            "Should preserve Harmony analysis text as content: {content:?}"
+        );
 
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results
@@ -1931,6 +1921,77 @@ mod tests {
             "get_current_weather",
             json!({"location": "San Francisco"}),
         );
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_analysis_only_emits_stripped_content() {
+        let chunks = vec![create_mock_response_chunk(
+            "<|channel|>analysis<|message|>Need to inspect the request.<|end|>".to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "Need to inspect the request.");
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_truncated_call_keeps_analysis_without_marker_leak() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "Need current weather.");
+        assert!(!content.contains("<|channel|>"));
+        assert!(!content.contains("Hidden City"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_drops_directed_non_function_commentary() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|start|>assistant<|channel|>commentary to=browser.search <|constrain|>json<|message|>{"query":"secret weather"}<|call|>"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("secret weather"));
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
+    }
+
+    #[tokio::test]
+    async fn test_jailed_stream_harmony_drops_recipientless_tool_call_payload() {
+        let chunks = vec![create_mock_response_chunk(
+            r#"<|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"}<|call|>"#.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("NYC"));
+        assert!(!content.contains("<|channel|>"));
+        assert!(!results.iter().any(test_utils::has_tool_call));
     }
 
     #[tokio::test]
@@ -2405,7 +2466,6 @@ mod parallel_jail_tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }
             })
@@ -2672,6 +2732,53 @@ mod parallel_jail_tests {
         ];
 
         validate_parallel_streaming_tool_calls(&results, &expected_calls);
+    }
+
+    /// GLM-4.7 parallel tool calls in a single chunk. GLM uses a distinct
+    /// `<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`
+    /// wire format with its own `find_tool_call_end_position_glm47`.
+    /// Regression test: the old single-find end-position function exited after the
+    /// first `</tool_call>`, leaking subsequent calls as raw XML into content.
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_glm47() {
+        let jail = JailedStream::builder().tool_call_parser("glm47").build();
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>Boston</arg_value>\
+</tool_call>\
+<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>New York</arg_value>\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            ("get_weather", json!({"location": "Boston"})),
+            ("get_weather", json!({"location": "New York"})),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+
+        for result in &results {
+            if let Some(ref data) = result.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref content) = choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML must not leak as text content, got: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // =============================================================================

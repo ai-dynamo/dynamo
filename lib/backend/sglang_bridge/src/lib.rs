@@ -41,6 +41,8 @@ pub async fn build_in_process_engine(
         disaggregation_mode,
         bootstrap_host_override,
     );
-    bridge.start().await?;
+    // In-process pre-flight handshake. worker_id is opaque to the bridge
+    // (SGLang has no use for it), so pass 0.
+    bridge.start(0).await?;
     Ok(Arc::new(bridge))
 }

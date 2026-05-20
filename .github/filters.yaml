@@ -3,6 +3,7 @@
 # Filters that trigger CI jobs:
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
+#   snapshot -> snapshot-agent build and test
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -39,6 +40,7 @@ examples:
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
+  - 'dev/observability/**'
   - 'deploy/observability/**'
   - 'deploy/pre-deployment/**'
 
@@ -49,6 +51,7 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
@@ -111,9 +114,16 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  # Operator imports the local snapshot module.
+  - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
+
+snapshot:
+  - *ci
+  - 'deploy/snapshot/**'
+  - 'deploy/snapshot/.*'
 
 deploy:
   - *ci
@@ -121,6 +131,7 @@ deploy:
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
+  - 'tests/utils/managed_deployment.py'
   - '!**/*.md'
   - '!**/*.rst'
 

@@ -40,9 +40,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, CommonArgs, DisaggregatedEndpoint, DynamoError, EngineConfig,
-    ErrorType, FinishReason, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    WorkerConfig, chunk, usage,
+    AsyncEngineContext, BackendError, CommonArgs, DynamoError, EngineConfig, ErrorType,
+    FinishReason, GenerateContext, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
+    PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use futures::stream::BoxStream;
 use rand::Rng;
@@ -343,7 +343,7 @@ fn extract_context_length_from_model_info(json_info: &str) -> Option<u32> {
 
 #[async_trait]
 impl LLMEngine for SglangBridge {
-    async fn start(&self) -> Result<EngineConfig, DynamoError> {
+    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         let endpoint = Endpoint::from_shared(self.grpc_endpoint.clone())
             .map_err(|e| invalid_arg(format!("invalid grpc endpoint: {e}")))?
             .connect_timeout(Duration::from_secs(self.connect_timeout_secs));
@@ -437,17 +437,22 @@ impl LLMEngine for SglangBridge {
         // prefill worker's bootstrap_host/port and falls into the
         // "original prefill path" that forwards prefill output via the
         // wire instead of letting SGLang do NIXL KV transfer directly.
-        let disaggregated_endpoint = matches!(self.disaggregation_mode, DisaggMode::Prefill)
-            .then(|| DisaggregatedEndpoint {
-                bootstrap_host: self.bootstrap_host.get().cloned(),
-                bootstrap_port: self.bootstrap_port.get().copied(),
-            });
+        let (bootstrap_host, bootstrap_port) =
+            if matches!(self.disaggregation_mode, DisaggMode::Prefill) {
+                (
+                    self.bootstrap_host.get().cloned(),
+                    self.bootstrap_port.get().copied(),
+                )
+            } else {
+                (None, None)
+            };
 
         Ok(EngineConfig {
             model: self.served_model_name.clone(),
             served_model_name: Some(self.served_model_name.clone()),
             context_length,
-            disaggregated_endpoint,
+            bootstrap_host,
+            bootstrap_port,
             // KV-cache hints intentionally omitted for now: KvRouter falls back
             // to round-robin. Wire `SubscribeKvEvents` in a follow-up to enable
             // KV-aware routing.
@@ -458,8 +463,9 @@ impl LLMEngine for SglangBridge {
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
+        ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        let ctx = ctx.inner_arc();
         match self.disaggregation_mode {
             DisaggMode::Prefill => self.generate_prefill(request, ctx).await,
             DisaggMode::Decode | DisaggMode::None => self.generate_decode(request, ctx).await,

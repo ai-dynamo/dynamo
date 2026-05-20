@@ -26,7 +26,8 @@ spec:
 Deploy:
 ```bash
 export NAMESPACE=your-namespace
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
+# Save the manifest above as sla-aic.yaml first.
+kubectl apply -f sla-aic.yaml -n $NAMESPACE
 ```
 
 ### Online Profiling (Real Measurements)
@@ -46,13 +47,9 @@ spec:
 
 Deploy:
 ```bash
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_dgdr.yaml -n $NAMESPACE
+# Save the manifest above as sla-online.yaml first.
+kubectl apply -f sla-online.yaml -n $NAMESPACE
 ```
-
-Available sample DGDRs in `components/src/dynamo/profiler/deploy/`:
-- **`profile_sla_dgdr.yaml`**: Standard online profiling for dense models
-- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator
-- **`profile_sla_moe_dgdr.yaml`**: Online profiling for MoE models (SGLang)
 
 > **Note**: Starting with Dynamo 1.0.0 (DGDR API version v1beta1), DGDR fields use structured spec fields (e.g., `spec.workload`, `spec.sla`, `spec.hardware`) instead of the nested `profilingConfig.config` blob used in v1alpha1.
 
@@ -75,7 +72,8 @@ spec:
 
 Deploy:
 ```bash
-kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_moe_dgdr.yaml -n $NAMESPACE
+# Save the manifest above as sla-moe.yaml first.
+kubectl apply -f sla-moe.yaml -n $NAMESPACE
 ```
 
 ### Using Existing DGD Configs (Custom Setups)
@@ -126,7 +124,7 @@ spec:
   searchStrategy: rapid
 ```
 
-### Mocker Deployment (Testing)
+### Simulation with Mocker
 
 Deploy a mocker backend that simulates GPU timing behavior without real GPUs. Useful for:
 - Large-scale experiments without GPU resources
