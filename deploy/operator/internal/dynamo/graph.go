@@ -1800,7 +1800,32 @@ func applyKvTransferPolicyEnvVarsToWorkerComponent(
 			Value: strconv.FormatFloat(float64(*kvt.PreferredWeight), 'f', -1, 32),
 		})
 	}
-	main.Env = MergeEnvs(policyEnvs, main.Env)
+	main.Env = MergeEnvs(removeKvTransferPolicyEnvVars(main.Env), policyEnvs)
+}
+
+func removeKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
+	if len(envs) == 0 {
+		return envs
+	}
+	filtered := make([]corev1.EnvVar, 0, len(envs))
+	for _, env := range envs {
+		if isKvTransferPolicyEnvVar(env.Name) {
+			continue
+		}
+		filtered = append(filtered, env)
+	}
+	return filtered
+}
+
+func isKvTransferPolicyEnvVar(name string) bool {
+	switch name {
+	case commonconsts.EnvKvTransferDomain,
+		commonconsts.EnvKvTransferEnforcement,
+		commonconsts.EnvKvTransferPreferredWeight:
+		return true
+	default:
+		return false
+	}
 }
 
 // dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated
