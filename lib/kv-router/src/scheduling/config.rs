@@ -22,10 +22,10 @@ const fn default_track_prefill_tokens() -> bool {
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
 
 /// Default pending ISL token tiers per worker for `router_queue_by_incoming_missing_isl`.
-/// - Cheap requests (0-2047 cache miss): 4M ISL tokens per worker
-/// - Expensive requests (2048+ cache miss): 1M ISL tokens per worker
+/// - Cheap requests (0-3071 cache miss): 4M ISL tokens per worker
+/// - Expensive requests (3072+ cache miss): 2M ISL tokens per worker
 pub const DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS: &[(usize, usize)] =
-    &[(0, 4 * 1024 * 1024), (2048, 1024 * 1024)];
+    &[(0, 4 * 1024 * 1024), (3072, 2 * 1024 * 1024)];
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -187,8 +187,8 @@ pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
 impl RouterQueueDepthTiers {
     /// Default tiers for ISL token caps per worker.
     ///
-    /// - Cheap requests (0-2047 cache miss): 4M ISL tokens per worker
-    /// - Expensive requests (2048+ cache miss): 1M ISL tokens per worker
+    /// - Cheap requests (0-3071 cache miss): 4M ISL tokens per worker
+    /// - Expensive requests (3072+ cache miss): 2M ISL tokens per worker
     ///
     /// See [`DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS`].
     pub fn default_per_worker() -> Self {
@@ -602,12 +602,12 @@ pub struct KvRouterConfig {
     /// parked in the pending queue.
     ///
     /// Example with 4 workers:
-    ///   [(0, 4194304), (2048, 1048576)]  # 4M and 1M ISL tokens per worker
+    ///   [(0, 4194304), (3072, 2097152)]  # 4M and 2M ISL tokens per worker
     /// - request missing 500 tokens  → matches (0, 4194304)    → cap = 4M*4 = 16M tokens
-    /// - request missing 3000 tokens → matches (2048, 1048576) → cap = 1M*4 = 4M tokens
+    /// - request missing 3500 tokens → matches (3072, 2097152) → cap = 2M*4 = 8M tokens
     ///
-    /// Default: `[(0, 4194304), (2048, 1048576)]` — 4M ISL tokens per worker for cheap
-    /// requests (low cache miss), 1M for expensive requests (high cache miss).
+    /// Default: `[(0, 4194304), (3072, 2097152)]` — 4M ISL tokens per worker for cheap
+    /// requests (low cache miss), 2M for expensive requests (high cache miss).
     /// This allows more queued ISL tokens for cheap requests and fewer for expensive ones.
     ///
     /// Semantics across config surfaces:

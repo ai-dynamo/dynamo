@@ -362,7 +362,7 @@ def test_kv_router_kwargs_uses_default_queue_tiers() -> None:
 
     assert kwargs["router_queue_by_incoming_missing_isl"] == [
         (0, 4194304),
-        (2048, 1048576),
+        (3072, 2097152),
     ]
 
 

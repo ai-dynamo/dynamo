@@ -123,7 +123,7 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_threshold: Optional[float]
     router_queue_by_incoming_missing_isl: list[tuple[int, int]] = (
         (0, 4 * 1024 * 1024),
-        (2048, 1024 * 1024),
+        (3072, 2 * 1024 * 1024),
     )
     router_event_threads: int
     router_queue_policy: str
