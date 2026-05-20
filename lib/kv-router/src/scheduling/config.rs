@@ -149,7 +149,7 @@ impl FromStr for SharedCacheType {
     }
 }
 
-/// One row of the cache-miss-keyed queue-depth table.
+/// One row of the cache-miss-keyed pending ISL token cap table.
 ///
 /// Requests whose best-case cache-miss tokens (ISL minus best cached tokens
 /// across eligible workers) meet `missing_cache_tokens_floor` are subject to
@@ -157,7 +157,7 @@ impl FromStr for SharedCacheType {
 /// floor it clears; the tier with the highest matched floor wins (i.e. the
 /// most expensive bucket the request falls into determines the cap).
 ///
-/// `max_queue_depth` is a per-worker queue depth cap — the effective cap
+/// `max_queue_depth` is a per-worker pending ISL token cap — the effective cap
 /// is `max_queue_depth * worker_count` where worker_count is the total
 /// number of registered workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Validate)]
@@ -165,12 +165,12 @@ pub struct RouterQueueDepthByMissingIslTier {
     /// Minimum cache-miss tokens (ISL minus best cached tokens across eligible
     /// workers) for this tier to apply. Tier 0 matches all requests.
     pub missing_cache_tokens_floor: usize,
-    /// Per-worker queue depth cap. Effective cap is `max_queue_depth * worker_count`.
+    /// Per-worker pending ISL token cap. Effective cap is `max_queue_depth * worker_count`.
     #[validate(range(min = 1, message = "max_queue_depth must be > 0"))]
     pub max_queue_depth: usize,
 }
 
-/// Validated, sorted queue-depth tiers keyed by cache-miss tokens.
+/// Validated, sorted pending ISL token cap tiers keyed by cache-miss tokens.
 ///
 /// Guarantees:
 /// - Empty vec means capping is disabled

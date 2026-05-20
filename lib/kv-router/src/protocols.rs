@@ -408,8 +408,8 @@ impl Default for RouterRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RouterBackpressureReason {
-    /// the total queue size has been reached.
-    MaxQueueDepthExceeded,
+    /// The configured cap on total queued ISL tokens has been reached.
+    MaxQueuedIslTokensExceeded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

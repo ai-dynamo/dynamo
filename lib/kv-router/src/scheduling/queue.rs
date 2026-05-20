@@ -75,7 +75,7 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
-    /// Per-tier queue depth caps keyed on cache-miss tokens.
+    /// Per-tier pending ISL token caps keyed on cache-miss tokens.
     /// Empty means no admission cap.
     queue_depth_tiers: RouterQueueDepthTiers,
     /// Reference instant for computing arrival offsets.
@@ -134,9 +134,7 @@ impl<
             tracing::info!("Router queue enabled with threshold fraction {frac}");
         }
         if !queue_depth_tiers.is_unbounded() {
-            tracing::info!(
-                "Router queue depth tiered by cache-miss: tiered ISL token caps configured"
-            );
+            tracing::info!("Router queue tiered by cache-miss: pending ISL token caps configured");
         }
         Self {
             pending: Mutex::new(BinaryHeap::new()),
@@ -216,7 +214,7 @@ impl<
                     && pending_isl_tokens >= max_isl_tokens
                 {
                     request.respond(Err(KvSchedulerError::Backpressure {
-                        reason: RouterBackpressureReason::MaxQueueDepthExceeded,
+                        reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
                         queued_isl_tokens: pending_isl_tokens,
                         max_queued_isl_tokens: Some(max_isl_tokens),
                     }));
@@ -1013,7 +1011,7 @@ mod tests {
             matches!(
                 resp3,
                 Err(KvSchedulerError::Backpressure {
-                    reason: RouterBackpressureReason::MaxQueueDepthExceeded,
+                    reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
                     queued_isl_tokens: 512,
                     max_queued_isl_tokens: Some(512),
                 })
@@ -1066,7 +1064,7 @@ mod tests {
             matches!(
                 resp3,
                 Err(KvSchedulerError::Backpressure {
-                    reason: RouterBackpressureReason::MaxQueueDepthExceeded,
+                    reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
                     queued_isl_tokens: 512,
                     max_queued_isl_tokens: Some(512),
                 })
