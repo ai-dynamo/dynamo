@@ -354,6 +354,7 @@ class ProcessTracker:
         for pid in dead:
             del self.series[pid]
             del self.names[pid]
+            self.first_seen.pop(pid, None)
             if pid in self._pid_slot:
                 self._free_slots.append(self._pid_slot.pop(pid))
 

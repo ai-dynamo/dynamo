@@ -136,7 +136,7 @@
 
   function appendTrim(arr, vals) {
     if (!vals || vals.length === 0) return;
-    arr.push.apply(arr, vals);
+    for (const val of vals) arr.push(val);
     if (arr.length > MAX_POINTS) arr.splice(0, arr.length - MAX_POINTS);
   }
 

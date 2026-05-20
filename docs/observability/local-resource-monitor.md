@@ -17,7 +17,7 @@ Design context lives in [DEP #9065](https://github.com/ai-dynamo/dynamo/issues/9
 - **Nsight Systems** is a 980 MB profile-then-analyze tool — right for one-off deep dives, wrong for an always-on CI signal.
 - **aiperf** is client-side load + latency, not server-side per-process telemetry, and runs *after* the engine is up.
 
-This exporter samples at 200 ms (PCIe internally at 10/s), groups subprocesses into one logical worker per engine, and labels each per-engine PID with framework + model + test name (e.g. `VLLM::EngineCore, Qwen3-0.6B, test_serve_deployment[aggregated_unified]`) — so Grafana renders parallel engines bin-packed onto one GPU as separate side-by-side series instead of one summed line. That's what makes flaky one-of-N-tests failures diagnosable.
+This monitor samples at 200 ms (PCIe internally at 10/s), groups subprocesses into one logical worker per engine, and labels each per-engine PID with framework + model + test name (e.g. `VLLM::EngineCore, Qwen3-0.6B, test_serve_deployment[aggregated_unified]`) — so Grafana renders parallel engines bin-packed onto one GPU as separate side-by-side series instead of one summed line. That's what makes flaky one-of-N-tests failures diagnosable.
 
 ## Prometheus + Grafana
 
