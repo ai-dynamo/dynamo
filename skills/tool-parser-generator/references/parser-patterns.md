@@ -1,5 +1,10 @@
 # Tool Call Parser Patterns Reference
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 Quick reference for common tool call patterns found in LLM chat templates.
 
 ## Pattern Categories

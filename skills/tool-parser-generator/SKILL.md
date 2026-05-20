@@ -6,6 +6,11 @@ license: "Apache-2.0"
 
 # Tool Parser Generator Skill
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 Add support for new models' tool calling formats by analyzing their chat templates and generating appropriate parser implementations for dynamo.
 
 ## When to Use This Skill

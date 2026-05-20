@@ -7,6 +7,11 @@ disable-model-invocation: true
 
 # PR CI Monitor
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 Perform a full health check on a Dynamo pull request. Takes a PR number as argument (e.g., `/dynamo:pr-monitor 6554`).
 
 ## Step 1: PR Overview

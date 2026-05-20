@@ -5,6 +5,11 @@ description: Maintain Dynamo Fern docs site -- add, update, move, or remove page
 
 # Dynamo Docs Maintenance
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 Unified skill for adding, updating, moving, and removing pages on the Dynamo Fern documentation site.
 
 ## Branch Rule

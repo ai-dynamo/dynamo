@@ -1,5 +1,10 @@
 # Parser Integration Guide
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 Step-by-step guide for integrating new parsers or configurations into dynamo.
 
 ## Option 1: Add Configuration Preset (Most Common)
