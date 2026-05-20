@@ -1,18 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sidecar bridge to SGLang's native gRPC server (`sglang.runtime.v1`,
-//! enabled by `sglang.launch_server --enable-grpc`). Forwards each Dynamo
-//! `PreprocessedRequest` to SGLang's `Generate` RPC and streams tokens back.
-//!
-//! Disaggregated serving: prefill workers extract
-//! `disaggregation_bootstrap_port` + `dist_init_addr` from
-//! `GetServerInfo.json_info` at startup, generate a 63-bit `bootstrap_room`
-//! per request, and yield a single chunk carrying `disaggregated_params`
-//! for the frontend's prefill router to forward to decode. Decode workers
-//! pull `bootstrap_info` off the inbound request and pass it through to
-//! SGLang via the proto's `DisaggregatedParams` (int64 `bootstrap_room`
-//! preserves the dp_rank encoding the router puts in the upper bits).
+//! Bridge to SGLang's native gRPC server (`sglang.runtime.v1`, enabled by
+//! `sglang.launch_server --enable-grpc`). Forwards `PreprocessedRequest`
+//! to SGLang's `Generate` RPC and streams tokens back.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,7 +72,7 @@ pub struct SglangBridge {
 }
 
 impl SglangBridge {
-    fn new(
+    pub(crate) fn new(
         grpc_endpoint: String,
         served_model_name: String,
         connect_timeout_secs: u64,
@@ -113,9 +104,8 @@ impl SglangBridge {
             .unwrap_or_else(|| args.model_path.clone());
         let mode = args.common.disaggregation_mode;
 
-        // Prefill workers register with endpoint_types=prefill and
-        // component=prefill so the frontend's prefill router targets them on
-        // a separate discovery endpoint from decode workers.
+        // Prefill workers register under component=prefill so the prefill
+        // router targets them on a separate discovery endpoint from decode.
         let endpoint_types = if mode.is_prefill() {
             "prefill".to_string()
         } else {
@@ -280,10 +270,8 @@ impl LLMEngine for SglangBridge {
             .map_err(|e| backend_error(format!("connect {}: {e}", self.grpc_endpoint)))?;
         let mut client = SglangServiceClient::new(channel);
 
-        // The gRPC server binds early but the scheduler subprocess takes
-        // 30-60s to load the model. HealthCheck returns healthy=false until
-        // it's reachable; poll for up to ~120s with capped exponential
-        // backoff.
+        // gRPC port binds before the scheduler is loaded (~30-60s).
+        // HealthCheck returns healthy=false until ready; poll up to 120s.
         let mut backoff = Duration::from_millis(500);
         loop {
             let health = client

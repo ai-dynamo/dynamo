@@ -288,7 +288,14 @@ async def async_main():
     if config.router_prefill_load_model == "aic":
         kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
-    e = EntrypointArgs(EngineType.Dynamic, **kwargs)
+    if config.engine == "sglang-grpc":
+        # chat_engine_factory only applies to EngineType.Dynamic.
+        kwargs.pop("chat_engine_factory", None)
+        engine_type = EngineType.SglangGrpc
+    else:
+        engine_type = EngineType.Dynamic
+
+    e = EntrypointArgs(engine_type, **kwargs)
     engine = await make_engine(runtime, e)
 
     try:

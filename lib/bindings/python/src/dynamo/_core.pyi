@@ -2309,6 +2309,7 @@ class EngineType:
     Echo: "EngineType"
     Dynamic: "EngineType"
     Mocker: "EngineType"
+    SglangGrpc: "EngineType"
     ...
 
 class EntrypointArgs:

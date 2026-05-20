@@ -61,6 +61,8 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
+    /// In-process bridge to SGLang's native gRPC server. Single-worker only.
+    SglangGrpc = 4,
 }
 
 #[pyclass]
@@ -556,8 +558,11 @@ pub fn make_engine<'p>(
             let local_path = if model_path.exists() {
                 model_path
             } else {
-                // Mocker only needs tokenizer, not weights
-                let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
+                // Tokenizer-only engines: weights live elsewhere (mock / SGLang server).
+                let ignore_weights = matches!(
+                    args.engine_type,
+                    EngineType::Mocker | EngineType::SglangGrpc
+                );
                 // Preserve the original HF model ID as source_path so the
                 // frontend can resolve model metadata even when the served
                 // model name differs (e.g., --model-name model-1 --model-path
@@ -748,6 +753,18 @@ async fn select_engine(
             let engine =
                 make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
 
+            RsEngineConfig::InProcessTokens {
+                engine,
+                model: Box::new(local_model),
+                is_prefill: args.is_prefill,
+            }
+        }
+        EngineType::SglangGrpc => {
+            let served_name = local_model.display_name().to_string();
+            let engine =
+                dynamo_sglang_bridge::build_in_process_engine_from_env(served_name)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("sglang_bridge: {e}"))?;
             RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
