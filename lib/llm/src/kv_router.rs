@@ -431,7 +431,7 @@ where
     Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
 {
     indexer: Indexer,
-    scheduler: KvScheduler<Sel>,
+    scheduler: KvScheduler<Sel, KvRouterOverlapRefresher>,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
@@ -490,13 +490,12 @@ where
                 })?;
         }
 
-        let overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>> =
-            KvRouterOverlapRefresher::for_indexer(
-                indexer.clone(),
-                kv_router_config.clone(),
-                block_size,
-            )
-            .map(|r| Arc::new(r) as Arc<dyn OverlapScoresRefresh>);
+        let overlap_scores_refresh = KvRouterOverlapRefresher::for_indexer(
+            indexer.clone(),
+            kv_router_config.clone(),
+            block_size,
+        )
+        .map(Arc::new);
         let client_for_overload = client.clone();
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());

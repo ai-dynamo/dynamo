@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::overlap_refresh::OverlapScoresRefresh;
+use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy::{RouterSchedulingPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::SchedulerQueue;
@@ -27,26 +27,33 @@ use crate::sequences::{
 };
 use dynamo_tokens::SequenceHash;
 
-pub struct LocalScheduler<P, C, S = RouterSchedulingPolicy, Sel = DefaultWorkerSelector>
-where
+pub struct LocalScheduler<
+    P,
+    C,
+    S = RouterSchedulingPolicy,
+    Sel = DefaultWorkerSelector,
+    RF = NoopOverlapScoresRefresh,
+> where
     P: SequencePublisher,
     C: WorkerConfigLike,
     S: SchedulingPolicy,
     Sel: WorkerSelector<C>,
+    RF: OverlapScoresRefresh,
 {
     slots: Arc<ActiveSequencesMultiWorker<P>>,
-    queue: Arc<SchedulerQueue<P, C, S, Sel>>,
+    queue: Arc<SchedulerQueue<P, C, S, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
 
-impl<P, C, S, Sel> LocalScheduler<P, C, S, Sel>
+impl<P, C, S, Sel, RF> LocalScheduler<P, C, S, Sel, RF>
 where
     P: SequencePublisher + 'static,
     C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
     S: SchedulingPolicy + 'static,
     Sel: WorkerSelector<C> + Send + Sync + 'static,
+    RF: OverlapScoresRefresh + 'static,
 {
     fn worker_dp_range(workers: &HashMap<WorkerId, C>) -> HashMap<WorkerId, (u32, u32)> {
         workers
@@ -60,9 +67,9 @@ where
             .collect()
     }
 
-    /// Construct a scheduler. Preserves the pre-overlap-refresh signature so downstream
-    /// callers of the exported scheduling API don't break. Use
-    /// [`Self::new_with_overlap_refresh`] when dequeue-time overlap-score refresh is wanted.
+    /// Construct a scheduler, optionally wiring in an [`OverlapScoresRefresh`] so the
+    /// scheduler queue can re-query overlap scores at dequeue time for long-waiting
+    /// requests.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
@@ -72,42 +79,7 @@ where
         selector: Sel,
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        recheck_interval: Duration,
-        track_prefill_tokens_default: bool,
-        cancellation_token: CancellationToken,
-        worker_type: &'static str,
-        monitor_worker_configs: bool,
-    ) -> Self {
-        Self::new_with_overlap_refresh(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            policy,
-            prefill_load_estimator,
-            None,
-            None,
-            recheck_interval,
-            track_prefill_tokens_default,
-            cancellation_token,
-            worker_type,
-            monitor_worker_configs,
-        )
-    }
-
-    /// Like [`Self::new`] but wires in an [`OverlapScoresRefresh`] so the scheduler queue
-    /// can re-query overlap scores at dequeue time for long-waiting requests.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_overlap_refresh(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        policy: S,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
@@ -415,6 +387,48 @@ where
     }
 }
 
+impl<P, C, S, Sel> LocalScheduler<P, C, S, Sel, NoopOverlapScoresRefresh>
+where
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
+    S: SchedulingPolicy + 'static,
+    Sel: WorkerSelector<C> + Send + Sync + 'static,
+{
+    /// Construct a scheduler without dequeue-time overlap refresh.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_without_overlap_refresh(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+    ) -> Self {
+        Self::new(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+            None,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -482,7 +496,7 @@ mod tests {
         ));
         let (cfg_tx, cfg_rx) = watch::channel(workers);
         let cancel_token = CancellationToken::new();
-        let scheduler = Arc::new(LocalScheduler::new(
+        let scheduler = Arc::new(LocalScheduler::new_without_overlap_refresh(
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,

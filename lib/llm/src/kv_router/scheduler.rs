@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
-pub use dynamo_kv_router::scheduling::overlap_refresh::{OverlapScoresRefresh, RefreshedOverlap};
+pub use dynamo_kv_router::scheduling::overlap_refresh::{
+    NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
+};
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
@@ -30,18 +32,26 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub struct KvScheduler<Sel = DefaultWorkerSelector>
+pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig>,
+    RF: OverlapScoresRefresh,
 {
     inner: Arc<
-        LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, RouterSchedulingPolicy, Sel>,
+        LocalScheduler<
+            RuntimeSequencePublisher,
+            ModelRuntimeConfig,
+            RouterSchedulingPolicy,
+            Sel,
+            RF,
+        >,
     >,
 }
 
-impl<Sel> KvScheduler<Sel>
+impl<Sel, RF> KvScheduler<Sel, RF>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig> + Send + Sync + 'static,
+    RF: OverlapScoresRefresh + Send + Sync + 'static,
 {
     /// Start the scheduler, optionally wiring an [`OverlapScoresRefresh`] into the queue so
     /// long-waiting requests can be re-scored at dequeue time.
@@ -53,7 +63,7 @@ where
         selector: Sel,
         kv_router_config: &KvRouterConfig,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
@@ -83,7 +93,7 @@ where
             kv_router_config.router_queue_policy
         );
 
-        let inner = Arc::new(LocalScheduler::new_with_overlap_refresh(
+        let inner = Arc::new(LocalScheduler::new(
             slots,
             workers_with_configs.clone(),
             kv_router_config.router_queue_threshold,

@@ -11,6 +11,6 @@ pub mod selector;
 
 mod types;
 pub use local::LocalScheduler;
-pub use overlap_refresh::{OverlapScoresRefresh, RefreshedOverlap};
+pub use overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap};
 pub use prefill_load::PrefillLoadEstimator;
 pub use types::*;

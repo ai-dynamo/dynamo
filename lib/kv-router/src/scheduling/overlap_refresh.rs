@@ -45,3 +45,14 @@ pub struct RefreshedOverlap {
 pub trait OverlapScoresRefresh: Send + Sync {
     async fn refresh(&self, block_hashes: &[LocalBlockHash]) -> Option<RefreshedOverlap>;
 }
+
+/// Default no-op refresher used when dequeue-time overlap refresh is not configured.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopOverlapScoresRefresh;
+
+#[async_trait]
+impl OverlapScoresRefresh for NoopOverlapScoresRefresh {
+    async fn refresh(&self, _block_hashes: &[LocalBlockHash]) -> Option<RefreshedOverlap> {
+        None
+    }
+}

@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use super::overlap_refresh::OverlapScoresRefresh;
+use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
@@ -119,6 +119,7 @@ pub struct SchedulerQueue<
     C: WorkerConfigLike,
     S: SchedulingPolicy = FcfsPolicy,
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
+    RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
     pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
     /// Serializes admission so worker selection always sees prior bookings.
@@ -147,7 +148,7 @@ pub struct SchedulerQueue<
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Re-query overlap scores at dequeue time when a request has been waiting longer than
     /// `overlap_refresh_after`. `None` disables the refresh entirely.
-    overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>>,
+    overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
 }
@@ -157,32 +158,9 @@ impl<
     C: WorkerConfigLike,
     S: SchedulingPolicy,
     Sel: WorkerSelector<C>,
-> SchedulerQueue<P, C, S, Sel>
+    RF: OverlapScoresRefresh + 'static,
+> SchedulerQueue<P, C, S, Sel, RF>
 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        policy: S,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>>,
-    ) -> Self {
-        Self::new_with_overload_provider(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            policy,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            None,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_overload_provider(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
@@ -192,7 +170,7 @@ impl<
         selector: Sel,
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<dyn OverlapScoresRefresh>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     ) -> Self {
         if let Some(frac) = threshold_frac {
@@ -231,7 +209,47 @@ impl<
             overloaded_worker_provider,
         }
     }
+}
 
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike,
+    S: SchedulingPolicy,
+    Sel: WorkerSelector<C>,
+> SchedulerQueue<P, C, S, Sel, NoopOverlapScoresRefresh>
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        threshold_frac: Option<f64>,
+        block_size: u32,
+        selector: Sel,
+        policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    ) -> Self {
+        Self::new_with_overload_provider(
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            block_size,
+            selector,
+            policy,
+            prefill_load_estimator,
+            None,
+            None,
+        )
+    }
+}
+
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike,
+    S: SchedulingPolicy,
+    Sel: WorkerSelector<C>,
+    RF: OverlapScoresRefresh + 'static,
+> SchedulerQueue<P, C, S, Sel, RF>
+{
     /// Register externally-provided workers in the slot tracker.
     ///
     /// Looks up DP rank/size from the discovery watch channel; defaults to
@@ -825,7 +843,6 @@ mod tests {
             selector,
             FcfsPolicy,
             None,
-            None,
         ));
 
         (queue, slots)
@@ -875,7 +892,6 @@ mod tests {
             selector,
             FcfsPolicy,
             prefill_load_estimator,
-            None,
         ));
 
         (queue, slots, cfg_tx)
@@ -1554,10 +1570,18 @@ mod tests {
         }
     }
 
-    fn refresh_test_queue(
-        refresh: Option<Arc<dyn super::super::overlap_refresh::OverlapScoresRefresh>>,
+    fn refresh_test_queue<RF: super::super::overlap_refresh::OverlapScoresRefresh + 'static>(
+        refresh: Option<Arc<RF>>,
         refresh_after: Option<Duration>,
-    ) -> Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>> {
+    ) -> Arc<
+        SchedulerQueue<
+            NoopSequencePublisher,
+            SimpleWorkerConfig,
+            FcfsPolicy,
+            DefaultWorkerSelector,
+            RF,
+        >,
+    > {
         let block_size = 16u32;
         let dp_range: HashMap<u64, (u32, u32)> = HashMap::from([(0, (0, 1))]);
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
@@ -1577,7 +1601,7 @@ mod tests {
             },
         );
         let (_cfg_tx, cfg_rx) = watch::channel(configs);
-        let mut queue = SchedulerQueue::new(
+        let mut queue = SchedulerQueue::new_with_overload_provider(
             slots,
             cfg_rx,
             None,
@@ -1586,6 +1610,7 @@ mod tests {
             FcfsPolicy,
             None,
             refresh,
+            None,
         );
         // The constructor reads the env var; override here so tests are deterministic and
         // don't depend on global env state.
@@ -1682,7 +1707,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn maybe_refresh_is_noop_without_refresher() {
-        let queue = refresh_test_queue(None, Some(Duration::from_millis(10)));
+        let queue = refresh_test_queue::<super::super::overlap_refresh::NoopOverlapScoresRefresh>(
+            None,
+            Some(Duration::from_millis(10)),
+        );
         let (mut request, _rx) = make_request("req", 256);
         let original_overlap = request.effective_overlap_blocks.clone();
         let enqueue_at = Instant::now();
@@ -1707,10 +1735,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn maybe_refresh_returns_none_keeps_original_scores() {
         let queue = refresh_test_queue(
-            Some(Arc::new(FailingRefresher)
-                as Arc<
-                    dyn super::super::overlap_refresh::OverlapScoresRefresh,
-                >),
+            Some(Arc::new(FailingRefresher)),
             Some(Duration::from_millis(10)),
         );
         let (mut request, _rx) = make_request("req", 256);
@@ -1765,7 +1790,7 @@ mod tests {
             },
         );
         let (_cfg_tx, cfg_rx) = watch::channel(configs);
-        let mut queue = SchedulerQueue::new(
+        let mut queue = SchedulerQueue::new_with_overload_provider(
             Arc::clone(&slots),
             cfg_rx,
             Some(0.0), // threshold=0 → busy as soon as any tokens are active
@@ -1773,7 +1798,8 @@ mod tests {
             DefaultWorkerSelector::new(None, "test"),
             FcfsPolicy,
             None,
-            Some(refresher.clone() as Arc<dyn super::super::overlap_refresh::OverlapScoresRefresh>),
+            Some(refresher.clone()),
+            None,
         );
         // Set the threshold deterministically; the constructor reads env state otherwise.
         queue.overlap_refresh_after = Some(Duration::from_millis(20));
