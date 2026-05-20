@@ -199,6 +199,23 @@ class DeploymentSpec:
         self._deployment_spec["metadata"]["name"] = value
 
     @property
+    def api_version(self) -> str:
+        """Schema version parsed from ``apiVersion`` (e.g. ``v1alpha1``, ``v1beta1``).
+
+        Defaults to ``v1alpha1`` when ``apiVersion`` is missing, preserving the
+        historical behaviour of this class.
+        """
+        api_version = self._deployment_spec.get("apiVersion", "")
+        if "/" in api_version:
+            return api_version.split("/", 1)[1]
+        return "v1alpha1"
+
+    def _graph_env_key(self) -> str:
+        # Graph-level env field was renamed from ``envs`` (v1alpha1) to ``env``
+        # (v1beta1). Per-service ``envs`` was NOT renamed.
+        return "env" if self.api_version == "v1beta1" else "envs"
+
+    @property
     def port(self) -> int:
         """Deployment port"""
         return self._port
@@ -278,21 +295,22 @@ class DeploymentSpec:
             log_level: Set log level (sets DYN_LOG to specified level)
         """
         spec = self._deployment_spec
-        if "envs" not in spec["spec"]:
-            spec["spec"]["envs"] = []
+        env_key = self._graph_env_key()
+        if env_key not in spec["spec"]:
+            spec["spec"][env_key] = []
 
         # Remove any existing logging env vars to avoid duplicates
-        spec["spec"]["envs"] = [
+        spec["spec"][env_key] = [
             env
-            for env in spec["spec"]["envs"]
+            for env in spec["spec"][env_key]
             if env.get("name") not in ["DYN_LOGGING_JSONL", "DYN_LOG"]
         ]
 
         if enable_jsonl:
-            spec["spec"]["envs"].append({"name": "DYN_LOGGING_JSONL", "value": "true"})
+            spec["spec"][env_key].append({"name": "DYN_LOGGING_JSONL", "value": "true"})
 
         if log_level:
-            spec["spec"]["envs"].append({"name": "DYN_LOG", "value": log_level})
+            spec["spec"][env_key].append({"name": "DYN_LOG", "value": log_level})
 
     def get_logging_config(self) -> dict:
         """Get current logging configuration
@@ -300,7 +318,8 @@ class DeploymentSpec:
         Returns:
             dict with 'jsonl_enabled' and 'log_level' keys
         """
-        envs = self._deployment_spec.get("spec", {}).get("envs", [])
+        env_key = self._graph_env_key()
+        envs = self._deployment_spec.get("spec", {}).get(env_key, [])
 
         jsonl_enabled = False
         log_level = None
@@ -656,7 +675,7 @@ class ManagedDeployment:
                 assert self._custom_api is not None, "Kubernetes API not initialized"
                 status = await self._custom_api.get_namespaced_custom_object(  # type: ignore[awaitable-is-not-coroutine]
                     group="nvidia.com",
-                    version="v1alpha1",
+                    version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
@@ -996,7 +1015,7 @@ class ManagedDeployment:
             assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.create_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.deployment_spec.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 body=self.deployment_spec.spec(),
@@ -1037,7 +1056,7 @@ class ManagedDeployment:
             assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.patch_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.deployment_spec.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 name=self._deployment_name,
@@ -1232,7 +1251,7 @@ class ManagedDeployment:
             if self._deployment_name and self._custom_api is not None:
                 await self._custom_api.delete_namespaced_custom_object(
                     group="nvidia.com",
-                    version="v1alpha1",
+                    version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
