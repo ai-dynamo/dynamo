@@ -5,7 +5,7 @@ use super::*;
 use super::context::{DeviceMemPool, DeviceStream, PinnedBuffer, TransferBackend};
 use super::TransferError;
 
-use dynamo_memory::{ZeCommandQueue, ZeEvent, ZeEventPool};
+use dynamo_memory::{SyclCopyQueue, ZeCommandQueue, ZeEvent, ZeEventPool};
 use dynamo_memory::ze::ZE_EVENT_SCOPE_FLAG_HOST;
 use dynamo_runtime::utils::pool::SyncPoolItem;
 use std::ffi::c_void;
@@ -462,5 +462,250 @@ fn ze_memcpy_h2d(
     queue.execute_nonblocking(&mut list).map_err(|e| {
         TransferError::ExecutionError(format!("ZE H2D queue submit failed: {:?}", e))
     })?;
+    Ok(())
+}
+
+// ============================================================================
+// SYCL transfer backend — copies through SYCL runtime
+// ============================================================================
+
+pub(super) struct TransferBackendSycl {
+    queue: Arc<SyclCopyQueue>,
+    event_tx: mpsc::UnboundedSender<(oneshot::Sender<()>, std::time::Instant)>,
+    event_worker: Option<JoinHandle<()>>,
+    cancel_token: CancellationToken,
+}
+
+impl TransferBackendSycl {
+    pub fn new(queue: Arc<SyclCopyQueue>) -> Self {
+        let (event_tx, event_rx) =
+            mpsc::unbounded_channel::<(oneshot::Sender<()>, std::time::Instant)>();
+
+        let cancel_token = CancellationToken::new();
+        let sycl_queue = queue.clone();
+        let event_worker = Self::setup_event_worker(sycl_queue, event_rx, cancel_token.clone());
+
+        Self {
+            queue,
+            event_tx,
+            event_worker: Some(event_worker),
+            cancel_token,
+        }
+    }
+
+    fn setup_event_worker(
+        queue: Arc<SyclCopyQueue>,
+        mut event_rx: mpsc::UnboundedReceiver<(oneshot::Sender<()>, std::time::Instant)>,
+        cancel_token: CancellationToken,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build Tokio runtime for SYCL event worker.");
+
+            runtime.block_on(async move {
+                // Small scratch buffer for fence memcpy (allocated once).
+                let mut scratch: u8 = 0;
+                loop {
+                    tokio::select! {
+                        Some((tx, start)) = event_rx.recv() => {
+                            // Submit a 1-byte self-copy as a fence on the in-order queue.
+                            // When this completes, all prior memcpys on this queue are done.
+                            let event = unsafe {
+                                queue.memcpy(
+                                    &mut scratch as *mut u8 as *mut c_void,
+                                    &scratch as *const u8 as *const c_void,
+                                    1,
+                                )
+                            };
+                            event.wait();
+                            let elapsed = start.elapsed();
+                            tracing::info!("SYCL handle_local_transfer: copy done, elapsed={:.3}ms", elapsed.as_secs_f64() * 1000.0);
+                            let _ = tx.send(());
+                        }
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+                    }
+                }
+            });
+        })
+    }
+
+}
+
+impl TransferBackend for TransferBackendSycl {
+    fn device_mem_pool(&self) -> Option<DeviceMemPool> {
+        None
+    }
+
+    fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        let start = std::time::Instant::now();
+        self.event_tx
+            .send((tx, start))
+            .map_err(|_| TransferError::ExecutionError("SYCL event worker exited.".into()))?;
+        Ok(())
+    }
+
+    fn acquire_resources_for_transfer_sync(
+        &self,
+        _size: usize,
+    ) -> Result<SyncPoolItem<PinnedBuffer>, TransferError> {
+        Err(TransferError::ExecutionError(
+            "SYCL pinned buffer pool not yet implemented".into(),
+        ))
+    }
+
+    fn device_stream(&self) -> DeviceStream {
+        DeviceStream::SyclQueue(self.queue.clone())
+    }
+
+    fn shutdown(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(handle) = self.event_worker.take()
+            && let Err(e) = handle.join()
+        {
+            tracing::error!("Error joining SYCL event worker: {:?}", e);
+        }
+    }
+}
+
+// ============================================================================
+// SYCL copy operations
+// ============================================================================
+
+/// Copy a single block using SYCL memcpy.
+pub fn copy_block_sycl<'a, Source, Destination>(
+    sources: &'a Source,
+    destinations: &'a mut Destination,
+    queue: &SyclCopyQueue,
+    _strategy: TransferStrategy,
+) -> Result<(), TransferError>
+where
+    Source: BlockDataProvider,
+    Destination: BlockDataProviderMut,
+{
+    let src_data = sources.block_data();
+    let dst_data = destinations.block_data_mut();
+
+    if src_data.is_fully_contiguous() && dst_data.is_fully_contiguous() {
+        let src_view = src_data.block_view()?;
+        let mut dst_view = dst_data.block_view_mut()?;
+
+        debug_assert_eq!(src_view.size(), dst_view.size());
+        if src_view.size() == 0 {
+            return Ok(());
+        }
+        unsafe {
+            let event = queue.memcpy(
+                dst_view.as_mut_ptr() as *mut c_void,
+                src_view.as_ptr() as *const c_void,
+                src_view.size(),
+            );
+            event.wait();
+        }
+    } else {
+        assert_eq!(src_data.num_layers(), dst_data.num_layers());
+        for layer_idx in 0..src_data.num_layers() {
+            for outer_idx in 0..src_data.num_outer_dims() {
+                let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+                let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
+                debug_assert_eq!(src_view.size(), dst_view.size());
+                if src_view.size() == 0 {
+                    continue;
+                }
+                unsafe {
+                    let event = queue.memcpy(
+                        dst_view.as_mut_ptr() as *mut c_void,
+                        src_view.as_ptr() as *const c_void,
+                        src_view.size(),
+                    );
+                    event.wait();
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Batch copy multiple blocks using SYCL memcpy.
+/// Submits all copies to the in-order SYCL queue, then waits on the last event.
+pub fn copy_blocks_sycl<'a, Source, Destination>(
+    sources: &'a [Source],
+    destinations: &'a mut [Destination],
+    queue: &SyclCopyQueue,
+    _ctx: &crate::block_manager::block::transfer::TransferContext,
+) -> Result<(), TransferError>
+where
+    Source: BlockDataProvider,
+    Destination: BlockDataProviderMut,
+{
+    if sources.len() != destinations.len() {
+        return Err(TransferError::CountMismatch(
+            sources.len(),
+            destinations.len(),
+        ));
+    }
+
+    let mut dst_ptrs: Vec<*mut c_void> = Vec::new();
+    let mut src_ptrs: Vec<*const c_void> = Vec::new();
+    let mut sizes: Vec<usize> = Vec::new();
+
+    for (src, dst) in sources.iter().zip(destinations.iter_mut()) {
+        let src_data = src.block_data();
+        let dst_data = dst.block_data_mut();
+
+        if src_data.is_fully_contiguous() && dst_data.is_fully_contiguous() {
+            let src_view = src_data.block_view()?;
+            let mut dst_view = dst_data.block_view_mut()?;
+            debug_assert_eq!(src_view.size(), dst_view.size());
+            if src_view.size() == 0 {
+                continue;
+            }
+            unsafe {
+                dst_ptrs.push(dst_view.as_mut_ptr() as *mut c_void);
+                src_ptrs.push(src_view.as_ptr() as *const c_void);
+                sizes.push(src_view.size());
+            }
+        } else {
+            assert_eq!(src_data.num_layers(), dst_data.num_layers());
+            assert_eq!(src_data.num_outer_dims(), dst_data.num_outer_dims());
+            for layer_idx in 0..src_data.num_layers() {
+                for outer_idx in 0..src_data.num_outer_dims() {
+                    let src_view = src_data.layer_view(layer_idx, outer_idx)?;
+                    let mut dst_view = dst_data.layer_view_mut(layer_idx, outer_idx)?;
+                    debug_assert_eq!(src_view.size(), dst_view.size());
+                    if src_view.size() == 0 {
+                        continue;
+                    }
+                    unsafe {
+                        dst_ptrs.push(dst_view.as_mut_ptr() as *mut c_void);
+                        src_ptrs.push(src_view.as_ptr() as *const c_void);
+                        sizes.push(src_view.size());
+                    }
+                }
+            }
+        }
+    }
+
+    if dst_ptrs.is_empty() {
+        return Ok(());
+    }
+
+    let total_bytes: usize = sizes.iter().sum();
+    tracing::info!(
+        "SYCL copy_blocks: {} ops, total_bytes={} ({:.2} MB)",
+        dst_ptrs.len(),
+        total_bytes,
+        total_bytes as f64 / (1024.0 * 1024.0)
+    );
+
+    // Submit all copies to the in-order SYCL queue. Don't block here —
+    // the transfer handler will call device_event() which submits a fence
+    // and waits for all prior work on this queue to complete.
+    unsafe { queue.memcpy_batch(&mut dst_ptrs, &mut src_ptrs, &sizes) };
+
     Ok(())
 }

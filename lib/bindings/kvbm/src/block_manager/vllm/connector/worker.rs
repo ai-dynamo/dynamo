@@ -545,11 +545,12 @@ impl PyKvConnectorWorker {
         self.connector_worker.clear_connector_metadata()
     }
 
-    pub fn save_kv_layer(&mut self, layer_name: String, _kv_layer: Py<PyAny>) -> PyResult<()> {
-        // Note: kv_layer is not used in the current implementation
-        self.connector_worker
-            .save_kv_layer(layer_name)
-            .map_err(to_pyerr)
+    pub fn save_kv_layer(&mut self, py: Python<'_>, layer_name: String, _kv_layer: Py<PyAny>) -> PyResult<()> {
+        py.allow_threads(|| {
+            self.connector_worker
+                .save_kv_layer(layer_name)
+                .map_err(to_pyerr)
+        })
     }
 
     pub fn get_finished(

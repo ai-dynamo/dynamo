@@ -11,7 +11,7 @@
 
 use crate::{StorageError, pinned::StorageBackendOps};
 
-pub use level_zero::{Event as ZeEvent, EventPool as ZeEventPool, ZE_EVENT_SCOPE_FLAG_HOST, sync_sycl_event, ze_context_handle_t, get_ze_context_from_sycl_queue};
+pub use level_zero::{Event as ZeEvent, EventPool as ZeEventPool, ZE_EVENT_SCOPE_FLAG_HOST, sync_sycl_event, ze_context_handle_t, get_ze_context_from_sycl_queue, SyclCopyQueue, SyclEvent};
 use level_zero::{self, CommandList, CommandQueue, Context, Device, Driver, EventPool};
 use std::{
     collections::HashMap,

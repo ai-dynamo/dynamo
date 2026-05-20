@@ -40,7 +40,7 @@ mod tests;
 
 pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::{DeviceContext, DeviceStorage};
-pub use ze::{Ze, ZeCommandQueue, ZeContext, ZeError, ZeEvent, ZeEventPool};
+pub use ze::{Ze, ZeCommandQueue, ZeContext, ZeError, ZeEvent, ZeEventPool, SyclCopyQueue, SyclEvent};
 #[cfg(target_os = "linux")]
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;

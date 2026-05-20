@@ -41,6 +41,9 @@ where
         DeviceStream::Ze(ze_queue) => {
             ze::copy_block(source, destination, ze_queue.as_ref(), strategy)
         }
+        DeviceStream::SyclQueue(sycl_queue) => {
+            ze::copy_block_sycl(source, destination, sycl_queue.as_ref(), strategy)
+        }
     }
 }
 
@@ -60,6 +63,9 @@ where
         }
         DeviceStream::Ze(ze_queue) => {
             ze::copy_blocks_with_customized_kernel(sources, destinations, ze_queue.as_ref(), ctx)
+        }
+        DeviceStream::SyclQueue(sycl_queue) => {
+            ze::copy_blocks_sycl(sources, destinations, sycl_queue.as_ref(), ctx)
         }
     }
 }

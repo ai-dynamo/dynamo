@@ -4,7 +4,7 @@
 use super::*;
 
 use cudarc::driver::{CudaContext, CudaStream};
-use dynamo_memory::{BackendType, DeviceContext, ZeCommandQueue, ZeContext, pool::CudaMemPool};
+use dynamo_memory::{BackendType, DeviceContext, SyclCopyQueue, ZeCommandQueue, ZeContext, pool::CudaMemPool};
 use nixl_sys::Agent as NixlAgent;
 
 use anyhow::Result;
@@ -173,8 +173,10 @@ pub struct PoolConfig {
 pub enum DeviceStream {
     /// CUDA stream.
     Cuda(Arc<CudaStream>),
-    /// Level Zero command queue.
+    /// Level Zero command queue (raw Ze path — only for non-PyTorch contexts).
     Ze(Arc<ZeCommandQueue>),
+    /// SYCL copy queue — copies go through SYCL runtime, keeping its dependency tracking intact.
+    SyclQueue(Arc<SyclCopyQueue>),
 }
 
 /// Extension trait for DeviceContext — creates a DeviceStream by downcasting
@@ -205,11 +207,8 @@ impl DeviceContextExt for DeviceContext {
     fn new_stream_with_foreign_context(&self, sycl_queue_ptr: u64) -> anyhow::Result<DeviceStream> {
         match self.backend_type() {
             BackendType::Ze => {
-                let ze_ctx = self.backend.as_any()
-                    .downcast_ref::<Arc<ZeContext>>()
-                    .expect("BackendType::Ze but downcast to Arc<ZeContext> failed");
-                let foreign_ctx = unsafe { dynamo_memory::ze::get_ze_context_from_sycl_queue(sycl_queue_ptr) };
-                Ok(DeviceStream::Ze(ze_ctx.new_stream_with_foreign_context(foreign_ctx)?))
+                let copy_queue = unsafe { SyclCopyQueue::new(sycl_queue_ptr) };
+                Ok(DeviceStream::SyclQueue(Arc::new(copy_queue)))
             }
             _ => anyhow::bail!("new_stream_with_foreign_context only supported for Ze backend"),
         }
@@ -272,6 +271,9 @@ impl TransferContext {
             }
             DeviceStream::Ze(ze_queue) => {
                 Box::new(super::ze::TransferBackendZe::new(ze_queue.clone(), config.as_ref()))
+            }
+            DeviceStream::SyclQueue(sycl_queue) => {
+                Box::new(super::ze::TransferBackendSycl::new(sycl_queue.clone()))
             }
         };
         Ok(Self {
