@@ -1533,6 +1533,13 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
+        num_g2_blocks: Optional[int] = None,
+        num_g3_blocks: Optional[int] = None,
+        offload_batch_size: Optional[int] = None,
+        bandwidth_g1_to_g2_gbps: Optional[float] = None,
+        bandwidth_g2_to_g1_gbps: Optional[float] = None,
+        bandwidth_g2_to_g3_gbps: Optional[float] = None,
+        bandwidth_g3_to_g2_gbps: Optional[float] = None,
     ) -> None:
         ...
 
@@ -1571,6 +1578,27 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def num_g2_blocks(self) -> Optional[int]: ...
+
+    @property
+    def num_g3_blocks(self) -> Optional[int]: ...
+
+    @property
+    def offload_batch_size(self) -> Optional[int]: ...
+
+    @property
+    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
@@ -1782,8 +1810,16 @@ def run_mocker_trace_replay(
     trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
+    report_jsonl_path: Optional[str | os.PathLike[str]] = None,
+    max_sim_time_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
+    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
+
+    When ``report_jsonl_path`` is provided (offline disagg replay only), one
+    JSON object per request is written to that path. Each line includes
+    arrival/admit/token timestamps, input/output lengths, the full per-token
+    ITL series, and prefill/decode worker indices.
+    """
     ...
 
 def run_mocker_synthetic_trace_replay(
