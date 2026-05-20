@@ -84,7 +84,7 @@ class DistributedRuntime:
         Args:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
-            request_plane: Request plane transport ("tcp", "http", or "nats")
+            request_plane: Request plane transport ("tcp" or "nats")
         """
         ...
 
@@ -352,18 +352,41 @@ def compute_block_hash_for_seq(
 
     ...
 
+class ContextMetadata:
+    """
+    Live mutable view over propagated context metadata.
+    """
+    def __getitem__(self, key: str) -> str: ...
+    def __setitem__(self, key: str, value: str) -> None: ...
+    def __delitem__(self, key: str) -> None: ...
+    def __len__(self) -> int: ...
+    def __contains__(self, key: str) -> bool: ...
+    def __iter__(self) -> Any: ...
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]: ...
+    def pop(self, key: str, default: Optional[str] = None) -> Optional[str]: ...
+    def keys(self) -> List[str]: ...
+    def values(self) -> List[str]: ...
+    def items(self) -> List[Tuple[str, str]]: ...
+    def clear(self) -> None: ...
+    def copy(self) -> Dict[str, str]: ...
+
 class Context:
     """
     Context wrapper around AsyncEngineContext for Python bindings.
     Provides tracing and cancellation capabilities for request handling.
     """
 
-    def __init__(self, id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        id: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
         """
         Create a new Context instance.
 
         Args:
             id: Optional request ID. If None, a default ID will be generated.
+            metadata: Optional propagated metadata map.
         """
         ...
 
@@ -391,12 +414,12 @@ class Context:
         """
         ...
 
-    def id(self) -> Optional[str]:
+    def id(self) -> str:
         """
         Get the context ID.
 
         Returns:
-            The context identifier string, or None if not set.
+            The context identifier string.
         """
         ...
 
@@ -415,6 +438,16 @@ class Context:
         requests. Engines normally don't need this — the framework
         auto-fires on the first non-empty chunk in the response stream."""
         ...
+
+    @property
+    def metadata(self) -> ContextMetadata:
+        """
+        Get the live propagated context metadata mapping.
+        """
+        ...
+
+    @metadata.setter
+    def metadata(self, metadata: Dict[str, str]) -> None: ...
 
     @property
     def trace_id(self) -> Optional[str]:
@@ -527,6 +560,7 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     enable_eagle: bool
     taints: Set[str]
+    stable_routing_id: str | None
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -1307,6 +1341,9 @@ class AicPerfConfig:
         aic_model_path: str,
         aic_tp_size: int = 1,
         aic_backend_version: Optional[str] = None,
+        aic_moe_tp_size: Optional[int] = None,
+        aic_moe_ep_size: Optional[int] = None,
+        aic_attention_dp_size: Optional[int] = None,
     ) -> None:
         ...
 
@@ -1479,6 +1516,13 @@ class MockEngineArgs:
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
+        num_g2_blocks: Optional[int] = None,
+        num_g3_blocks: Optional[int] = None,
+        offload_batch_size: Optional[int] = None,
+        bandwidth_g1_to_g2_gbps: Optional[float] = None,
+        bandwidth_g2_to_g1_gbps: Optional[float] = None,
+        bandwidth_g2_to_g3_gbps: Optional[float] = None,
+        bandwidth_g3_to_g2_gbps: Optional[float] = None,
     ) -> None:
         ...
 
@@ -1517,6 +1561,27 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def num_g2_blocks(self) -> Optional[int]: ...
+
+    @property
+    def num_g3_blocks(self) -> Optional[int]: ...
+
+    @property
+    def offload_batch_size(self) -> Optional[int]: ...
+
+    @property
+    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
+
+    @property
+    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
@@ -1728,8 +1793,16 @@ def run_mocker_trace_replay(
     trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
+    report_jsonl_path: Optional[str | os.PathLike[str]] = None,
+    max_sim_time_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
+    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
+
+    When ``report_jsonl_path`` is provided (offline disagg replay only), one
+    JSON object per request is written to that path. Each line includes
+    arrival/admit/token timestamps, input/output lengths, the full per-token
+    ITL series, and prefill/decode worker indices.
+    """
     ...
 
 def run_mocker_synthetic_trace_replay(
