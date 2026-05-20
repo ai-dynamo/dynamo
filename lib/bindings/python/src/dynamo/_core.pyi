@@ -1378,7 +1378,7 @@ class KvRouterConfig:
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
-        router_queue_depth_by_missing_isl: Optional[list[tuple[int, int]]] = None,
+        router_queue_by_incoming_missing_isl: Optional[list[tuple[int, int]]] = None,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1413,8 +1413,8 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
-            router_queue_depth_by_missing_isl: Optional tiered per-worker pending ISL token caps
-                keyed on the request's best-case missing prefill tokens
+            router_queue_by_incoming_missing_isl: Optional tiered per-worker pending ISL token caps
+                keyed on the request's incoming missing ISL
                 (ISL minus best cached tokens across eligible workers). Each
                 entry is a `(missing_isl_floor, max_isl_tokens)` tuple; the
                 tier with the highest matched floor wins. The cap is multiplied

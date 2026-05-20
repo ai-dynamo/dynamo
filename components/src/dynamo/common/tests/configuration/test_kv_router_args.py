@@ -348,11 +348,11 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
 
 def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
     config = KvRouterConfigBase.from_cli_args(argparse.Namespace())
-    config.router_queue_depth_by_missing_isl = [(0, 2048), (2048, 512)]
+    config.router_queue_by_incoming_missing_isl = [(0, 2048), (2048, 512)]
 
     kwargs = config.kv_router_kwargs()
 
-    assert kwargs["router_queue_depth_by_missing_isl"] == [(0, 2048), (2048, 512)]
+    assert kwargs["router_queue_by_incoming_missing_isl"] == [(0, 2048), (2048, 512)]
 
 
 def test_load_aware_clears_predicted_ttl() -> None:
