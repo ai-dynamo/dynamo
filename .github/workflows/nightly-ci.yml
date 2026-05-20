@@ -6,6 +6,11 @@ name: Nightly CI Pipeline
 on:
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  # TODO: REVERT — testing only. Triggers full nightly on push to this dev
+  # branch. MUST be removed before merging to main.
+  push:
+    branches:
+      - pvijayakrish/nightly-notifications
   workflow_dispatch:  # Allow manual triggering for testing
     inputs:
       release:
@@ -127,6 +132,13 @@ jobs:
               echo "release=true" >> "$GITHUB_OUTPUT"
               echo "run_tests=true" >> "$GITHUB_OUTPUT"
               ;;
+            push)
+              # TODO: REVERT — testing only. Treats push to the dev branch like
+              # schedule so the full nightly (incl. release.yml + GitLab) runs.
+              # MUST be removed before merging to main.
+              echo "release=true" >> "$GITHUB_OUTPUT"
+              echo "run_tests=true" >> "$GITHUB_OUTPUT"
+              ;;
             workflow_dispatch)
               if [ "${DISPATCH_RELEASE}" = "false" ]; then
                 echo "release=false" >> "$GITHUB_OUTPUT"
@@ -163,8 +175,8 @@ jobs:
         id: post
         continue-on-error: true
         env:
-          SLACK_BOT_TOKEN:  ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_BOT_TOKEN:  ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
           SOURCE_SHA:       ${{ needs.resolve-source-sha.outputs.source_sha }}
           DEV_SUFFIX:       ${{ needs.compute-dev-version.outputs.dev_suffix }}
           RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -203,14 +215,21 @@ jobs:
 
           OK=$(echo "${RESPONSE}" | jq -r '.ok')
           if [ "${OK}" != "true" ]; then
-            echo "::error::Slack chat.postMessage failed: ${RESPONSE}"
+            # RESPONSE may carry channel/ts/warning fields; surface only .error.
+            ERR=$(echo "${RESPONSE}" | jq -r '.error // "unknown"')
+            echo "::error::Slack chat.postMessage failed: ${ERR}"
             exit 1
           fi
           TS=$(echo "${RESPONSE}" | jq -r '.ts')
           CH=$(echo "${RESPONSE}" | jq -r '.channel')
+          # Register both as masks BEFORE they touch GITHUB_OUTPUT or stdout, so
+          # they render as *** in this job's logs and in the job outputs UI.
+          # Masks don't cross job boundaries — downstream jobs re-register.
+          echo "::add-mask::${TS}"
+          echo "::add-mask::${CH}"
           echo "thread_ts=${TS}"   >> "${GITHUB_OUTPUT}"
           echo "channel_id=${CH}"  >> "${GITHUB_OUTPUT}"
-          echo "Posted nightly start message in channel ${CH} ts=${TS}"
+          echo "Posted nightly start message"
 
   # ============================================================================
   # BUILD JOBS
