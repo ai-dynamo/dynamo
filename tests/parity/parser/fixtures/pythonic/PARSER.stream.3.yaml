@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: pythonic
+model_label: Llama 4 (pythonic fmt)
+mode: stream
+cases:
+  PARSER.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from PARSER.batch.1
+    chunks:
+    - delta_text: '[g'
+    - delta_text: et_
+    - delta_text: weath
+    - delta_text: er(location
+    - delta_text: ="NYC")]
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang: *id001
+      vllm: *id001
