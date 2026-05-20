@@ -17,13 +17,18 @@ ARG PYTHON_VERSION
 # Install only the packages needed to resolve and install the planner runtime
 # dependencies in the builder stage. git/git-lfs are only needed because
 # aiconfigurator is currently installed from a Git URL with LFS-backed assets.
+# gcc + python3-dev are needed to compile aiperf's `crick` dep from sdist on
+# arm64 (no manylinux aarch64 wheel published); the toolchain is confined to
+# this builder stage and never reaches the final image.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
+        gcc \
         git \
         git-lfs \
-        libgomp1 && \
+        libgomp1 \
+        python${PYTHON_VERSION}-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
