@@ -281,6 +281,15 @@ impl<
                 }
             }
         }
+
+        while let Some(entry) = self.pending.pop() {
+            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+            self.pending_isl_tokens
+                .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
+
+            let mut request = entry.request;
+            request.respond(Err(KvSchedulerError::SubscriberShutdown));
+        }
     }
 
     fn handle_enqueue(&mut self, request: SchedulingRequest) {
@@ -937,6 +946,34 @@ mod tests {
             }
         }
         assert_eq!(ok_count, num_requests, "not all requests were scheduled");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pending_requests_receive_shutdown_on_queue_drop() {
+        let block_size = 16;
+        let isl = 512;
+        let (queue, _slots) = make_queue(1, block_size, isl, Some(0.0));
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        rx1.await
+            .expect("first response sender dropped")
+            .expect("first request should be scheduled");
+
+        let (req2, rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        drop(queue);
+
+        let response = tokio::time::timeout(Duration::from_secs(1), rx2)
+            .await
+            .expect("shutdown response timed out")
+            .expect("pending response sender dropped");
+        assert!(matches!(
+            response,
+            Err(KvSchedulerError::SubscriberShutdown)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
