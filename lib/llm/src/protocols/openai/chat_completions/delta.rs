@@ -266,6 +266,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             // Update prompt_tokens from worker if provided (e.g., for embeddings)
             self.usage.prompt_tokens = completion_usage.prompt_tokens;
 
+            // When the engine provides completion_tokens (ModelOutput::Text mode),
+            // trust it over the token_ids count since token_ids may be empty.
+            if completion_usage.completion_tokens > 0 {
+                self.usage.completion_tokens = completion_usage.completion_tokens;
+            }
+
             // Propagate prompt token details if provided
             if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());
