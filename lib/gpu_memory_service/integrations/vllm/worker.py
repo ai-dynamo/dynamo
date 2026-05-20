@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import sys
 from contextlib import nullcontext
 from typing import List, Optional
@@ -36,7 +37,10 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_lock_mode,
     get_gms_ro_connect_timeout_ms,
 )
-from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
+from gpu_memory_service.integrations.vllm.model_loader import (
+    get_mx_load_context,
+    register_gms_loader,
+)
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
@@ -55,6 +59,23 @@ patch_memory_snapshot()
 apply_scratch_kv_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
+
+# MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency).
+# Sleep/wake serving lifecycle is implemented in modelexpress.lifecycle, which
+# composes publish/unpublish_metadata + register_tensors + MxClient/NIXL
+# teardown into a single pause/resume pair.
+if os.environ.get("MX_ENABLED", "0") == "1":
+    try:
+        from modelexpress import configure_vllm_logging
+        from modelexpress.lifecycle import pause_serving, resume_serving
+
+        configure_vllm_logging()
+    except ImportError as e:
+        raise ImportError(
+            "MX_ENABLED=1 but modelexpress is not installed. "
+            "Install with: pip install modelexpress"
+        ) from e
+
 
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
@@ -210,6 +231,11 @@ class GMSWorker(Worker):
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
 
+        # Pause MX serving before GMS unmap
+        mx_ctx = get_mx_load_context()
+        if mx_ctx is not None:
+            pause_serving(mx_ctx)
+
         for tag in ("weights", "kv_cache"):
             manager = get_gms_client_memory_manager(tag)
             assert manager is not None, f"GMS {tag} client is not initialized"
@@ -262,6 +288,11 @@ class GMSWorker(Worker):
             except ConnectionError as e:
                 logger.error("Fatal: cannot connect to GMS during remap: %s", e)
                 sys.exit(1)
+
+            # Resume MX serving after GMS remap
+            mx_ctx = get_mx_load_context()
+            if mx_ctx is not None:
+                resume_serving(mx_ctx, self.model_runner.model)
 
         if "kv_cache" in tags:
             kv_cache_manager = get_gms_client_memory_manager("kv_cache")
