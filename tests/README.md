@@ -341,7 +341,7 @@ All commands below are meant to be run **inside the container**.
 
 **Local-dev / dev containers** -- you must compile the Rust bindings before running pytest. Without this step, tests that import `dynamo._internal` will fail with `ImportError`:
 ```bash
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 cd lib/bindings/python && maturin develop --uv && cd -
 ```
 
