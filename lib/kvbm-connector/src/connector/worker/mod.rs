@@ -757,5 +757,8 @@ pub struct FinishedRequests {
     pub onboarding: HashSet<String>,
 }
 
-#[cfg(all(test, feature = "testing"))]
+// Gated on `testing-nixl`: every test here builds a TestConnectorInstance,
+// which needs a NIXL/UCX runtime + CUDA device memory (unavailable on the CPU
+// pre-merge runner). Run via `cargo test -p kvbm-connector --features testing-nixl`.
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests;

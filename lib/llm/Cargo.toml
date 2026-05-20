@@ -16,6 +16,9 @@ description = "Dynamo LLM Library"
 default = []
 
 testing-etcd = []
+# Opt-in: gates media-loader tests that require a working NIXL/UCX runtime.
+# NIXL itself is a regular dependency via dynamo-memory, not a dev-dependency.
+testing-nixl = []
 # Forward the NVTX feature to dynamo-runtime (build with --features nvtx or dynamo-llm/nvtx)
 nvtx = ["dynamo-runtime/nvtx"]
 integration = ["dynamo-runtime/integration"]

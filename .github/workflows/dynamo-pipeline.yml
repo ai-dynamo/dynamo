@@ -135,6 +135,11 @@ jobs:
           cargo test --locked --all-targets --features=media-ffmpeg,testing-nixl,integration -- --nocapture
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
+          # kvbm-connector instance/e2e tests need NIXL/UCX + CUDA (gated behind
+          # `testing-nixl`, skipped by the CPU pre-merge job). Serial: each test
+          # stands up TCP messengers and NIXL agents.
+          cargo clippy -p kvbm-connector --features testing-nixl --no-deps --all-targets -- -D warnings
+          cargo test --locked -p kvbm-connector --features testing-nixl --all-targets -- --nocapture --test-threads=1
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
   mypy:

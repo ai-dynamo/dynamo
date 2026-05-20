@@ -67,6 +67,12 @@ testing = [
     "kvbm-physical/testing",
     "dep:figment",
 ]
+# Opt-in: gates tests that build a real TestConnectorInstance/Cluster, which
+# require a working NIXL/UCX runtime and CUDA device memory. Pure `#[cfg]` gate
+# (no deps) — the harness it uses comes from the default-on `testing` feature.
+# Non-default so the CPU pre-merge job (`cargo test --all-targets`) skips them;
+# run them in the GPU job via `cargo test -p kvbm-connector --features testing-nixl`.
+testing-nixl = []
 # Gates NCCL-accelerated intra-pass layer-wise onboard (G2→G1 via cudarc).
 nccl = ["kvbm-engine/nccl"]
 # Opt-in S3 object-storage integration tests against MinIO.

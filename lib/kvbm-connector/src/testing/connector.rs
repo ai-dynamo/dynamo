@@ -1461,10 +1461,14 @@ impl TensorDescriptor for MockTensor {
 
 #[cfg(test)]
 mod tests {
+    // Only the NIXL-gated instance tests configure tracing.
+    #[cfg(feature = "testing-nixl")]
     use tracing_subscriber::EnvFilter;
 
     use super::*;
 
+    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    #[cfg(feature = "testing-nixl")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_single_worker_initialization() {
         let _ = tracing_subscriber::fmt()
@@ -1520,6 +1524,8 @@ mod tests {
             .expect("Cleanup should succeed");
     }
 
+    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    #[cfg(feature = "testing-nixl")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_multi_worker_initialization() {
         let _ = tracing_subscriber::fmt()
@@ -1751,6 +1757,8 @@ mod tests {
     // Sync factory tests - regular #[test], not #[tokio::test]
     // =========================================================================
 
+    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    #[cfg(feature = "testing-nixl")]
     #[test]
     fn test_sync_single_worker_creation() {
         let _ = tracing_subscriber::fmt()
@@ -1774,6 +1782,8 @@ mod tests {
         );
     }
 
+    // Builds a real cluster (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    #[cfg(feature = "testing-nixl")]
     #[test]
     fn test_sync_cluster_creation() {
         let _ = tracing_subscriber::fmt()

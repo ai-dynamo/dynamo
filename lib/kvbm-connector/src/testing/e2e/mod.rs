@@ -6,13 +6,15 @@
 //! This module provides E2E tests using TestConnectorCluster to test
 //! multi-instance scenarios like bidirectional transfers.
 
-#[cfg(test)]
+// These E2E tests build TestConnectorClusters (NIXL/UCX + CUDA required), so
+// they are gated behind `testing-nixl` and skipped by the CPU pre-merge job.
+#[cfg(all(test, feature = "testing-nixl"))]
 mod find_blocks;
 
 #[cfg(all(test, feature = "s3"))]
 mod s3_object;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
     use crate::testing::connector::{ConnectorTestConfig, TestConnectorCluster};
     use kvbm_physical::transfer::FillPattern;
