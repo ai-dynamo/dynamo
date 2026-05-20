@@ -606,8 +606,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     source ${VIRTUAL_ENV}/bin/activate && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
-        KVBM_FEATURES=""; \
-        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
+        KVBM_FEATURES="" && \
         maturin build --release ${KVBM_FEATURES} --out target/wheels && \
         if [ "$DEVICE" = "cuda" ]; then \
             auditwheel repair \
