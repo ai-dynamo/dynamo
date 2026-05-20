@@ -6,7 +6,7 @@
 //! This module consolidates ALL network-related configuration and creation logic.
 //! It is the ONLY place in the codebase that:
 //! - Reads environment variables for network configuration
-//! - Knows about transport-specific types (SharedHttpServer, TcpRequestClient, etc.)
+//! - Knows about transport-specific types
 //! - Performs mode selection based on RequestPlaneMode
 //! - Creates servers and clients
 //!
@@ -27,10 +27,6 @@ use tokio_util::sync::CancellationToken;
 /// Uses OnceLock since the port is set once when the server binds and never changes.
 static ACTUAL_TCP_RPC_PORT: OnceLock<u16> = OnceLock::new();
 
-/// Global storage for the actual HTTP RPC port after binding.
-/// Uses OnceLock since the port is set once when the server binds and never changes.
-static ACTUAL_HTTP_RPC_PORT: OnceLock<u16> = OnceLock::new();
-
 /// Global storage for the shared TCP server instance.
 ///
 /// When multiple workers run in the same process, they must share a single TCP server
@@ -42,24 +38,12 @@ static ACTUAL_HTTP_RPC_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_TCP_SERVER: tokio::sync::OnceCell<Arc<SharedTcpServer>> =
     tokio::sync::OnceCell::const_new();
 
-/// Global storage for the shared HTTP server instance.
-///
-/// Same rationale as GLOBAL_TCP_SERVER: multiple workers in the same process must share
-/// a single HTTP server so that all endpoints are registered on the same port.
-static GLOBAL_HTTP_SERVER: tokio::sync::OnceCell<
-    Arc<super::ingress::http_endpoint::SharedHttpServer>,
-> = tokio::sync::OnceCell::const_new();
-
 /// Process-wide cancellation token for the global TCP server.
 ///
 /// This token is independent of any individual runtime's cancellation token so that
 /// component Drop impls (e.g. KvRouter::drop → cancel) don't kill the shared accept
 /// loop while the OnceCell still hands out the (now-dead) server to later runtimes.
 static GLOBAL_TCP_SERVER_TOKEN: std::sync::LazyLock<CancellationToken> =
-    std::sync::LazyLock::new(CancellationToken::new);
-
-/// Process-wide cancellation token for the global HTTP server.
-static GLOBAL_HTTP_SERVER_TOKEN: std::sync::LazyLock<CancellationToken> =
     std::sync::LazyLock::new(CancellationToken::new);
 
 /// Get the actual TCP RPC port that the server is listening on.
@@ -85,45 +69,13 @@ fn set_actual_tcp_rpc_port(port: u16) {
     }
 }
 
-/// Get the actual HTTP RPC port that the server is listening on.
-pub fn get_actual_http_rpc_port() -> anyhow::Result<u16> {
-    ACTUAL_HTTP_RPC_PORT.get().copied().ok_or_else(|| {
-        tracing::error!(
-            "HTTP RPC port not set - request_plane_server() must be called before get_actual_http_rpc_port()"
-        );
-        anyhow::anyhow!(
-            "HTTP RPC port not initialized. This is not expected."
-        )
-    })
-}
-
-/// Set the actual HTTP RPC port (called internally after server binds).
-fn set_actual_http_rpc_port(port: u16) {
-    if let Err(existing) = ACTUAL_HTTP_RPC_PORT.set(port) {
-        tracing::warn!(
-            existing_port = existing,
-            new_port = port,
-            "HTTP RPC port already set, ignoring new value"
-        );
-    }
-}
-
 /// Network configuration loaded from environment variables
 #[derive(Clone)]
 struct NetworkConfig {
-    // HTTP server configuration
-    http_host: String,
-    /// HTTP port to bind to. If None, the OS will assign a free port.
-    http_port: Option<u16>,
-    http_rpc_root: String,
-
     // TCP server configuration
     tcp_host: String,
     /// TCP port to bind to. If None, the OS will assign a free port.
     tcp_port: Option<u16>,
-
-    // HTTP client configuration
-    http_client_config: super::egress::http_router::Http2Config,
 
     // TCP client configuration
     tcp_client_config: super::egress::tcp_client::TcpRequestConfig,
@@ -138,26 +90,12 @@ impl NetworkConfig {
     /// This is the ONLY place where network-related environment variables are read.
     fn from_env(nats_client: Option<async_nats::Client>) -> Self {
         Self {
-            // HTTP server configuration
-            // If DYN_HTTP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            http_host: std::env::var("DYN_HTTP_RPC_HOST")
-                .unwrap_or_else(|_| crate::utils::get_http_rpc_host_from_env()),
-            http_port: std::env::var("DYN_HTTP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok()),
-            http_rpc_root: std::env::var("DYN_HTTP_RPC_ROOT_PATH")
-                .unwrap_or_else(|_| "/v1/rpc".to_string()),
-
             // TCP server configuration
             // If DYN_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            tcp_host: std::env::var("DYN_TCP_RPC_HOST")
-                .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env()),
+            tcp_host: crate::utils::tcp_rpc_host_from_env(),
             tcp_port: std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok()),
-
-            // HTTP client configuration (reads DYN_HTTP2_* env vars)
-            http_client_config: super::egress::http_router::Http2Config::from_env(),
 
             // TCP client configuration (reads DYN_TCP_* env vars)
             tcp_client_config: super::egress::tcp_client::TcpRequestConfig::from_env(),
@@ -230,19 +168,6 @@ impl NetworkManager {
         let config = NetworkConfig::from_env(nats_client);
 
         match mode {
-            RequestPlaneMode::Http => {
-                let port_display = config
-                    .http_port
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "OS-assigned".to_string());
-                tracing::info!(
-                    %mode,
-                    host = %config.http_host,
-                    port = %port_display,
-                    rpc_root = %config.http_rpc_root,
-                    "Initializing NetworkManager with HTTP request plane"
-                );
-            }
             RequestPlaneMode::Tcp => {
                 let port_display = config
                     .tcp_port
@@ -279,7 +204,7 @@ impl NetworkManager {
     ///
     /// # Returns
     ///
-    /// Returns a trait object that abstracts over HTTP/TCP/NATS implementations.
+    /// Returns a trait object that abstracts over TCP/NATS implementations.
     ///
     /// # Errors
     ///
@@ -302,7 +227,7 @@ impl NetworkManager {
     ///
     /// # Returns
     ///
-    /// Returns a trait object that abstracts over HTTP/TCP/NATS implementations.
+    /// Returns a trait object that abstracts over TCP/NATS implementations.
     ///
     /// # Errors
     ///
@@ -311,7 +236,6 @@ impl NetworkManager {
     /// - NATS mode is selected but NATS client is not available
     pub fn create_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         match self.mode {
-            RequestPlaneMode::Http => self.create_http_client(),
             RequestPlaneMode::Tcp => self.create_tcp_client(),
             RequestPlaneMode::Nats => self.create_nats_client(),
         }
@@ -331,51 +255,9 @@ impl NetworkManager {
 
     async fn create_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         match self.mode {
-            RequestPlaneMode::Http => self.create_http_server().await,
             RequestPlaneMode::Tcp => self.create_tcp_server().await,
             RequestPlaneMode::Nats => self.create_nats_server().await,
         }
-    }
-
-    async fn create_http_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
-        use super::ingress::http_endpoint::SharedHttpServer;
-
-        // Use the global HTTP server to ensure all workers in the same process share
-        // a single server. This is critical for correct endpoint routing.
-        let server = GLOBAL_HTTP_SERVER
-            .get_or_try_init(|| async {
-                // Use configured port if specified, otherwise use port 0 (OS assigns free port)
-                let port = self.config.http_port.unwrap_or(0);
-                let bind_addr = format!("{}:{}", self.config.http_host, port)
-                    .parse()
-                    .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
-
-                tracing::info!(
-                    bind_addr = %bind_addr,
-                    port_source = if self.config.http_port.is_some() { "DYN_HTTP_RPC_PORT" } else { "OS-assigned" },
-                    rpc_root = %self.config.http_rpc_root,
-                    "Creating HTTP request plane server"
-                );
-
-                let server = SharedHttpServer::new(bind_addr, GLOBAL_HTTP_SERVER_TOKEN.clone());
-
-                // Bind and start server, getting the actual bound address
-                let actual_addr = server.clone().bind_and_start().await?;
-
-                // Store the actual bound port globally so build_transport_type() can access it
-                set_actual_http_rpc_port(actual_addr.port());
-
-                tracing::info!(
-                    actual_addr = %actual_addr,
-                    actual_port = actual_addr.port(),
-                    "HTTP request plane server started"
-                );
-
-                Ok::<_, anyhow::Error>(server)
-            })
-            .await?;
-
-        Ok(server.clone() as Arc<dyn RequestPlaneServer>)
     }
 
     async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
@@ -437,15 +319,6 @@ impl NetworkManager {
     // ============================================================================
     // PRIVATE: Client Creation
     // ============================================================================
-
-    fn create_http_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
-        use super::egress::http_router::HttpRequestClient;
-
-        tracing::debug!("Creating HTTP request plane client with config from NetworkManager");
-        Ok(Arc::new(HttpRequestClient::with_config(
-            self.config.http_client_config.clone(),
-        )?))
-    }
 
     fn create_tcp_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         use super::egress::tcp_client::TcpRequestClient;

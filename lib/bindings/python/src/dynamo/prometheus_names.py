@@ -259,7 +259,7 @@ class labels:
     # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
     # When a metric already has a label, injection does not overwrite it (original is preserved).
     MODEL_NAME = "model_name"
-    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"

@@ -95,7 +95,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                   multiple routing targets within a single TRT-LLM worker process.
             num_workers: Number of TRT-LLM worker processes
             single_gpu: If True, all workers share GPU 0
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
 
@@ -108,7 +108,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
         namespace_suffix = generate_random_suffix()
         self.namespace = namespace or f"test-namespace-{namespace_suffix}"
         self.component_name = (
-            "prefill" if disaggregation_mode == "prefill" else "tensorrt_llm"
+            "prefill" if disaggregation_mode == "prefill" else "backend"
         )
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
@@ -286,7 +286,7 @@ def test_router_decisions_trtllm_attention_dp(
         request_plane=request_plane,
         model_name=MODEL_NAME,
         block_size=TRTLLM_BLOCK_SIZE,
-        component_name="tensorrt_llm",
+        component_name="backend",
         num_workers=1,
         single_gpu=False,
         test_dp_rank=True,
@@ -312,7 +312,7 @@ def test_router_decisions_trtllm_multiple_workers(
         request_plane=request_plane,
         model_name=MODEL_NAME,
         block_size=TRTLLM_BLOCK_SIZE,
-        component_name="tensorrt_llm",
+        component_name="backend",
         num_workers=2,
         single_gpu=True,
         test_dp_rank=False,

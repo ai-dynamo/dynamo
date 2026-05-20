@@ -109,7 +109,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             num_workers: Number of vLLM worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """

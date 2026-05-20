@@ -679,9 +679,7 @@ pub(crate) fn self_host_base_url(
         .unwrap_or_default()
         .system_host;
     let host = match configured.as_str() {
-        "0.0.0.0" | "::" | "[::]" => {
-            dynamo_runtime::utils::ip_resolver::get_local_ip_for_advertise()
-        }
+        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
         _ => configured,
     };
 
