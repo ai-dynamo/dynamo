@@ -94,9 +94,13 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% if device != "cuda" %}
-# Match NIXL meta package and all device variants with our built version.
-# The nixl meta package imports device-specific packages, so all must be at the same version.
-# https://github.com/ai-dynamo/nixl/blob/v1.0.1/src/bindings/python/nixl-meta/nixl/__init__.py
+# NIXL meta package always tries to find a cuda-backend
+# https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
+#
+# We therefore install nixl-cu* packages, and use LD_LIBRARY_PATH settings to point to our installation of nixl
+# v1.1.0 nixl-cu13 has in-built RPATH point to conflicting built-in libs with symbols unsupported in non-cuda builds.
+# we therefore avoid installing nixl-cu13
+
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eu; \
     export UV_CACHE_DIR=/root/.cache/uv; \
@@ -104,8 +108,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install \
         {{ pip_target }} --force-reinstall --no-deps \
         "nixl==${NIXL_VERSION}" \
-        "nixl-cu12==${NIXL_VERSION}" \
-        "nixl-cu13==${NIXL_VERSION}"
+        "nixl-cu12==${NIXL_VERSION}"
 {% endif %}
 
 # Copy attribution files and wheels
