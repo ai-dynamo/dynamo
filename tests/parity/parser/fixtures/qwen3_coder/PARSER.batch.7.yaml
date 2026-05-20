@@ -81,3 +81,34 @@ cases:
   PARSER.batch.7.e:
     description: Large / deep JSON-edge payload test 7.e — not yet authored for this family
     reason: Large/deep JSON-edge payload test 7.e not yet authored for qwen3_coder; existing batch.7 coverage remains in 7.a-d.
+  PARSER.batch.7.f:
+    description: Numeric precision edge preserves integer-like number literal
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      <function=set_limit>
+      <parameter=count>9007199254740993</parameter>
+      </function>
+      </tool_call>
+    tools:
+    - name: set_limit
+      parameters:
+        type: object
+        properties:
+          count:
+            type: number
+    expected:
+      dynamo: &id003
+        calls:
+        - name: set_limit
+          arguments:
+            count: 9007199254740993
+        normal_text: ''
+      vllm: &id004
+        reason: Dynamo preserves integer-like number literals before the f64 path; vLLM/SGLang round through f64 and lose precision above 2^53.
+        calls:
+        - name: set_limit
+          arguments:
+            count: 9007199254740992
+        normal_text:
+      sglang: *id004
