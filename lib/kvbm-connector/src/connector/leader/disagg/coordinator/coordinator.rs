@@ -193,15 +193,14 @@ impl ConditionalDisaggCoordinator {
         let weak_coord = Arc::downgrade(&coord);
         observer.install_commit_fn(Arc::new(
             move |request_id: &str, blocks: Vec<ImmutableBlock<G2>>| {
-                if let Some(coord) = weak_coord.upgrade() {
-                    if let Err(err) = coord.commit_output_blocks(request_id, blocks) {
+                if let Some(coord) = weak_coord.upgrade()
+                    && let Err(err) = coord.commit_output_blocks(request_id, blocks) {
                         tracing::error!(
                             request_id,
                             error = %err,
                             "commit_output_blocks failed from observer"
                         );
                     }
-                }
             },
         ));
         coord
@@ -1089,7 +1088,7 @@ impl ConditionalDisaggCoordinator {
         session_hashes.extend_from_slice(&local_match_hashes);
         let session_g2: Vec<ImmutableBlock<G2>> = prefix_g2
             .into_iter()
-            .chain(local_match_g2.into_iter())
+            .chain(local_match_g2)
             .collect();
 
         let session_id = uuid::Uuid::new_v4();
@@ -1252,14 +1251,13 @@ impl ConditionalDisaggCoordinator {
         // DashMap removes), so a duplicate invocation is safe.
         if found {
             let sink_handle = self.failure_sink.lock().clone();
-            if let Some(sink_weak) = sink_handle {
-                if let Some(sink) = sink_weak.upgrade() {
+            if let Some(sink_weak) = sink_handle
+                && let Some(sink) = sink_weak.upgrade() {
                     let request_id_owned = request_id.to_string();
                     self.runtime.spawn(async move {
                         sink.on_session_failure(request_id_owned, reason).await;
                     });
                 }
-            }
         }
     }
 }
@@ -1400,12 +1398,11 @@ impl ConditionalDisaggCoordinator {
         // requests (decode forwarded no local-match hashes) leave
         // payload install to the wrapper's inner-passthrough path; the
         // coordinator state still tracks for observer-side output flow.
-        if num_external_tokens > 0 {
-            if let Err(err) = install_payload(request_id) {
+        if num_external_tokens > 0
+            && let Err(err) = install_payload(request_id) {
                 self.states.remove(request_id);
                 return Err(err);
             }
-        }
 
         let coord = self
             .arc_self()

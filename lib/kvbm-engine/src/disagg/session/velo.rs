@@ -489,8 +489,8 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                 // Skipped when this side has no workers — see
                 // matching comment in `attach()`. Stream-only
                 // callers (no pull) remain usable.
-                if inner_for_attach.leader.worker_count() > 0 {
-                    if let Err(err) = inner_for_attach
+                if inner_for_attach.leader.worker_count() > 0
+                    && let Err(err) = inner_for_attach
                         .leader
                         .ensure_remote_metadata(instance_id)
                         .await
@@ -505,7 +505,6 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                             });
                         return;
                     }
-                }
                 inner_for_attach
                     .lifecycle_stream
                     .push(LifecycleEvent::Attached {

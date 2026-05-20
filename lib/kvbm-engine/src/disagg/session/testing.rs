@@ -803,11 +803,10 @@ impl Session for MockSession {
         };
         // Paired mode: deliver Finished to partner so its
         // peer_finished + maybe_finalize fire.
-        if need_signal {
-            if let Some(partner) = self.partner() {
+        if need_signal
+            && let Some(partner) = self.partner() {
                 partner.inject_peer_finished();
             }
-        }
         self.maybe_finalize_paired();
     }
 
@@ -994,15 +993,14 @@ impl SessionFactory for MockSessionFactory {
             Some(peer_instance_id),
             Some(Arc::clone(&self.active_count)),
         );
-        if let Some(registry) = &self.paired_registry {
-            if let Some(holder) = registry.get(&session_id).map(|e| Arc::clone(e.value())) {
+        if let Some(registry) = &self.paired_registry
+            && let Some(holder) = registry.get(&session_id).map(|e| Arc::clone(e.value())) {
                 session.pair_with(&holder);
                 // Mirror velo: holder receives `Frame::Attach` →
                 // pushes `LifecycleEvent::Attached` on its own
                 // lifecycle stream.
                 holder.inject_lifecycle(LifecycleEvent::Attached { peer_instance_id });
             }
-        }
         *self.last_attached.lock() = Some(Arc::clone(&session));
         self.attach_records.lock().push(AttachRecord {
             session_id,
@@ -1199,7 +1197,7 @@ mod tests {
 
         let hashes = vec![committed[0].hash];
         let pull_fut = session.pull(hashes, dst);
-        let handle = tokio::spawn(async move { pull_fut.await });
+        let handle = tokio::spawn(pull_fut);
 
         session.wait_pull_count(1).await;
         session.resolve_pull(0, Ok(()));
@@ -1226,7 +1224,7 @@ mod tests {
         let hashes = vec![committed[0].hash];
         let session_clone = Arc::clone(&session);
         let pull_fut = session.pull(hashes, dst);
-        let handle = tokio::spawn(async move { pull_fut.await });
+        let handle = tokio::spawn(pull_fut);
 
         session_clone.wait_pull_count(1).await;
         session_clone.resolve_pull(0, Err(anyhow!("simulated transport failure")));

@@ -111,7 +111,7 @@ async fn drop_releases_egress_port() {
 
     // Drop the last InstanceLeader clone — ConsolidatorGuard::Drop must run
     // shutdown to completion. We give it a bounded budget to detect a hang.
-    let _ = tokio::task::spawn_blocking(move || drop(leader))
+    tokio::task::spawn_blocking(move || drop(leader))
         .await
         .expect("drop task must not panic");
 

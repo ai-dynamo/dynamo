@@ -404,7 +404,7 @@ pub fn validate_remote_metadata(
     // Gate 4: TP divisibility — one tp_size must divide the other.
     let local_tp = local.tp_size;
     let remote_tp = head.tp_size;
-    if local_tp % remote_tp != 0 && remote_tp % local_tp != 0 {
+    if !local_tp.is_multiple_of(remote_tp) && !remote_tp.is_multiple_of(local_tp) {
         return Err(CompatError::Coprime {
             local_tp,
             remote_tp,
@@ -472,7 +472,7 @@ pub fn validate_remote_metadata(
 
     // Gate 7: required logical tier present on every remote rank.
     for (i, tiers) in remote_tiers.iter().enumerate() {
-        if !tiers.iter().any(|t| *t == required_tier) {
+        if !tiers.contains(&required_tier) {
             return Err(CompatError::MissingLogicalTier {
                 rank: i,
                 tier: required_tier,
@@ -816,7 +816,7 @@ mod tests {
         );
     }
 
-    fn tier_refs<'a>(t: &'a [Vec<LogicalLayoutHandle>]) -> Vec<&'a [LogicalLayoutHandle]> {
+    fn tier_refs(t: &[Vec<LogicalLayoutHandle>]) -> Vec<&[LogicalLayoutHandle]> {
         t.iter().map(|v| v.as_slice()).collect()
     }
 

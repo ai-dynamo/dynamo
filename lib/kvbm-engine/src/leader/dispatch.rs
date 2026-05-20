@@ -243,7 +243,7 @@ pub fn plan_pull(
 
     let local_tp = local.tp_size;
     let remote_tp = head.tp_size;
-    if local_tp % remote_tp != 0 && remote_tp % local_tp != 0 {
+    if !local_tp.is_multiple_of(remote_tp) && !remote_tp.is_multiple_of(local_tp) {
         bail!(
             "plan_pull: coprime tp sizes (local={local_tp}, remote={remote_tp}); \
              one must divide the other",

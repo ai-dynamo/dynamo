@@ -874,8 +874,8 @@ fn plan_and_lower(
             // gives CudaGraphReplay a higher score (1050) than DirectDma (1000),
             // so select_candidate picks it when the cap is on. The ops are shared
             // with the DirectDma candidate; rebinding happens per-launch.
-            if capabilities.cuda_graph_replay && strategy.is_cuda_family() {
-                if let [Candidate::DirectDma { ops }] = &candidates[..] {
+            if capabilities.cuda_graph_replay && strategy.is_cuda_family()
+                && let [Candidate::DirectDma { ops }] = &candidates[..] {
                     let route_family = match strategy {
                         TransferStrategy::CudaAsyncH2D => 0u8,
                         TransferStrategy::CudaAsyncD2H => 1u8,
@@ -900,7 +900,6 @@ fn plan_and_lower(
                         ops: replay_ops,
                     });
                 }
-            }
             let sel_ctx = SelectionContext {
                 strategy,
                 descriptor_count: candidates.len(),

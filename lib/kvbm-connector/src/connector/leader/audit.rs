@@ -51,7 +51,7 @@ pub fn audit_build_meta(role: &'static str, output: &crate::common::SchedulerOut
     let n_new = output.scheduled_new_reqs.len();
     let n_cached = output.scheduled_cached_reqs.len();
     let n_total = n_new + n_cached;
-    if n_total == 0 && output.iteration % 20 != 0 {
+    if n_total == 0 && !output.iteration.is_multiple_of(20) {
         return;
     }
 
