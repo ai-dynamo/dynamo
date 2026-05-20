@@ -53,14 +53,7 @@ fn is_otlp_export_enabled() -> bool {
     if OTLP_EXPORT_OVERRIDES.load(Ordering::Relaxed) > 0 {
         return true;
     }
-    std::env::var("OTEL_EXPORT_ENABLED")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    dynamo_runtime::config::env_is_truthy("OTEL_EXPORT_ENABLED")
 }
 
 /// On drop, marks the `engine.generate` span as cancelled unless
