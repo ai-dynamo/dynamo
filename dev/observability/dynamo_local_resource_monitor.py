@@ -1331,9 +1331,17 @@ def build_monitor_server(collector: MetricsCollector):
         max_http_buffer_size=50 * 1024 * 1024,
     )
 
-    ui_state = {"view_minutes": 2}
     client_cursors: dict[str, dict] = {}
     client_lock = threading.Lock()
+
+    def new_client_cursor() -> dict:
+        return {
+            "main": 0,
+            "pcie": [0] * collector.gpu_count,
+            "disk": 0,
+            "view_minutes": 2,
+            "next_push": 0.0,
+        }
 
     @app.route("/")
     def index():
@@ -1350,11 +1358,7 @@ def build_monitor_server(collector: MetricsCollector):
     def handle_connect():
         sid = flask.request.sid
         with client_lock:
-            client_cursors[sid] = {
-                "main": 0,
-                "pcie": [0] * collector.gpu_count,
-                "disk": 0,
-            }
+            client_cursors[sid] = new_client_cursor()
 
         def send_init():
             for _ in range(50):
@@ -1364,11 +1368,16 @@ def build_monitor_server(collector: MetricsCollector):
                 time.sleep(0.1)
             snapshot = collector.snapshot_full()
             with client_lock:
-                client_cursors[sid] = {
-                    "main": snapshot["counter_main"],
-                    "pcie": list(snapshot["counter_pcie"]),
-                    "disk": snapshot["counter_disk"],
-                }
+                cursor = client_cursors.get(sid)
+                if cursor is None:
+                    return
+                cursor.update(
+                    {
+                        "main": snapshot["counter_main"],
+                        "pcie": list(snapshot["counter_pcie"]),
+                        "disk": snapshot["counter_disk"],
+                    }
+                )
             socketio.emit("init", snapshot, to=sid)
 
         threading.Thread(target=send_init, daemon=True).start()
@@ -1383,16 +1392,24 @@ def build_monitor_server(collector: MetricsCollector):
         sid = flask.request.sid
         snapshot = collector.snapshot_full()
         with client_lock:
-            client_cursors[sid] = {
-                "main": snapshot["counter_main"],
-                "pcie": list(snapshot["counter_pcie"]),
-                "disk": snapshot["counter_disk"],
-            }
+            cursor = client_cursors.get(sid)
+            if cursor is None:
+                return
+            cursor.update(
+                {
+                    "main": snapshot["counter_main"],
+                    "pcie": list(snapshot["counter_pcie"]),
+                    "disk": snapshot["counter_disk"],
+                }
+            )
         socketio.emit("init", snapshot, to=sid)
 
     @socketio.on("view_minutes")
     def handle_view_minutes(view_minutes):
-        ui_state["view_minutes"] = int(view_minutes)
+        with client_lock:
+            cursor = client_cursors.get(flask.request.sid)
+            if cursor is not None:
+                cursor["view_minutes"] = int(view_minutes)
 
     push_policy = {
         1: (0.075, 1),
@@ -1404,37 +1421,56 @@ def build_monitor_server(collector: MetricsCollector):
 
     def push_loop():
         while True:
-            view_minutes = ui_state.get("view_minutes", 2)
-            push_sec, step = push_policy.get(view_minutes, (0.100, 1))
-            time.sleep(push_sec)
-            with collector.lock:
-                counter_main = collector.counter_main
-                counter_pcie = list(collector.counter_pcie)
-                counter_disk = collector.counter_disk
+            time.sleep(0.075)
+            now = time.monotonic()
             with client_lock:
-                cursors = list(client_cursors.items())
+                cursors = [
+                    (sid, cursor.copy())
+                    for sid, cursor in client_cursors.items()
+                    if now >= cursor.get("next_push", 0.0)
+                ]
 
             for sid, cursor in cursors:
                 last_main = cursor["main"]
                 last_pcie = cursor["pcie"]
                 last_disk = cursor["disk"]
+                push_sec, step = push_policy.get(
+                    cursor.get("view_minutes", 2), (0.100, 1)
+                )
+                delta = collector.snapshot_delta(
+                    last_main, last_pcie, last_disk, step=step
+                )
+                counter_main = delta["counter_main"]
+                counter_pcie = list(delta["counter_pcie"])
+                counter_disk = delta["counter_disk"]
                 if (
                     counter_main <= last_main
                     and counter_pcie == last_pcie
                     and counter_disk <= last_disk
                 ):
+                    with client_lock:
+                        live_cursor = client_cursors.get(sid)
+                        if live_cursor is not None:
+                            live_cursor["next_push"] = now + push_sec
                     continue
-                delta = collector.snapshot_delta(
-                    last_main, last_pcie, last_disk, step=step
-                )
                 with client_lock:
-                    if sid not in client_cursors:
+                    live_cursor = client_cursors.get(sid)
+                    if live_cursor is None:
                         continue
-                    client_cursors[sid] = {
-                        "main": counter_main,
-                        "pcie": counter_pcie,
-                        "disk": counter_disk,
-                    }
+                    if (
+                        live_cursor["main"] != last_main
+                        or live_cursor["pcie"] != last_pcie
+                        or live_cursor["disk"] != last_disk
+                    ):
+                        continue
+                    live_cursor.update(
+                        {
+                            "main": counter_main,
+                            "pcie": counter_pcie,
+                            "disk": counter_disk,
+                            "next_push": now + push_sec,
+                        }
+                    )
                 socketio.emit("delta", delta, to=sid)
 
     return socketio, app, push_loop
