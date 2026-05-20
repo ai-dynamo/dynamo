@@ -88,6 +88,198 @@ fn remove_known_non_jinja2_tags(template: &str) -> String {
         .replace("{% endgeneration %}", "")
 }
 
+/// Temporary compatibility shim for MiniJinja dotted integer lookup parsing.
+///
+/// MiniJinja supports terminal dotted integer lookup like `items.0`, but currently
+/// parses mid-chain lookup like `m.content.0.type` as a float token (`0.`) and
+/// fails before rendering. Jinja2 treats `a.0.b` like `a[0].b`, so rewrite only
+/// `.digits.` inside Jinja expression/block regions.
+///
+/// TODO: remove after minijinja PR 900:
+/// https://github.com/mitsuhiko/minijinja/pull/900
+fn rewrite_midchain_dotted_integer_lookup(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+
+    while i < template.len() {
+        let rest = &template[i..];
+
+        if rest.starts_with("{#") {
+            if let Some(end) = template[i + 2..].find("#}") {
+                let end = i + 2 + end + 2;
+                out.push_str(&template[i..end]);
+                i = end;
+            } else {
+                out.push_str(rest);
+                break;
+            }
+            continue;
+        }
+
+        if rest.starts_with("{%")
+            && let Some(tag_end) = find_jinja_tag_end(template, i + 2, "%}")
+        {
+            let tag_inner = &template[i + 2..tag_end - 2];
+            if is_basic_block_tag(tag_inner, "raw") {
+                if let Some(raw_end) = find_raw_block_end(template, tag_end) {
+                    out.push_str(&template[i..raw_end]);
+                    i = raw_end;
+                } else {
+                    out.push_str(rest);
+                    break;
+                }
+                continue;
+            }
+        }
+
+        let close = if rest.starts_with("{{") {
+            Some("}}")
+        } else if rest.starts_with("{%") {
+            Some("%}")
+        } else {
+            None
+        };
+
+        if let Some(close) = close {
+            out.push_str(&template[i..i + 2]);
+            i += 2;
+
+            let mut quote = None;
+            let mut escaped = false;
+            while i < template.len() {
+                if quote.is_none() && template[i..].starts_with(close) {
+                    out.push_str(&template[i..i + close.len()]);
+                    i += close.len();
+                    break;
+                }
+
+                let ch = template[i..].chars().next().unwrap();
+
+                if let Some(active_quote) = quote {
+                    out.push(ch);
+                    i += ch.len_utf8();
+                    if escaped {
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == active_quote {
+                        quote = None;
+                    }
+                    continue;
+                }
+
+                if ch == '\'' || ch == '"' {
+                    quote = Some(ch);
+                    out.push(ch);
+                    i += ch.len_utf8();
+                    continue;
+                }
+
+                if ch == '.' {
+                    let previous_is_digit = i > 0 && template.as_bytes()[i - 1].is_ascii_digit();
+                    if !previous_is_digit {
+                        let digits_start = i + 1;
+                        let mut digits_end = digits_start;
+                        while digits_end < template.len() {
+                            let next = template[digits_end..].chars().next().unwrap();
+                            if next.is_ascii_digit() {
+                                digits_end += next.len_utf8();
+                            } else {
+                                break;
+                            }
+                        }
+
+                        if digits_end > digits_start
+                            && digits_end < template.len()
+                            && template[digits_end..].starts_with('.')
+                        {
+                            out.push('[');
+                            out.push_str(&template[digits_start..digits_end]);
+                            out.push(']');
+                            i = digits_end;
+                            continue;
+                        }
+                    }
+                }
+
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    out
+}
+
+fn find_jinja_tag_end(template: &str, mut i: usize, close: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+
+    while i < template.len() {
+        if quote.is_none() && template[i..].starts_with(close) {
+            return Some(i + close.len());
+        }
+
+        let ch = template[i..].chars().next().unwrap();
+        if let Some(active_quote) = quote {
+            i += ch.len_utf8();
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        }
+        i += ch.len_utf8();
+    }
+
+    None
+}
+
+fn is_basic_block_tag(tag_inner: &str, tag_name: &str) -> bool {
+    let mut trimmed = tag_inner.trim();
+    if trimmed.starts_with('-') || trimmed.starts_with('+') {
+        trimmed = trimmed[1..].trim_start();
+    }
+
+    let Some(rest) = trimmed.strip_prefix(tag_name) else {
+        return false;
+    };
+
+    match rest.as_bytes().first() {
+        Some(b) if b.is_ascii_alphanumeric() || *b == b'_' => return false,
+        _ => {}
+    }
+
+    let rest = rest.trim();
+    rest.is_empty() || rest == "-" || rest == "+"
+}
+
+fn find_raw_block_end(template: &str, mut i: usize) -> Option<usize> {
+    while i < template.len() {
+        let tag_start = i + template[i..].find("{%")?;
+        let tag_end = find_jinja_tag_end(template, tag_start + 2, "%}")?;
+        let tag_inner = &template[tag_start + 2..tag_end - 2];
+        if is_basic_block_tag(tag_inner, "endraw") {
+            return Some(tag_end);
+        }
+        i = tag_end;
+    }
+
+    None
+}
+
 impl JinjaEnvironment {
     fn env(self) -> Environment<'static> {
         self.env
@@ -153,7 +345,12 @@ impl HfTokenizerConfigJsonFormatter {
                     supports_add_generation_prompt = Some(true);
                 }
                 // Remove known non-standard tags before validation (they don't affect output)
-                let template_cleaned = remove_known_non_jinja2_tags(x);
+                let mut template_cleaned = remove_known_non_jinja2_tags(x);
+                // Temporary: patch behavior of MiniJinja so that it recognizes
+                // references like xxx.0.yyy.
+                // TODO: remove after minijinja PR 900
+                // (https://github.com/mitsuhiko/minijinja/pull/900)
+                template_cleaned = rewrite_midchain_dotted_integer_lookup(&template_cleaned);
                 env.add_template_owned("default", template_cleaned.clone())?;
                 env.add_template_owned("tool_use", template_cleaned)?;
             }
@@ -178,7 +375,13 @@ impl HfTokenizerConfigJsonFormatter {
                             supports_add_generation_prompt = Some(false);
                         }
                         // Remove known non-standard tags before validation (they don't affect output)
-                        let template_cleaned = remove_known_non_jinja2_tags(v);
+                        let mut template_cleaned = remove_known_non_jinja2_tags(v);
+                        // Temporary: patch behavior of MiniJinja so that it recognizes
+                        // references like xxx.0.yyy.
+                        // TODO: remove after minijinja PR 900
+                        // (https://github.com/mitsuhiko/minijinja/pull/900)
+                        template_cleaned =
+                            rewrite_midchain_dotted_integer_lookup(&template_cleaned);
                         env.add_template_owned(k.to_string(), template_cleaned)?;
                     }
                 }
@@ -278,5 +481,59 @@ mod tests {
         let template = "Start {% generation %}Part 1{% endgeneration %} middle {% generation %}Part 2{% endgeneration %}";
         let result = remove_known_non_jinja2_tags(template);
         assert_eq!(result, "Start Part 1 middle Part 2");
+    }
+
+    #[test]
+    fn test_rewrite_midchain_dotted_integer_lookup() {
+        let template = "{{ m.content.0.type }}";
+        let result = rewrite_midchain_dotted_integer_lookup(template);
+        assert_eq!(result, "{{ m.content[0].type }}");
+    }
+
+    #[test]
+    fn test_rewrite_midchain_dotted_integer_lookup_in_block() {
+        let template = r#"{% if m.content.0.type == "tool_reference" %}x{% endif %}"#;
+        let result = rewrite_midchain_dotted_integer_lookup(template);
+        assert_eq!(
+            result,
+            r#"{% if m.content[0].type == "tool_reference" %}x{% endif %}"#
+        );
+    }
+
+    #[test]
+    fn test_rewrite_preserves_text_strings_comments_and_terminal_lookup() {
+        let template = r#"text m.content.0.type {{ "m.content.0.type" }} {# m.content.0.type #} {{ items.0 }}"#;
+        let result = rewrite_midchain_dotted_integer_lookup(template);
+        assert_eq!(result, template);
+    }
+
+    #[test]
+    fn test_rewrite_preserves_raw_blocks() {
+        let template = r#"{% raw %}{{ m.content.0.type }}{% endraw %} {{ m.content.0.type }}"#;
+        let result = rewrite_midchain_dotted_integer_lookup(template);
+        assert_eq!(
+            result,
+            r#"{% raw %}{{ m.content.0.type }}{% endraw %} {{ m.content[0].type }}"#
+        );
+    }
+
+    #[test]
+    fn test_rewrite_preserves_raw_blocks_with_whitespace_control() {
+        let template = r#"{%- raw -%}{{ m.content.0.type }}{%- endraw -%} {{ m.content.0.type }}"#;
+        let result = rewrite_midchain_dotted_integer_lookup(template);
+        assert_eq!(
+            result,
+            r#"{%- raw -%}{{ m.content.0.type }}{%- endraw -%} {{ m.content[0].type }}"#
+        );
+    }
+
+    #[test]
+    fn test_rewrite_preserves_numeric_literals() {
+        let template = r#"{{ 1.5.10 }} {{ 3.14.something }} {{ m.content.0.type }}"#;
+        let result = rewrite_midchain_dotted_integer_lookup(template);
+        assert_eq!(
+            result,
+            r#"{{ 1.5.10 }} {{ 3.14.something }} {{ m.content[0].type }}"#
+        );
     }
 }
