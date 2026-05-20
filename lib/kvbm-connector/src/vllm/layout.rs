@@ -109,6 +109,64 @@ fn derive_block_layout_from_physical(phys_layout: &KvDimLayout) -> KvBlockLayout
     }
 }
 
+/// Reject a *physical* layout whose head axes are transposed in memory.
+///
+/// In every ordering KVBM synthesizes strides for (NHD/HND/Universal, MLA,
+/// payload backends), `HeadSize`/`Payload` is the innermost axis and, when
+/// present, `HeadCount` sits strictly outer of it. A backend whose
+/// `get_kv_cache_shape` reports the tail axes swapped (`HeadCount` innermost)
+/// still produces a *fully contiguous* tensor and still passes the
+/// commutative checks downstream — `inner_dim = HeadCount * HeadSize` and the
+/// total-bytes product are both order-agnostic. The stride synthesis in
+/// `FullyContiguousLayout::layout_view` would then treat the inner axis as
+/// `HeadSize`, mis-projecting every per-head transfer the permute kernels do.
+///
+/// `phys_layout` is in descending-stride (physical memory) order, so "inner"
+/// means a larger index. This asserts:
+/// - the innermost axis is `HeadSize` or `Payload` (the per-token tail), and
+/// - if both `HeadCount` and `HeadSize` are present, `HeadCount` precedes
+///   `HeadSize` (is strictly outer).
+///
+/// This is the stride-derived form of the positional `heads @ 4`,
+/// `head_size @ 5` guard — stronger than a set-membership check, which a
+/// `HeadCount`/`HeadSize` transposition passes silently.
+fn assert_head_axes_ordering(phys_layout: &KvDimLayout) -> Result<()> {
+    let dims = phys_layout.dims();
+    let order = || {
+        dims.iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+
+    // Innermost axis must be the per-token tail (HeadSize or Payload).
+    match dims.last() {
+        Some(KvDim::HeadSize) | Some(KvDim::Payload) => {}
+        other => bail!(
+            "physical layout [{}] does not end in HeadSize/Payload (innermost axis \
+             is {:?}); the per-token tail must be the innermost (unit-stride) axis \
+             or the permute kernels will mis-address per-head data",
+            order(),
+            other,
+        ),
+    }
+
+    if let (Some(hc), Some(hs)) = (
+        phys_layout.position(KvDim::HeadCount),
+        phys_layout.position(KvDim::HeadSize),
+    ) && hc > hs
+    {
+        bail!(
+            "physical layout [{}] has HeadCount inner to HeadSize (HeadCount @ {hc}, \
+             HeadSize @ {hs}); HeadCount must be strictly outer. The backend's tail \
+             axes appear transposed — strides would be mis-projected because \
+             inner_dim = HeadCount*HeadSize is commutative and cannot catch this.",
+            order(),
+        );
+    }
+    Ok(())
+}
+
 /// Determine the KV cache layout configuration and block dimension from
 /// a caller-supplied (logical) [`KvDimLayout`] plus the actual tensor
 /// strides.
@@ -180,6 +238,7 @@ pub fn determine_kv_layout(
     // with the same backend, so divergence here is a bug we want to
     // surface at register time rather than later.
     let phys_layout = relabel_to_physical_order(0, &kv_tensors[0], dim_layout)?;
+    assert_head_axes_ordering(&phys_layout)?;
     let ref_strides = kv_tensors[0].stride();
     let ref_elem = kv_tensors[0].element_size();
     for (i, tensor) in kv_tensors.iter().enumerate().skip(1) {
@@ -361,6 +420,7 @@ pub fn determine_cross_layer_kv_layout(
     // Relabel to physical order so derived_block_layout / size lookups
     // see the byte-order view.
     let phys_layout = relabel_to_physical_order(0, kv_tensor, dim_layout)?;
+    assert_head_axes_ordering(&phys_layout)?;
 
     let derived_block_layout = derive_block_layout_from_physical(&phys_layout);
     if declared_block_layout != KvBlockLayout::Unknown
@@ -534,6 +594,49 @@ mod tests {
             vec![2, num_blocks, page_size, nh, hd],
         )
         .unwrap()
+    }
+
+    /// Tail-swap guard: a tensor whose `HeadCount`/`HeadSize` axes are
+    /// transposed in memory (HeadCount innermost) is fully contiguous and
+    /// passes the commutative `inner_dim = nh*hd` / total-bytes checks, but
+    /// must be rejected by `assert_head_axes_ordering` — otherwise the
+    /// stride synthesis would treat HeadCount as the inner (HeadSize) axis
+    /// and mis-project every per-head transfer.
+    #[test]
+    fn rejects_headcount_headsize_tail_swap() {
+        let n_blocks = 1024;
+        let page = 16;
+        let nh = 8;
+        let hd = 128;
+        let dtype = 2;
+        // Logical labels as Python would report them for NHD.
+        let dim_layout = nhd_per_layer_layout(n_blocks, page, nh, hd);
+        // Element strides with HeadCount as the innermost (unit-stride) axis
+        // and HeadSize just outside it — the transposition. Order matches
+        // the logical dims [Outer, Block, Page, HeadCount, HeadSize].
+        let s_hc = 1;
+        let s_hs = nh; // 8
+        let s_pg = nh * hd; // 1024
+        let s_bk = page * nh * hd; // 16384
+        let s_ot = n_blocks * page * nh * hd; // 16777216
+        let tensors = vec![TestTensor::arc_strided(
+            vec![2, n_blocks, page, nh, hd],
+            vec![s_ot, s_bk, s_pg, s_hc, s_hs],
+            dtype,
+        )];
+        let err = determine_kv_layout(
+            n_blocks,
+            dtype,
+            &tensors,
+            &dim_layout,
+            KvBlockLayout::OperationalNHD,
+        )
+        .expect_err("tail-swapped HeadCount/HeadSize must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HeadSize") || msg.contains("HeadCount"),
+            "error should name the transposed head axes, got: {msg}"
+        );
     }
 
     /// FlashAttn NHD per-layer: outer-first, Block at axis 1. Resolves to
