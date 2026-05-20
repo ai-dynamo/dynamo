@@ -110,13 +110,13 @@ def test_staging_prep_starts_before_restore(monkeypatch):
         assert allow_finish.wait(timeout=1.0)
         return FakeApi()
 
-    monkeypatch.setattr(
-        nixl_staging.cuda_utils,
-        "cuda_runtime_set_device",
-        lambda _device: None,
-    )
+    class _FakeVMM:
+        def runtime_set_device(self, _device):
+            pass
+
+    fake_vmm = _FakeVMM()
     monkeypatch.setattr(nixl_staging, "load_nixl_api", fake_load_nixl_api)
-    monkeypatch.setattr(nixl_staging, "make_pinned_copy_slots", lambda _count: [])
+    monkeypatch.setattr(nixl_staging, "make_pinned_copy_slots", lambda _vmm, _count: [])
 
     session = _NixlPosixStagingTransferSession(
         backend_name="test-backend",
@@ -127,6 +127,7 @@ def test_staging_prep_starts_before_restore(monkeypatch):
         warn_under_parallelized=False,
         posix_backend_params={"ios_pool_size": "64", "kernel_queue_size": "16"},
         sources=[source],
+        vmm=fake_vmm,
     )
     try:
         assert prep_started.wait(timeout=1.0)

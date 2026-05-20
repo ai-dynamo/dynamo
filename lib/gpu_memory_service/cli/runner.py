@@ -58,6 +58,7 @@ async def serve_configs(configs: Sequence[Config]) -> None:
         logger.info("Starting GPU Memory Service Server for device %d", config.device)
         logger.info("GMS tag: %s", config.tag)
         logger.info("Socket path: %s", config.socket_path)
+        logger.info("VMM device kind: %s", config.device_kind.value)
         logger.info(
             "Allocation retry config: interval=%ss timeout=%s",
             config.alloc_retry_interval,
@@ -73,6 +74,7 @@ async def serve_configs(configs: Sequence[Config]) -> None:
                 device=config.device,
                 allocation_retry_interval=config.alloc_retry_interval,
                 allocation_retry_timeout=config.alloc_retry_timeout,
+                device_kind=config.device_kind,
             )
         )
 

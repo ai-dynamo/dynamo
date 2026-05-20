@@ -8,8 +8,8 @@ import json
 import os
 from typing import Any, Dict, Optional, Sequence, Tuple
 
-from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device
 from gpu_memory_service.snapshot.backends.pinned_host import (
     PINNED_COPY_CHUNK_SIZE,
     close_pinned_copy_slots,
@@ -55,6 +55,7 @@ class DeviceToFileWriter:
         file_path: str,
         *,
         device: Optional[int] = None,
+        device_kind: VMMDeviceType = VMMDeviceType.CUDA,
         buffers: int = _SAVE_COPY_BUFFERS,
         chunk_size: int = PINNED_COPY_CHUNK_SIZE,
     ) -> None:
@@ -65,9 +66,10 @@ class DeviceToFileWriter:
             raise ValueError("buffers must be positive")
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
+        self._vmm = get_vmm_device(device_kind)
         if device is not None:
-            cuda_utils.cuda_runtime_set_device(device)
-        self._slots = make_pinned_copy_slots(buffers)
+            self._vmm.runtime_set_device(device)
+        self._slots = make_pinned_copy_slots(self._vmm, buffers)
         self._slot_index = 0
         self._closed = False
         try:

@@ -37,7 +37,7 @@ except ImportError:
     cuda_runtime = _MissingCudaRuntime()
 
 
-def list_devices() -> list[int]:
+def list_cuda_devices() -> list[int]:
     """Return list of CUDA device indices visible to this process via NVML."""
     import pynvml
 
@@ -51,7 +51,7 @@ def list_devices() -> list[int]:
     return list(range(count))
 
 
-def device_memory_info(device: int) -> tuple[int, int]:
+def cuda_device_memory_info(device: int) -> tuple[int, int]:
     """Return ``(free_bytes, total_bytes)`` for a CUDA device via NVML."""
     import pynvml
 
@@ -129,19 +129,6 @@ def cumem_export_to_shareable_handle(handle: int) -> int:
     )
     cuda_check_result(result, "cuMemExportToShareableHandle")
     return int(fd)
-
-
-def align_to_granularity(size: int, granularity: int) -> int:
-    """Align size up to VMM granularity.
-
-    Args:
-        size: Size in bytes
-        granularity: Allocation granularity
-
-    Returns:
-        Aligned size
-    """
-    return ((size + granularity - 1) // granularity) * granularity
 
 
 def cumem_import_from_shareable_handle_close_fd(fd: int) -> int:
@@ -306,3 +293,111 @@ def cuda_memcpy_d2h_async(
         ),
         "cudaMemcpyAsync",
     )
+
+
+class CudaVMM:
+    """``VMMDevice`` Protocol implementation backed by the CUDA driver API.
+
+    Methods delegate to the module-level helper.
+
+    """
+
+    # ----- driver lifecycle -------------------------------------------------
+
+    def ensure_initialized(self) -> None:
+        cuda_ensure_initialized()
+
+    def synchronize(self) -> None:
+        cuda_synchronize()
+
+    # ----- discovery / sizing -----------------------------------------------
+
+    def list_devices(self) -> list[int]:
+        return list_cuda_devices()
+
+    def device_memory_info(self, device: int) -> tuple[int, int]:
+        return cuda_device_memory_info(device)
+
+    def get_allocation_granularity(self, device: int) -> int:
+        return cumem_get_allocation_granularity(device)
+
+    # ----- physical memory --------------------------------------------------
+
+    def create_tolerate_oom(self, size: int, device: int) -> tuple[bool, int]:
+        return cumem_create_tolerate_oom(size, device)
+
+    def release(self, handle: int) -> None:
+        cumem_release(handle)
+
+    # ----- shareable-handle export / import ---------------------------------
+
+    def export_to_shareable_handle(self, handle: int) -> int:
+        return cumem_export_to_shareable_handle(handle)
+
+    def import_shareable_handle_close_fd(self, fd: int) -> int:
+        return cumem_import_from_shareable_handle_close_fd(fd)
+
+    # ----- virtual address space + mapping ----------------------------------
+
+    def address_reserve(self, size: int, granularity: int) -> int:
+        return cumem_address_reserve(size, granularity)
+
+    def address_free(self, va: int, size: int) -> None:
+        cumem_address_free(va, size)
+
+    def map(self, va: int, size: int, handle: int) -> None:
+        cumem_map(va, size, handle)
+
+    def unmap(self, va: int, size: int) -> None:
+        cumem_unmap(va, size)
+
+    def set_access(
+        self, va: int, size: int, device: int, access: GrantedLockType
+    ) -> None:
+        cumem_set_access(va, size, device, access)
+
+    # ----- pointer validation -----------------------------------------------
+
+    def validate_pointer(self, va: int) -> None:
+        cuda_validate_pointer(va)
+
+    # ----- runtime helpers --------------------------------------------------
+
+    def runtime_check_result(self, result, name: str) -> None:
+        cuda_runtime_check_result(result, name)
+
+    def runtime_set_device(self, device: int) -> None:
+        cuda_runtime_set_device(device)
+
+    def host_register(self, ptr: int, size: int) -> None:
+        cuda_host_register(ptr, size)
+
+    def host_unregister(self, ptr: int) -> None:
+        cuda_host_unregister(ptr)
+
+    def stream_create_nonblocking(self):
+        return cuda_stream_create_nonblocking()
+
+    def stream_destroy(self, stream) -> None:
+        cuda_stream_destroy(stream)
+
+    def stream_synchronize(self, stream) -> None:
+        cuda_stream_synchronize(stream)
+
+    def memcpy_h2d_async(
+        self,
+        dst_ptr: int,
+        src_ptr: int,
+        size: int,
+        stream,
+    ) -> None:
+        cuda_memcpy_h2d_async(dst_ptr, src_ptr, size, stream)
+
+    def memcpy_d2h_async(
+        self,
+        dst_ptr: int,
+        src_ptr: int,
+        size: int,
+        stream,
+    ) -> None:
+        cuda_memcpy_d2h_async(dst_ptr, src_ptr, size, stream)

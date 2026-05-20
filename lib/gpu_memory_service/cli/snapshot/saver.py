@@ -16,8 +16,8 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     device_sharded_ssd_roots,
     parse_sharded_ssd_roots,
@@ -38,6 +38,7 @@ def _save_device(
     lock_timeout_ms: int,
     shard_size_bytes: int,
     sharded_ssd_roots: list[str],
+    device_kind: VMMDeviceType,
 ) -> None:
     output_dir = os.path.join(checkpoint_dir, f"device-{device}")
     shard_roots = device_sharded_ssd_roots(
@@ -65,6 +66,7 @@ def _save_device(
         timeout_ms=lock_timeout_ms,
         shard_size_bytes=shard_size_bytes,
         sharded_ssd_roots=shard_roots,
+        device_kind=device_kind,
     ).save(max_workers=max_workers)
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint saved: device=%d elapsed=%.2fs", device, elapsed)
@@ -107,6 +109,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Comma-separated SSD roots for sharded prototype saves.",
     )
+    parser.add_argument(
+        "--device-kind",
+        type=str,
+        default=VMMDeviceType.CUDA.value,
+        choices=[d.value for d in VMMDeviceType],
+        help="VMM device kind (default: cuda).",
+    )
     return parser
 
 
@@ -122,7 +131,10 @@ def main(argv: list[str] | None = None) -> None:
     shard_size_bytes = args.shard_size_bytes
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
 
-    devices = cuda_utils.list_devices()
+    device_kind = VMMDeviceType.from_str(args.device_kind)
+    _vmm = get_vmm_device(device_kind)
+    _vmm.ensure_initialized()
+    devices = _vmm.list_devices()
     logger.info(
         "Starting GMS save for %d devices lock_timeout_ms=%d sharded_ssd_roots=%s",
         len(devices),
@@ -140,6 +152,7 @@ def main(argv: list[str] | None = None) -> None:
                 lock_timeout_ms,
                 shard_size_bytes,
                 sharded_ssd_roots,
+                device_kind,
             ): dev
             for dev in devices
         }

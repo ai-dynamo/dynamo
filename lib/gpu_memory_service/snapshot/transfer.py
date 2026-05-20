@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
+from gpu_memory_service.common.vmm import VMMDeviceType
 from gpu_memory_service.snapshot.model import AllocationEntry
 
 
@@ -49,6 +50,7 @@ class GMSSnapshotConfig:
 
     device: int
     max_workers: int
+    device_kind: VMMDeviceType = VMMDeviceType.CUDA
     backend_config: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

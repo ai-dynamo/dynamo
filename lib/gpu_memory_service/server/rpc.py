@@ -21,6 +21,7 @@ from gpu_memory_service.common.protocol.messages import (
 )
 from gpu_memory_service.common.protocol.wire import recv_message, send_message
 from gpu_memory_service.common.utils import fail
+from gpu_memory_service.common.vmm import VMMDeviceType
 
 from .allocations import AllocationNotFoundError
 from .fsm import Connection, InvalidTransition
@@ -63,6 +64,7 @@ class GMSRPCServer:
         *,
         allocation_retry_interval: float = 0.5,
         allocation_retry_timeout: Optional[float] = None,
+        device_kind: VMMDeviceType = VMMDeviceType.CUDA,
     ):
         self.socket_path = socket_path
         self.device = device
@@ -70,9 +72,14 @@ class GMSRPCServer:
             device,
             allocation_retry_interval=allocation_retry_interval,
             allocation_retry_timeout=allocation_retry_timeout,
+            device_kind=device_kind,
         )
         self._server: Optional[asyncio.Server] = None
-        logger.info("GMSRPCServer initialized: device=%d", device)
+        logger.info(
+            "GMSRPCServer initialized: device=%d, device_kind=%s",
+            device,
+            device_kind.value,
+        )
 
     def _prepare_socket_path(self) -> None:
         if not os.path.exists(self.socket_path):
