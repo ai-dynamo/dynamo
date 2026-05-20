@@ -42,6 +42,16 @@ spec:
       componentType: frontend
       replicas: 1
       extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+          - key: "kubernetes.io/arch"
+            operator: "Equal"
+            value: "arm64"
+            effect: "NoSchedule"
         mainContainer:
           command:
             - python3
@@ -55,8 +65,6 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
           image: <your-registry>/sglang-dynamo-glm5-efa:latest
-          name: ""
-          resources: {}
           volumeMounts:
             - mountPath: /model-store
               name: model-cache
@@ -81,6 +89,16 @@ spec:
           - name: compute-domain-channel
       extraPodSpec:
         hostIPC: true
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+          - key: "kubernetes.io/arch"
+            operator: "Equal"
+            value: "arm64"
+            effect: "NoSchedule"
         mainContainer:
           command:
             - bash
@@ -201,15 +219,9 @@ spec:
               value: "7200"
             - name: NCCL_GRAPH_MIXING_SUPPORT
               value: "0"
-            # === Host the device plugin's GPU isolation (override any
-            # NVIDIA_VISIBLE_DEVICES=all baked into the base image).
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: void
             - name: NIXL_LOG_LEVEL
               value: ERROR
           image: <your-registry>/sglang-dynamo-glm5-efa:latest
-          name: ""
-          resources: {}
           # REQUIRED. NIXL fi_mr_reg on VRAM needs broader caps than IPC_LOCK
           # alone provides on EFA. IPC_LOCK is also added (belt-and-suspenders).
           securityContext:
@@ -253,6 +265,16 @@ spec:
             vpc.amazonaws.com/efa: "4"
       extraPodSpec:
         hostIPC: true
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+          - key: "kubernetes.io/arch"
+            operator: "Equal"
+            value: "arm64"
+            effect: "NoSchedule"
         mainContainer:
           command:
             - bash
@@ -353,13 +375,9 @@ spec:
               value: "1"
             - name: NCCL_STORE_TIMEOUT
               value: "7200"
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: void
             - name: NIXL_LOG_LEVEL
               value: ERROR
           image: <your-registry>/sglang-dynamo-glm5-efa:latest
-          name: ""
-          resources: {}
           securityContext:
             privileged: true
             capabilities:

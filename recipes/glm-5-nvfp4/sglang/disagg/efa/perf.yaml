@@ -84,9 +84,9 @@ spec:
           "
 
           echo "Waiting for model '$TARGET_MODEL' at http://$ENDPOINT/v1/models..."
-          deadline=$((SECONDS + 1800))
+          deadline=$(( $(date +%s) + 1800 ))
           while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
-            if [ "$SECONDS" -ge "$deadline" ]; then
+            if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "Timed out after 30m waiting for model '$TARGET_MODEL' at http://$ENDPOINT/v1/models"
               exit 1
             fi
