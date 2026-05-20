@@ -389,6 +389,8 @@ impl
                     completion_usage: data.completion_usage,
                     disaggregated_params: data.disaggregated_params,
                     engine_data: data.engine_data,
+                    tool_calls: data.tool_calls,
+                    reasoning_content: data.reasoning_content,
                 })
             })
         });

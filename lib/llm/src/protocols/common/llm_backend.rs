@@ -111,6 +111,14 @@ pub struct BackendOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Pre-parsed tool call deltas in OpenAI format (ModelOutput::Text pass-through).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+
+    /// Pre-parsed reasoning content (ModelOutput::Text pass-through).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -177,6 +185,16 @@ pub struct LLMEngineOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Pre-parsed tool call deltas in OpenAI format. Set by engines that handle
+    /// their own postprocessing (ModelOutput::Text). Passed through as-is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+
+    /// Pre-parsed reasoning content. Set by engines that handle their own
+    /// postprocessing (ModelOutput::Text). Passed through as-is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl LLMEngineOutput {
@@ -197,6 +215,8 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -217,6 +237,8 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -237,6 +259,8 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -257,6 +281,8 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            tool_calls: None,
+            reasoning_content: None,
         }
     }
 }
