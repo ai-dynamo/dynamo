@@ -26,6 +26,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         && apt-get install -y --no-install-recommends \
             ca-certificates \
             gcc \
+            libc6-dev \
             python${PYTHON_VERSION}-dev \
             python${PYTHON_VERSION}-venv \
         && apt-get clean \
