@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: gemma4
+model_label: Gemma 4
+mode: stream
+cases:
+  PARSER.stream.3:
+    description: Complete single tool call with a grammar token split across chunk boundaries
+    ref: derived from PARSER.batch.1
+    chunks:
+    - delta_text: <|
+    - delta_text: too
+    - delta_text: l_cal
+    - delta_text: l>call:get_
+    - delta_text: weather{location:<|
+    - delta_text: '"|'
+    - delta_text: '>NY'
+    - delta_text: C<|"|
+    - delta_text: '>}<tool_cal'
+    - delta_text: l|>
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang: *id001
+      vllm: *id001

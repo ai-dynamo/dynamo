@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate the parity chart (matrix of cell markers) from the YAML fixtures.
+"""Generate the parity table (matrix of cell markers) from the YAML fixtures.
 
 ================================================================================
 EXAMPLE OUTPUT (truncated; illustrative, NOT a snapshot of current fixtures
-— run the script for the real chart):
+— run the script for the real table):
 
     | model          | parser     | 1 | 2.a | 2.b | 2.c | ... | 9 | 10 |
     |---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
@@ -19,7 +19,7 @@ EXAMPLE OUTPUT (truncated; illustrative, NOT a snapshot of current fixtures
 ================================================================================
 
 Reads every `tests/parity/parser/fixtures/<family>/PARSER.*.yaml` and emits
-the chart referenced in `tests/parity/README.md`.
+the table referenced in `tests/parity/README.md`.
 
 Cell markers (per peer, vllm + sglang):
   =     peer block is `*d_<case>` anchor ref to dynamo (matches)
@@ -36,11 +36,11 @@ Footnote markers `†` (no vLLM peer) and `§` (no SGLang peer) are auto-derived
 from `expected.<impl>.unavailable` across each family's cases.
 
 Run:
-    # Markdown chart to stdout
+    # Markdown table to stdout
     python3 tests/parity/parser/generate_parity_chart.py \
         > tests/parity/parser/PARITY.md
 
-    # HTML chart with clickable YAML links + hover tooltips. Write next
+    # HTML table with clickable YAML links + hover tooltips. Write next
     # to this script so `<a href="fixtures/<family>/PARSER.batch.N.yaml">`
     # resolves when opened in a browser.
     python3 tests/parity/parser/generate_parity_chart.py --html \
@@ -82,7 +82,7 @@ def _make_jinja_env() -> Environment:
 
 
 def _commit_sha() -> str | None:
-    """HEAD SHA at chart-generation time, or None if not in a git tree."""
+    """HEAD SHA at table-generation time, or None if not in a git tree."""
     try:
         out = (
             subprocess.check_output(
@@ -284,7 +284,7 @@ def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
 
 
 # Curated featured-model order. The only hand-maintained list left in the
-# script: it picks WHICH families lead the chart and IN WHAT ORDER. The
+# script: it picks WHICH families lead the table and IN WHAT ORDER. The
 # human-readable label for each (e.g. "DeepSeek V4") is sourced from the
 # fixture YAML's `model_label:` field, so the label travels with the
 # family definition, not with this script.
@@ -293,7 +293,7 @@ def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
 # planning notes. When that list changes, this list and the corresponding
 # `model_label:` fields under `fixtures/<family>/PARSER.batch.yaml` must
 # be updated together.
-# Alphabetical-by-family-id within the list (matches the chart row order).
+# Alphabetical-by-family-id within the list (matches the table row order).
 TOP_N_FAMILIES = [
     "deepseek_v4",
     "gemma4",
@@ -404,7 +404,7 @@ def _normalize_split_parent_cases(cases: dict) -> dict:
     Some older fixture files still define parent buckets such as
     `PARSER.batch.30`, while newer files define leaf buckets such as
     `PARSER.batch.30.a`. For display, parent+leaf duplication is confusing:
-    once any leaf exists for a parent bucket, the chart should show only the
+    once any leaf exists for a parent bucket, the table should show only the
     leaf columns. Parent entries are copied into missing leaf cells so their
     existing expectations or n/a reasons remain visible until the YAML itself
     is migrated.
@@ -1057,7 +1057,7 @@ def _build_missing_tooltip_html(family: str, sub: str) -> str:
     """Tooltip for an absent fixture entry.
 
     This is intentionally distinct from an explicit n/a stub. Missing means
-    the chart has no fixture data for this family/case; explicit n/a means a
+    the table has no fixture data for this family/case; explicit n/a means a
     fixture author recorded why the case does not apply.
     """
     case_id = f"PARSER.batch.{sub}"
@@ -1070,7 +1070,7 @@ def _build_missing_tooltip_html(family: str, sub: str) -> str:
     parts.append(
         '<pre class="ttip-pre">No fixture entry exists for this family/case. '
         "If the case is intentionally not applicable, add an explicit n/a "
-        "stub with description: and reason: so the chart can explain it.</pre>"
+        "stub with description: and reason: so the table can explain it.</pre>"
     )
     parts.append("</div>")
     return "".join(parts)
@@ -1156,7 +1156,7 @@ def _parser_inheritance_tooltip_html(
             fm = re.search(r'\("([^"]+)"\)', info["factory"])
             if fm:
                 suffix = f'  block="{fm.group(1)}"'
-        # ← THIS goes on the target family's line only when the chart cell
+        # ← THIS goes on the target family's line only when the table cell
         # IS the target (not an alias).
         marker_html = (
             "  <strong>← THIS</strong>" if (fam == family and not alias_of) else ""
@@ -1182,7 +1182,7 @@ def _parser_inheritance_tooltip_html(
                 )
 
     # Peer-availability footnote (†/§) — embedded here so symbols don't need
-    # their own native tooltip. Anchored on the chart-cell family, so an
+    # their own native tooltip. Anchored on the table-cell family, so an
     # alias inherits its target's peer markers (they share the same fixture
     # YAMLs and the same `expected.<impl>.unavailable` flags).
     peer_notes: list[str] = []
@@ -1547,9 +1547,9 @@ def render_html(
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
     title = (
-        f"Dynamo {family_filter} parser parity chart"
+        f"Dynamo {family_filter} Parser Parity Table"
         if family_filter
-        else "Dynamo parser parity chart"
+        else "Dynamo Parser Parity Table"
     )
     command = "python3 tests/parity/parser/generate_parity_chart.py --html"
     output = "tests/parity/parser/PARITY.html"

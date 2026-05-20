@@ -25,7 +25,7 @@ tests/parity/
     ├── fixtures/                   ← static YAML, generated from Dynamo as oracle
     │   └── <family>/PARSER.batch.yaml         (and per-top-level-case files like PARSER.batch.8.yaml; see Fixture file schema)
     ├── capture_parser_outputs.py     ← drift-check (default) or merge any impl's output into `expected.{dynamo,vllm,sglang}`
-    ├── generate_parity_chart.py    ← print the parity-status chart (run on demand; not checked in)
+    ├── generate_parity_chart.py    ← print the parity-status table (run on demand; not checked in)
     │
     ├── dynamo.py                   ← M2 in-process wrapper (PyO3 binding)
     ├── vllm.py                     ← M2 in-process wrapper (ToolParserManager)
@@ -141,19 +141,19 @@ PR description.
 Cell values show how each engine's recorded `expected.<impl>` block relates to Dynamo (the oracle). **Convention:** a divergent peer block carries a `reason:` field iff the divergence is *intentional* (documented contract difference, vendor behavior, etc.). No `reason:` = **research-needed** — we observed the divergence but haven't classified it yet.
 
 - `=` — both engines match Dynamo (peer block is an anchor ref `*d_<case>` to dynamo's).
-- `V` — vLLM diverges, **intentional** (engine block has `reason:` field). Rendered the same color as = in the HTML chart since the divergence is accounted for.
+- `V` — vLLM diverges, **intentional** (engine block has `reason:` field). Rendered the same color as = in the HTML table since the divergence is accounted for.
 - `V?` — vLLM diverges, **research-needed** (engine block has no `reason:` yet; we observed the divergence but haven't classified it).
 - `V!` — vLLM is expected to crash; `expected.vllm.error: <substring>` records the matching error.
 - `S`, `S?`, `S!` — same as V/V?/V! for SGLang.
 - `VS`, `VS?`, `V?S`, `V!S`, `VS!`, `V?S?`, `V!S!`, … — combinations (both engines diverge with any mix of intentional/research-needed/error).
 - `n/a` — **not applicable**: engine marked `unavailable` (no parser registered for that family), OR the sub-case shape doesn't apply to this grammar (e.g. attribute-encoded DSML families have no `4.b` because there's no embedded JSON to malform).
-- `—` — **missing fixture coverage**: no fixture entry exists for that family/case yet. If the case is intentionally not applicable, add an explicit chart-only n/a stub with `description:` and `reason:` so the chart can explain it.
+- `—` — **missing fixture coverage**: no fixture entry exists for that family/case yet. If the case is intentionally not applicable, add an explicit table-only n/a stub with `description:` and `reason:` so the table can explain it.
 
 19 parsers total — split into the **Top-N models** we prioritize and
 **Others** wired into the harness for completeness. Both sections sorted
 alphabetically within themselves.
 
-The chart isn't checked in — it would drift behind the YAML every time a
+The table isn't checked in — it would drift behind the YAML every time a
 case is added or a peer block flips. Generate it on demand and save it
 somewhere you can browse:
 
@@ -176,7 +176,7 @@ generator reads every `fixtures/<family>/PARSER.*.yaml` and emits one
 cell per `(family, sub-case)` using the legend above.
 
 **Example output** (illustrative — cell values are made up, **not** a
-snapshot of current fixtures; run the script for the real chart):
+snapshot of current fixtures; run the script for the real table):
 
 ```text
 | model       | parser     | 1 | 2.a | 2.b | 2.c | 2.d | 3 | ... | 9 | 10 |
@@ -189,7 +189,7 @@ snapshot of current fixtures; run the script for the real chart):
 
 Read a row left-to-right: `=` = both engines match Dynamo, `V` / `S` =
 that engine diverges with a documented reason (rendered same color as =
-in the HTML chart), `V?` / `S?` = divergence not yet classified
+in the HTML table), `V?` / `S?` = divergence not yet classified
 (research-needed), `n/a` = case doesn't apply or peer is unavailable.
 
 ### Footnotes
@@ -290,7 +290,7 @@ fixture).
 
 ## Resolving divergences (8 steps)
 
-Each non-`=` cell in the generated chart is a divergent `expected.<impl>` block
+Each non-`=` cell in the generated table is a divergent `expected.<impl>` block
 in the family's YAML fixture (concrete `calls` + `normal_text`, or
 `{error: <substring>}`, or `{unavailable: <reason>}`). Cells that
 match Dynamo are stored as anchor refs `*d_<case>` to the dynamo
@@ -487,13 +487,13 @@ PARSER.batch.8.b:
   - ...
 ```
 
-Then regenerate the chart so the cell flips:
+Then regenerate the table so the cell flips:
 
 ```bash
 python3 tests/parity/parser/generate_parity_chart.py > PARITY.md
 ```
 
-Pytest should now be fully green; the chart cell flips to `=`.
+Pytest should now be fully green; the table cell flips to `=`.
 
 ```bash
 git add lib/parsers/ tests/parity/parser/
@@ -517,7 +517,7 @@ few classes stay recorded forever (intentional, by design):
 
 Everything else is a candidate to fix. Permanent divergences should
 carry a `reason:` field that classifies them as intentional (so the
-chart shows `V`/`S`, not `V?`/`S?`).
+table shows `V`/`S`, not `V?`/`S?`).
 
 ## Fixture file schema
 
@@ -840,5 +840,5 @@ real value-add is the cross-impl half (vLLM and SGLang).
    `{error: <substring>}` so the test asserts on a stable signature
    rather than the full volatile message. Add a `reason:` field to
    intentional divergences so they show as `V`/`S` not `V?`/`S?` in the
-   chart.
-6. Regenerate the chart: `python3 tests/parity/parser/generate_parity_chart.py > PARITY.md`.
+   table.
+6. Regenerate the table: `python3 tests/parity/parser/generate_parity_chart.py > PARITY.md`.
