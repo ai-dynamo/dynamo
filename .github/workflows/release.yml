@@ -138,7 +138,9 @@ jobs:
           if [[ "${NIGHTLY}" == "true" ]]; then
             DATE_UTC=$(date -u +%Y%m%d)
             SHORT_SHA="${COMMIT_SHA:0:7}"
-            NGC_VERSION_TAG="nightly-${DATE_UTC}-${SHORT_SHA}"
+            # Nightly NGC tag is just date+SHA; the `-nightly` differentiator now lives in the
+            # repo name (vllm-runtime-nightly, etc.), so the tag itself stays bare.
+            NGC_VERSION_TAG="${DATE_UTC}-${SHORT_SHA}"
             WHEEL_VERSION="${BASE_VERSION}.dev${DATE_UTC}"
             # Helm and cargo now publish on nightly with collision-safe SemVer pre-release suffixes.
             # Two runs on the same UTC day for the same commit would still collide; daily nightly schedule won't hit that.
@@ -224,15 +226,18 @@ jobs:
           IS_NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
         run: |
           set -euo pipefail
+          # Nightly publishes go to a separate set of NGC repos suffixed `-nightly` so they
+          # never collide with the stable runtime repos and consumers can pin to either lane.
           ENTRIES=$(jq -c -n --arg t "$NGC_VERSION_TAG" --arg nightly "$IS_NIGHTLY" '
             $t as $T |
             ($nightly == "true") as $is_nightly |
+            (if $is_nightly then "-nightly" else "" end) as $repo_suffix |
             [
-              {label: ("vllm-runtime:" + $T),                source_suffix: "vllm-runtime-cuda12",        target_repo: "vllm-runtime",         target_tag: $T},
-              {label: ("sglang-runtime:" + $T),              source_suffix: "sglang-runtime-cuda12",      target_repo: "sglang-runtime",       target_tag: $T},
-              {label: ("vllm-runtime:" + $T + "-cuda13"),    source_suffix: "vllm-runtime-cuda13",        target_repo: "vllm-runtime",         target_tag: ($T + "-cuda13")},
-              {label: ("sglang-runtime:" + $T + "-cuda13"),  source_suffix: "sglang-runtime-cuda13",      target_repo: "sglang-runtime",       target_tag: ($T + "-cuda13")},
-              {label: ("tensorrtllm-runtime:" + $T + "-cuda13"), source_suffix: "trtllm-runtime-cuda13",  target_repo: "tensorrtllm-runtime",  target_tag: ($T + "-cuda13")}
+              {label: ("vllm-runtime:" + $T + "-cuda12"),    source_suffix: "vllm-runtime-cuda12",        target_repo: ("vllm-runtime" + $repo_suffix),         target_tag: ($T + "-cuda12")},
+              {label: ("sglang-runtime:" + $T + "-cuda12"),  source_suffix: "sglang-runtime-cuda12",      target_repo: ("sglang-runtime" + $repo_suffix),       target_tag: ($T + "-cuda12")},
+              {label: ("vllm-runtime:" + $T + "-cuda13"),    source_suffix: "vllm-runtime-cuda13",        target_repo: ("vllm-runtime" + $repo_suffix),         target_tag: ($T + "-cuda13")},
+              {label: ("sglang-runtime:" + $T + "-cuda13"),  source_suffix: "sglang-runtime-cuda13",      target_repo: ("sglang-runtime" + $repo_suffix),       target_tag: ($T + "-cuda13")},
+              {label: ("tensorrtllm-runtime:" + $T + "-cuda13"), source_suffix: "trtllm-runtime-cuda13",  target_repo: ("tensorrtllm-runtime" + $repo_suffix),  target_tag: ($T + "-cuda13")}
             ] + (if $is_nightly then [] else [
               {label: ("vllm-runtime:" + $T + "-efa"),        source_suffix: "vllm-runtime-efa-cuda12",   target_repo: "vllm-runtime",         target_tag: ($T + "-efa")},
               {label: ("sglang-runtime:" + $T + "-efa"),      source_suffix: "sglang-runtime-efa-cuda12", target_repo: "sglang-runtime",       target_tag: ($T + "-efa")},
