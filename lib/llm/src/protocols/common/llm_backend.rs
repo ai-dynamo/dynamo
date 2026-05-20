@@ -131,7 +131,8 @@ pub struct BackendOutput {
 /// levels of post-processing before the BackendOutput is returns
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct LLMEngineOutput {
-    // new token_ids
+    // new token_ids (default to empty for ModelOutput::Text mode)
+    #[serde(default)]
     pub token_ids: Vec<TokenIdType>,
 
     /// If the LLM Engine performs the detokenization, then this will have a Some of the detokenized
