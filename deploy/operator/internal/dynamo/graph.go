@@ -1508,6 +1508,19 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
 		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+		for _, name := range GetGPUMemoryService(component).ExtraClientContainers {
+			var container *corev1.Container
+			for i := range podSpec.Containers {
+				if podSpec.Containers[i].Name == name {
+					container = &podSpec.Containers[i]
+					break
+				}
+			}
+			if container == nil {
+				continue
+			}
+			gms.EnsureClient(&podSpec, container)
+		}
 	}
 
 	// Clone main container into two engine containers (active + standby) for failover.

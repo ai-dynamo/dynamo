@@ -453,6 +453,20 @@ func TestGmsResourceSharingEntries_Multinode(t *testing.T) {
 	assert.Equal(t, []string{"svc-gms-1", "svc-wkr-1"}, refs[1].Filter.ChildCliqueNames)
 }
 
+func TestGmsResourceSharingEntries_IncludesFutureClientPods(t *testing.T) {
+	roles := []ServiceRole{
+		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
+		{Name: "svc-loader-0", Role: Role("gms-client"), Rank: 0, Replicas: 1},
+	}
+
+	refs := gmsResourceSharingEntries("svc", roles)
+
+	require.Len(t, refs, 1)
+	require.NotNil(t, refs[0].Filter)
+	assert.Equal(t, []string{"svc-gms-0", "svc", "svc-loader-0"}, refs[0].Filter.ChildCliqueNames)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Intra-pod failover tests
 // ──────────────────────────────────────────────────────────────────────────────

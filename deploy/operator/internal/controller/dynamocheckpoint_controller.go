@@ -217,21 +217,37 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 
 	// Sync DRA ResourceClaimTemplate for GMS-enabled checkpoints.
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
+		if ckpt.Spec.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+			return ctrl.Result{}, fmt.Errorf("GMS checkpoint jobs for mode %q are not implemented", ckpt.Spec.GPUMemoryService.Mode)
+		}
 		if !r.RuntimeConfig.DRAEnabled {
 			return ctrl.Result{}, fmt.Errorf(
 				"GMS requires DRA (Dynamic Resource Allocation), but the resource.k8s.io/v1 API is not available")
 		}
-		if len(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers) == 0 {
-			return ctrl.Result{}, fmt.Errorf("checkpoint job requires at least one container for GMS")
+		targetContainerName := ckpt.Spec.Job.TargetContainerName
+		if targetContainerName == "" {
+			targetContainerName = consts.MainContainerName
 		}
-		gpuQty := ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
-		gpuCount := int(gpuQty.Value())
-		deviceClassName := ""
-		if ckpt.Spec.GPUMemoryService != nil {
-			deviceClassName = ckpt.Spec.GPUMemoryService.DeviceClassName
+		var targetContainer *corev1.Container
+		for i := range ckpt.Spec.Job.PodTemplateSpec.Spec.Containers {
+			if ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[i].Name == targetContainerName {
+				targetContainer = &ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[i]
+				break
+			}
+		}
+		if targetContainer == nil {
+			return ctrl.Result{}, fmt.Errorf("checkpoint job pod template: pod spec has no container named %q", targetContainerName)
+		}
+		gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s: %w", ckpt.Name, err)
 		}
 		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
-		_, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+			deviceClassName := ckpt.Spec.GPUMemoryService.DeviceClassName
+			if deviceClassName == "" {
+				deviceClassName = dra.DefaultDeviceClassName
+			}
 			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, ckpt.Namespace, gpuCount, deviceClassName)
 		})
 		if err != nil {
