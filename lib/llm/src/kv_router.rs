@@ -501,7 +501,7 @@ where
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
-        let scheduler = KvScheduler::start_with_overlap_refresh(
+        let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
             workers_with_configs.clone(),
