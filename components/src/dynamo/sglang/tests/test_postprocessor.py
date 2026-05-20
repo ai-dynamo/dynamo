@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for SglangPostProcessor."""
+"""Unit tests for SglangPostProcessor.
+
+Note: Dynamo forces incremental_streaming_output=True on SGLang, so the
+``text`` field in each engine chunk is an incremental delta (not cumulative).
+"""
 
 
 from dynamo.sglang.postprocessor import SglangPostProcessor
@@ -26,7 +30,8 @@ class TestSglangPostProcessorBasic:
         assert chunk["index"] == 0
         assert "finish_reason" not in chunk
 
-    def test_cumulative_text_delta(self):
+    def test_incremental_text_deltas(self):
+        """Each chunk's text is an incremental delta, not cumulative."""
         pp = SglangPostProcessor()
         pp.process_chunk(
             {
@@ -39,7 +44,7 @@ class TestSglangPostProcessorBasic:
         )
         chunk = pp.process_chunk(
             {
-                "text": "Hello world",
+                "text": " world",
                 "output_ids": [2],
                 "meta_info": {"finish_reason": None},
                 "index": 0,
@@ -81,9 +86,10 @@ class TestSglangPostProcessorBasic:
             },
             is_final=False,
         )
+        # Empty text delta -> skip
         chunk = pp.process_chunk(
             {
-                "text": "Hello",
+                "text": "",
                 "output_ids": [],
                 "meta_info": {"finish_reason": None},
                 "index": 0,
@@ -127,10 +133,10 @@ class TestSglangPostProcessorBasic:
             },
             is_final=False,
         )
-        # Final chunk with same cumulative text (empty delta)
+        # Final chunk with empty text delta
         chunk = pp.process_chunk(
             {
-                "text": "Hello",
+                "text": "",
                 "output_ids": [],
                 "meta_info": {
                     "finish_reason": {"type": "length", "matched": None},
@@ -168,3 +174,27 @@ class TestSglangPostProcessorBasic:
         assert c0["index"] == 0
         assert c1["text"] == "B"
         assert c1["index"] == 1
+
+    def test_text_accumulation_for_reparse(self):
+        """Verify that incremental deltas are accumulated internally."""
+        pp = SglangPostProcessor()
+        pp.process_chunk(
+            {
+                "text": "Hello ",
+                "output_ids": [1],
+                "meta_info": {"finish_reason": None},
+                "index": 0,
+            },
+            is_final=False,
+        )
+        pp.process_chunk(
+            {
+                "text": "world",
+                "output_ids": [2],
+                "meta_info": {"finish_reason": None},
+                "index": 0,
+            },
+            is_final=False,
+        )
+        # Internal accumulated text should be "Hello world"
+        assert pp._accumulated_text[0] == "Hello world"

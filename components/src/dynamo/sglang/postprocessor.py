@@ -4,8 +4,13 @@
 """Worker-level postprocessor that uses SGLang's native parsers.
 
 When --postprocessing sglang is set, this converts raw engine output
-(cumulative text + meta_info) into GenerateChunk dicts with text,
-tool_calls, reasoning_content -- matching sglang.launch_server behavior.
+into GenerateChunk dicts with text, tool_calls, reasoning_content --
+matching sglang.launch_server behavior.
+
+Note: Dynamo forces incremental_streaming_output=True on SGLang, so
+the ``text`` field in each engine chunk is an **incremental delta**
+(not cumulative). We accumulate the full text ourselves for the
+finish-time re-parse of tool calls.
 """
 
 from __future__ import annotations
@@ -35,7 +40,8 @@ class SglangPostProcessor:
     ):
         self._tool_call_parser = None
         self._reasoning_parser = None
-        self._stream_buffer: dict[int, str] = {}
+        # Accumulated full text per index for finish-time re-parse
+        self._accumulated_text: dict[int, str] = {}
         self._has_tool_calls: dict[int, bool] = {}
 
         if tool_call_parser_name and tools:
@@ -63,7 +69,9 @@ class SglangPostProcessor:
 
         Args:
             raw: Dict from engine.async_generate() with keys:
-                 text (cumulative), output_ids, meta_info, index
+                 text (incremental delta), output_ids, meta_info, index.
+                 Note: Dynamo sets incremental_streaming_output=True, so
+                 ``text`` is a per-chunk delta, NOT cumulative.
             is_final: Whether this is the final chunk (finish_reason set)
 
         Returns:
@@ -71,12 +79,16 @@ class SglangPostProcessor:
         """
         index = raw.get("index") or 0
         meta_info = raw["meta_info"]
-        cumulative_text = raw.get("text", "")
 
-        # Compute delta from cumulative text
-        prev = self._stream_buffer.get(index, "")
-        delta = cumulative_text[len(prev) :]
-        self._stream_buffer[index] = cumulative_text
+        # text is an incremental delta (not cumulative) because Dynamo
+        # forces incremental_streaming_output=True on SGLang.
+        delta = raw.get("text", "")
+
+        # Accumulate for finish-time re-parse
+        if delta:
+            self._accumulated_text[index] = (
+                self._accumulated_text.get(index, "") + delta
+            )
 
         if not delta and not is_final:
             return None
@@ -110,9 +122,9 @@ class SglangPostProcessor:
                 tool_call_deltas.append(tc)
                 self._has_tool_calls[index] = True
 
-        # On finish: re-parse full text for missed tool calls
+        # On finish: re-parse full accumulated text for missed tool calls
         if is_final and self._tool_call_parser:
-            full_text = cumulative_text
+            full_text = self._accumulated_text.get(index, "")
             if self._reasoning_parser:
                 r, n = self._reasoning_parser.parse_non_stream(full_text)
                 full_text = n if n else ""
@@ -167,7 +179,7 @@ class SglangPostProcessor:
 
     def reset(self) -> None:
         """Reset state for a new request."""
-        self._stream_buffer.clear()
+        self._accumulated_text.clear()
         self._has_tool_calls.clear()
         if self._reasoning_parser:
             from sglang.srt.parser.reasoning_parser import ReasoningParser
