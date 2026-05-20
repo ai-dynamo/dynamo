@@ -6,15 +6,20 @@
 // CHAT_TURNS corpus adapted from sgl-project/llm-tokenizer v1.3.2
 // (`tests/tokenizer_cache_correctness_test.rs`). The ChatML markers `<|im_start|>` /
 // `<|im_end|>` were rewritten to TinyLlama's `<s>` / `</s>` so the test runs offline
-// against the tokenizer fixture bundled at
-// `lib/llm/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json`. Both marker pairs
-// are atomic in their respective BPE vocabularies (`special: true, normalized: false`),
-// so the same L1 correctness invariant is exercised:
+// against in-tree tokenizer fixtures. The same corpus is also rendered into Llama-3.1
+// format and tested against the bundled mock-llama-3.1 fixture, exercising a second
+// special-token family with a different added-token layout (4 boundary tokens instead
+// of 2, distinct surface strings `<|begin_of_text|>` / `<|start_header_id|>` /
+// `<|end_header_id|>` / `<|eot_id|>`).
+//
+// All boundary tokens used in both formats are atomic in their respective BPE
+// vocabularies (`special: true, normalized: false`), so the same L1 correctness
+// invariant is exercised for each:
 //
 //   tokenize(prefix) + tokenize(suffix) == tokenize(prefix + suffix)
 
 //! Integration test: cached vs uncached encoding must produce identical token IDs across
-//! a representative corpus of multi-turn chat prompts.
+//! a representative corpus of multi-turn chat prompts, on multiple tokenizer families.
 
 use std::sync::Arc;
 
@@ -27,6 +32,92 @@ const TINYLLAMA_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../llm/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
 );
+
+/// In-tree mock Llama-3.1 fixture. Has the full set of Llama-3.1 special tokens
+/// (`<|begin_of_text|>`, `<|start_header_id|>`, `<|end_header_id|>`, `<|eot_id|>`,
+/// reserved_special_token_*, `<|end_of_text|>`) but an empty BPE vocab. Regular text
+/// encodes to `[]`; special tokens encode to their atomic IDs. The L1 invariant
+/// `tokenize(prefix) ++ tokenize(suffix) == tokenize(prefix+suffix)` still holds —
+/// that's exactly what this test asserts, regardless of how trivially the non-special
+/// segments tokenize.
+const LLAMA31_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct/tokenizer.json"
+);
+
+/// A tokenizer fixture together with the formatter that re-keys the chat corpus into
+/// that family's native special-token markers, plus the list of those markers for the
+/// `CachedTokenizer` constructor.
+struct Setup {
+    name: &'static str,
+    path: &'static str,
+    specials: &'static [&'static str],
+    /// Rewrite a corpus turn from the canonical TinyLlama-format CHAT_TURNS entry
+    /// (with `<s>role\n...</s>` markers) into this family's native chat format.
+    render: fn(tinyllama_format: &str) -> String,
+}
+
+/// Identity: CHAT_TURNS entries are already in TinyLlama format.
+fn render_llama2(s: &str) -> String {
+    s.to_string()
+}
+
+/// Convert a TinyLlama-format chat string into Llama-3.1 instruction format.
+///
+/// `<s>role\ncontent</s>` → `<|start_header_id|>role<|end_header_id|>\n\ncontent<|eot_id|>`
+/// with a single `<|begin_of_text|>` prepended once at the very start.
+fn render_llama3(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 64);
+    out.push_str("<|begin_of_text|>");
+    let mut remaining = s;
+    while let Some(rest) = remaining.strip_prefix("<s>") {
+        let end = rest
+            .find("</s>")
+            .expect("CHAT_TURNS turn must end with </s>");
+        let turn = &rest[..end];
+        // The role is everything up to the first '\n'; the content is the rest.
+        // Some corpus entries put no content after the role (e.g. "<s>system\n</s>"),
+        // in which case split_once returns (role, "").
+        let (role, content) = turn.split_once('\n').unwrap_or((turn, ""));
+        out.push_str("<|start_header_id|>");
+        out.push_str(role);
+        out.push_str("<|end_header_id|>\n\n");
+        out.push_str(content);
+        out.push_str("<|eot_id|>");
+        remaining = &rest[end + "</s>".len()..];
+    }
+    out
+}
+
+const SETUPS: &[Setup] = &[
+    Setup {
+        name: "tinyllama (Llama-2 family, <s>/</s>)",
+        path: TINYLLAMA_PATH,
+        specials: &["<s>", "</s>"],
+        render: render_llama2,
+    },
+    Setup {
+        name: "mock-llama-3.1 (Llama-3 family, <|begin_of_text|>/<|*_header_id|>/<|eot_id|>)",
+        path: LLAMA31_PATH,
+        specials: &[
+            "<|begin_of_text|>",
+            "<|start_header_id|>",
+            "<|end_header_id|>",
+            "<|eot_id|>",
+        ],
+        render: render_llama3,
+    },
+];
+
+fn build_cached_setup(setup: &Setup) -> (Arc<dyn Tokenizer>, CachedTokenizer) {
+    let base = Arc::new(
+        HuggingFaceTokenizer::from_file(setup.path)
+            .unwrap_or_else(|e| panic!("load tokenizer {}: {e}", setup.path)),
+    );
+    let specials: Vec<String> = setup.specials.iter().map(|s| (*s).to_string()).collect();
+    let cached = CachedTokenizer::new(base.clone(), specials, 50 * 1024 * 1024);
+    (base, cached)
+}
 
 /// 29 multi-turn ChatML strings re-keyed onto TinyLlama's `<s>`/`</s>` markers.
 const CHAT_TURNS: [&str; 29] = [
@@ -81,102 +172,113 @@ const CHAT_TURNS: [&str; 29] = [
     "<s>system\nYou are a compiler expert.</s><s>user\nExplain why BPE tokenizers are not prefix-stable:\n\nThe core issue is that BPE applies merges based on local context. When you tokenize 'prefix' alone, it might apply merge rules differently than when tokenizing 'prefix + suffix' as a whole. For example:\n\ntokenize('hello world') might produce [hello, _world]\ntokenize('hello') + tokenize(' world') might produce [hel, lo, _wo, rld]\n\nThis is because the merge rules see different contexts. The space before 'world' in the first case is part of the token boundary, but in the second case, ' world' is tokenized in isolation.\n\nSpecial tokens solve this because they are:\n1. Atomic (never split or merged)\n2. Protected from normalization\n3. Marked with special: true flag\n4. Have normalized: false property\n\nThis guarantees: tokenize(prefix + special + suffix) = tokenize(prefix + special) + tokenize(suffix)\n\nOur L1 cache exploits this by:\n1. Finding all special token boundaries\n2. Re-tokenizing prefixes at those boundaries\n3. Caching the exact token IDs\n4. On cache hit, appending suffix tokens\n</s>",
 ];
 
-fn build_cached() -> (Arc<dyn Tokenizer>, CachedTokenizer) {
-    let base = Arc::new(
-        HuggingFaceTokenizer::from_file(TINYLLAMA_PATH).expect("load TinyLlama tokenizer"),
-    );
-    let specials = vec!["<s>".to_string(), "</s>".to_string()];
-    let cached = CachedTokenizer::new(base.clone(), specials, 50 * 1024 * 1024);
-    (base, cached)
-}
-
 #[test]
 fn cached_vs_uncached_first_pass() {
-    // First-pass through each turn: cold cache, then identical request — both produce
-    // the same token IDs as the uncached tokenizer (covers both miss-path and hit-path).
-    let (base, cached) = build_cached();
+    // For each tokenizer family: re-key the corpus into that family's chat format,
+    // then encode every turn twice (miss-path, hit-path) and assert byte-exact token
+    // equality against an uncached baseline.
+    for setup in SETUPS {
+        let (base, cached) = build_cached_setup(setup);
 
-    let mut hits_at_start = cached.cache_stats().hits;
-    let mut hits_grew_at_least_once = false;
+        let mut hits_at_start = cached.cache_stats().hits;
+        let mut hits_grew_at_least_once = false;
 
-    for (i, turn) in CHAT_TURNS.iter().enumerate() {
-        let plain = base
-            .encode(turn)
-            .expect("uncached encode")
-            .token_ids()
-            .to_vec();
+        for (i, raw_turn) in CHAT_TURNS.iter().enumerate() {
+            let turn = (setup.render)(raw_turn);
+            let plain = base
+                .encode(&turn)
+                .expect("uncached encode")
+                .token_ids()
+                .to_vec();
 
-        // First call — miss path; cache populates at every special-token boundary.
-        let cached_first = cached
-            .encode(turn)
-            .expect("cached encode (miss)")
-            .token_ids()
-            .to_vec();
-        assert_eq!(
-            cached_first, plain,
-            "turn {i}: miss-path cached encode != uncached encode"
-        );
+            // First call — miss path; cache populates at every special-token boundary.
+            let cached_first = cached
+                .encode(&turn)
+                .expect("cached encode (miss)")
+                .token_ids()
+                .to_vec();
+            assert_eq!(
+                cached_first, plain,
+                "[{}] turn {i}: miss-path cached encode != uncached encode",
+                setup.name
+            );
 
-        // Second call — hit path; merged prefix + suffix must equal plain encode.
-        let cached_second = cached
-            .encode(turn)
-            .expect("cached encode (hit)")
-            .token_ids()
-            .to_vec();
-        assert_eq!(
-            cached_second, plain,
-            "turn {i}: hit-path cached encode != uncached encode"
-        );
+            // Second call — hit path; merged prefix + suffix must equal plain encode.
+            let cached_second = cached
+                .encode(&turn)
+                .expect("cached encode (hit)")
+                .token_ids()
+                .to_vec();
+            assert_eq!(
+                cached_second, plain,
+                "[{}] turn {i}: hit-path cached encode != uncached encode",
+                setup.name
+            );
 
-        let now = cached.cache_stats().hits;
-        if now > hits_at_start {
-            hits_grew_at_least_once = true;
+            let now = cached.cache_stats().hits;
+            if now > hits_at_start {
+                hits_grew_at_least_once = true;
+            }
+            hits_at_start = now;
         }
-        hits_at_start = now;
-    }
 
-    assert!(
-        hits_grew_at_least_once,
-        "expected at least one turn to produce an L1 hit"
-    );
+        assert!(
+            hits_grew_at_least_once,
+            "[{}] expected at least one turn to produce an L1 hit",
+            setup.name
+        );
+    }
 }
 
 #[test]
 fn cross_turn_shared_prefix_hits() {
     // Turns 0/1/2 share progressively longer prefixes. Encoding them in order should
     // produce L1 hits on turns 1 and 2 (their prefixes were populated on turn 0).
-    let (_base, cached) = build_cached();
+    for setup in SETUPS {
+        let (_base, cached) = build_cached_setup(setup);
 
-    let before = cached.cache_stats();
-    for &turn in &CHAT_TURNS[..3] {
-        let _ = cached.encode(turn).unwrap();
+        let before = cached.cache_stats();
+        for raw_turn in &CHAT_TURNS[..3] {
+            let _ = cached.encode(&(setup.render)(raw_turn)).unwrap();
+        }
+        let after = cached.cache_stats();
+
+        assert!(
+            after.hits > before.hits,
+            "[{}] shared-prefix turns should produce L1 hits (before={}, after={})",
+            setup.name,
+            before.hits,
+            after.hits
+        );
     }
-    let after = cached.cache_stats();
-
-    assert!(
-        after.hits > before.hits,
-        "shared-prefix turns should produce L1 hits (before={}, after={})",
-        before.hits,
-        after.hits
-    );
 }
 
 #[test]
 fn cache_disabled_by_empty_specials_is_transparent() {
     // No specials registered -> L1 always misses, every encode goes through the inner
-    // tokenizer. Output must still equal uncached encode.
-    let base = Arc::new(
-        HuggingFaceTokenizer::from_file(TINYLLAMA_PATH).expect("load TinyLlama tokenizer"),
-    );
-    let cached = CachedTokenizer::new(base.clone(), Vec::new(), 4096);
-    for (i, turn) in CHAT_TURNS.iter().enumerate() {
-        let plain = base.encode(turn).unwrap().token_ids().to_vec();
-        let through = cached.encode(turn).unwrap().token_ids().to_vec();
-        assert_eq!(plain, through, "turn {i}: transparent encode mismatch");
+    // tokenizer. Output must still equal uncached encode. Tested per tokenizer family
+    // because the relevant code path is the wrapper, not the tokenizer.
+    for setup in SETUPS {
+        let base = Arc::new(
+            HuggingFaceTokenizer::from_file(setup.path)
+                .unwrap_or_else(|e| panic!("load tokenizer {}: {e}", setup.path)),
+        );
+        let cached = CachedTokenizer::new(base.clone(), Vec::new(), 4096);
+        for (i, raw_turn) in CHAT_TURNS.iter().enumerate() {
+            let turn = (setup.render)(raw_turn);
+            let plain = base.encode(&turn).unwrap().token_ids().to_vec();
+            let through = cached.encode(&turn).unwrap().token_ids().to_vec();
+            assert_eq!(
+                plain, through,
+                "[{}] turn {i}: transparent encode mismatch",
+                setup.name
+            );
+        }
+        assert_eq!(
+            cached.cache_stats().hits,
+            0,
+            "[{}] with no specials, L1 must produce zero hits",
+            setup.name
+        );
     }
-    assert_eq!(
-        cached.cache_stats().hits,
-        0,
-        "with no specials, L1 must produce zero hits"
-    );
 }
