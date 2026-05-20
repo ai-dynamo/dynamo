@@ -45,7 +45,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/bin/etcd/ | COPY from dynamo_base |
 |  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
 |  upstream Python/site-packages | inherited from upstream `vllm/vllm-openai` (multi-arch tag selected by CUDA family) |
-|  /workspace/{tests,examples,components/src/dynamo/{common,vllm},lib,deploy/sanity_check.py} | COPY from build context |
+|  /workspace/{tests,examples,dev,components/src/dynamo/{common,frontend,vllm},lib} | COPY from build context |
 | **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
 |  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
 |  /usr/local/rustup/ | COPY from dynamo_tools |
@@ -446,7 +446,7 @@ container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME
 # From this point forward, commands run inside the container started in step 2.
 
 # 3. Sanity check (optional but recommended)
-deploy/sanity_check.py
+dev/sanity_check.py
 
 # 4. Run inference (requires both frontend and backend)
 # Start frontend
@@ -541,7 +541,7 @@ cargo build --locked --features dynamo-llm/block-manager --workspace
 cd lib/bindings/python && maturin develop --uv && cd -
 
 # 5. Sanity check (optional but recommended)
-deploy/sanity_check.py --runtime-check-only
+dev/sanity_check.py --runtime-check-only
 
 # 6. Run tests
 python -m pytest tests/

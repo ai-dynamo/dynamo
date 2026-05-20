@@ -98,7 +98,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_REQUEST_PLANE",
             default="tcp",
             help="Determines how requests are distributed from routers to workers. 'tcp' is fastest.",
-            choices=["tcp", "nats", "http"],
+            choices=["tcp", "nats"],
         )
         add_argument(
             g,

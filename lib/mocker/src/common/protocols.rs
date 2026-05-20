@@ -398,9 +398,12 @@ struct MockEngineArgsSerde {
     kv_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
     num_g2_blocks: OptionalConfigValue<usize>,
+    num_g3_blocks: OptionalConfigValue<usize>,
     offload_batch_size: OptionalConfigValue<usize>,
     bandwidth_g1_to_g2_gbps: OptionalConfigValue<f64>,
     bandwidth_g2_to_g1_gbps: OptionalConfigValue<f64>,
+    bandwidth_g2_to_g3_gbps: OptionalConfigValue<f64>,
+    bandwidth_g3_to_g2_gbps: OptionalConfigValue<f64>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
     zmq_kv_events_port: OptionalConfigValue<u16>,
     zmq_replay_port: OptionalConfigValue<u16>,
@@ -608,15 +611,22 @@ pub struct MockEngineArgs {
 
     /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
     /// feature is enabled, setting this explicitly opts the mocker into
-    /// G2 offload simulation. When unset, no G2 offload engine is attached.
+    /// G2 offload simulation. When unset or set to 0, no G2 offload engine
+    /// is attached.
     #[builder(default = "None")]
     #[validate(range(min = 1))]
     pub num_g2_blocks: Option<usize>,
 
+    /// KVBM G3 shared lower-tier block capacity. Positive values require
+    /// `num_g2_blocks` and `kv_bytes_per_token`; 0 disables G3.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub num_g3_blocks: Option<usize>,
+
     /// Batch size for the G1→G2 offload pipeline. Offloads are grouped
     /// into batches of this size before being handed to the worker.
     /// Only consulted when the `kvbm-offload` feature is enabled;
-    /// falls back to the `KvbmOffloadConfig` default when unset.
+    /// falls back to the `KvbmOffloadConfig` default when unset or 0.
     #[builder(default = "None")]
     #[validate(range(min = 1))]
     pub offload_batch_size: Option<usize>,
@@ -635,6 +645,16 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0))]
     pub bandwidth_g2_to_g1_gbps: Option<f64>,
+
+    /// G2→G3 offload bandwidth in GB/s for the shared PS-queue simulation.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g2_to_g3_gbps: Option<f64>,
+
+    /// G3→G2 staging bandwidth in GB/s for the shared PS-queue simulation.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g3_to_g2_gbps: Option<f64>,
 
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
@@ -679,6 +699,13 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         return Err(mock_engine_args_validation_error(
             "block_size_zero",
             "block_size must be greater than 0".to_string(),
+        ));
+    }
+
+    if args.num_g3_blocks.is_some() && args.num_g2_blocks.is_none() {
+        return Err(mock_engine_args_validation_error(
+            "g3_requires_g2",
+            "num_g3_blocks requires num_g2_blocks because mocker stages G3 through G2".to_string(),
         ));
     }
 
@@ -848,6 +875,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(num_g2_blocks) = compat.num_g2_blocks.into_nullable() {
             builder = builder.num_g2_blocks(num_g2_blocks);
         }
+        if let Some(num_g3_blocks) = compat.num_g3_blocks.into_nullable() {
+            builder = builder.num_g3_blocks(num_g3_blocks);
+        }
         if let Some(offload_batch_size) = compat.offload_batch_size.into_nullable() {
             builder = builder.offload_batch_size(offload_batch_size);
         }
@@ -856,6 +886,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(bandwidth_g2_to_g1_gbps) = compat.bandwidth_g2_to_g1_gbps.into_nullable() {
             builder = builder.bandwidth_g2_to_g1_gbps(bandwidth_g2_to_g1_gbps);
+        }
+        if let Some(bandwidth_g2_to_g3_gbps) = compat.bandwidth_g2_to_g3_gbps.into_nullable() {
+            builder = builder.bandwidth_g2_to_g3_gbps(bandwidth_g2_to_g3_gbps);
+        }
+        if let Some(bandwidth_g3_to_g2_gbps) = compat.bandwidth_g3_to_g2_gbps.into_nullable() {
+            builder = builder.bandwidth_g3_to_g2_gbps(bandwidth_g3_to_g2_gbps);
         }
         if let Some(reasoning) = compat.reasoning.into_nullable() {
             builder = builder.reasoning(reasoning);
@@ -931,6 +967,16 @@ impl MockEngineArgs {
                     (_, None) => {}
                 }
             }
+        }
+
+        if self.num_g2_blocks == Some(0) {
+            self.num_g2_blocks = None;
+        }
+        if self.num_g3_blocks == Some(0) {
+            self.num_g3_blocks = None;
+        }
+        if self.offload_batch_size == Some(0) {
+            self.offload_batch_size = None;
         }
     }
 
@@ -1010,6 +1056,13 @@ mod tests {
             "bootstrap_port": args.bootstrap_port,
             "kv_bytes_per_token": args.kv_bytes_per_token,
             "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
+            "num_g2_blocks": args.num_g2_blocks,
+            "num_g3_blocks": args.num_g3_blocks,
+            "offload_batch_size": args.offload_batch_size,
+            "bandwidth_g1_to_g2_gbps": args.bandwidth_g1_to_g2_gbps,
+            "bandwidth_g2_to_g1_gbps": args.bandwidth_g2_to_g1_gbps,
+            "bandwidth_g2_to_g3_gbps": args.bandwidth_g2_to_g3_gbps,
+            "bandwidth_g3_to_g2_gbps": args.bandwidth_g3_to_g2_gbps,
             "reasoning": args.reasoning,
             "zmq_kv_events_port": args.zmq_kv_events_port,
             "zmq_replay_port": args.zmq_replay_port,
@@ -1130,6 +1183,64 @@ mod tests {
                 .contains("block_size and sglang.page_size to match"),
             "unexpected error: {error}",
         );
+    }
+
+    #[test]
+    fn test_normalized_g3_requires_g2() {
+        let missing_g2 = MockEngineArgs::builder()
+            .num_g3_blocks(Some(10))
+            .kv_bytes_per_token(Some(1024))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(
+            missing_g2.to_string().contains("requires num_g2_blocks"),
+            "unexpected error: {missing_g2}",
+        );
+    }
+
+    #[test]
+    fn test_normalized_zero_disables_optional_offload_knobs() {
+        let args = MockEngineArgs::builder()
+            .num_g2_blocks(Some(0))
+            .num_g3_blocks(Some(0))
+            .offload_batch_size(Some(0))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.num_g2_blocks, None);
+        assert_eq!(args.num_g3_blocks, None);
+        assert_eq!(args.offload_batch_size, None);
+    }
+
+    #[test]
+    fn test_normalized_zero_g3_does_not_require_g2_or_kv_bytes() {
+        let args = MockEngineArgs::builder()
+            .num_g3_blocks(Some(0))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.num_g3_blocks, None);
+    }
+
+    #[test]
+    fn test_normalized_g3_allows_missing_kv_bytes_for_cli_auto_compute() {
+        let args = MockEngineArgs::builder()
+            .num_g2_blocks(Some(10))
+            .num_g3_blocks(Some(10))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.num_g2_blocks, Some(10));
+        assert_eq!(args.num_g3_blocks, Some(10));
+        assert_eq!(args.kv_bytes_per_token, None);
     }
 
     #[test]

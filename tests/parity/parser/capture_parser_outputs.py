@@ -152,7 +152,7 @@ def normalize_output(d: dict) -> dict:
 
 
 def is_na_stub(case: dict[str, Any]) -> bool:
-    """Explicit chart-only n/a stub: no parser input, no expected block."""
+    """Explicit table-only n/a stub: no parser input, no expected block."""
     return set(case) == {"description", "reason"} and all(
         isinstance(case[key], str) and case[key].strip()
         for key in ("description", "reason")

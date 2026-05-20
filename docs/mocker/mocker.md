@@ -114,7 +114,7 @@ python -m dynamo.mocker \
 | `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
 | `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
 | `--discovery-backend` | Env-driven (`etcd`) | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` |
-| `--request-plane` | Env-driven (`tcp`) | Request transport: `nats`, `http`, or `tcp` |
+| `--request-plane` | Env-driven (`tcp`) | Request transport: `nats`, `tcp` |
 | `--event-plane` | Env-driven (`nats`) | Event transport: `nats` or `zmq` |
 
 ## Environment Variables
