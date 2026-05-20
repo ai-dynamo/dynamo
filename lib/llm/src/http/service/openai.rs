@@ -60,6 +60,8 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
+use dynamo_protocols::types::Choice;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -1109,7 +1111,9 @@ fn make_dispatch_event(
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
 /// `role` is excluded — backends set it on every delta.
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
-    use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
+    if resp.nvext.is_some() {
+        return false;
+    }
     resp.inner.usage.is_none()
         && resp.inner.choices.iter().all(|c| {
             let ChatCompletionStreamResponseDelta {
@@ -1131,7 +1135,9 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
 
 /// Completions variant of [`is_empty_stream_response`].
 fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
-    use dynamo_protocols::types::Choice;
+    if resp.nvext.is_some() {
+        return false;
+    }
     resp.inner.usage.is_none()
         && resp.inner.choices.iter().all(|c| {
             let Choice {
