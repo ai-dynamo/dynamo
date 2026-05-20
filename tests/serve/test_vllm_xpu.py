@@ -237,10 +237,13 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_710_490_000
             ),  # KV cache cap (2x safety over min=855_244_800)
-            pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
+            pytest.mark.timeout(
+                360
+            ),  # XPU engine init (CCL + model load) needs more time
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
+        timeout=360,
         env={"DYN_MM_ALLOW_INTERNAL": "1"},
         script_args=[
             "--model",
@@ -647,7 +650,7 @@ def test_multimodal_b64(
 @pytest.mark.pre_merge
 @pytest.mark.multimodal
 @pytest.mark.model("Qwen/Qwen3-VL-2B-Instruct")
-@pytest.mark.timeout(220)
+@pytest.mark.timeout(360)
 def test_multimodal_b64_frontend_decoding(
     request,
     runtime_services_dynamic_ports,
@@ -692,7 +695,7 @@ def test_multimodal_b64_frontend_decoding(
             "--frontend-decoding",
         ],
         delayed_start=0,
-        timeout=220,
+        timeout=360,
         request_payloads=[b64_payload],
     )
 
