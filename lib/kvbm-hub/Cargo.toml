@@ -28,8 +28,6 @@ kvbm-protocols = { workspace = true, features = ["client"] }
 # Async / core
 anyhow       = { workspace = true }
 async-trait  = { workspace = true }
-bytes        = { workspace = true }
-dashmap      = { workspace = true }
 futures      = { workspace = true }
 parking_lot  = { workspace = true }
 serde        = { workspace = true }
@@ -43,7 +41,6 @@ uuid         = { workspace = true }
 
 # HTTP server
 axum       = { workspace = true }
-tower-http = { workspace = true }
 
 # HTTP client
 reqwest = { workspace = true }

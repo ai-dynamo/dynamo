@@ -32,7 +32,6 @@ dynamo-tokens = { workspace = true }
 
 # External
 anyhow         = { workspace = true }
-axum           = { workspace = true }
 bytes          = { workspace = true }
 cudarc         = { workspace = true }
 dashmap        = { workspace = true }

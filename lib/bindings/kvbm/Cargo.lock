@@ -2896,7 +2896,6 @@ name = "kvbm-connector"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "axum",
  "bytes",
  "cudarc",
  "dashmap",
@@ -2991,9 +2990,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "bytes",
  "clap",
- "dashmap",
  "figment",
  "futures",
  "kvbm-protocols",
@@ -3004,7 +3001,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -3035,7 +3031,6 @@ dependencies = [
  "kvbm-observability",
  "lru 0.16.4",
  "parking_lot",
- "prometheus",
  "rmp-serde",
  "serde",
  "serde_json",
