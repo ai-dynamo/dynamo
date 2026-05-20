@@ -23,24 +23,23 @@
 //! RAII guards (`MutableBlock`, `ImmutableBlock`) manage block lifecycle automatically.
 
 pub mod config;
-pub mod engine;
 pub mod status;
 
 pub use config::PySchedulerConfig;
 pub use status::PyRequestStatus;
 
-use kvbm_connector::common::{Request, SchedulerOutput};
-use kvbm_logical::{
-    BlockManager, BlockRegistry,
-    pools::BlockDuplicationPolicy,
-    tinylfu::TinyLFUTracker,
-};
+use dynamo_kvbm::G1;
+use dynamo_kvbm::v2::integrations::common::{Request, SchedulerOutput};
+use dynamo_kvbm::v2::integrations::scheduler::{KVCacheManager, Scheduler};
+use dynamo_kvbm::v2::logical::BlockRegistry;
+use dynamo_kvbm::v2::logical::manager::BlockManager;
+use dynamo_kvbm::v2::logical::pools::BlockDuplicationPolicy;
+use dynamo_kvbm::v2::utils::tinylfu::TinyLFUTracker;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::v2::connector::leader::PyConnectorLeader;
-use self::engine::{G1, KVCacheManager, Scheduler};
 
 /// Python wrapper for the Rust Scheduler.
 ///

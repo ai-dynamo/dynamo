@@ -3,7 +3,7 @@
 
 //! Python bindings for request status.
 
-use super::engine::RequestStatus; // engine is v2::scheduler::engine
+use dynamo_kvbm::v2::integrations::scheduler::RequestStatus;
 use pyo3::prelude::*;
 
 /// Python wrapper for RequestStatus.
