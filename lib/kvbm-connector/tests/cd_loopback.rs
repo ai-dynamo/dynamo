@@ -28,8 +28,8 @@ use kvbm_connector::connector::leader::disagg::testing::{
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
-    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, DecodeDisaggLeader,
-    PrefillDisaggLeader,
+    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, CoordinatorParts,
+    DecodeDisaggLeader, HubWiring, PrefillDisaggLeader,
 };
 use kvbm_engine::disagg::session::MockSessionFactory;
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
@@ -112,12 +112,16 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
     let d_transport = MockCdBlockTransport::new();
     let d_workers = MockCdWorkerHook::new();
     let d_coordinator = ConditionalDisaggCoordinator::new_with_decode(
-        d_inner.clone(),
-        d_transport.clone(),
-        d_workers.clone(),
-        d_factory.clone(),
-        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
-        tokio::runtime::Handle::current(),
+        CoordinatorParts {
+            inner: d_inner.clone(),
+            transport: d_transport.clone(),
+            worker_hook: d_workers.clone(),
+            session_factory: d_factory.clone(),
+            peer_resolver: Arc::new(
+                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+            ),
+            runtime: tokio::runtime::Handle::current(),
+        },
         Arc::new(AlwaysRemote),
         d_queue.clone(),
     );
@@ -133,9 +137,11 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         d_transport.clone(),
         d_workers.clone(),
         tokio::runtime::Handle::current(),
-        None,
-        None,
-        None,
+        HubWiring {
+            hub: None,
+            client: None,
+            hub_velo_id: None,
+        },
     );
 
     // ---------- Prefill side ----------
@@ -146,14 +152,16 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
 
     let p_transport = MockCdBlockTransport::new();
     let p_workers = MockCdWorkerHook::new();
-    let p_coordinator = ConditionalDisaggCoordinator::new(
-        p_inner.clone(),
-        p_transport.clone(),
-        p_workers.clone(),
-        p_factory.clone(),
-        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
-        tokio::runtime::Handle::current(),
-    );
+    let p_coordinator = ConditionalDisaggCoordinator::new(CoordinatorParts {
+        inner: p_inner.clone(),
+        transport: p_transport.clone(),
+        worker_hook: p_workers.clone(),
+        session_factory: p_factory.clone(),
+        peer_resolver: Arc::new(
+            kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+        ),
+        runtime: tokio::runtime::Handle::current(),
+    });
     let p_wrapper =
         PrefillDisaggLeader::from_parts(p_inner.clone(), p_coordinator.clone(), p_workers.clone());
 

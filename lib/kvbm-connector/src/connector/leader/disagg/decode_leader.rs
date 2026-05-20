@@ -47,7 +47,7 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{FinishedStatus, Request};
 use crate::{G2, SequenceHash};
 
-use super::coordinator::ConditionalDisaggCoordinator;
+use super::coordinator::{ConditionalDisaggCoordinator, RemotePrefillStart};
 use super::decode::CdFailureSink;
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::{ConnectorLeaderApi, PolicyInputs, PrefillSelection};
@@ -284,6 +284,15 @@ impl std::fmt::Debug for DecodeDisaggLeader {
     }
 }
 
+/// Optional hub-side wiring for a [`DecodeDisaggLeader`]. Grouped so
+/// `from_parts` stays below the argument-count threshold; these three are a
+/// single conceptual unit (all `None` when the hub path is disabled).
+pub struct HubWiring {
+    pub hub: Option<Arc<HubClient>>,
+    pub client: Option<Arc<ConditionalDisaggClient>>,
+    pub hub_velo_id: Option<InstanceId>,
+}
+
 impl DecodeDisaggLeader {
     /// Construct a `DecodeDisaggLeader`.
     pub fn from_parts(
@@ -293,10 +302,13 @@ impl DecodeDisaggLeader {
         transport: Arc<dyn CdBlockTransport>,
         worker_hook: Arc<dyn CdWorkerHook>,
         tokio_handle: tokio::runtime::Handle,
-        hub: Option<Arc<HubClient>>,
-        client: Option<Arc<ConditionalDisaggClient>>,
-        hub_velo_id: Option<InstanceId>,
+        hub_wiring: HubWiring,
     ) -> Arc<Self> {
+        let HubWiring {
+            hub,
+            client,
+            hub_velo_id,
+        } = hub_wiring;
         let inflight_budget = InflightBudget::new(config.max_inflight_remote_prefill_tokens);
         let leader = Arc::new_cyclic(|weak_self| Self {
             inner,
@@ -691,12 +703,14 @@ impl DecodeDisaggLeader {
             inner_for_install.install_cd_onboarding_payload(rid, payload)
         };
         match self.coordinator.begin_remote_prefill(
-            request_id,
-            inputs,
-            initiator,
-            session_prefix_g2,
-            session_local_g2,
-            prefill_token_ids,
+            RemotePrefillStart {
+                request_id,
+                inputs,
+                initiator_instance_id: initiator,
+                prefix_g2: session_prefix_g2,
+                local_match_g2: session_local_g2,
+                prefill_token_ids,
+            },
             install_payload,
         ) {
             Ok(outcome) => {

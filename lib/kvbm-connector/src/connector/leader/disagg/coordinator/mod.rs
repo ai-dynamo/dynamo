@@ -7,7 +7,7 @@
 //! and the prefill side ([`super::prefill_leader::PrefillDisaggLeader`])
 //! share a single [`CdRequest`] type whose role-conditional fields are
 //! carried by a [`CdRequestRole`] enum.
-//! [`super::coordinator::ConditionalDisaggCoordinator`] owns the
+//! [`ConditionalDisaggCoordinator`] owns the
 //! `DashMap<String, Arc<CdRequest>>` and drives both sides.
 //!
 //! ## Field layout — what's shared vs role-conditional
@@ -24,8 +24,10 @@
 //! during the migration; collapsing the status enums (if it makes
 //! sense) is deferred to Slice 4 cleanup.
 
-pub mod coordinator;
-pub use coordinator::ConditionalDisaggCoordinator;
+pub mod driver;
+pub use driver::{
+    CdRegisterObserverFn, ConditionalDisaggCoordinator, CoordinatorParts, RemotePrefillStart,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;

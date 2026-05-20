@@ -14,12 +14,12 @@ use std::time::Duration;
 use anyhow::Result;
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
-use kvbm_connector::connector::leader::disagg::ConditionalDisaggCoordinator;
 use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillStatus;
 use kvbm_connector::connector::leader::disagg::testing::{
     MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim, MockSlot, TEST_BLOCK_SIZE,
     wait_until,
 };
+use kvbm_connector::connector::leader::disagg::{ConditionalDisaggCoordinator, CoordinatorParts};
 use kvbm_connector::connector::leader::disagg::{ConnectorLeaderApi, PrefillDisaggLeader};
 use kvbm_engine::disagg::session::{CommittedBlock, MockSession, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
@@ -152,12 +152,16 @@ fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -
     let factory = MockSessionFactory::new();
 
     let coordinator = ConditionalDisaggCoordinator::new_with_watchdog(
-        inner.clone(),
-        transport.clone(),
-        workers.clone(),
-        factory.clone(),
-        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
-        tokio::runtime::Handle::current(),
+        CoordinatorParts {
+            inner: inner.clone(),
+            transport: transport.clone(),
+            worker_hook: workers.clone(),
+            session_factory: factory.clone(),
+            peer_resolver: Arc::new(
+                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+            ),
+            runtime: tokio::runtime::Handle::current(),
+        },
         watchdog,
     );
 
@@ -455,14 +459,16 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
     let transport = MockCdBlockTransport::new();
     let workers = MockCdWorkerHook::new();
     let factory = MockSessionFactory::new();
-    let coordinator = ConditionalDisaggCoordinator::new(
-        inner.clone(),
-        transport.clone(),
-        workers.clone(),
-        factory.clone(),
-        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
-        tokio::runtime::Handle::current(),
-    );
+    let coordinator = ConditionalDisaggCoordinator::new(CoordinatorParts {
+        inner: inner.clone(),
+        transport: transport.clone(),
+        worker_hook: workers.clone(),
+        session_factory: factory.clone(),
+        peer_resolver: Arc::new(
+            kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+        ),
+        runtime: tokio::runtime::Handle::current(),
+    });
     let wrapper =
         PrefillDisaggLeader::from_parts(inner.clone(), coordinator.clone(), workers.clone());
 

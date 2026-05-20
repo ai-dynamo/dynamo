@@ -61,8 +61,8 @@ use kvbm_connector::connector::leader::disagg::testing::{
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
-    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, DecodeDisaggLeader,
-    PrefillDisaggLeader,
+    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, CoordinatorParts,
+    DecodeDisaggLeader, HubWiring, PrefillDisaggLeader,
 };
 use kvbm_engine::disagg::session::MockSessionFactory;
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
@@ -131,12 +131,16 @@ fn build_instance(factory: Arc<MockSessionFactory>) -> DualRoleInstance {
     let queue = InMemoryRemotePrefillQueue::new();
 
     let decode_coord = ConditionalDisaggCoordinator::new_with_decode(
-        inner.clone(),
-        transport.clone(),
-        workers.clone(),
-        factory.clone(),
-        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
-        tokio::runtime::Handle::current(),
+        CoordinatorParts {
+            inner: inner.clone(),
+            transport: transport.clone(),
+            worker_hook: workers.clone(),
+            session_factory: factory.clone(),
+            peer_resolver: Arc::new(
+                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+            ),
+            runtime: tokio::runtime::Handle::current(),
+        },
         Arc::new(AlwaysRemote),
         queue.clone(),
     );
@@ -148,19 +152,23 @@ fn build_instance(factory: Arc<MockSessionFactory>) -> DualRoleInstance {
         transport.clone(),
         workers.clone(),
         tokio::runtime::Handle::current(),
-        None,
-        None,
-        None,
+        HubWiring {
+            hub: None,
+            client: None,
+            hub_velo_id: None,
+        },
     );
 
-    let prefill_coord = ConditionalDisaggCoordinator::new(
-        inner.clone(),
-        transport.clone(),
-        workers.clone(),
-        factory.clone(),
-        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
-        tokio::runtime::Handle::current(),
-    );
+    let prefill_coord = ConditionalDisaggCoordinator::new(CoordinatorParts {
+        inner: inner.clone(),
+        transport: transport.clone(),
+        worker_hook: workers.clone(),
+        session_factory: factory.clone(),
+        peer_resolver: Arc::new(
+            kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+        ),
+        runtime: tokio::runtime::Handle::current(),
+    });
 
     let prefill_wrapper =
         PrefillDisaggLeader::from_parts(inner.clone(), prefill_coord.clone(), workers.clone());

@@ -806,9 +806,9 @@ impl ConnectorLeader {
             use super::disagg::{
                 AlwaysRemote, CdBlockTransport, CdWorkerHook, ConditionalDisaggCoordinator,
                 ConditionalDisaggLeader, ConditionalDisaggPolicy, ConnectorLeaderApi,
-                ConnectorLeaderShim, DecodeDisaggLeader, EngineCdBlockTransport, HubPeerResolver,
-                HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook, PeerResolver,
-                PrefillDisaggLeader, RemotePrefillQueue,
+                ConnectorLeaderShim, CoordinatorParts, DecodeDisaggLeader, EngineCdBlockTransport,
+                HubPeerResolver, HubRemotePrefillQueue, HubWiring, InnerLeaderShim,
+                InnerLeaderWorkerHook, PeerResolver, PrefillDisaggLeader, RemotePrefillQueue,
             };
             use kvbm_config::DisaggregationRole;
             use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
@@ -945,12 +945,14 @@ impl ConnectorLeader {
                     let queue: Arc<dyn RemotePrefillQueue> =
                         HubRemotePrefillQueue::new(Arc::clone(&client));
                     let coord = ConditionalDisaggCoordinator::new_with_decode(
-                        Arc::clone(&inner_shim),
-                        Arc::clone(&transport),
-                        Arc::clone(&worker_hook),
-                        Arc::clone(&session_factory),
-                        Arc::clone(&peer_resolver) as Arc<dyn PeerResolver>,
-                        tokio_handle.clone(),
+                        CoordinatorParts {
+                            inner: Arc::clone(&inner_shim),
+                            transport: Arc::clone(&transport),
+                            worker_hook: Arc::clone(&worker_hook),
+                            session_factory: Arc::clone(&session_factory),
+                            peer_resolver: Arc::clone(&peer_resolver) as Arc<dyn PeerResolver>,
+                            runtime: tokio_handle.clone(),
+                        },
                         policy,
                         queue,
                     );
@@ -961,21 +963,23 @@ impl ConnectorLeader {
                         Arc::clone(&transport),
                         Arc::clone(&worker_hook),
                         tokio_handle.clone(),
-                        Some(Arc::clone(&hub)),
-                        Some(Arc::clone(&client)),
-                        hub_velo_id,
+                        HubWiring {
+                            hub: Some(Arc::clone(&hub)),
+                            client: Some(Arc::clone(&client)),
+                            hub_velo_id,
+                        },
                     );
                     RoleSpecific::Decode(decode)
                 }
                 DisaggregationRole::Prefill => {
-                    let coord = ConditionalDisaggCoordinator::new(
-                        Arc::clone(&inner_shim),
-                        Arc::clone(&transport),
-                        Arc::clone(&worker_hook),
-                        Arc::clone(&session_factory),
-                        Arc::clone(&peer_resolver) as Arc<dyn PeerResolver>,
-                        tokio_handle.clone(),
-                    );
+                    let coord = ConditionalDisaggCoordinator::new(CoordinatorParts {
+                        inner: Arc::clone(&inner_shim),
+                        transport: Arc::clone(&transport),
+                        worker_hook: Arc::clone(&worker_hook),
+                        session_factory: Arc::clone(&session_factory),
+                        peer_resolver: Arc::clone(&peer_resolver) as Arc<dyn PeerResolver>,
+                        runtime: tokio_handle.clone(),
+                    });
 
                     // Wire the offload-pipeline observer once — captures
                     // G1→G2 register events so output blocks flow back

@@ -84,9 +84,11 @@ use crate::common::RequestMetadata;
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 
-pub use coordinator::ConditionalDisaggCoordinator;
+pub use coordinator::{
+    CdRegisterObserverFn, ConditionalDisaggCoordinator, CoordinatorParts, RemotePrefillStart,
+};
 pub use decode::{BeginOutcome, CdFailureSink, RemotePrefillStatus};
-pub use decode_leader::DecodeDisaggLeader;
+pub use decode_leader::{DecodeDisaggLeader, HubWiring};
 pub use leader::{
     ConditionalDisaggLeader, ConditionalDisaggLeaderBuilder, build_hub_client, register_with_hub,
 };

@@ -1841,9 +1841,11 @@ impl InstanceLeader {
         // Project WirePullOptions onto the full TransferOptions for the
         // legacy path. The legacy executor honours nixl_write_notification
         // and metric_route; all other TransferOptions fields default.
-        let mut transfer_opts = TransferOptions::default();
-        transfer_opts.nixl_write_notification = opts.nixl_write_notification;
-        transfer_opts.metric_route = opts.metric_route;
+        let transfer_opts = TransferOptions {
+            nixl_write_notification: opts.nixl_write_notification,
+            metric_route: opts.metric_route,
+            ..Default::default()
+        };
 
         let notification = parallel_worker.execute_remote_onboard_for_instance(
             remote_instance,

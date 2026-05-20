@@ -45,6 +45,34 @@ use super::super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::super::{ConditionalDisaggPolicy, PolicyInputs, PrefillSelection};
 use super::{CdRequest, CdRequestStatus, DecodeBits, PrefillBits};
 
+/// Type-erased register-observer callback handed to
+/// `Pipeline::add_register_observer`.
+pub type CdRegisterObserverFn = Arc<dyn Fn(&[ImmutableBlock<G2>]) + Send + Sync + 'static>;
+
+/// Inputs to [`ConditionalDisaggCoordinator::begin_remote_prefill`]. Bundled
+/// so the method stays below the argument-count threshold; the RAII install
+/// closure stays a separate generic argument to avoid boxing.
+pub struct RemotePrefillStart<'a> {
+    pub request_id: &'a str,
+    pub inputs: &'a PolicyInputs,
+    pub initiator_instance_id: InstanceId,
+    pub prefix_g2: Vec<ImmutableBlock<G2>>,
+    pub local_match_g2: Vec<ImmutableBlock<G2>>,
+    pub prefill_token_ids: Vec<u32>,
+}
+
+/// Shared dependencies every coordinator constructor needs. Bundled so the
+/// ctors stay below the argument-count threshold; these six always travel
+/// together.
+pub struct CoordinatorParts {
+    pub inner: Arc<dyn InnerLeaderShim>,
+    pub transport: Arc<dyn CdBlockTransport>,
+    pub worker_hook: Arc<dyn CdWorkerHook>,
+    pub session_factory: Arc<dyn SessionFactory>,
+    pub peer_resolver: Arc<dyn PeerResolver>,
+    pub runtime: Handle,
+}
+
 // ============================================================================
 // ConditionalDisaggCoordinator
 // ============================================================================
@@ -87,86 +115,41 @@ impl ConditionalDisaggCoordinator {
     ///
     /// This is the prefill-only constructor (no decode-role policy or queue).
     /// Use [`new_with_decode`] to enable the decode role.
-    pub fn new(
-        inner: Arc<dyn InnerLeaderShim>,
-        transport: Arc<dyn CdBlockTransport>,
-        worker_hook: Arc<dyn CdWorkerHook>,
-        session_factory: Arc<dyn SessionFactory>,
-        peer_resolver: Arc<dyn PeerResolver>,
-        runtime: Handle,
-    ) -> Arc<Self> {
-        Self::new_with_watchdog(
-            inner,
-            transport,
-            worker_hook,
-            session_factory,
-            peer_resolver,
-            runtime,
-            LIFECYCLE_WATCHDOG,
-        )
+    pub fn new(parts: CoordinatorParts) -> Arc<Self> {
+        Self::new_with_watchdog(parts, LIFECYCLE_WATCHDOG)
     }
 
     /// Test-friendly constructor with an injectable lifecycle watchdog.
     /// Production callers use [`new`](Self::new) which fixes the watchdog
     /// at [`LIFECYCLE_WATCHDOG`] (60s).
-    pub fn new_with_watchdog(
-        inner: Arc<dyn InnerLeaderShim>,
-        transport: Arc<dyn CdBlockTransport>,
-        worker_hook: Arc<dyn CdWorkerHook>,
-        session_factory: Arc<dyn SessionFactory>,
-        peer_resolver: Arc<dyn PeerResolver>,
-        runtime: Handle,
-        lifecycle_watchdog: Duration,
-    ) -> Arc<Self> {
-        Self::new_with_watchdog_and_decode(
-            inner,
-            transport,
-            worker_hook,
-            session_factory,
-            peer_resolver,
-            runtime,
-            lifecycle_watchdog,
-            None,
-            None,
-        )
+    pub fn new_with_watchdog(parts: CoordinatorParts, lifecycle_watchdog: Duration) -> Arc<Self> {
+        Self::new_with_watchdog_and_decode(parts, lifecycle_watchdog, None, None)
     }
 
     /// Construct with both prefill and decode roles enabled (Slice 4).
     pub fn new_with_decode(
-        inner: Arc<dyn InnerLeaderShim>,
-        transport: Arc<dyn CdBlockTransport>,
-        worker_hook: Arc<dyn CdWorkerHook>,
-        session_factory: Arc<dyn SessionFactory>,
-        peer_resolver: Arc<dyn PeerResolver>,
-        runtime: Handle,
+        parts: CoordinatorParts,
         policy: Arc<dyn ConditionalDisaggPolicy>,
         queue: Arc<dyn RemotePrefillQueue>,
     ) -> Arc<Self> {
-        Self::new_with_watchdog_and_decode(
+        Self::new_with_watchdog_and_decode(parts, LIFECYCLE_WATCHDOG, Some(policy), Some(queue))
+    }
+
+    /// Full constructor used by all public ctors.
+    fn new_with_watchdog_and_decode(
+        parts: CoordinatorParts,
+        lifecycle_watchdog: Duration,
+        policy: Option<Arc<dyn ConditionalDisaggPolicy>>,
+        queue: Option<Arc<dyn RemotePrefillQueue>>,
+    ) -> Arc<Self> {
+        let CoordinatorParts {
             inner,
             transport,
             worker_hook,
             session_factory,
             peer_resolver,
             runtime,
-            LIFECYCLE_WATCHDOG,
-            Some(policy),
-            Some(queue),
-        )
-    }
-
-    /// Full constructor used by all public ctors.
-    fn new_with_watchdog_and_decode(
-        inner: Arc<dyn InnerLeaderShim>,
-        transport: Arc<dyn CdBlockTransport>,
-        worker_hook: Arc<dyn CdWorkerHook>,
-        session_factory: Arc<dyn SessionFactory>,
-        peer_resolver: Arc<dyn PeerResolver>,
-        runtime: Handle,
-        lifecycle_watchdog: Duration,
-        policy: Option<Arc<dyn ConditionalDisaggPolicy>>,
-        queue: Option<Arc<dyn RemotePrefillQueue>>,
-    ) -> Arc<Self> {
+        } = parts;
         // Observer wired at construction.  Closure-based commit
         // dispatch (set after `Arc::new_cyclic` produces the coord)
         // forwards observer-matched blocks to
@@ -213,7 +196,7 @@ impl ConditionalDisaggCoordinator {
     }
 
     /// Returns a closure suitable for `Pipeline::add_register_observer`.
-    pub fn observer_callback(&self) -> Arc<dyn Fn(&[ImmutableBlock<G2>]) + Send + Sync + 'static> {
+    pub fn observer_callback(&self) -> CdRegisterObserverFn {
         let observer = Arc::clone(&self.observer);
         Arc::new(move |blocks: &[ImmutableBlock<G2>]| observer.observe(blocks))
     }
@@ -1039,17 +1022,21 @@ impl ConditionalDisaggCoordinator {
     /// discussion above only applies once PC is turned on.
     pub fn begin_remote_prefill<F>(
         &self,
-        request_id: &str,
-        inputs: &PolicyInputs,
-        initiator_instance_id: InstanceId,
-        prefix_g2: Vec<ImmutableBlock<G2>>,
-        local_match_g2: Vec<ImmutableBlock<G2>>,
-        prefill_token_ids: Vec<u32>,
+        start: RemotePrefillStart<'_>,
         install_payload: F,
     ) -> Result<BeginOutcome>
     where
         F: FnOnce(&str) -> Result<()>,
     {
+        let RemotePrefillStart {
+            request_id,
+            inputs,
+            initiator_instance_id,
+            prefix_g2,
+            local_match_g2,
+            prefill_token_ids,
+        } = start;
+
         if self.states.contains_key(request_id) {
             anyhow::bail!(
                 "begin_remote_prefill called twice for request_id={}",

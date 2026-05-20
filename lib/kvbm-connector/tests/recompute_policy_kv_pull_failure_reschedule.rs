@@ -50,7 +50,8 @@ use kvbm_connector::connector::leader::disagg::testing::{
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
-    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, DecodeDisaggLeader,
+    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, CoordinatorParts,
+    DecodeDisaggLeader, HubWiring,
 };
 use kvbm_engine::disagg::session::{CommittedBlock, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
@@ -149,12 +150,16 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
     let workers = MockCdWorkerHook::new();
 
     let coordinator = ConditionalDisaggCoordinator::new_with_decode(
-        inner.clone(),
-        transport.clone(),
-        workers.clone(),
-        factory.clone(),
-        Arc::new(kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver),
-        tokio::runtime::Handle::current(),
+        CoordinatorParts {
+            inner: inner.clone(),
+            transport: transport.clone(),
+            worker_hook: workers.clone(),
+            session_factory: factory.clone(),
+            peer_resolver: Arc::new(
+                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+            ),
+            runtime: tokio::runtime::Handle::current(),
+        },
         Arc::new(AlwaysRemote),
         queue.clone(),
     );
@@ -171,9 +176,11 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
         transport.clone(),
         workers.clone(),
         tokio::runtime::Handle::current(),
-        None,
-        None,
-        None,
+        HubWiring {
+            hub: None,
+            client: None,
+            hub_velo_id: None,
+        },
     );
 
     // ---------- 1. GNMT — opens session, populates coordinator state ----------

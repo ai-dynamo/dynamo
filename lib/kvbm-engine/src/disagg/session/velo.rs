@@ -234,23 +234,38 @@ impl std::fmt::Debug for VeloSession {
     }
 }
 
+/// Constructor inputs for [`VeloSession::new_inner`]. Bundled so the
+/// constructor stays below the argument-count threshold.
+struct VeloSessionParts {
+    session_id: SessionId,
+    velo: Arc<velo::Velo>,
+    leader: Arc<InstanceLeader>,
+    local_endpoint: Option<SessionEndpoint>,
+    runtime: Handle,
+    outbound_tx: mpsc::UnboundedSender<OutboundCommand>,
+    outbound_install_tx: oneshot::Sender<velo::StreamSender<Frame>>,
+    active_count: Arc<AtomicUsize>,
+    peer_resolver: Option<Arc<dyn PeerResolver>>,
+}
+
 impl VeloSession {
     /// Build inner state plus the outbound queue. The caller must
     /// also call [`spawn_outbound_sender`] with `outbound_rx` and
     /// `install_rx` to start draining; the install half of the
     /// oneshot stays inside the inner so the holder-side dispatch
     /// path can install it after `Frame::Attach` arrives.
-    fn new_inner(
-        session_id: SessionId,
-        velo: Arc<velo::Velo>,
-        leader: Arc<InstanceLeader>,
-        local_endpoint: Option<SessionEndpoint>,
-        runtime: Handle,
-        outbound_tx: mpsc::UnboundedSender<OutboundCommand>,
-        outbound_install_tx: oneshot::Sender<velo::StreamSender<Frame>>,
-        active_count: Arc<AtomicUsize>,
-        peer_resolver: Option<Arc<dyn PeerResolver>>,
-    ) -> Arc<VeloSessionInner> {
+    fn new_inner(parts: VeloSessionParts) -> Arc<VeloSessionInner> {
+        let VeloSessionParts {
+            session_id,
+            velo,
+            leader,
+            local_endpoint,
+            runtime,
+            outbound_tx,
+            outbound_install_tx,
+            active_count,
+            peer_resolver,
+        } = parts;
         let prev = active_count.fetch_add(1, Ordering::AcqRel);
         crate::engine_audit!(
             "session_inner_created",
@@ -1310,17 +1325,17 @@ impl VeloSessionFactory {
         let endpoint = endpoint_from_handle(anchor.handle());
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (install_tx, install_rx) = oneshot::channel();
-        let inner = VeloSession::new_inner(
+        let inner = VeloSession::new_inner(VeloSessionParts {
             session_id,
-            Arc::clone(&self.velo),
-            Arc::clone(&self.leader),
-            Some(endpoint),
-            self.runtime.clone(),
+            velo: Arc::clone(&self.velo),
+            leader: Arc::clone(&self.leader),
+            local_endpoint: Some(endpoint),
+            runtime: self.runtime.clone(),
             outbound_tx,
-            install_tx,
-            Arc::clone(&self.active_count),
-            self.peer_resolver.clone(),
-        );
+            outbound_install_tx: install_tx,
+            active_count: Arc::clone(&self.active_count),
+            peer_resolver: self.peer_resolver.clone(),
+        });
         spawn_outbound_sender(outbound_rx, install_rx, Arc::clone(&inner), &self.runtime);
         spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
         Ok(Arc::new(VeloSession { inner }))
@@ -1341,17 +1356,17 @@ impl SessionFactory for VeloSessionFactory {
         let endpoint = endpoint_from_handle(anchor.handle());
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (install_tx, install_rx) = oneshot::channel();
-        let inner = VeloSession::new_inner(
+        let inner = VeloSession::new_inner(VeloSessionParts {
             session_id,
-            Arc::clone(&self.velo),
-            Arc::clone(&self.leader),
-            Some(endpoint),
-            self.runtime.clone(),
+            velo: Arc::clone(&self.velo),
+            leader: Arc::clone(&self.leader),
+            local_endpoint: Some(endpoint),
+            runtime: self.runtime.clone(),
             outbound_tx,
-            install_tx,
-            Arc::clone(&self.active_count),
-            self.peer_resolver.clone(),
-        );
+            outbound_install_tx: install_tx,
+            active_count: Arc::clone(&self.active_count),
+            peer_resolver: self.peer_resolver.clone(),
+        });
         spawn_outbound_sender(outbound_rx, install_rx, Arc::clone(&inner), &self.runtime);
         spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
         Ok(Arc::new(VeloSession { inner }))
@@ -1427,17 +1442,17 @@ impl SessionFactory for VeloSessionFactory {
             let our_instance = velo.instance_id();
             let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
             let (install_tx, install_rx) = oneshot::channel();
-            let inner = VeloSession::new_inner(
+            let inner = VeloSession::new_inner(VeloSessionParts {
                 session_id,
-                Arc::clone(&velo),
+                velo: Arc::clone(&velo),
                 leader,
-                Some(local_endpoint.clone()),
-                runtime.clone(),
+                local_endpoint: Some(local_endpoint.clone()),
+                runtime: runtime.clone(),
                 outbound_tx,
-                install_tx,
+                outbound_install_tx: install_tx,
                 active_count,
                 peer_resolver,
-            );
+            });
             // Puller knows peer's identity out-of-band.
             *inner.peer_instance_id.lock() = Some(peer_instance_id);
             // Install outbound immediately on the puller side via

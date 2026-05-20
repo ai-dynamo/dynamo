@@ -250,14 +250,11 @@ fn drop_on_non_runtime_thread_signals_cancel() {
     // the tasks, which see cancel=true and exit. The egress port should
     // become free shortly — we give it up to 3 s.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let mut last_err: Option<std::io::Error> = None;
     loop {
         match try_bind(egress_port) {
             Ok(()) => break,
-            Err(e) => {
-                last_err = Some(e);
+            Err(err) => {
                 if std::time::Instant::now() >= deadline {
-                    let err = last_err.unwrap();
                     panic!(
                         "egress port {egress_port} still bound 3 s after \
                          non-runtime Drop: {err}. Cancel signal did not \
