@@ -604,7 +604,7 @@ class MetricsCollector:
                 self.gpu_names.append(name)
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 self.gpu_mem_total_gib.append(mem.total / (1024**3))
-                self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=False))
+                self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=True))
                 self.gpu_util.append(deque(maxlen=maxlen_main))
                 self.gpu_temp.append(deque(maxlen=maxlen_main))
                 self.gpu_pcie_tx.append(deque(maxlen=maxlen_pcie))
@@ -1285,6 +1285,8 @@ def build_monitor_server(collector: MetricsCollector):
     )
 
     ui_state = {"view_minutes": 2}
+    client_cursors: dict[str, dict] = {}
+    client_lock = threading.Lock()
 
     @app.route("/")
     def index():
@@ -1300,6 +1302,12 @@ def build_monitor_server(collector: MetricsCollector):
     @socketio.on("connect")
     def handle_connect():
         sid = flask.request.sid
+        with client_lock:
+            client_cursors[sid] = {
+                "main": 0,
+                "pcie": [0] * collector.gpu_count,
+                "disk": 0,
+            }
 
         def send_init():
             for _ in range(50):
@@ -1307,13 +1315,33 @@ def build_monitor_server(collector: MetricsCollector):
                     if len(collector.ts_main) > 5:
                         break
                 time.sleep(0.1)
-            socketio.emit("init", collector.snapshot_full(), to=sid)
+            snapshot = collector.snapshot_full()
+            with client_lock:
+                client_cursors[sid] = {
+                    "main": snapshot["counter_main"],
+                    "pcie": list(snapshot["counter_pcie"]),
+                    "disk": snapshot["counter_disk"],
+                }
+            socketio.emit("init", snapshot, to=sid)
 
         threading.Thread(target=send_init, daemon=True).start()
 
+    @socketio.on("disconnect")
+    def handle_disconnect():
+        with client_lock:
+            client_cursors.pop(flask.request.sid, None)
+
     @socketio.on("request_init")
     def handle_request_init():
-        socketio.emit("init", collector.snapshot_full(), to=flask.request.sid)
+        sid = flask.request.sid
+        snapshot = collector.snapshot_full()
+        with client_lock:
+            client_cursors[sid] = {
+                "main": snapshot["counter_main"],
+                "pcie": list(snapshot["counter_pcie"]),
+                "disk": snapshot["counter_disk"],
+            }
+        socketio.emit("init", snapshot, to=sid)
 
     @socketio.on("view_minutes")
     def handle_view_minutes(view_minutes):
@@ -1328,9 +1356,6 @@ def build_monitor_server(collector: MetricsCollector):
     }
 
     def push_loop():
-        last_main = 0
-        last_pcie: list[int] = [0] * collector.gpu_count
-        last_disk = 0
         while True:
             view_minutes = ui_state.get("view_minutes", 2)
             push_sec, step = push_policy.get(view_minutes, (0.100, 1))
@@ -1339,17 +1364,31 @@ def build_monitor_server(collector: MetricsCollector):
                 counter_main = collector.counter_main
                 counter_pcie = list(collector.counter_pcie)
                 counter_disk = collector.counter_disk
-            if (
-                counter_main <= last_main
-                and counter_pcie == last_pcie
-                and counter_disk <= last_disk
-            ):
-                continue
-            delta = collector.snapshot_delta(last_main, last_pcie, last_disk, step=step)
-            last_main = counter_main
-            last_pcie = counter_pcie
-            last_disk = counter_disk
-            socketio.emit("delta", delta)
+            with client_lock:
+                cursors = list(client_cursors.items())
+
+            for sid, cursor in cursors:
+                last_main = cursor["main"]
+                last_pcie = cursor["pcie"]
+                last_disk = cursor["disk"]
+                if (
+                    counter_main <= last_main
+                    and counter_pcie == last_pcie
+                    and counter_disk <= last_disk
+                ):
+                    continue
+                delta = collector.snapshot_delta(
+                    last_main, last_pcie, last_disk, step=step
+                )
+                with client_lock:
+                    if sid not in client_cursors:
+                        continue
+                    client_cursors[sid] = {
+                        "main": counter_main,
+                        "pcie": counter_pcie,
+                        "disk": counter_disk,
+                    }
+                socketio.emit("delta", delta, to=sid)
 
     return socketio, app, push_loop
 
