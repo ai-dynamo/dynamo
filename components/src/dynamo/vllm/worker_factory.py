@@ -397,7 +397,8 @@ class WorkerFactory:
 
         # Topology readiness role.
         # _create_decode_worker handles both DECODE and AGGREGATED disaggregation modes.
-        # `--route-to-encoder` adds Encode to the AND-set of required peers.
+        # Encode is omitted from `needs` until encode workers register a card —
+        # advertising it now would leave route-to-encoder deployments perma-not-ready.
         if config.disaggregation_mode == DisaggregationMode.DECODE:
             worker_type = WorkerType.Decode
             needs_set: list[WorkerType] = [WorkerType.Prefill]
@@ -405,8 +406,6 @@ class WorkerFactory:
             # AGGREGATED
             worker_type = WorkerType.Aggregated
             needs_set = []
-        if config.route_to_encoder:
-            needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
         await self.register_vllm_model(
@@ -613,13 +612,11 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
 
         # Register prefill model with ModelType.Prefill (the legacy bit that
-        # gates prefill-side routing) and the topology readiness role.
+        # gates prefill-side routing) and the topology readiness role. Encode
+        # is omitted from `needs` until encode workers register a card.
         model_input = (
             ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
         )
-        needs_set: list[WorkerType] = [WorkerType.Decode]
-        if config.route_to_encoder:
-            needs_set.append(WorkerType.Encode)
         await self.register_vllm_model(
             model_input,
             ModelType.Prefill,
@@ -628,7 +625,7 @@ class WorkerFactory:
             engine_client,
             vllm_config,
             worker_type=WorkerType.Prefill,
-            needs=[needs_set],
+            needs=[[WorkerType.Decode]],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(
