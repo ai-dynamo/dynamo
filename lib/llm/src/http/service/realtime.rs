@@ -199,7 +199,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
         // writer dropped at end of scope → spawned cleanup sends Close + drains.
     });
 
-    // Inbound loop: parse client frames into request stream items.
     while let Some(msg) = ws_rx.next().await {
         let msg = match msg {
             Ok(m) => m,
@@ -267,6 +266,16 @@ fn close_message(code: u16, reason: &str) -> Message {
 /// the sink: `writer.send(...).await`, `&mut *writer` for fns that take
 /// `&mut Sink<Message>`. There is no explicit close API — the close sequence
 /// is bound to the wrapper's lifecycle, including panic / early-return paths.
+///
+/// `Drop` is sync and the close sequence is async, so the cleanup runs on
+/// a spawned task that outlives the dropping scope. The task owns `ws_tx`
+/// exclusively, so the WebSocket's underlying TCP socket stays open until
+/// the cleanup writes the Close frame, drains the sink under
+/// `CLOSE_DRAIN_TIMEOUT`, and drops `ws_tx`. `handle_socket`'s
+/// `outbound.await` returns *before* the Close frame is on the wire, but
+/// the client still sees the in-band Close — the only scenario the cleanup
+/// can't complete is runtime shutdown racing connection teardown, which
+/// doesn't happen on axum's long-lived global runtime.
 struct ScopedWsWriter {
     ws_tx: Option<SplitSink<WebSocket, Message>>,
     close_reason: Arc<Mutex<Option<Message>>>,
@@ -289,7 +298,7 @@ impl std::ops::Deref for ScopedWsWriter {
     fn deref(&self) -> &Self::Target {
         self.ws_tx
             .as_ref()
-            .expect("ScopedWsWriter sink already taken")
+            .expect("ScopedWsWriter sink only taken by Drop; no other consumer should exist")
     }
 }
 
@@ -297,7 +306,7 @@ impl std::ops::DerefMut for ScopedWsWriter {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.ws_tx
             .as_mut()
-            .expect("ScopedWsWriter sink already taken")
+            .expect("ScopedWsWriter sink only taken by Drop; no other consumer should exist")
     }
 }
 
@@ -358,7 +367,9 @@ where
                 match serde_json::from_str::<RealtimeClientEvent>(text.as_str()) {
                     Ok(e) => e,
                     Err(err) => {
-                        tracing::warn!(%err, "/v1/realtime malformed JSON during engine selection");
+                        // Client-driven and repeatable; debug! so a misbehaving
+                        // peer can't amplify the log channel.
+                        tracing::debug!(%err, "/v1/realtime malformed JSON during engine selection");
                         send_error_event(ws_tx, "invalid_request", "malformed JSON frame", None)
                             .await;
                         continue;
@@ -366,7 +377,7 @@ where
                 }
             }
             Message::Binary(_) => {
-                tracing::warn!("/v1/realtime binary frame during engine selection");
+                tracing::debug!("/v1/realtime binary frame during engine selection");
                 send_error_event(
                     ws_tx,
                     "invalid_request",
@@ -382,7 +393,7 @@ where
         let session_update = match event {
             RealtimeClientEvent::SessionUpdate(req) => req,
             other => {
-                tracing::warn!(
+                tracing::debug!(
                     event = other.event_type(),
                     "/v1/realtime expected session.update before engine selection"
                 );
