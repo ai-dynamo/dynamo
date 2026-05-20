@@ -1425,8 +1425,8 @@ class KvRouterConfig:
                 The cap is compared against the sum of ISL tokens for all requests
                 currently parked in the pending queue.
                 Default: `None`, which uses the Rust default
-                `[(0, 2097152), (2048, 262144)]` — 2M ISL tokens per worker
-                for cheap requests (low cache miss), 256K for expensive requests.
+                `[(0, 4194304), (2048, 524288)]` — 4M ISL tokens per worker
+                for cheap requests (low cache miss), 512K for expensive requests.
                 Backpressure (ResourceExhausted) is returned when the cap is reached.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,

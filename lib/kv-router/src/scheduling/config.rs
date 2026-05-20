@@ -22,10 +22,10 @@ const fn default_track_prefill_tokens() -> bool {
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
 
 /// Default pending ISL token tiers per worker for `router_queue_depth_by_missing_isl`.
-/// - Cheap requests (0-2047 cache miss): 2M ISL tokens per worker
-/// - Expensive requests (2048+ cache miss): 256K ISL tokens per worker
+/// - Cheap requests (0-2047 cache miss): 4M ISL tokens per worker
+/// - Expensive requests (2048+ cache miss): 512K ISL tokens per worker
 pub const DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS: &[(usize, usize)] =
-    &[(0, 2 * 1024 * 1024), (2048, 256 * 1024)];
+    &[(0, 4 * 1024 * 1024), (2048, 512 * 1024)];
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -187,8 +187,8 @@ pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
 impl RouterQueueDepthTiers {
     /// Default tiers for ISL token caps per worker.
     ///
-    /// - Cheap requests (0-2047 cache miss): 2M ISL tokens per worker
-    /// - Expensive requests (2048+ cache miss): 256K ISL tokens per worker
+    /// - Cheap requests (0-2047 cache miss): 4M ISL tokens per worker
+    /// - Expensive requests (2048+ cache miss): 512K ISL tokens per worker
     ///
     /// See [`DEFAULT_ROUTER_QUEUE_ISL_TOKENS_TIERS`].
     pub fn default_per_worker() -> Self {
@@ -589,12 +589,12 @@ pub struct KvRouterConfig {
     /// parked in the pending queue.
     ///
     /// Example with 4 workers:
-    ///   [(0, 2097152), (2048, 262144)]  # 2M and 256K ISL tokens per worker
-    /// - request missing 500 tokens  → matches (0, 2097152)    → cap = 2M*4 = 8M tokens
-    /// - request missing 3000 tokens → matches (2048, 262144)  → cap = 256K*4 = 1M tokens
+    ///   [(0, 4194304), (2048, 524288)]  # 4M and 512K ISL tokens per worker
+    /// - request missing 500 tokens  → matches (0, 4194304)    → cap = 4M*4 = 16M tokens
+    /// - request missing 3000 tokens → matches (2048, 524288)  → cap = 512K*4 = 2M tokens
     ///
-    /// Default: `[(0, 2097152), (2048, 262144)]` — 2M ISL tokens per worker for cheap
-    /// requests (low cache miss), 256K for expensive requests (high cache miss).
+    /// Default: `[(0, 4194304), (2048, 524288)]` — 4M ISL tokens per worker for cheap
+    /// requests (low cache miss), 512K for expensive requests (high cache miss).
     /// This allows more queued ISL tokens for cheap requests and fewer for expensive ones.
     /// Empty vec means unbounded queue (no ISL token capping).
     ///
