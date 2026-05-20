@@ -260,6 +260,7 @@ impl LocalModelBuilder {
         // already supplied one or the env var is unset. Published in etcd so routing
         // layers can keep cache assignments stable across worker restarts.
         self.runtime_config.populate_stable_routing_id_from_env();
+        self.runtime_config.validate_topology_config()?;
         self.runtime_config.add_topology_taints();
 
         let template = self
