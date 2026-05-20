@@ -1028,13 +1028,14 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_enable_disk_adds_posix() {
+    fn test_auto_enable_disk_only_bypass_mode_adds_gds_mt_and_ucx() {
+        // Disk-only (no host) triggers bypass_host_cache() == true, which forces
+        // GDS_MT even when use_gds=false, and requires UCX for VRAM segment metadata.
         let config = config_with_cache(None, Some(10.0), false);
         let nixl = config.nixl.expect("nixl auto-created");
-        assert!(nixl.has_backend("POSIX"));
-        assert!(!nixl.has_backend("GDS_MT"));
-        // host wasn't enabled, so UCX shouldn't be added
-        assert!(!nixl.has_backend("UCX"));
+        assert!(nixl.has_backend("GDS_MT"));
+        assert!(!nixl.has_backend("POSIX"));
+        assert!(nixl.has_backend("UCX"));
     }
 
     #[test]
