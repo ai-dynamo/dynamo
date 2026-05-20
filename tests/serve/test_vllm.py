@@ -38,7 +38,11 @@ from tests.utils.payload_builder import (
     router_cached_tokens_chat_payload,
     router_selection_chat_payload_default,
 )
-from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
+from tests.utils.payloads import (
+    EmbeddingPayload,
+    LoraTestChatPayload,
+    ToolCallingChatPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -647,6 +651,16 @@ vllm_configs = {
                 ],
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
+            ),
+            # `dimensions` truncation (Matryoshka). Qwen3-Embedding-0.6B has a
+            # hidden dim of 1024, so the truncated vector should be exactly 128.
+            # Built inline since `embedding_payload()`'s `extra_body` kwarg
+            # lives in PR #9722 and isn't in this branch's base.
+            EmbeddingPayload(
+                body={"input": ["Hello, world!"], "dimensions": 128},
+                repeat_count=1,
+                expected_log=[],
+                expected_response=["Generated 1 embeddings with dimension 128"],
             ),
         ],
     ),
