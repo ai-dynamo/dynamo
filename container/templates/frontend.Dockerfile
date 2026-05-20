@@ -12,22 +12,30 @@ FROM ${EPP_IMAGE} AS epp
 # reaches the final frontend image. aiperf 0.8.0 depends on crick==0.0.8,
 # which publishes no manylinux aarch64 wheel — without this, arm64 builds
 # fall back to sdist and fail in the final stage where gcc is intentionally
-# absent. The produced wheel lands in /opt/dynamo/wheelhouse/extra and uv
-# picks it up via UV_FIND_LINKS.
+# absent. amd64 has a prebuilt manylinux_x86_64 wheel on PyPI, so the build
+# is gated on TARGETARCH=arm64; amd64 ships an empty /wheels and uv pulls
+# crick straight from PyPI in the final stage. /wheels is created either
+# way so the COPY --from=crick_builder in the final stage always succeeds.
 FROM ${FRONTEND_IMAGE} AS crick_builder
 ARG PYTHON_VERSION
+ARG TARGETARCH
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        gcc \
-        python${PYTHON_VERSION}-dev \
-        python${PYTHON_VERSION}-venv \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-RUN python${PYTHON_VERSION} -m venv /tmp/buildenv \
-    && /tmp/buildenv/bin/pip install --no-cache-dir --upgrade pip wheel \
-    && /tmp/buildenv/bin/pip wheel --no-cache-dir --no-deps crick==0.0.8 -w /wheels
+    mkdir -p /wheels \
+    && if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends \
+            ca-certificates \
+            gcc \
+            python${PYTHON_VERSION}-dev \
+            python${PYTHON_VERSION}-venv \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        python${PYTHON_VERSION} -m venv /tmp/buildenv \
+        && /tmp/buildenv/bin/pip install --no-cache-dir --upgrade pip wheel \
+        && /tmp/buildenv/bin/pip wheel --no-cache-dir --no-deps crick==0.0.8 -w /wheels; \
+    fi
 
 FROM ${FRONTEND_IMAGE} AS frontend
 
