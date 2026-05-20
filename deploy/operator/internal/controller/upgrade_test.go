@@ -59,8 +59,7 @@ type upgradeCase struct {
 	// child is the workload object created by the old controller.
 	child client.Object
 
-	renderChild         func(context.Context, *testing.T, client.Object, client.Object) client.Object
-	serviceSelector     func(context.Context, *testing.T, client.Object, client.Object) map[string]string
+	render              func(context.Context, *testing.T, client.Object, client.Object) (child client.Object, serviceSelector map[string]string)
 	childPodLabels      func(*testing.T, client.Object) map[string]map[string]string
 	expectedWorkerSites map[string]string
 }
@@ -239,16 +238,22 @@ spec:
 			return upgradeCase{
 				parent: parent,
 				child:  child,
-				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
+				render: func(ctx context.Context, t *testing.T, parent, child client.Object) (client.Object, map[string]string) {
 					t.Helper()
-					t.Log("\nrender Deployment from the converted DCD and existing Deployment")
+
+					t.Log("render Deployment from the converted DCD and existing Deployment")
 					dcd := parent.(*v1beta1.DynamoComponentDeployment)
-					deployment, toDelete, err := newUpgradeDCDReconciler(t, dcd, child).generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+					reconciler := newUpgradeDCDReconciler(t, dcd, child)
+					deployment, toDelete, err := reconciler.generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 					require.NoError(t, err)
 					require.False(t, toDelete)
-					return deployment
+
+					t.Log("generate the DCD service selector from the same converted parent and existing child")
+					service, toDelete, err := reconciler.generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+					require.NoError(t, err)
+					require.False(t, toDelete)
+					return deployment, service.Spec.Selector
 				},
-				serviceSelector: renderDCDServiceSelector,
 				childPodLabels: func(t *testing.T, obj client.Object) map[string]map[string]string {
 					t.Helper()
 					deployment := obj.(*appsv1.Deployment)
@@ -513,16 +518,22 @@ spec:
 			return upgradeCase{
 				parent: parent,
 				child:  child,
-				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
+				render: func(ctx context.Context, t *testing.T, parent, child client.Object) (client.Object, map[string]string) {
 					t.Helper()
-					t.Log("\nrender LeaderWorkerSet from the converted DCD and existing LeaderWorkerSet")
+
+					t.Log("render LeaderWorkerSet from the converted DCD and existing LeaderWorkerSet")
 					dcd := parent.(*v1beta1.DynamoComponentDeployment)
-					lws, toDelete, err := newUpgradeDCDReconciler(t, dcd, child).generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+					reconciler := newUpgradeDCDReconciler(t, dcd, child)
+					lws, toDelete, err := reconciler.generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
 					require.NoError(t, err)
 					require.False(t, toDelete)
-					return lws
+
+					t.Log("generate the DCD service selector from the same converted parent and existing child")
+					service, toDelete, err := reconciler.generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+					require.NoError(t, err)
+					require.False(t, toDelete)
+					return lws, service.Spec.Selector
 				},
-				serviceSelector: renderDCDServiceSelector,
 				childPodLabels: func(t *testing.T, obj client.Object) map[string]map[string]string {
 					t.Helper()
 					lws := obj.(*leaderworkersetv1.LeaderWorkerSet)
@@ -781,15 +792,17 @@ spec:
 			return upgradeCase{
 				parent: parent,
 				child:  child,
-				renderChild: func(ctx context.Context, t *testing.T, parent, child client.Object) client.Object {
+				render: func(ctx context.Context, t *testing.T, parent, child client.Object) (client.Object, map[string]string) {
 					t.Helper()
-					t.Log("\nprepare Grove render deployment from the converted DGD and existing PodCliqueSet")
+
+					t.Log("prepare Grove render deployment from the converted DGD and existing PodCliqueSet")
 					dgd := parent.(*v1beta1.DynamoGraphDeployment)
 					reconciler := newUpgradeDGDReconciler(t, dgd, child)
 					renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
 					require.NoError(t, err)
 					require.NotNil(t, existing)
-					t.Log("\ngenerate the desired Grove PodCliqueSet from the prepared render deployment")
+
+					t.Log("generate the desired Grove PodCliqueSet from the prepared render deployment")
 					pcs, err := dynamo.GenerateGrovePodCliqueSet(
 						ctx,
 						renderDGD,
@@ -802,11 +815,25 @@ spec:
 						nil,
 					)
 					require.NoError(t, err)
-					t.Log("\npreserve the existing PodCliqueSet clique order before comparing specs")
+
+					t.Log("preserve the existing PodCliqueSet clique order before comparing specs")
 					preserveGrovePodCliqueSetOrder(pcs, existing)
-					return pcs
+
+					t.Log("generate the decode service selector from the same prepared Grove component")
+					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
+					require.NotNil(t, decodeComponent)
+					service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+						ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
+						Namespace:       renderDGD.Namespace,
+						ComponentType:   string(decodeComponent.ComponentType),
+						DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decodeComponent),
+						ComponentName:   "VllmDecodeWorker",
+						Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decodeComponent),
+						IsK8sDiscovery:  true,
+					})
+					require.NoError(t, err)
+					return pcs, service.Spec.Selector
 				},
-				serviceSelector: renderGroveDecodeServiceSelector,
 				childPodLabels: func(t *testing.T, obj client.Object) map[string]map[string]string {
 					t.Helper()
 					pcs := obj.(*grovev1alpha1.PodCliqueSet)
@@ -826,7 +853,8 @@ spec:
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			var parent client.Object
-			t.Log("\nconvert the persisted pre-upgrade parent through the v1beta1 conversion path")
+
+			t.Log("convert the persisted pre-upgrade parent through the v1beta1 conversion path")
 			switch alpha := tt.parent.DeepCopyObject().(type) {
 			case *v1alpha1.DynamoComponentDeployment:
 				dcd := &v1beta1.DynamoComponentDeployment{}
@@ -841,16 +869,18 @@ spec:
 			}
 
 			oldChild := tt.child.DeepCopyObject().(client.Object)
-			t.Logf("\nseed the fake client with the pre-upgrade %T child", oldChild)
-			t.Log("\nrender the desired child with the current reconciler")
-			newChild := tt.renderChild(ctx, t, parent, oldChild)
+
+			t.Logf("seed the fake client with the pre-upgrade %T child", oldChild)
+
+			t.Log("render the desired child and service selector with the current reconciler")
+			newChild, selector := tt.render(ctx, t, parent, oldChild)
 			oldPodLabels := tt.childPodLabels(t, oldChild)
 			newPodLabels := tt.childPodLabels(t, newChild)
 
-			t.Log("\ncompare old and new child specs; a change here would trigger a rollout")
+			t.Log("compare old and new child specs; a change here would trigger a rollout")
 			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should not change the child spec hash")
 
-			t.Log("\nassert worker pod labels keep the legacy worker identity")
+			t.Log("assert worker pod labels keep the legacy worker identity")
 			for site, subComponentType := range tt.expectedWorkerSites {
 				oldLabels, ok := oldPodLabels[site]
 				require.True(t, ok, "pre-upgrade child labels for %s", site)
@@ -865,8 +895,7 @@ spec:
 				require.NotContains(t, newLabels, commonconsts.KubeLabelDynamoComponentClass, "post-upgrade %s component class", site)
 			}
 
-			t.Log("\nrender the service selector and keep it aligned with the upgraded child")
-			selector := tt.serviceSelector(ctx, t, parent, newChild)
+			t.Log("check the rendered service selector stays aligned with the upgraded child")
 			require.NotNil(t, selector, "service selector")
 			require.Equal(t, commonconsts.ComponentTypeWorker, selector[commonconsts.KubeLabelDynamoComponentType])
 		})
@@ -900,13 +929,15 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		},
 	}
 
-	t.Log("\nseed the fake client with a native v1beta1 DGD and existing PodCliqueSet")
+	t.Log("seed the fake client with a native v1beta1 DGD and existing PodCliqueSet")
 	reconciler := newUpgradeDGDReconciler(t, dgd, existingPCS)
-	t.Log("\nprepare the Grove render deployment without legacy worker selector migration")
+
+	t.Log("prepare the Grove render deployment without legacy worker selector migration")
 	renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
 	require.NoError(t, err)
 	require.NotNil(t, existing)
-	t.Log("\ngenerate the desired PodCliqueSet from the prepared native render deployment")
+
+	t.Log("generate the desired PodCliqueSet from the prepared native render deployment")
 	desired, err := dynamo.GenerateGrovePodCliqueSet(
 		ctx,
 		renderDGD,
@@ -919,48 +950,16 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	t.Log("\npreserve existing clique order before checking native labels")
+
+	t.Log("preserve existing clique order before checking native labels")
 	preserveGrovePodCliqueSetOrder(desired, existing)
-	t.Log("\nassert the native prefill component stays prefill instead of legacy worker")
+
+	t.Log("assert the native prefill component stays prefill instead of legacy worker")
 	prefillComponent := renderDGD.GetComponentByName("prefill")
 	require.NotNil(t, prefillComponent)
 	require.Equal(t, v1beta1.ComponentTypePrefill, prefillComponent.ComponentType)
 	prefillClique := requireGroveClique(t, desired, "prefill")
 	require.Equal(t, commonconsts.ComponentTypePrefill, prefillClique.Labels[commonconsts.KubeLabelDynamoComponentType])
-}
-
-func renderDCDServiceSelector(ctx context.Context, t *testing.T, parent, child client.Object) map[string]string {
-	t.Helper()
-	t.Log("\ngenerate the DCD service selector from the converted parent and desired child")
-	dcd := parent.(*v1beta1.DynamoComponentDeployment)
-	service, toDelete, err := newUpgradeDCDReconciler(t, dcd, child).generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
-	require.NoError(t, err)
-	require.False(t, toDelete)
-	return service.Spec.Selector
-}
-
-func renderGroveDecodeServiceSelector(ctx context.Context, t *testing.T, parent, child client.Object) map[string]string {
-	t.Helper()
-	t.Log("\nprepare Grove render deployment from the desired child before building the service selector")
-	dgd := parent.(*v1beta1.DynamoGraphDeployment)
-	reconciler := newUpgradeDGDReconciler(t, dgd, child)
-	renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
-	require.NoError(t, err)
-	require.NotNil(t, existing)
-	decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
-	require.NotNil(t, decodeComponent)
-	t.Log("\ngenerate the decode service selector from the prepared Grove component")
-	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-		ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
-		Namespace:       renderDGD.Namespace,
-		ComponentType:   string(decodeComponent.ComponentType),
-		DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decodeComponent),
-		ComponentName:   "VllmDecodeWorker",
-		Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decodeComponent),
-		IsK8sDiscovery:  true,
-	})
-	require.NoError(t, err)
-	return service.Spec.Selector
 }
 
 func newUpgradeDGDReconciler(
