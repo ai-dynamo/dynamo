@@ -18,7 +18,7 @@ pytestmark = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-GENERATOR = REPO_ROOT / "tests/parity/parser/generate_parity_chart.py"
+GENERATOR = REPO_ROOT / "tests/parity/generate_parity_table.py"
 
 
 class LinkCollector(HTMLParser):
@@ -38,20 +38,9 @@ class LinkCollector(HTMLParser):
                 self.hrefs.append(value)
 
 
+@pytest.mark.timeout(60)
 def test_generate_parser_parity_table_html() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(GENERATOR.relative_to(REPO_ROOT)),
-            "--html",
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    html = result.stdout
+    html = _render_html()
     links = LinkCollector()
     links.feed(html)
     fixture_links = [href for href in links.hrefs if href.startswith("fixtures/")]
@@ -59,11 +48,42 @@ def test_generate_parser_parity_table_html() -> None:
 
     assert "<html" in html.lower()
     assert "<table" in html.lower()
-    assert "Dynamo Parser Parity Table" in html
-    assert "generate_parity_chart.py --html" in html
+    assert "Dynamo Tool Call Parser - Parity Table" in html
+    assert "generate_parity_table.py parser --html" in html
+    assert "PARSER.batch.*" in html
+    assert "PARSER.stream.*" in html
     assert fixture_links
     assert len(fixture_families) > 10
     assert "deepseek_v3" in fixture_families
     assert "qwen3_coder" in fixture_families
+    assert any("/PARSER.batch" in href for href in fixture_links)
+    assert any("/PARSER.stream" in href for href in fixture_links)
+
+
+@pytest.mark.timeout(60)
+def test_generate_parser_parity_table_batch_mode_excludes_stream_links() -> None:
+    html = _render_html("--mode", "batch")
+    links = LinkCollector()
+    links.feed(html)
+    fixture_links = [href for href in links.hrefs if href.startswith("fixtures/")]
+
+    assert fixture_links
     assert all("/PARSER.batch" in href for href in fixture_links)
     assert all("PARSER.stream." not in href for href in fixture_links)
+
+
+def _render_html(*extra_args: str) -> str:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(GENERATOR.relative_to(REPO_ROOT)),
+            "parser",
+            "--html",
+            *extra_args,
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
