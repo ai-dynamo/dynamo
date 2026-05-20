@@ -54,6 +54,8 @@ _PUBLISH_BACKOFF_FACTOR = 2.0
 _KV_EVENTS_MIN_SLEEP_SEC = 0.005
 _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
+_PUBLISH_MAX_ITEMS_PER_DRAIN = 1024
+_PUBLISH_MAX_DRAIN_TIME_SEC = 0.005
 
 # InflightBatchingStats fields the FPM publisher consumes. As of
 # NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 fields live nested
@@ -568,14 +570,37 @@ class Publisher:
         min_sleep: float,
         max_sleep: float,
         backoff_factor: float,
+        max_items_per_drain: Optional[int] = _PUBLISH_MAX_ITEMS_PER_DRAIN,
+        max_drain_time_s: Optional[float] = _PUBLISH_MAX_DRAIN_TIME_SEC,
     ):
         sleep_s = min_sleep
         while not self._stop_event.is_set():
             had_data = False
+            drain_limited = False
+            drained_items = 0
+            drain_started = time.monotonic()
             try:
                 async for item in fetch_fn():
                     had_data = True
                     handler_fn(item)
+                    drained_items += 1
+
+                    if self._stop_event.is_set():
+                        break
+
+                    if (
+                        max_items_per_drain is not None
+                        and drained_items >= max_items_per_drain
+                    ):
+                        drain_limited = True
+                        break
+
+                    if (
+                        max_drain_time_s is not None
+                        and time.monotonic() - drain_started >= max_drain_time_s
+                    ):
+                        drain_limited = True
+                        break
             except (asyncio.TimeoutError, TimeoutError, asyncio.QueueEmpty):
                 pass
             except Exception as e:
@@ -586,6 +611,8 @@ class Publisher:
                 sleep_s = min(max_sleep, sleep_s * backoff_factor)
             else:
                 sleep_s = min_sleep
+                if drain_limited and not self._stop_event.is_set():
+                    await asyncio.sleep(min_sleep)
 
     def _check_fpm_schema(self, stat: dict) -> None:
         """One-shot probe: disable FPM publisher if the TRT-LLM IterationStats
