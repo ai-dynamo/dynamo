@@ -1038,11 +1038,13 @@ class MetricsPayload(BasePayload):
           serving the values are 0 (set at shutdown). The "name appears"
           check catches regressions where the gauges silently fail to
           register against the runtime's ``MetricsRegistry``.
-        - kv_cache_hit_rate: Python-side ``LLMBackendMetrics`` gauge.
-          Has no data rows until the engine populates per-rank values,
-          so check HELP-line presence via multiline. Catches the bridge
-          regression where ``LLMBackendMetrics`` construction was gated
-          on the engine returning per-rank sources.
+
+        ``kv_cache_hit_rate`` is INTENTIONALLY not in this list. With the
+        Rust ``prometheus`` crate, a ``GaugeVec`` family with no labeled
+        children is skipped by the text encoder — so an engine that
+        legitimately reports ``kv_cache_hit_rate=None`` (no prefix cache,
+        or no requests observed) has no HELP line. That's the tri-state
+        contract working as designed; not a regression to test for here.
         """
         prefix = prometheus_names.name_prefix.COMPONENT
 
@@ -1063,16 +1065,6 @@ class MetricsPayload(BasePayload):
                 validator=lambda value: float(value) >= 0,
                 error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
-            ),
-            MetricCheck(
-                name=f"{prefix}_{prometheus_names.kvstats.KV_CACHE_HIT_RATE}",
-                pattern=lambda name: rf"^# HELP {name}\b",
-                validator=lambda matches: len(matches) >= 1,
-                error_msg=lambda name, matches: (
-                    f"{name} HELP line missing — gauge not registered"
-                ),
-                success_msg=lambda name, matches: f"SUCCESS: {name} registered",
-                multiline=True,
             ),
         ]
 

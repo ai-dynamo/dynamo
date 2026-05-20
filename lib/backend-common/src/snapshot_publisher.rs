@@ -85,7 +85,7 @@ mod tests {
     use crate::engine::ComponentSnapshot;
     use crate::metrics::{ComponentGauges, EngineMetrics, TestHierarchy};
 
-    fn make_publisher(ranks: &[u32]) -> SnapshotPublisher {
+    fn make_publisher() -> SnapshotPublisher {
         let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
         let gauges = Arc::new(ComponentGauges::new(&metrics).expect("component gauges"));
         // No router publishers in this unit test — they need a real
@@ -99,7 +99,7 @@ mod tests {
     /// shouldn't tear the worker down.
     #[test]
     fn publish_unknown_rank_is_noop() {
-        let publisher = make_publisher(&[0]);
+        let publisher = make_publisher();
         publisher.publish(
             42,
             ComponentSnapshot {
