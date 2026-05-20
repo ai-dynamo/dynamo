@@ -100,7 +100,7 @@ def _commit_sha() -> str | None:
 def _peer_versions() -> dict[str, str]:
     """Extract pinned vllm / sglang versions from pyproject.toml.
 
-    Matches a line like `"vllm[flashinfer,runai,otel]==0.20.1",` (TOML is
+    Matches a line like `"vllm[flashinfer,runai,otel]==X.Y.Z",` (TOML is
     not parsed — the regex is sufficient and avoids a tomllib import on
     older Pythons running this script outside a Python 3.11+ env)."""
     out: dict[str, str] = {}
