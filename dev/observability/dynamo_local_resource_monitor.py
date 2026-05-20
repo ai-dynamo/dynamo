@@ -187,6 +187,7 @@ def _resolve_process_name(pid: int) -> str:
                 parts.append(test)
             elif script:
                 parts.append(script)
+            parts.append(f"PID={pid}")
             return ", ".join(parts)
 
         # SGLang, TRT-LLM, mpi4py, orted — walk ancestry for context
@@ -212,7 +213,16 @@ def _resolve_process_name(pid: int) -> str:
                 parts.append(test)
             elif script:
                 parts.append(script)
+            parts.append(f"PID={pid}")
             return ", ".join(parts)
+
+        if cmdline and os.path.basename(cmdline[0]) == "node":
+            label = _classify_node_process(full_cmd)
+            if label:
+                return f"{label}:{pid}"
+        if cmdline and cmdline[0] == "docker" and "exec" in cmdline:
+            if "node" in full_cmd:
+                return f"Docker/Cursor:{pid}"
 
         # Python with dynamo module: extract module + model + test context
         if cmdline and os.path.basename(cmdline[0]).startswith("python"):
@@ -230,19 +240,20 @@ def _resolve_process_name(pid: int) -> str:
                         parts.append(short_model)
                     if test:
                         parts.append(test)
+                    parts.append(f"PID={pid}")
                     return ", ".join(parts)
             if len(cmdline) > 1:
                 script = os.path.basename(cmdline[1])
                 if len(script) > 25:
                     script = script[:22] + "..."
-                return script
+                return f"{script}, PID={pid}"
 
         if cmdline:
             base = os.path.basename(cmdline[0])
             if len(base) > 25:
                 base = base[:22] + "..."
-            return base
-        return proc_name
+            return f"{base}:{pid}"
+        return f"{proc_name}:{pid}"
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return f"pid:{pid}"
 
@@ -298,6 +309,33 @@ def _extract_arg(cmdline: list[str], flag: str) -> str:
     return ""
 
 
+def _classify_node_process(full_cmd: str) -> str:
+    lower_cmd = full_cmd.lower()
+    markers = (
+        ("--type=extensionhost", "ExtHost"),
+        ("cursorpyright", "Pylance"),
+        ("pyright", "Pylance"),
+        ("pylance", "Pylance"),
+        ("--type=filewatcher", "FileWatcher"),
+        ("--type=ptyhost", "PtyHost"),
+        ("server-main.js", "CursorServer"),
+        ("multiplex-server", "Multiplex"),
+        ("forwarder.js", "PortFwd"),
+        ("markdown-language-features", "Markdown"),
+        ("rust-analyzer", "RustAnalyzer"),
+        ("gitlens", "GitLens"),
+        ("typescript", "TSServer"),
+        ("eslint", "ESLint"),
+        ("bootstrap-fork", "CursorWorker"),
+    )
+    for marker, label in markers:
+        if marker in lower_cmd:
+            return label
+    if ".cursor-server" in lower_cmd or ".vscode-server" in lower_cmd:
+        return "CursorNode"
+    return ""
+
+
 class ProcessTracker:
     """Track rolling per-process series with stable colors for the dashboard UI."""
 
@@ -322,14 +360,13 @@ class ProcessTracker:
         timestamp: float = 0,
         pre_resolved: dict[int, str] | None = None,
     ):
+        pre_resolved = pre_resolved or {}
+        self.names.update(pre_resolved)
         for pid in data:
             if pid not in self.series:
                 backfill = min(self._len, self.maxlen)
                 self.series[pid] = deque([0.0] * backfill, maxlen=self.maxlen)
-                if pre_resolved and pid in pre_resolved:
-                    self.names[pid] = pre_resolved[pid]
-                else:
-                    self.names[pid] = name_resolver(pid)
+                self.names[pid] = pre_resolved.get(pid) or name_resolver(pid)
                 self.first_seen[pid] = timestamp
                 if self._free_slots:
                     slot = self._free_slots.pop(0)
@@ -604,7 +641,7 @@ class MetricsCollector:
                 self.gpu_names.append(name)
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 self.gpu_mem_total_gib.append(mem.total / (1024**3))
-                self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=True))
+                self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=False))
                 self.gpu_util.append(deque(maxlen=maxlen_main))
                 self.gpu_temp.append(deque(maxlen=maxlen_main))
                 self.gpu_pcie_tx.append(deque(maxlen=maxlen_pcie))
@@ -754,8 +791,18 @@ class MetricsCollector:
     ):
         gpu_names: list[dict[int, str]] = []
         for i, (gpu_proc_mem, _, _) in enumerate(gpu_data):
-            new_pids = self.proc_gpu_mem[i].new_pids(gpu_proc_mem)
-            gpu_names.append({pid: _resolve_process_name(pid) for pid in new_pids})
+            tracker = self.proc_gpu_mem[i]
+            new_pids = tracker.new_pids(gpu_proc_mem)
+            stale_label_pids = {
+                pid
+                for pid in gpu_proc_mem
+                if f"PID={pid}" not in tracker.names.get(pid, "")
+                and f":{pid}" not in tracker.names.get(pid, "")
+            }
+            pids_to_resolve = new_pids | stale_label_pids
+            gpu_names.append(
+                {pid: _resolve_process_name(pid) for pid in pids_to_resolve}
+            )
 
         cpu_id_data: dict[int, float] = {}
         cpu_id_names: dict[int, str] = {}

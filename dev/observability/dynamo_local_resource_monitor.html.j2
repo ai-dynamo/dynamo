@@ -6,39 +6,40 @@
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <style>
-  * { box-sizing: border-box; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    margin: 0;
     background: #0d0d14;
     color: #e0e0e0;
     font-family: monospace;
     overflow: hidden;
   }
   #toolbar {
-    height: 52px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 10px 16px;
-    border-bottom: 1px solid #2a2a3c;
+    padding: 12px 20px;
   }
-  h1 { margin: 0; font-size: 20px; font-weight: 700; }
+  #toolbar h1 { font-size: 22px; }
   .btn {
-    border: 1px solid #444466;
-    padding: 6px 12px;
+    border: none;
+    padding: 6px 14px;
     cursor: pointer;
     font-family: monospace;
-    font-weight: 700;
+    font-weight: bold;
+    margin-left: 4px;
     border-radius: 4px;
     font-size: 13px;
+  }
+  .range-btn {
     background: #2a2a3c;
     color: #e0e0e0;
+    border: 1px solid #444;
   }
-  .btn.active { background: #55557a; }
-  #pause-btn { background: #ffcc00; color: #0d0d14; border-color: #ffcc00; }
-  #snapshot-btn { background: #00e676; color: #0d0d14; border-color: #00e676; }
-  #chart { width: 100vw; height: calc(100vh - 74px); }
-  #status { height: 22px; padding-left: 16px; font-size: 11px; color: #9a9aaa; }
+  .range-btn.active { background: #444466; }
+  #pause-btn { background: #ffcc00; color: #0d0d14; margin-left: 12px; }
+  #snapshot-btn { background: #00e676; color: #0d0d14; }
+  #chart { width: 100%; height: calc(100vh - 50px); }
+  #status { position: fixed; bottom: 8px; left: 20px; font-size: 11px; color: #666; }
 </style>
 </head>
 <body>
@@ -48,6 +49,7 @@
     <button class="btn range-btn" data-sec="60">1m</button>
     <button class="btn range-btn active" data-sec="120">2m</button>
     <button class="btn range-btn" data-sec="300">5m</button>
+    <button class="btn range-btn" data-sec="600">10m</button>
     <button class="btn range-btn" data-sec="900">15m</button>
     <button class="btn" id="pause-btn">Pause</button>
     <button class="btn" id="snapshot-btn">Snapshot</button>
@@ -66,6 +68,9 @@
   let paused = false;
   let renderScheduled = false;
   let lastCounters = {main: 0, disk: 0, pcie: []};
+  let rateSnapshot = {main: 0, disk: 0, pcie: [], time: Date.now()};
+  let sampleRates = {main: "0.0", disk: "0.0", pcie: [], pcieAvg: "0.0"};
+  const MEM_PATTERNS = ["/", "\\", "x", "+", "-", "|", "."];
   const status = document.getElementById("status");
   const chart = document.getElementById("chart");
 
@@ -80,7 +85,13 @@
   socket.on("connect", function() {
     status.textContent = "Connected. Waiting for data...";
     socket.emit("view_minutes", Math.max(1, Math.round(viewSeconds / 60)));
-    socket.emit("request_init");
+    if (state) {
+      socket.emit("request_init");
+    } else {
+      setTimeout(function() {
+        if (!state) socket.emit("request_init");
+      }, 3000);
+    }
   });
 
   socket.on("disconnect", function() {
@@ -94,6 +105,13 @@
       disk: msg.counter_disk || 0,
       pcie: msg.counter_pcie || []
     };
+    rateSnapshot = {
+      main: lastCounters.main,
+      disk: lastCounters.disk,
+      pcie: lastCounters.pcie.slice(),
+      time: Date.now()
+    };
+    sampleRates = zeroRates(lastCounters.pcie);
     if (msg.hostname) {
       const gpuTag = msg.gpu_summary ? " " + msg.gpu_summary : "";
       const title = "Dynamo Local Resource Monitor - " + msg.hostname + gpuTag;
@@ -166,9 +184,9 @@
       appendTrim(state.pcie_rx[gi] || [], (msg.pcie_rx || [])[gi] || []);
     }
     lastCounters = {
-      main: msg.counter_main || lastCounters.main,
-      disk: msg.counter_disk || lastCounters.disk,
-      pcie: msg.counter_pcie || lastCounters.pcie
+      main: typeof msg.counter_main === "number" ? msg.counter_main : lastCounters.main,
+      disk: typeof msg.counter_disk === "number" ? msg.counter_disk : lastCounters.disk,
+      pcie: Array.isArray(msg.counter_pcie) ? msg.counter_pcie : lastCounters.pcie
     };
   }
 
@@ -181,7 +199,12 @@
     renderScheduled = true;
     requestAnimationFrame(function() {
       renderScheduled = false;
-      render();
+      try {
+        render();
+      } catch (err) {
+        status.textContent = "Render error: " + (err && err.message ? err.message : err);
+        throw err;
+      }
     });
   }
 
@@ -197,131 +220,388 @@
     const traces = [];
     const timesMain = toDates(state.ts_main);
     const timesDisk = toDates(state.ts_disk);
-    const colors = [
-      "#00e5ff", "#ff1744", "#76ff03", "#448aff", "#ff9100",
-      "#d500f9", "#ffea00", "#f50057", "#00e676", "#ff6d00"
-    ];
+    const gpuCount = state.gpu_count || 0;
+    const gpuRows = Array.from({length: gpuCount}, (_, gi) => ({mem: gi * 2 + 1, util: gi * 2 + 2}));
+    const cpuRow = gpuCount * 2 + 1;
+    const ioRow = cpuRow + 1;
+    const nRows = ioRow;
+    const rowWeights = gpuRows.flatMap(() => [7, 3]).concat([3, 3]);
+    const rowGaps = gpuRows.flatMap((_, gi) => [gi > 0 ? 0.04 : 0, 0.002]).concat([gpuCount ? 0.04 : 0, 0.02]);
 
-    for (let gi = 0; gi < (state.gpu_count || 0); gi++) {
+    const domains = computeDomains(rowWeights, rowGaps);
+    let secondaryY = nRows + 1;
+    const pcieY = [];
+    const tempY = [];
+    for (let gi = 0; gi < gpuCount; gi++) {
+      if (state.has_pcie) pcieY[gi] = yRef(secondaryY++);
+      tempY[gi] = yRef(secondaryY++);
+    }
+    const netY = yRef(secondaryY++);
+
+    const systemLegend = gpuCount > 0 ? (gpuCount === 1 ? "legend2" : "legend" + (gpuCount + 1)) : "legend";
+
+    for (let gi = 0; gi < gpuCount; gi++) {
+      const memRow = gpuRows[gi].mem;
+      const utilRow = gpuRows[gi].util;
+      const gpuLegend = gi === 0 ? "legend" : "legend" + (gi + 1);
       const memSeries = state.gpu_mem[gi] || [];
+      const memColors = memSeries.map(proc => proc.color || "#999999");
+      const similarSet = findSimilarColors(memColors, 30);
       for (let i = memSeries.length - 1; i >= 0; i--) {
         const proc = memSeries[i];
-        traces.push({
-          x: timesMain, y: proc.vals, name: "GPU " + gi + " " + proc.name + " (" + proc.pid + ")",
+        const procColor = proc.color || "#999999";
+        const trace = {
+          x: timesMain, y: proc.vals, name: proc.name,
           type: "scatter", mode: "none", stackgroup: "gpu_mem_" + gi,
-          fillcolor: hexToRgba(proc.color || colors[i % colors.length], 0.55),
-          line: {width: 0, color: proc.color || colors[i % colors.length]},
-          xaxis: "x", yaxis: "y", legendgroup: "gpu_mem_" + gi
+          fillcolor: hexToRgba(procColor, 0.6),
+          line: {width: 0, color: procColor},
+          xaxis: xRef(memRow), yaxis: yRef(memRow), legendgroup: "gpu_mem_" + gi,
+          legendgrouptitle: {text: "GPU " + gi + " Mem"}, legend: gpuLegend
+        };
+        if (similarSet.has(i)) {
+          const pattern = MEM_PATTERNS[Math.abs(proc.pid || 0) % MEM_PATTERNS.length];
+          trace.fillpattern = {
+            shape: pattern,
+            solidity: 0.15,
+            size: 8,
+            bgcolor: hexToRgba(procColor, 0.6),
+            fgcolor: "rgba(13,13,20,0.4)"
+          };
+        }
+        traces.push(trace);
+      }
+      if (memSeries.length === 0) {
+        traces.push({
+          x: timesMain, y: timesMain.map(() => 0), name: "GPU " + gi + " Mem: 0",
+          type: "scatter", mode: "lines", line: {width: 1, color: "#555"},
+          xaxis: xRef(memRow), yaxis: yRef(memRow), legendgroup: "gpu_mem_" + gi, legend: gpuLegend
         });
       }
-      traces.push({
-        x: timesMain,
-        y: timesMain.map(() => (state.gpu_mem_total_gib || [])[gi] || 0),
-        name: "GPU " + gi + " total",
-        type: "scatter", mode: "lines", line: {color: "#ff5252", width: 1, dash: "dot"},
-        xaxis: "x", yaxis: "y", legendgroup: "gpu_total"
-      });
-      traces.push({
-        x: timesMain, y: (state.gpu_util || [])[gi] || [], name: "GPU " + gi + " util",
-        type: "scatter", mode: "lines", line: {color: "#76b900", width: 2},
-        fill: "tozeroy", fillcolor: "rgba(118,185,0,0.25)", xaxis: "x2", yaxis: "y2"
-      });
-      traces.push({
-        x: timesMain, y: (state.gpu_temp || [])[gi] || [], name: "GPU " + gi + " temp",
-        type: "scatter", mode: "lines", line: {color: "#ff6e40", width: 1, dash: "dot"},
-        xaxis: "x2", yaxis: "y2"
-      });
       if (state.has_pcie) {
         const timesPcie = toDates((state.ts_pcie || [])[gi] || []);
         traces.push({
-          x: timesPcie, y: (state.pcie_tx || [])[gi] || [], name: "GPU " + gi + " PCIe TX",
-          type: "scatter", mode: "lines", line: {color: "#ef5350", width: 1}, xaxis: "x4", yaxis: "y4"
+          x: timesPcie, y: (state.pcie_tx || [])[gi] || [], name: "PCIe W (GPU " + gi + ")",
+          type: "scatter", mode: "lines", line: {color: "#ef5350", width: 0.5}, xaxis: xRef(memRow), yaxis: pcieY[gi],
+          legendgroup: "pcie_" + gi, legendgrouptitle: {text: "GPU " + gi + " PCIe"}, legend: gpuLegend
         });
         traces.push({
-          x: timesPcie, y: (state.pcie_rx || [])[gi] || [], name: "GPU " + gi + " PCIe RX",
-          type: "scatter", mode: "lines", line: {color: "#69f0ae", width: 1, dash: "dot"}, xaxis: "x4", yaxis: "y4"
+          x: timesPcie, y: (state.pcie_rx || [])[gi] || [], name: "PCIe R (GPU " + gi + ")",
+          type: "scatter", mode: "lines", line: {color: "#69f0ae", width: 0.5, dash: "dot"}, xaxis: xRef(memRow), yaxis: pcieY[gi],
+          legendgroup: "pcie_" + gi, legend: gpuLegend
         });
       }
+      traces.push({
+        x: timesMain, y: (state.gpu_util || [])[gi] || [], name: "GPU " + gi + " Util",
+        type: "scatter", mode: "lines", line: {color: "#76b900", width: 2},
+        fill: "tozeroy", fillcolor: hexToRgba("#76b900", 0.65), xaxis: xRef(utilRow), yaxis: yRef(utilRow),
+        legendgroup: "util_" + gi, legendgrouptitle: {text: "GPU " + gi + " Util"}, legend: gpuLegend
+      });
+      traces.push({
+        x: timesMain, y: (state.gpu_temp || [])[gi] || [], name: "GPU " + gi + " Temp",
+        type: "scatter", mode: "lines", line: {color: "#ff6e40", width: 1.5, dash: "dot"},
+        xaxis: xRef(utilRow), yaxis: tempY[gi], legendgroup: "util_" + gi, legend: gpuLegend
+      });
     }
 
-    for (const proc of state.cpu_procs || []) {
+    const cpuProcs = state.cpu_procs || [];
+    for (let i = cpuProcs.length - 1; i >= 0; i--) {
+      const proc = cpuProcs[i];
       traces.push({
         x: timesMain, y: proc.vals, name: proc.name, type: "scatter", mode: "none",
-        stackgroup: "cpu", fillcolor: hexToRgba(proc.color || "#8888ff", 0.45),
-        line: {width: 0, color: proc.color || "#8888ff"}, xaxis: "x3", yaxis: "y3"
+        stackgroup: "cpu", fillcolor: hexToRgba(proc.color || "#8888ff", 0.55),
+        line: {width: 0, color: proc.color || "#8888ff"}, xaxis: xRef(cpuRow), yaxis: yRef(cpuRow),
+        legendgroup: "cpu", legendgrouptitle: {text: "CPU"}, legend: systemLegend
       });
     }
     traces.push({
       x: timesMain, y: state.cpu || [], name: "CPU total", type: "scatter", mode: "lines",
-      line: {color: "#ffcc00", width: 1.5, dash: "dot"}, xaxis: "x3", yaxis: "y3"
+      line: {color: "#ffcc00", width: 1.5, dash: "dot"}, xaxis: xRef(cpuRow), yaxis: yRef(cpuRow),
+      legendgroup: "cpu", legend: systemLegend
     });
+    const diskTotal = (state.disk_read || []).map((v, i) => v + (state.disk_write || [])[i]);
     traces.push({
-      x: timesDisk, y: state.disk_read || [], name: "Disk read", type: "scatter", mode: "lines",
-      line: {color: "#ff9800", width: 1}, xaxis: "x4", yaxis: "y4"
-    });
-    traces.push({
-      x: timesDisk, y: state.disk_write || [], name: "Disk write", type: "scatter", mode: "lines",
-      line: {color: "#ffd740", width: 1}, xaxis: "x4", yaxis: "y4"
+      x: timesDisk, y: diskTotal, name: "Disk I/O", type: "scatter", mode: "lines",
+      line: {color: "#ff9800", width: 1, shape: "spline", smoothing: 0.8},
+      fill: "tozeroy", fillcolor: hexToRgba("#ff9800", 0.35), xaxis: xRef(ioRow), yaxis: yRef(ioRow),
+      legendgroup: "disk_io", legendgrouptitle: {text: "Disk I/O"}, legend: systemLegend
     });
     traces.push({
       x: timesMain, y: state.net_sent || [], name: "Net TX", type: "scatter", mode: "lines",
-      line: {color: "#18ffff", width: 1}, xaxis: "x4", yaxis: "y4"
+      line: {color: "#18ffff", width: 0.5, shape: "spline", smoothing: 1.3},
+      xaxis: xRef(ioRow), yaxis: netY, legendgroup: "net", legendgrouptitle: {text: "Network"}, legend: systemLegend
     });
     traces.push({
       x: timesMain, y: state.net_recv || [], name: "Net RX", type: "scatter", mode: "lines",
-      line: {color: "#ff80ab", width: 1}, xaxis: "x4", yaxis: "y4"
+      line: {color: "#ff80ab", width: 0.5, shape: "spline", smoothing: 1.3},
+      xaxis: xRef(ioRow), yaxis: netY, legendgroup: "net", legend: systemLegend
     });
 
     const range = visibleRange();
     const baseAxis = {gridcolor: "#262640", zerolinecolor: "#444466"};
-    const xAxis = {gridcolor: "#262640", type: "date"};
-    if (range) xAxis.range = range;
+    const xBase = {domain: [0, 0.92], gridcolor: "#262640", type: "date"};
+    if (range) xBase.range = range;
+    const legendStyle = {
+      orientation: "v",
+      xanchor: "left",
+      x: 1.01,
+      font: {size: 10},
+      bgcolor: "rgba(13,13,20,0.8)",
+      tracegroupgap: 1,
+      itemsizing: "constant",
+      valign: "top"
+    };
     const layout = {
       paper_bgcolor: "#0d0d14", plot_bgcolor: "#141420",
       font: {family: "monospace", color: "#e0e0e0", size: 11},
-      margin: {l: 68, r: 20, t: 20, b: 34},
-      hovermode: "x unified",
-      legend: {orientation: "v", x: 1.01, y: 1, bgcolor: "rgba(13,13,20,0.75)", font: {size: 10}},
-      grid: {rows: 4, columns: 1, pattern: "independent", roworder: "top to bottom"},
-      xaxis: Object.assign({}, xAxis),
-      xaxis2: Object.assign({}, xAxis),
-      xaxis3: Object.assign({}, xAxis),
-      xaxis4: Object.assign({}, xAxis),
-      yaxis: Object.assign({title: "GPU VRAM GiB", domain: [0.76, 1.0], rangemode: "tozero"}, baseAxis),
-      yaxis2: Object.assign({title: "GPU % / C", domain: [0.52, 0.72], range: [0, 105]}, baseAxis),
-      yaxis3: Object.assign({title: "CPU %", domain: [0.28, 0.48], range: [0, 105]}, baseAxis),
-      yaxis4: Object.assign({title: "I/O", domain: [0.0, 0.24], rangemode: "tozero"}, baseAxis),
-      annotations: [
-        label("GPU VRAM by process", 0.995),
-        label("GPU utilization + temperature", 0.715),
-        label("CPU total + top process groups", 0.475),
-        label("Disk, network, PCIe", 0.235)
-      ]
+      margin: {l: 70, r: 20, t: 10, b: 35},
+      hovermode: false,
+      showlegend: true,
+      grid: {rows: nRows, columns: 1, pattern: "independent", roworder: "top to bottom"},
+      shapes: rowBackgrounds(nRows),
+      annotations: []
     };
-    Plotly.react(chart, traces, layout, {responsive: true, displayModeBar: true, scrollZoom: true});
-    const gpuText = state.gpu_count ? state.gpu_count + " GPU" + (state.gpu_count === 1 ? "" : "s") : "CPU-only";
+
+    for (let r = 1; r <= nRows; r++) {
+      layout[xLayout(r)] = Object.assign(
+        {showticklabels: r === nRows, anchor: yRef(r)},
+        xBase
+      );
+      layout[yLayout(r)] = Object.assign({domain: domains[r - 1]}, baseAxis);
+    }
+
+    for (let gi = 0; gi < gpuCount; gi++) {
+      const memRow = gpuRows[gi].mem;
+      const utilRow = gpuRows[gi].util;
+      const gpuLegend = gi === 0 ? "legend" : "legend" + (gi + 1);
+      layout[gpuLegend] = Object.assign({}, legendStyle, {
+        yanchor: "top",
+        y: domains[memRow - 1][1]
+      });
+      layout[yLayout(memRow)].title = {
+        text: "<span style=\"color:#76b900\">GPU " + gi + " GiB</span>",
+        font: {size: 10}
+      };
+      layout[yLayout(memRow)].rangemode = "tozero";
+      layout[yLayout(utilRow)].title = {
+        text: "<span style=\"color:#76b900\">GPU " + gi + " %-util</span>",
+        font: {size: 10}
+      };
+      layout[yLayout(utilRow)].range = [0, 105];
+      layout[yLayoutByRef(tempY[gi])] = {
+        domain: domains[utilRow - 1],
+        title: {text: "GPU &deg;C", font: {color: "#ff6e40", size: 10}},
+        overlaying: yRef(utilRow),
+        side: "right",
+        showgrid: false,
+        autorange: true,
+        minallowed: 30
+      };
+      if (state.has_pcie) {
+        layout[yLayoutByRef(pcieY[gi])] = {
+          domain: domains[memRow - 1],
+          title: {text: "PCIe GB/s (log)", font: {color: "#999", size: 10}},
+          overlaying: yRef(memRow),
+          side: "right",
+          showgrid: false,
+          type: "log",
+          autorange: true
+        };
+      }
+      layout.annotations.push(rowLabel(
+        memRow,
+        state.has_pcie ? "GPU " + gi + " Memory (GiB) + PCIe (GB/s)" : "GPU " + gi + " Memory (GiB)",
+        state.has_pcie ? mainPcieRateText(gi) : mainRateText()
+      ));
+      layout.annotations.push(rowLabel(
+        utilRow,
+        "GPU " + gi + " %-util + GPU &deg;C",
+        mainRateText()
+      ));
+      const maxGib = (state.gpu_mem_total_gib || [])[gi] || 0;
+      if (!maxGib) continue;
+      layout.shapes.push({
+        type: "line", x0: 0, x1: 1, y0: maxGib, y1: maxGib,
+        xref: xRef(memRow) + " domain", yref: yRef(memRow), line: {color: "#ff5252", width: 2}
+      });
+      layout.annotations.push({
+        text: maxGib.toFixed(1) + " GiB", x: 1, y: maxGib,
+        xref: xRef(memRow) + " domain", yref: yRef(memRow), showarrow: false,
+        font: {size: 10, color: "#ff5252"}, xanchor: "right"
+      });
+    }
+
+    layout[systemLegend] = Object.assign({}, legendStyle, {
+      yanchor: "top",
+      y: domains[cpuRow - 1][1]
+    });
+    layout[yLayout(cpuRow)].title = {
+      text: "<span style=\"color:#ffcc00\">CPU %</span>",
+      font: {size: 10}
+    };
+    layout[yLayout(cpuRow)].range = [0, 105];
+    layout[yLayout(ioRow)].title = {
+      text: "<span style=\"color:#ff9800\">Disk I/O MB/s</span>",
+      font: {size: 10}
+    };
+    layout[yLayout(ioRow)].rangemode = "tozero";
+    layout[yLayoutByRef(netY)] = {
+      domain: domains[ioRow - 1],
+      title: {text: "Net MB/s (log)", font: {color: "#18ffff", size: 10}},
+      overlaying: yRef(ioRow),
+      side: "right",
+      showgrid: false,
+      type: "log",
+      autorange: true
+    };
+    layout.annotations.push(rowLabel(
+      cpuRow,
+      "CPU Usage (%)",
+      mainRateText()
+    ));
+    layout.annotations.push(rowLabel(
+      ioRow,
+      "Disk I/O (MB/s) + Network (MB/s)",
+      diskRateText()
+    ));
+
+    Plotly.react(chart, traces, layout, {
+      responsive: true,
+      displayModeBar: true,
+      scrollZoom: true,
+      toImageButtonOptions: {format: "png", filename: "resource_monitor", height: 1080, width: 1920, scale: 2}
+    });
+    const gpuText = gpuCount ? gpuCount + " GPU" + (gpuCount === 1 ? "" : "s") : "CPU-only";
+    const pcieText = sampleRates.pcie.length
+      ? " pcie [" + sampleRates.pcie.map((rate, gi) => "gpu" + gi + " " + rate).join(", ") + "]/s"
+      : "";
     status.textContent = (paused ? "Paused" : "Live") +
       " | " + gpuText +
-      " | main " + lastCounters.main +
-      " disk " + lastCounters.disk;
+      " | main " + sampleRates.main + "/s" +
+      pcieText +
+      " disk " + sampleRates.disk + "/s";
   }
 
-  function label(text, y) {
+  function zeroRates(pcieCounters) {
     return {
-      text: "  " + text + "  ",
+      main: "0.0",
+      disk: "0.0",
+      pcie: (pcieCounters || []).map(() => "0.0"),
+      pcieAvg: "0.0"
+    };
+  }
+
+  function updateSampleRates() {
+    if (!state) return;
+    const now = Date.now();
+    const elapsed = (now - rateSnapshot.time) / 1000;
+    if (elapsed <= 0) return;
+    const currentPcie = Array.isArray(lastCounters.pcie) ? lastCounters.pcie : [];
+    const pcieRates = currentPcie.map((counter, gi) => {
+      const previous = rateSnapshot.pcie[gi] || 0;
+      return Math.max(0, (counter - previous) / elapsed);
+    });
+    const pcieAvg = pcieRates.length
+      ? pcieRates.reduce((total, rate) => total + rate, 0) / pcieRates.length
+      : 0;
+    sampleRates = {
+      main: Math.max(0, (lastCounters.main - rateSnapshot.main) / elapsed).toFixed(1),
+      disk: Math.max(0, (lastCounters.disk - rateSnapshot.disk) / elapsed).toFixed(1),
+      pcie: pcieRates.map(rate => rate.toFixed(1)),
+      pcieAvg: pcieAvg.toFixed(1)
+    };
+    rateSnapshot = {
+      main: lastCounters.main,
+      disk: lastCounters.disk,
+      pcie: currentPcie.slice(),
+      time: now
+    };
+  }
+
+  function mainRateText() {
+    return sampleRates.main + " samples/s";
+  }
+
+  function mainPcieRateText(gpuIndex) {
+    const pcieRate = sampleRates.pcie[gpuIndex] || sampleRates.pcieAvg || "0.0";
+    return sampleRates.main + " samples/s, " + pcieRate + " samples/s";
+  }
+
+  function diskRateText() {
+    return sampleRates.disk + " samples/s";
+  }
+
+  function xRef(row) {
+    return row === 1 ? "x" : "x" + row;
+  }
+
+  function yRef(row) {
+    return row === 1 ? "y" : "y" + row;
+  }
+
+  function xLayout(row) {
+    return row === 1 ? "xaxis" : "xaxis" + row;
+  }
+
+  function yLayout(row) {
+    return row === 1 ? "yaxis" : "yaxis" + row;
+  }
+
+  function yLayoutByRef(ref) {
+    return ref === "y" ? "yaxis" : "yaxis" + ref.slice(1);
+  }
+
+  function computeDomains(weights, gaps) {
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    const totalGap = gaps.reduce((a, b) => a + b, 0);
+    const usable = 1 - totalGap;
+    let top = 1;
+    return weights.map((weight, i) => {
+      top -= gaps[i] || 0;
+      const height = (weight / totalWeight) * usable;
+      const domain = [top - height, top];
+      top -= height;
+      return domain;
+    });
+  }
+
+  function rowBackgrounds(rowCount) {
+    const colors = ["#101020", "#181830"];
+    return Array.from({length: rowCount}, (_, i) => ({
+      type: "rect", x0: 0, x1: 1, y0: 0, y1: 1,
+      xref: xRef(i + 1) + " domain",
+      yref: yRef(i + 1) + " domain",
+      fillcolor: colors[i % colors.length],
+      line: {width: 0}, layer: "below"
+    }));
+  }
+
+  function label(text, xref, yref, rateText) {
+    const displayText = rateText ? text + "<br>" + rateText : text;
+    return {
+      text: "  " + displayText + "  ",
       x: 0,
-      y: y,
-      xref: "paper",
-      yref: "paper",
+      y: 0.97,
+      xref: xref,
+      yref: yref,
       showarrow: false,
       xanchor: "left",
       yanchor: "top",
       bgcolor: "rgba(30,30,50,0.92)",
       bordercolor: "#444466",
       borderwidth: 1,
+      borderpad: 3,
       font: {size: 11, color: "#c0c0d0"}
     };
   }
+
+  function rowLabel(row, text, rateText) {
+    return label(text, xRef(row) + " domain", yRef(row) + " domain", rateText);
+  }
+
+  setInterval(function() {
+    updateSampleRates();
+    if (state) scheduleRender();
+  }, 5000);
 
   function hexToRgba(hex, alpha) {
     const h = (hex || "#999999").replace("#", "");
@@ -329,6 +609,40 @@
     const g = parseInt(h.substring(2, 4), 16);
     const b = parseInt(h.substring(4, 6), 16);
     return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
+  }
+
+  function hexToHue(hex) {
+    const h = (hex || "#999999").replace("#", "");
+    const r = parseInt(h.substring(0, 2), 16) / 255;
+    const g = parseInt(h.substring(2, 4), 16) / 255;
+    const b = parseInt(h.substring(4, 6), 16) / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+    if (delta === 0) return {hue: 0, sat: 0};
+    let hue;
+    if (max === r) hue = ((g - b) / delta + 6) % 6;
+    else if (max === g) hue = (b - r) / delta + 2;
+    else hue = (r - g) / delta + 4;
+    return {hue: hue * 60, sat: delta / max};
+  }
+
+  function findSimilarColors(colors, threshold) {
+    const needs = new Set();
+    const hsv = colors.map(color => hexToHue(color));
+    for (let i = 0; i < hsv.length; i++) {
+      if (hsv[i].sat < 0.15) continue;
+      for (let j = i + 1; j < hsv.length; j++) {
+        if (hsv[j].sat < 0.15) continue;
+        let hueDelta = Math.abs(hsv[i].hue - hsv[j].hue);
+        if (hueDelta > 180) hueDelta = 360 - hueDelta;
+        if (hueDelta < threshold) {
+          needs.add(i);
+          needs.add(j);
+        }
+      }
+    }
+    return needs;
   }
 
   document.querySelectorAll(".range-btn").forEach(btn => {
