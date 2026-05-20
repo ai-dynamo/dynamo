@@ -208,18 +208,20 @@ impl<
         }
 
         if self.all_workers_prefill_busy(threshold, request.eligibility(), decay_now) {
-            let pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
-            // This is a rejection threshold on current queued ISL, not a hard
-            // post-admission bound on `pending + incoming`.
-            if let Some(max_isl_tokens) = self.tier_cap_for_request(&request)
-                && pending_isl_tokens >= max_isl_tokens
-            {
-                request.respond(Err(KvSchedulerError::Backpressure {
-                    reason: RouterBackpressureReason::MaxQueueDepthExceeded,
-                    queued_isl_tokens: pending_isl_tokens,
-                    max_queued_isl_tokens: Some(max_isl_tokens),
-                }));
-                return;
+            if !self.queue_depth_tiers.is_unbounded() {
+                let pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
+                // This is a rejection threshold on current queued ISL, not a hard
+                // post-admission bound on `pending + incoming`.
+                if let Some(max_isl_tokens) = self.tier_cap_for_request(&request)
+                    && pending_isl_tokens >= max_isl_tokens
+                {
+                    request.respond(Err(KvSchedulerError::Backpressure {
+                        reason: RouterBackpressureReason::MaxQueueDepthExceeded,
+                        queued_isl_tokens: pending_isl_tokens,
+                        max_queued_isl_tokens: Some(max_isl_tokens),
+                    }));
+                    return;
+                }
             }
             tracing::debug!("all workers prefill-busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
