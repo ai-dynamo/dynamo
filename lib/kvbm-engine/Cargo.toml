@@ -44,6 +44,10 @@ aws-config = { version = "1.8.11", optional = true }
 rayon = { version = "1", optional = true }
 tokio-rayon = { version = "2", optional = true }
 chrono = { version = "0.4", optional = true }
+# Path assumes the Mooncake repo is checked out at ../../Mooncake/ relative to
+# the workspace root. CI and contributors must clone Mooncake to this location:
+#   git clone https://github.com/kvcache-ai/Mooncake ../../Mooncake
+# See docs/integrations/mooncake-store-integration.md for full setup instructions.
 mooncake_store = { path = "../../../Mooncake/mooncake-store/rust", optional = true }
 async-nats = { workspace = true, optional = true }
 flume = { version = "0.11", optional = true }

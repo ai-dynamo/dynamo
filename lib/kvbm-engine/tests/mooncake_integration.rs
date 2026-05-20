@@ -2,10 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration test: verify Mooncake Store via raw API and MooncakeObjectBlockClient.
+//!
+//! This test requires a running Mooncake server. Run with:
+//! ```bash
+//! cargo test -p kvbm-engine --features mooncake,testing --test mooncake_integration -- --ignored
+//! ```
 
+use kvbm_config::MooncakeProtocol;
 use mooncake_store::MooncakeStore;
 
-fn main() {
+#[test]
+#[ignore = "Requires Mooncake server and NIXL environment"]
+fn mooncake_integration() {
     println!("=== Mooncake Integration Test ===");
 
     // ---------------------------------------------------------------
@@ -13,15 +21,17 @@ fn main() {
     // ---------------------------------------------------------------
     {
         let store = MooncakeStore::new().expect("create store");
-        store.setup(
-            "localhost",
-            "http://127.0.0.1:8080/metadata",
-            512 * 1024 * 1024,
-            128 * 1024 * 1024,
-            "tcp",
-            "",
-            "127.0.0.1:50051",
-        ).expect("setup store");
+        store
+            .setup(
+                "localhost",
+                "http://127.0.0.1:8080/metadata",
+                512 * 1024 * 1024,
+                128 * 1024 * 1024,
+                "tcp",
+                "",
+                "127.0.0.1:50051",
+            )
+            .expect("setup store");
 
         let key = "test-key-1";
         let value = b"hello mooncake from dynamo!";
@@ -39,7 +49,9 @@ fn main() {
         assert_eq!(size, value.len() as i64);
         println!("[OK] get_size({}) = {}", key, size);
 
-        let results = store.batch_is_exist(&["test-key-1", "test-key-2"]).expect("batch_is_exist");
+        let results = store
+            .batch_is_exist(&["test-key-1", "test-key-2"])
+            .expect("batch_is_exist");
         assert_eq!(results, vec![true, false]);
         println!("[OK] batch_is_exist = {:?}", results);
 
@@ -52,15 +64,15 @@ fn main() {
     // 2. MooncakeObjectBlockClient::has_blocks
     // ---------------------------------------------------------------
     {
-        use kvbm_engine::object::mooncake::client::MooncakeObjectBlockClient;
-        use kvbm_engine::object::ObjectBlockOps;
         use kvbm_config::MooncakeObjectConfig;
+        use kvbm_engine::object::ObjectBlockOps;
+        use kvbm_engine::object::mooncake::client::MooncakeObjectBlockClient;
 
         let config = MooncakeObjectConfig {
             metadata_server: "http://127.0.0.1:8080/metadata".to_string(),
             master_server_addr: "127.0.0.1:50051".to_string(),
             local_hostname: "localhost".to_string(),
-            protocol: "tcp".to_string(),
+            protocol: MooncakeProtocol::Tcp,
             device_name: "".to_string(),
             global_segment_size: 512 * 1024 * 1024,
             local_buffer_size: 128 * 1024 * 1024,
@@ -68,8 +80,8 @@ fn main() {
             max_concurrent_requests: 4,
         };
 
-        let client = MooncakeObjectBlockClient::new(&config)
-            .expect("create MooncakeObjectBlockClient");
+        let client =
+            MooncakeObjectBlockClient::new(&config).expect("create MooncakeObjectBlockClient");
 
         let hash_a = kvbm_engine::SequenceHash::new(42, None, 0);
         let hash_b = kvbm_engine::SequenceHash::new(99, None, 1);
@@ -84,6 +96,5 @@ fn main() {
         println!("[OK] has_blocks (empty) = {:?}", results);
     }
 
-    println!("
-=== All integration tests passed ===");
+    println!("\n=== All integration tests passed ===");
 }
