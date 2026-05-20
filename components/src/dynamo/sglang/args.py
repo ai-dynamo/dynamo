@@ -385,18 +385,37 @@ async def parse_args(args: list[str]) -> Config:
     # stream_output.
     enable_disjoint_streaming_output(server_args)
 
+    # Resolve preprocessing/postprocessing from new flags or deprecated alias
+    preprocessing = dynamo_config.preprocessing
+    postprocessing = dynamo_config.postprocessing
+
     if dynamo_config.use_sglang_tokenizer:
+        if preprocessing is not None or postprocessing is not None:
+            logging.error(
+                "--use-sglang-tokenizer cannot be combined with "
+                "--preprocessing or --postprocessing. Use the new flags instead."
+            )
+            sys.exit(1)
         warnings.warn(
-            "--use-sglang-tokenizer is deprecated and will be removed in a future "
-            "release. Use '--dyn-chat-processor sglang' on the frontend instead, "
-            "which provides the same SGLang-native pre/post processing with KV "
-            "router support.",
+            "--use-sglang-tokenizer is deprecated. Use "
+            "'--preprocessing sglang --postprocessing sglang' instead.",
             FutureWarning,
             stacklevel=2,
         )
-        logging.info("Using SGLang's built in tokenizer")
-    else:
-        logging.info("Using dynamo's built in tokenizer")
+        preprocessing = "sglang"
+        postprocessing = "sglang"
+
+    # Apply defaults
+    if preprocessing is None:
+        preprocessing = "dynamo"
+    if postprocessing is None:
+        postprocessing = "dynamo"
+
+    # Store resolved values back
+    dynamo_config.preprocessing = preprocessing
+    dynamo_config.postprocessing = postprocessing
+
+    logging.info("Preprocessing: %s, Postprocessing: %s", preprocessing, postprocessing)
 
     # Derive use_kv_events from server_args.kv_events_config
     # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)

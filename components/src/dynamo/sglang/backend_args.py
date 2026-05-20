@@ -44,6 +44,25 @@ class DynamoSGLangArgGroup(ArgGroup):
             "the same SGLang-native pre/post processing with KV router support.",
         )
 
+        g.add_argument(
+            "--preprocessing",
+            type=str,
+            choices=["dynamo", "sglang"],
+            default=None,
+            help="Who handles preprocessing/tokenization. "
+            "'dynamo' (default): Rust preprocessor tokenizes. "
+            "'sglang': SGLang tokenizes (loses KV routing).",
+        )
+        g.add_argument(
+            "--postprocessing",
+            type=str,
+            choices=["dynamo", "sglang"],
+            default=None,
+            help="Who handles postprocessing (detokenization, tool/reasoning parsing). "
+            "'dynamo' (default): Rust backend detokenizes and parses. "
+            "'sglang': SGLang handles all postprocessing.",
+        )
+
         add_negatable_bool_argument(
             g,
             flag_name="--multimodal-encode-worker",
@@ -132,6 +151,8 @@ class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
+    preprocessing: Optional[str] = None
+    postprocessing: Optional[str] = None
     multimodal_encode_worker: bool
     multimodal_worker: bool
     embedding_transfer_mode: EmbeddingTransferMode
