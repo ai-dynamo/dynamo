@@ -6,7 +6,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use crate::{
     backend::Backend,
     engines::StreamingEngineAdapter,
-    model_type::{ModelInput, ModelType},
+    model_type::{ModelInput, ModelOutput, ModelType},
     preprocessor::{BackendOutput, PreprocessedRequest},
     types::{
         Annotated,
@@ -45,7 +45,7 @@ pub async fn run(
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
             model
-                .attach(&endpoint, ModelType::Chat, ModelInput::Text, None)
+                .attach(&endpoint, ModelType::Chat, ModelInput::Text, ModelOutput::Text, None)
                 .await?;
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
@@ -76,7 +76,7 @@ pub async fn run(
                 ModelType::Chat | ModelType::Completions
             };
             model
-                .attach(&endpoint, model_type, ModelInput::Tokens, None)
+                .attach(&endpoint, model_type, ModelInput::Tokens, ModelOutput::Tokens, None)
                 .await?;
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();

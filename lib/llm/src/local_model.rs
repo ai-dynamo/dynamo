@@ -14,7 +14,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 
 use crate::entrypoint::RouterConfig;
 use crate::model_card::ModelDeploymentCard;
-use crate::model_type::{ModelInput, ModelType};
+use crate::model_type::{ModelInput, ModelOutput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
@@ -480,10 +480,12 @@ impl LocalModel {
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
+        model_output: ModelOutput,
         lora_info: Option<crate::model_card::LoraInfo>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
+        self.card.model_output = model_output;
         self.card.lora = lora_info.clone();
 
         // Compute model_suffix from lora_name if present

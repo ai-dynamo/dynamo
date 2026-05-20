@@ -25,7 +25,7 @@ use dynamo_backend_common::{
     PreprocessedRequest, RuntimeConfig as RsRuntimeConfig, SnapshotFn, Worker as RsWorker,
     WorkerConfig as RsWorkerConfig,
 };
-use dynamo_llm::model_type::ModelInput as RsModelInput;
+use dynamo_llm::model_type::{ModelInput as RsModelInput, ModelOutput as RsModelOutput};
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
 use futures::stream::{BoxStream, StreamExt};
@@ -34,7 +34,7 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 
-use crate::ModelInput;
+use crate::{ModelInput, ModelOutput};
 use crate::context::Context as PyContext;
 use crate::errors::py_exception_to_backend_error;
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
@@ -260,6 +260,7 @@ impl WorkerConfig {
         model_name = String::new(),
         served_model_name = None,
         model_input = ModelInput::Tokens,
+        model_output = ModelOutput::Tokens,
         endpoint_types = "chat,completions".to_string(),
         custom_jinja_template = None,
         tool_call_parser = None,
@@ -279,6 +280,7 @@ impl WorkerConfig {
         model_name: String,
         served_model_name: Option<String>,
         model_input: ModelInput,
+        model_output: ModelOutput,
         endpoint_types: String,
         custom_jinja_template: Option<String>,
         tool_call_parser: Option<String>,
@@ -296,6 +298,10 @@ impl WorkerConfig {
             ModelInput::Tokens => RsModelInput::Tokens,
             ModelInput::Tensor => RsModelInput::Tensor,
         };
+        let model_output_rs = match model_output {
+            ModelOutput::Tokens => RsModelOutput::Tokens,
+            ModelOutput::Text => RsModelOutput::Text,
+        };
         Self {
             inner: RsWorkerConfig {
                 namespace,
@@ -304,6 +310,7 @@ impl WorkerConfig {
                 model_name,
                 served_model_name,
                 model_input: model_input_rs,
+                model_output: model_output_rs,
                 endpoint_types,
                 custom_jinja_template: custom_jinja_template.map(PathBuf::from),
                 tool_call_parser,

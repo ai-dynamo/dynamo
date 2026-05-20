@@ -15,7 +15,7 @@ use std::time::Duration;
 use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::local_model::LocalModelBuilder;
 use dynamo_llm::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
-use dynamo_llm::model_type::{ModelInput, ModelType};
+use dynamo_llm::model_type::{ModelInput, ModelOutput, ModelType};
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -104,6 +104,8 @@ pub struct WorkerConfig {
     pub served_model_name: Option<String>,
     /// Whether the engine consumes tokens (`Tokens`) or raw text (`Text`).
     pub model_input: ModelInput,
+    /// Whether the engine returns raw tokens (`Tokens`) or fully-formed text (`Text`).
+    pub model_output: ModelOutput,
     /// Comma-separated list, e.g. `"chat,completions"`.
     /// Accepted values: `chat`, `completions`, `embedding`/`embeddings`,
     /// `tensor`, `prefill` (see `parse_endpoint_types`).
@@ -156,6 +158,7 @@ impl Default for WorkerConfig {
             model_name: String::new(),
             served_model_name: None,
             model_input: ModelInput::Tokens,
+            model_output: ModelOutput::Tokens,
             endpoint_types: "chat,completions".to_string(),
             custom_jinja_template: None,
             tool_call_parser: None,
@@ -518,7 +521,7 @@ impl Worker {
         let mut local_model = build_local_model(&self.config, engine_config).await?;
         tracing::debug!("local model built");
         local_model
-            .attach(&endpoint, model_type, self.config.model_input, None)
+            .attach(&endpoint, model_type, self.config.model_input, self.config.model_output, None)
             .await
             .map_err(|e| {
                 err(

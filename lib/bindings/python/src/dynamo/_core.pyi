@@ -1276,6 +1276,11 @@ class ModelInput:
     Tokens: ModelInput
     Tensor: ModelInput
 
+class ModelOutput:
+    """What type of response this model produces: Tokens or Text"""
+    Tokens: ModelOutput
+    Text: ModelOutput
+
 
 class ModelType:
     """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
@@ -1690,6 +1695,7 @@ async def register_model(
     media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
+    model_output: Optional[ModelOutput] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2548,6 +2554,7 @@ class backend:
             model_name: str = ...,
             served_model_name: Optional[str] = None,
             model_input: ModelInput = ...,
+            model_output: ModelOutput = ...,
             endpoint_types: str = ...,
             custom_jinja_template: Optional[str] = None,
             tool_call_parser: Optional[str] = None,
