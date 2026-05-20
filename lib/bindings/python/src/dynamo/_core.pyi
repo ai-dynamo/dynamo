@@ -1793,9 +1793,16 @@ def run_mocker_trace_replay(
     trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
+    report_jsonl_path: Optional[str | os.PathLike[str]] = None,
     max_sim_time_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
+    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
+
+    When ``report_jsonl_path`` is provided (offline disagg replay only), one
+    JSON object per request is written to that path. Each line includes
+    arrival/admit/token timestamps, input/output lengths, the full per-token
+    ITL series, and prefill/decode worker indices.
+    """
     ...
 
 def run_mocker_synthetic_trace_replay(

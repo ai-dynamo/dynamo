@@ -84,12 +84,17 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
       <family>/PARSER.<mode>.yaml       — legacy flat: holds 1, 2, ..., 10
       <family>/PARSER.<mode>.<n>.yaml   — per-top-level-case: holds n.a, n.b, ...
 
-    Both schemas are
+    The batch harness ignores stream fixtures; those are exercised by the
+    streaming harness layered on top of this fixture corpus.
+
+    Both batch schemas are
         {family: "...", mode: "batch", cases: {PARSER.batch.<id>: {...}, ...}}
     """
     out = []
     for fp in sorted(FIXTURES_ROOT.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text())
+        if doc.get("mode", "batch") != "batch":
+            continue
         for case_id, case in doc["cases"].items():
             out.append((doc["family"], case_id, case))
     out.sort(key=lambda t: (t[0], *_case_sort_key(t[1])))
