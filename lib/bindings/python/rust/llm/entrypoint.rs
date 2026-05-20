@@ -61,10 +61,6 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
-    /// In-process SGLang gRPC bridge (B1): frontend links the
-    /// `dynamo-sglang-bridge` crate as a library and dials a stock SGLang
-    /// `--grpc-mode` server directly. No Dynamo IPC hop, no sidecar binary.
-    SglangGrpc = 4,
 }
 
 #[pyclass]
@@ -560,12 +556,8 @@ pub fn make_engine<'p>(
             let local_path = if model_path.exists() {
                 model_path
             } else {
-                // Mocker and SglangGrpc only need the tokenizer in-process —
-                // weights live in the SGLang server (or are mocked).
-                let ignore_weights = matches!(
-                    args.engine_type,
-                    EngineType::Mocker | EngineType::SglangGrpc
-                );
+                // Mocker only needs tokenizer, not weights
+                let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
                 // Preserve the original HF model ID as source_path so the
                 // frontend can resolve model metadata even when the served
                 // model name differs (e.g., --model-name model-1 --model-path
@@ -755,55 +747,6 @@ async fn select_engine(
 
             let engine =
                 make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
-
-            RsEngineConfig::InProcessTokens {
-                engine,
-                model: Box::new(local_model),
-                is_prefill: args.is_prefill,
-            }
-        }
-        EngineType::SglangGrpc => {
-            let grpc_endpoint = std::env::var("SGLANG_GRPC_ENDPOINT")
-                .unwrap_or_else(|_| "http://127.0.0.1:30000".to_string());
-            let connect_timeout_secs: u64 = std::env::var("DYN_SGLANG_CONNECT_TIMEOUT_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(30);
-            let disagg_mode = match std::env::var("DYN_DISAGGREGATION_MODE")
-                .unwrap_or_default()
-                .as_str()
-            {
-                "prefill" => dynamo_sglang_bridge::DisaggMode::Prefill,
-                "decode" => dynamo_sglang_bridge::DisaggMode::Decode,
-                _ => dynamo_sglang_bridge::DisaggMode::None,
-            };
-            let bootstrap_host_override = std::env::var("DYN_BOOTSTRAP_HOST").ok();
-
-            let served_name = local_model.display_name().to_string();
-
-            let arc_engine = dynamo_sglang_bridge::build_in_process_engine(
-                grpc_endpoint,
-                served_name,
-                connect_timeout_secs,
-                disagg_mode,
-                bootstrap_host_override,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("sglang_bridge: {e}"))?;
-
-            let adapter_mode = match disagg_mode {
-                dynamo_sglang_bridge::DisaggMode::Prefill => {
-                    dynamo_backend_common::DisaggregationMode::Prefill
-                }
-                dynamo_sglang_bridge::DisaggMode::Decode => {
-                    dynamo_backend_common::DisaggregationMode::Decode
-                }
-                dynamo_sglang_bridge::DisaggMode::None => {
-                    dynamo_backend_common::DisaggregationMode::Aggregated
-                }
-            };
-            let adapter = dynamo_backend_common::EngineAdapter::new(arc_engine, adapter_mode);
-            let engine: dynamo_llm::backend::ExecutionContext = Arc::new(adapter);
 
             RsEngineConfig::InProcessTokens {
                 engine,

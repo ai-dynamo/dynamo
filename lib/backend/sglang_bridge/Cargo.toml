@@ -9,7 +9,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Dynamo Rust sidecar bridge to SGLang's gRPC server (sglang.grpc.scheduler). Runnable against stock upstream SGLang main with --grpc-mode."
+description = "Dynamo sidecar bridge to SGLang's native gRPC server (sglang.runtime.v1)."
 
 [[bin]]
 name = "dynamo-sglang-bridge"
@@ -23,15 +23,14 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
-prost = "0.13.5"
-prost-types = "0.13.5"
+prost = { version = "0.13.5" }
+prost-types = { version = "0.13.5" }
 rand = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1"
+tokio-stream = { workspace = true }
 tonic = { version = "0.13.1", features = ["transport"] }
 tracing = { workspace = true }
-uuid = { workspace = true }
 
 [build-dependencies]
-tonic-build = "0.13.1"
+tonic-build = { version = "0.13.1" }

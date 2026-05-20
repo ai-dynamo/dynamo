@@ -37,13 +37,13 @@ impl Drop for CancelMonitorGuard {
     }
 }
 
-pub struct EngineAdapter {
+pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
 }
 
 impl EngineAdapter {
-    pub fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
+    pub(crate) fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
         Self { engine, mode }
     }
 }

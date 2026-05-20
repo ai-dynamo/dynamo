@@ -12,7 +12,7 @@
 //!
 //! See `CLAUDE.md` in this crate for the design contract.
 
-pub mod adapter;
+mod adapter;
 pub mod args;
 pub mod disagg;
 pub mod engine;
@@ -25,7 +25,6 @@ pub mod testing;
 mod validate;
 pub mod worker;
 
-pub use adapter::EngineAdapter;
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use engine::{
