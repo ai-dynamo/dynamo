@@ -61,7 +61,7 @@ def _build_aiperf_script(
 
     return f"""set -e
 apt-get update -qq && apt-get install -y -qq curl jq git procps 2>/dev/null
-pip install --quiet git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75
+pip install --quiet aiperf==0.8.0
 echo "aiperf installed"
 
 # Wait for model
