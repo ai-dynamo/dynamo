@@ -18,7 +18,7 @@ import logging
 import math
 import typing
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional
 
 import aiohttp
 from prometheus_api_client import PrometheusConnect
@@ -99,6 +99,8 @@ class PrometheusAPIClient:
         metrics_source: str = "frontend",
         bearer_token: Optional[str] = None,
         ssl_verify: bool = False,
+        extra_query_params: Optional[Dict[str, str]] = None,
+        ca_bundle: Optional[str] = None,
     ):
         # disable_ssl=True (default) preserves prior behavior; flip via the
         # ssl_verify config knob (env: PROMETHEUS_SSL_VERIFY) when the
@@ -106,6 +108,10 @@ class PrometheusAPIClient:
         self.prom = PrometheusConnect(url=url, disable_ssl=not ssl_verify)
         if bearer_token:
             self.prom._session.headers["Authorization"] = f"Bearer {bearer_token}"
+        if extra_query_params:
+            self.prom._session.params = dict(extra_query_params)
+        if ca_bundle:
+            self.prom._session.verify = ca_bundle
         self.dynamo_namespace = dynamo_namespace
         self.metrics_source = metrics_source  # "frontend" | "router"
 

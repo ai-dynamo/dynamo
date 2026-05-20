@@ -136,7 +136,7 @@ Additional output with --thorough-check:
    └─ DYN_VAR2=value2
 
 Usage:
-    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check-only] [--json-output]
+    python dev/sanity_check.py [--thorough-check] [--terse] [--runtime-check-only] [--json-output]
 
 Options:
     --thorough-check              Enable thorough checking (file permissions, directory sizes, disk space, ulimits, CUDA/NVIDIA info, DYN_* env, HuggingFace model details)

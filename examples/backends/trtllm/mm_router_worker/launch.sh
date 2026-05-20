@@ -56,7 +56,7 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
     DYN_REQUEST_PLANE=nats python -m dynamo.trtllm \
         --model-path "$MODEL" \
         --served-model-name "${MODEL}__internal" \
-        --endpoint "dyn://${NAMESPACE}.trtllm.generate" \
+        --endpoint "dyn://${NAMESPACE}.backend.generate" \
         --modality multimodal \
         --publish-events-and-metrics \
         --kv-block-size "$BLOCK_SIZE" \
@@ -78,7 +78,7 @@ DYN_REQUEST_PLANE=nats python -m examples.backends.trtllm.mm_router_worker \
     --namespace "$NAMESPACE" \
     --component mm_router \
     --endpoint generate \
-    --downstream-component trtllm \
+    --downstream-component backend \
     --downstream-endpoint generate \
     --block-size "$BLOCK_SIZE" \
     2>&1 | sed "s/^/[mm_router] /" &
