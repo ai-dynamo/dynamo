@@ -3,20 +3,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-
-/// [TTFT-TRACE] helper — wall-clock epoch ms used to align TTFT trace logs
-/// across processes (frontend, prefill worker, decode worker).
-#[inline]
-fn unix_now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_runtime::{
@@ -121,14 +110,6 @@ impl
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
-        // [TTFT-TRACE] PrefillRouter entry.
-        tracing::info!(
-            request_id = %request_id,
-            request_received_epoch_ms = tracker.request_received_epoch_ms(),
-            epoch_ms = unix_now_ms(),
-            "[TTFT-TRACE] stage=prefill_router_entry"
-        );
-
         // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
@@ -147,29 +128,10 @@ impl
             ));
         }
 
-        // [TTFT-TRACE] Wrap resolve_prefill_worker to measure worker
-        // selection time (KV chooser / find_best_match or peek_next_worker
-        // plus bootstrap-endpoint lookup).
-        let resolve_start_ms = unix_now_ms();
-        let resolve_decision = self
+        let prefill_result = match self
             .resolve_prefill_worker(&prefill_req, preselected_worker)
-            .await;
-        let resolve_end_ms = unix_now_ms();
-        let resolved_kind = match &resolve_decision {
-            PrefillResolveDecision::Resolved { .. } => "resolved",
-            PrefillResolveDecision::Unavailable => "unavailable",
-            PrefillResolveDecision::NotActivated => "not_activated",
-            PrefillResolveDecision::NoBootstrapEndpoint => "no_bootstrap_endpoint",
-        };
-        tracing::info!(
-            request_id = %request_id,
-            resolve_ms = resolve_end_ms.saturating_sub(resolve_start_ms),
-            decision = resolved_kind,
-            epoch_ms = resolve_end_ms,
-            "[TTFT-TRACE] stage=prefill_worker_resolved"
-        );
-
-        let prefill_result = match resolve_decision {
+            .await
+        {
             PrefillResolveDecision::Resolved {
                 worker_id,
                 dp_rank,
@@ -188,19 +150,6 @@ impl
                 routing.prefill_worker_id = Some(worker_id);
                 routing.dp_rank = dp_rank;
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
-
-                // [TTFT-TRACE] Prefill worker chosen + bootstrap info ready;
-                // about to spawn prefill RPC. This is the closest the
-                // frontend gets to "prefill dispatched" in the bootstrap path.
-                tracing::info!(
-                    request_id = %request_id,
-                    worker_id = worker_id,
-                    dp_rank = ?dp_rank,
-                    bootstrap_room = bootstrap_info.bootstrap_room,
-                    epoch_ms = unix_now_ms(),
-                    path = "bootstrap",
-                    "[TTFT-TRACE] stage=prefill_dispatch"
-                );
 
                 // NVBugs 5969206: Do NOT link prefill as child of engine context.
                 // Kill propagation tears down the RPC transport, interrupting NIXL
@@ -228,15 +177,6 @@ impl
                 // Drop the phase barrier because we wait for prefill completion in this task,
                 // so there is no race with set_phase(Decode) below.
                 drop(prefill_phase_barrier);
-
-                // [TTFT-TRACE] About to enter blocking prefill path (no bootstrap).
-                tracing::info!(
-                    request_id = %request_id,
-                    preselected_worker = ?preselected_worker,
-                    epoch_ms = unix_now_ms(),
-                    path = "blocking",
-                    "[TTFT-TRACE] stage=prefill_dispatch"
-                );
 
                 // NVBugs 5969206: Do NOT link prefill as child (same rationale as bootstrap path).
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
@@ -273,21 +213,6 @@ impl
             Ok(outcome) => {
                 tracing::debug!("Prefill completed, proceeding to decode");
 
-                // [TTFT-TRACE] Prefill has returned to the router (in bootstrap
-                // path: only the spawn handshake has completed; in blocking
-                // path: prefill body has finished and prefill_complete_time
-                // has been recorded by execute_prefill).
-                let outcome_kind = match outcome {
-                    PrefillOutcome::Bootstrap(_) => "bootstrap",
-                    PrefillOutcome::Completed(_) => "completed",
-                };
-                tracing::info!(
-                    request_id = %request_id,
-                    outcome = outcome_kind,
-                    epoch_ms = unix_now_ms(),
-                    "[TTFT-TRACE] stage=prefill_returned_to_router"
-                );
-
                 // Set phase to Decode for the decode request.
                 // In bootstrap path, this blocks until the spawned prefill task releases its
                 // phase barrier after routing completes, ensuring correct worker attribution.
@@ -318,15 +243,6 @@ impl
                 let existing_override = decode_req.router_config_override.take();
                 decode_req.router_config_override =
                     Some(build_decode_router_override(existing_override));
-
-                // [TTFT-TRACE] About to hand the decode request to the next
-                // operator (the decode KvPushRouter). This is "frontend sends
-                // decode request" in the TTFT decomposition.
-                tracing::info!(
-                    request_id = %request_id,
-                    epoch_ms = unix_now_ms(),
-                    "[TTFT-TRACE] stage=decode_dispatch_to_next_operator"
-                );
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);

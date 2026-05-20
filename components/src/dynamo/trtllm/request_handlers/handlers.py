@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import time
 from collections.abc import AsyncGenerator
 from typing import Optional
 
@@ -139,15 +138,6 @@ class PrefillHandler(HandlerBase):
         """
         logging.debug(f"Prefill Request ID: {context.id()}")
         logging.debug(f"PrefillHandler.generate received request: {request}")
-        # [TTFT-TRACE] Prefill worker RPC entry — measured against
-        # frontend-side prefill_dispatch epoch_ms to compute network + RPC
-        # overhead before the request reaches the engine.
-        logging.info(
-            "[TTFT-TRACE] mode=prefill request_id=%s stage=worker_rpc_entry "
-            "epoch_ms=%d",
-            context.id(),
-            int(time.time() * 1000),
-        )
         embeddings_tensor = None
         ep_disaggregated_params = None
 
@@ -226,17 +216,6 @@ class DecodeHandler(HandlerBase):
         If disaggregated_params is present, prefill was done. Otherwise generate normally.
         """
         logging.debug(f"Decode Request ID: {context.id()}")
-        # [TTFT-TRACE] Decode worker RPC entry — this is "decode worker
-        # consumed the decode request" in the TTFT decomposition. Diff
-        # against frontend's decode_dispatch epoch_ms to measure RPC + queue
-        # overhead, and against this worker's engine_first_response to
-        # isolate KV-transfer + first-decode-step latency.
-        logging.info(
-            "[TTFT-TRACE] mode=decode request_id=%s stage=worker_rpc_entry "
-            "epoch_ms=%d",
-            context.id(),
-            int(time.time() * 1000),
-        )
 
         disaggregated_params = request.get("disaggregated_params")
         if disaggregated_params:

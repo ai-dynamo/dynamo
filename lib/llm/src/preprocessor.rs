@@ -694,24 +694,9 @@ impl OpenAIPreprocessor {
             Cow::Borrowed(prompt)
         };
         let encoding = self.tokenizer.encode(prompt.as_ref())?;
-        let tokenize_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
-        // [TTFT-TRACE] HF tokenizer encode finished. This is the actual
-        // tokenize cost; chat-template rendering happens upstream in
-        // preprocess_request and is captured by the
-        // preprocessor_entered → tokenize_done delta together with any
-        // request-shape conversion.
-        tracing::info!(
-            tokenize_ms = tokenize_ms,
-            num_tokens = encoding.token_ids().len(),
-            epoch_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-            "[TTFT-TRACE] stage=tokenize_done"
-        );
         Ok(encoding)
     }
 
@@ -910,10 +895,6 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
-            // [TTFT-TRACE] Fires once when the first chunk with tokens is
-            // converted to the public response type. This is the closest
-            // user-space signal to "first token detokenized on the frontend".
-            first_detokenize_logged: bool,
         }
 
         let state = State {
@@ -926,7 +907,6 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: false,
             finished: false,
             trace_tokens_enabled,
-            first_detokenize_logged: false,
         };
 
         // transform the common response stream into a chat response stream
@@ -989,25 +969,6 @@ impl OpenAIPreprocessor {
                             })
                             .map_err(|e| e.to_string())
                     });
-
-                    // [TTFT-TRACE] First chunk with tokens just got
-                    // detokenized + assembled into the public response
-                    // shape. Diff against kv_push_router_first_token to
-                    // measure detokenize + parse overhead, and against
-                    // first_sse_chunk_emitted to measure remaining
-                    // postprocessor + SSE-convert cost.
-                    if !inner.first_detokenize_logged && chunk_tokens > 0 {
-                        inner.first_detokenize_logged = true;
-                        tracing::info!(
-                            request_id = inner.context.id(),
-                            chunk_tokens = chunk_tokens,
-                            epoch_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as u64)
-                                .unwrap_or(0),
-                            "[TTFT-TRACE] stage=first_chunk_detokenized"
-                        );
-                    }
 
                     // Create LLM metrics annotation with prefill/decode worker info from tracker.
                     // Worker types are stored at routing time to avoid expensive MDC lookup.
@@ -1495,20 +1456,6 @@ impl
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
-
-        // [TTFT-TRACE] OpenAIPreprocessor entered — pair with
-        // `http_handler_entered` to measure HTTP validation + engine-lookup
-        // overhead, and pair with the tracker's request_received epoch (set
-        // ~30 lines below at response_generator construction) to measure the
-        // sub-stages.
-        tracing::info!(
-            request_id = %request_id,
-            epoch_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-            "[TTFT-TRACE] stage=preprocessor_entered"
-        );
 
         // Build audit handle (None if no DYN_AUDIT_SINKS)
         let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);

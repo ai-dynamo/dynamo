@@ -9,10 +9,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId};
-use dynamo_runtime::{
-    pipeline::{AsyncEngineContextProvider, SingleIn},
-    protocols::maybe_error::MaybeError,
-};
+use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
@@ -134,18 +131,6 @@ impl PrefillRouter {
         // Clone tracker before request is consumed by generate_to_worker.
         // Used to record prefill_complete_time for KV transfer latency metric.
         let tracker = request.tracker.clone();
-        // [TTFT-TRACE] capture request_id from the context before request is
-        // consumed by generate_to_worker.
-        let trace_request_id = request.context().id().to_string();
-        tracing::info!(
-            request_id = %trace_request_id,
-            target_worker = ?target_worker,
-            epoch_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-            "[TTFT-TRACE] stage=prefill_rpc_send"
-        );
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
@@ -172,19 +157,6 @@ impl PrefillRouter {
         if let Some(ref tracker) = tracker {
             tracker.record_prefill_complete();
         }
-        // [TTFT-TRACE] First prefill response received from the prefill worker
-        // (= prefill engine finished + RPC return). Pair this with the
-        // matching prefill worker's `engine_first_response` log to isolate
-        // prefill→frontend network/RPC overhead.
-        tracing::info!(
-            request_id = %trace_request_id,
-            target_worker = ?target_worker,
-            epoch_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-            "[TTFT-TRACE] stage=prefill_rpc_first_response"
-        );
 
         if let Some(err) = first_output.err() {
             return Err(PrefillError::PrefillError(
@@ -261,41 +233,8 @@ impl PrefillRouter {
         // Capture current span to propagate trace context to the spawned task
         let span = tracing::Span::current();
 
-        // [TTFT-TRACE] Capture request_id and the tokio::spawn dispatch time
-        // here so we can measure scheduling latency between spawn() and the
-        // future body actually running. This is the bootstrap path's only
-        // user of spawn_prefill_task and the gap matters under high
-        // concurrency.
-        let trace_request_id = prefill_request.context().id().to_string();
-        let spawn_requested_epoch_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        tracing::info!(
-            request_id = %trace_request_id,
-            target_worker = ?target_worker,
-            epoch_ms = spawn_requested_epoch_ms,
-            "[TTFT-TRACE] stage=prefill_spawn_requested"
-        );
-
         tokio::spawn(
             async move {
-                // [TTFT-TRACE] Spawned future just started executing.
-                // Diff against spawn_requested_epoch_ms = tokio task-queue
-                // latency for this prefill RPC.
-                let spawn_started_epoch_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                tracing::info!(
-                    request_id = %trace_request_id,
-                    target_worker = ?target_worker,
-                    epoch_ms = spawn_started_epoch_ms,
-                    spawn_queue_ms = spawn_started_epoch_ms
-                        .saturating_sub(spawn_requested_epoch_ms),
-                    "[TTFT-TRACE] stage=prefill_spawn_started"
-                );
-
                 match Self::execute_prefill(
                     router,
                     prefill_request,

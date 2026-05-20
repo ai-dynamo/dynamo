@@ -1191,21 +1191,6 @@ async fn chat_completions(
 
     let request_id = request.id().to_string();
 
-    // [TTFT-TRACE] Very first line of the axum chat_completions handler.
-    // Pair this with `preprocessor_entered` to isolate validation +
-    // engine-lookup overhead, and with the tracker's request_received epoch
-    // (captured later when the response_generator is built) to measure the
-    // pre-tracker portion of the handler.
-    tracing::info!(
-        request_id = %request_id,
-        epoch_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-        endpoint = "chat_completions",
-        "[TTFT-TRACE] stage=http_handler_entered"
-    );
-
     // Determine streaming mode early
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -1331,12 +1316,6 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
-        // [TTFT-TRACE] Track when the first SSE Event is generated for this
-        // request. This is the closest signal in user space to "first byte
-        // about to go on the wire to the client" (axum's Sse layer flushes
-        // each Event individually).
-        let mut first_sse_emitted = false;
-        let trace_request_id_sse = request_id.clone();
 
         // flat_map lets us optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -1371,20 +1350,6 @@ async fn chat_completions(
                 Ok(Some(ev)) => events.push(Ok(ev)),
                 Ok(None) => {}
                 Err(e) => events.push(Err(e)),
-            }
-            // [TTFT-TRACE] Fire once when the first SSE event for this
-            // request leaves this flat_map. Includes both data events and
-            // any side-channel events.
-            if !first_sse_emitted && !events.is_empty() {
-                first_sse_emitted = true;
-                tracing::info!(
-                    request_id = %trace_request_id_sse,
-                    epoch_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0),
-                    "[TTFT-TRACE] stage=first_sse_chunk_emitted"
-                );
             }
             stream::iter(events)
         });
