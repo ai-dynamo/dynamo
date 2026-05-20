@@ -12,7 +12,7 @@
 //! Exposed under `dynamo._core.backend` as `Worker`, `WorkerConfig`,
 //! `EngineConfig`, and `RuntimeConfig`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -120,6 +120,7 @@ impl EngineConfig {
         data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
+        runtime_data = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -134,8 +135,15 @@ impl EngineConfig {
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
-    ) -> Self {
-        Self {
+        runtime_data: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let runtime_data = runtime_data
+            .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
+            .transpose()
+            .map_err(to_pyerr)?
+            .unwrap_or_default();
+
+        Ok(Self {
             inner: RsEngineConfig {
                 model,
                 served_model_name,
@@ -148,8 +156,9 @@ impl EngineConfig {
                 data_parallel_start_rank,
                 bootstrap_host,
                 bootstrap_port,
+                runtime_data,
             },
-        }
+        })
     }
 
     #[getter]
@@ -195,6 +204,12 @@ impl EngineConfig {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+    #[getter]
+    fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.inner.runtime_data)
+            .map(|value| value.unbind())
+            .map_err(to_pyerr)
     }
 }
 
@@ -404,6 +419,33 @@ impl Worker {
                 })
                 .map_err(to_pyerr)?;
 
+            // Initialize logging now that tokio context is available. Mirrors
+            // the DistributedRuntime init path — required so workers using
+            // `dynamo.common.backend.Worker` directly (without constructing a
+            // DistributedRuntime first) install the tracing + OTLP exporter
+            // layers. Without this, OTEL_EXPORT_ENABLED workers emit no
+            // logs and no spans.
+            if dynamo_runtime::config::env_is_truthy(
+                dynamo_runtime::config::environment_names::logging::otlp::OTEL_EXPORT_ENABLED,
+            ) {
+                rs::logging::init();
+                // Runtime canary: if a future refactor drops or breaks the
+                // init above, this loud stderr message fires once per worker
+                // startup so operators discover the regression without
+                // needing to chase silent missing-spans symptoms. We use
+                // `eprintln!` (not tracing::warn!) deliberately — a missing
+                // subscriber means tracing calls are silent no-ops, so the
+                // signal MUST bypass tracing.
+                if !tracing::dispatcher::has_been_set() {
+                    eprintln!(
+                        "ERROR: OTEL_EXPORT_ENABLED=1 but no tracing subscriber \
+                         installed after `Worker::run` init. Worker telemetry \
+                         (spans, logs) will be SILENT — check the conditional \
+                         `rs::logging::init()` call in `Worker::run`."
+                    );
+                }
+            }
+
             let py_engine = PyLLMEngine::new(engine, event_loop);
             let worker = RsWorker::new(Arc::new(py_engine), config);
 
@@ -439,6 +481,7 @@ struct PyLLMEngine {
     engine: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
+    request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
 }
 
 impl PyLLMEngine {
@@ -447,6 +490,7 @@ impl PyLLMEngine {
             engine,
             event_loop,
             trace_contexts: Arc::new(StdMutex::new(HashMap::new())),
+            request_metadata: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -476,14 +520,19 @@ impl PyLLMEngine {
     }
 }
 
-struct TraceContextGuard {
+struct RequestStateGuard {
     request_id: String,
     trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
+    request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
 }
 
-impl Drop for TraceContextGuard {
+impl Drop for RequestStateGuard {
     fn drop(&mut self) {
         self.trace_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.request_id);
+        self.request_metadata
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.request_id);
@@ -537,6 +586,10 @@ impl LLMEngine for PyLLMEngine {
                 data_parallel_start_rank: opt_attr::<u32>(bound, "data_parallel_start_rank")?,
                 bootstrap_host: opt_attr::<String>(bound, "bootstrap_host")?,
                 bootstrap_port: opt_attr::<u16>(bound, "bootstrap_port")?,
+                runtime_data: match bound.getattr("runtime_data") {
+                    Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
+                    _ => HashMap::new(),
+                },
             })
         })
         .map_err(py_err_to_dynamo)
@@ -551,26 +604,60 @@ impl LLMEngine for PyLLMEngine {
         let event_loop = self.event_loop.clone();
         let trace_context = get_distributed_tracing_context();
         let request_id = ctx.id().to_string();
-        let trace_guard = trace_context.as_ref().map(|trace_context| {
+        self.request_metadata
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(request_id.clone(), ctx.metadata().clone());
+        if let Some(trace_context) = trace_context.as_ref() {
             self.trace_contexts
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(request_id.clone(), trace_context.clone());
-            TraceContextGuard {
-                request_id,
-                trace_contexts: self.trace_contexts.clone(),
-            }
-        });
+        }
+        let request_state_guard = RequestStateGuard {
+            request_id,
+            trace_contexts: self.trace_contexts.clone(),
+            request_metadata: self.request_metadata.clone(),
+        };
 
         let first_token = ctx.first_token_sender().cloned();
         let inner_ctx = ctx.inner_arc();
+        // **Invariant**: `tracing::Span::current()` here MUST be the
+        // `engine.generate` span opened by `EngineAdapter::generate`. The
+        // capture must happen BEFORE `spawn_blocking` because inside the
+        // blocking closure, `Span::current()` is the worker-thread root,
+        // not the auto-span.
+        //
+        // If anyone refactors this dispatch (extra task hop, different
+        // scheduler), they must re-verify the captured span. `Context`
+        // stores this span and routes engine telemetry calls to it via
+        // `current_span` / `start_span` — wrong span = wrong attributes
+        // silently. See the `auto_span_records_*` tests in
+        // `lib/backend-common/src/adapter.rs` for the assertions that depend
+        // on this invariant.
+        debug_assert_eq!(
+            tracing::Span::current().metadata().map(|m| m.name()),
+            Some("engine.generate"),
+            "Span::current() must be engine.generate at PyLLMEngine boundary; \
+             a dispatch refactor likely broke the capture point"
+        );
+        let engine_span = tracing::Span::current();
 
         // Pythonize the request, call generate(request, context=ctx), and
         // turn the resulting Python async generator into a Rust stream.
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, PyContext::new(inner_ctx, trace_context, first_token))?;
+                let py_ctx = Py::new(
+                    py,
+                    PyContext::new(
+                        inner_ctx,
+                        trace_context,
+                        first_token,
+                        ctx.metadata().clone(),
+                    )
+                    .with_span(engine_span),
+                )?;
 
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("context", &py_ctx)?;
@@ -592,7 +679,7 @@ impl LLMEngine for PyLLMEngine {
         .map_err(py_err_to_dynamo)?;
 
         let mapped = async_stream::stream! {
-            let _trace_guard = trace_guard;
+            let _request_state_guard = request_state_guard;
             let mut inner = std::pin::pin!(stream);
             while let Some(item) = inner.next().await {
                 let py_obj = match item {
@@ -656,12 +743,18 @@ impl LLMEngine for PyLLMEngine {
             .get(ctx.id())
             .cloned()
             .or_else(get_distributed_tracing_context);
+        let metadata = self
+            .request_metadata
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(ctx.id())
+            .unwrap_or_default();
 
         let res: Result<(), PyErr> = async move {
             let py_future = tokio::task::spawn_blocking(move || {
                 Python::with_gil(|py| -> PyResult<_> {
                     let bound = engine.bind(py);
-                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context, None))?;
+                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context, None, metadata))?;
                     let coroutine = bound.call_method1("abort", (py_ctx,))?;
                     let locals = TaskLocals::new(event_loop.bind(py).clone());
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)

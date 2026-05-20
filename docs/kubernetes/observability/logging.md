@@ -60,7 +60,7 @@ helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 
 # Install Loki
-helm install --values deploy/observability/k8s/logging/values/loki-values.yaml loki grafana/loki -n $MONITORING_NAMESPACE
+helm install --values deploy/observability/logging/values/loki-values.yaml loki grafana/loki -n $MONITORING_NAMESPACE
 ```
 
 Our configuration (`loki-values.yaml`) sets up Loki in a simple configuration that is suitable for testing and development. It uses a local MinIO for storage. The installation pods can be viewed with:
@@ -74,7 +74,7 @@ Next, install the Grafana Alloy collector to gather logs from your Kubernetes cl
 
 ```bash
 # Generate a custom values file with the namespace information
-envsubst < deploy/observability/k8s/logging/values/alloy-values.yaml > alloy-custom-values.yaml
+envsubst < deploy/observability/logging/values/alloy-values.yaml > alloy-custom-values.yaml
 
 # Install the collector
 helm install --values alloy-custom-values.yaml alloy grafana/k8s-monitoring -n $MONITORING_NAMESPACE
@@ -124,10 +124,10 @@ Since we are using Grafana with the Prometheus Operator, we can simply apply the
 
 ```bash
 # Configure Grafana with the Loki datasource
-envsubst < deploy/observability/k8s/logging/grafana/loki-datasource.yaml | kubectl apply -n $MONITORING_NAMESPACE -f -
+envsubst < deploy/observability/logging/grafana/loki-datasource.yaml | kubectl apply -n $MONITORING_NAMESPACE -f -
 
 # Configure Grafana with the Dynamo Logs dashboard
-kubectl apply -f deploy/observability/k8s/logging/grafana/logging-dashboard.yaml -n $MONITORING_NAMESPACE
+kubectl apply -f deploy/observability/logging/grafana/logging-dashboard.yaml -n $MONITORING_NAMESPACE
 ```
 
 > [!Note]

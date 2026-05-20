@@ -2340,6 +2340,7 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "opentelemetry",
  "parking_lot",
  "prometheus",
  "serde",
@@ -2347,6 +2348,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2354,10 +2357,10 @@ name = "dynamo-bench"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "bytemuck",
  "chrono",
  "clap 4.6.1",
  "crossbeam-channel",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-mocker",
  "dynamo-tokens",
@@ -2395,6 +2398,19 @@ name = "dynamo-config"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-data-gen"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "dynamo-tokens",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2574,6 +2590,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
@@ -2590,6 +2607,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "slotmap",
  "tempfile",
  "tokio",
@@ -2686,7 +2704,6 @@ dependencies = [
  "figment",
  "futures",
  "humantime",
- "hyper-util",
  "jsonschema",
  "k8s-openapi",
  "kube",
@@ -5193,9 +5210,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
 dependencies = [
  "memo-map",
  "serde",
@@ -5204,9 +5221,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45092d80391870622fcf3bd82f5d2af18f99533ea60debb4bc9db0c76f0e809a"
+checksum = "99df5123c54391e2a228014c1dbbd85a3dab08a25e776c810526f2f47542b3de"
 dependencies = [
  "minijinja",
  "serde",

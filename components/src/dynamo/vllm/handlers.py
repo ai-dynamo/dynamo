@@ -48,7 +48,6 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
@@ -2400,7 +2399,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
@@ -2465,7 +2464,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -2655,7 +2654,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):

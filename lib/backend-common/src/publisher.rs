@@ -145,7 +145,7 @@ pub(crate) async fn setup_publishers(
         None
     } else {
         let router_publishers = build_router_publishers(component, &dp_ranks).await?;
-        let gauges = Arc::new(ComponentGauges::new(engine_metrics)?);
+        let gauges = Arc::new(ComponentGauges::new(engine_metrics, &dp_ranks)?);
         let publisher = Arc::new(SnapshotPublisher::new(gauges, router_publishers));
         if let Some(on_ready) = on_publisher_ready {
             on_ready(publisher.clone())

@@ -314,8 +314,88 @@ fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
 
 /// 1 GiB cap on metadata fetch — realistic files are <20 MiB. Bounds
 /// disk usage if a worker advertises a bogus `CheckedFile.size`, and is
-/// the fallback when `size` is absent (legacy MDCs).
+/// the fallback when `size` is absent on a `CheckedFile`.
 const ABSOLUTE_MAX_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// File extensions that identify model weights. Used by the hf:// sibling
+/// harvest to skip weight blobs (which `hub::from_hf(_, ignore_weights=true)`
+/// also already filters at download, but the snapshot dir may contain
+/// pre-existing weights from a prior unrestricted pull).
+///
+/// `.safetensors.index.json` is correctly kept: extension is `.json`.
+fn is_weight_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("safetensors" | "bin" | "gguf" | "onnx" | "tflite" | "h5" | "pt" | "pth" | "msgpack")
+    )
+}
+
+/// Parent directory of a `file://` URI when it resolves to a real local
+/// directory. Returns `None` for any other scheme or unreachable path.
+fn file_uri_parent(uri: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(uri).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    let path = url.to_file_path().ok()?;
+    let parent = path.parent()?;
+    parent.is_dir().then(|| parent.to_path_buf())
+}
+
+/// Symlink non-weight files from `snapshot_dir` into `slug_dir`. Picks up
+/// `preprocessor_config.json` and other sibling files that
+/// `from_pretrained(slug_dir)` consumers need.
+///
+/// Names in `typed_filenames` are owned by the resolve loop's typed-slot
+/// pass — never overwritten. Every other harvested sibling is re-linked
+/// unconditionally so a re-registration with the same `mdcsum` but a
+/// different upstream snapshot picks up fresh contents (mdcsum doesn't
+/// cover harvested files).
+fn harvest_siblings(
+    snapshot_dir: &Path,
+    slug_dir: &Path,
+    typed_filenames: &std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    let entries = match std::fs::read_dir(snapshot_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(
+                snapshot = %snapshot_dir.display(),
+                error = %e,
+                "sibling harvest: snapshot dir unreadable, skipping",
+            );
+            return Ok(());
+        }
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || is_weight_file(&path) {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if !n.is_empty() => n.to_owned(),
+            _ => continue,
+        };
+        if typed_filenames.contains(&name) {
+            continue;
+        }
+        let dst = slug_dir.join(&name);
+        // Resolve through the canonical target so a downstream
+        // `canonicalize` lands on a stable blob path rather than
+        // chasing snapshot-dir symlinks. `symlink_force` is idempotent
+        // and atomic via `stage_and_rename_sync`.
+        let target = std::fs::canonicalize(&path).unwrap_or(path);
+        symlink_force(&target, &dst)
+            .with_context(|| format!("harvesting {} -> {}", target.display(), dst.display()))?;
+        tracing::debug!(
+            file = %name,
+            target = %target.display(),
+            "harvested sibling into slug_dir",
+        );
+    }
+    Ok(())
+}
 
 /// Stage `uri` into `dest`, verifying staged bytes against `expected`
 /// before publishing. Schemes: `http(s)`, `file`, `hf`. For `hf://`,
@@ -603,6 +683,29 @@ pub struct ModelDeploymentCard {
     /// `Text` for engines that take care of pre-processing themselves.
     pub model_input: ModelInput,
 
+    /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
+    /// Orthogonal to `model_type` (which describes endpoints exposed).
+    ///
+    /// Every worker is expected to set this explicitly; `None` means the
+    /// worker has not declared a role and is treated as misconfiguration
+    /// (workers not ready). A temporary shim in `Model::ws_role_and_needs`
+    /// softens this while backends are being migrated — see
+    /// `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]` is
+    /// kept so pre-field cards still deserialize.
+    #[serde(default)]
+    pub worker_type: Option<crate::worker_type::WorkerType>,
+
+    /// Peer worker types this worker requires to serve traffic, in DNF form.
+    /// The outer `Vec` is OR; each inner `Vec` is an AND-set of required
+    /// worker types. Empty outer `Vec` means "no peers required."
+    ///
+    /// Examples:
+    /// - Prefill worker: `[[Decode]]` — needs a Decode peer.
+    /// - Encode worker: `[[Prefill, Decode], [Aggregated]]` — needs either a
+    ///   P+D pair or a single Aggregated peer.
+    #[serde(default)]
+    pub needs: Vec<Vec<crate::worker_type::WorkerType>>,
+
     /// LoRA metadata for routing
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraInfo>,
@@ -737,6 +840,35 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
+                // Topology fields participate in the checksum so that a rolling
+                // update that changes only worker_type/needs is correctly
+                // rejected as incompatible with the existing WorkerSet (forcing
+                // drain-and-redeploy) instead of silently joining and serving
+                // stale readiness data.
+                //
+                // worker_type discriminator: 0 = None, then the variant ordinal.
+                match self.worker_type {
+                    None => bytes_to_hash.push(0),
+                    Some(crate::worker_type::WorkerType::Prefill) => bytes_to_hash.push(1),
+                    Some(crate::worker_type::WorkerType::Decode) => bytes_to_hash.push(2),
+                    Some(crate::worker_type::WorkerType::Encode) => bytes_to_hash.push(3),
+                    Some(crate::worker_type::WorkerType::Aggregated) => bytes_to_hash.push(4),
+                }
+                // needs is DNF: hash length(outer) || for each alt { length(inner) || each variant }
+                bytes_to_hash.extend((self.needs.len() as u32).to_be_bytes());
+                for alt in &self.needs {
+                    bytes_to_hash.extend((alt.len() as u32).to_be_bytes());
+                    for w in alt {
+                        let v: u8 = match w {
+                            crate::worker_type::WorkerType::Prefill => 1,
+                            crate::worker_type::WorkerType::Decode => 2,
+                            crate::worker_type::WorkerType::Encode => 3,
+                            crate::worker_type::WorkerType::Aggregated => 4,
+                        };
+                        bytes_to_hash.push(v);
+                    }
+                }
+
                 if let Some(router_config) = self.router_config.as_ref()
                     && let Ok(bytes) = serde_json::to_vec(router_config)
                 {
@@ -747,6 +879,8 @@ impl ModelDeploymentCard {
                     // should be defined.
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
+
+                // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -992,6 +1126,24 @@ impl ModelDeploymentCard {
             "resolved model metadata files",
         );
 
+        // Harvest non-weight siblings (preprocessor_config.json, …) from
+        // every snapshot dir we touched. Typed-slot basenames are passed
+        // through so the harvest never overwrites them. No-op for `http://`.
+        let typed_filenames: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|(uri, _)| uri_basename(uri).ok())
+            .collect();
+        let mut snapshot_dirs: std::collections::HashSet<PathBuf> =
+            hf_snapshots.values().cloned().collect();
+        for (uri, _) in &entries {
+            if let Some(parent) = file_uri_parent(uri) {
+                snapshot_dirs.insert(parent);
+            }
+        }
+        for snap in &snapshot_dirs {
+            harvest_siblings(snap, &slug_dir, &typed_filenames)?;
+        }
+
         // Pass 3: rewrite cf.path to the cache symlink so downstream
         // tokenizer/config loaders read from a verified location.
         for (cf, _) in self.iter_metadata_files_mut() {
@@ -1188,6 +1340,8 @@ impl ModelDeploymentCard {
             migration_limit: 0,
             model_type: Default::default(),  // set later
             model_input: Default::default(), // set later
+            worker_type: Default::default(), // set later
+            needs: Default::default(),       // set later
             lora: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
@@ -1840,6 +1994,13 @@ mod tests {
             assert!(snap.join("tokenizer.json").exists());
             assert!(snap.join("generation_config.json").exists());
 
+            // Sibling harvest: TinyLlama_v1.1 fixture ships
+            // `special_tokens_map.json` and `tokenizer.model` outside the
+            // typed slots — both must land in slug_dir for
+            // `from_pretrained()` to see a complete model dir.
+            assert!(snap.join("special_tokens_map.json").exists());
+            assert!(snap.join("tokenizer.model").exists());
+
             for (cf, _) in mdc.iter_metadata_files() {
                 let path = cf.path().expect("post-download local path");
                 assert!(path.starts_with(&snap));
@@ -1947,5 +2108,230 @@ mod tests {
             "TmpGuard should have unlinked the tmp on cancel; leaked: {leaked_after:?}"
         );
         assert!(!dest.exists(), "dest must not exist after cancel");
+    }
+
+    /// Brings in the sibling that `lightseek-mm` needs.
+    #[test]
+    fn harvest_brings_in_non_weight_siblings() -> anyhow::Result<()> {
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+        std::fs::write(snap.path().join("preprocessor_config.json"), b"pre")?;
+        std::fs::write(snap.path().join("tokenizer.model"), b"sp")?;
+        // `.safetensors.index.json` is `.json`, not a weight — must be kept.
+        std::fs::write(snap.path().join("model.safetensors.index.json"), b"idx")?;
+        super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
+        assert!(slug.path().join("preprocessor_config.json").exists());
+        assert!(slug.path().join("tokenizer.model").exists());
+        assert!(slug.path().join("model.safetensors.index.json").exists());
+        Ok(())
+    }
+
+    /// Weight blobs stay out so the metadata cache doesn't bloat.
+    #[test]
+    fn harvest_skips_weight_blobs() -> anyhow::Result<()> {
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+            std::fs::write(snap.path().join(weight), b"WEIGHTS")?;
+        }
+        super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
+        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+            assert!(!slug.path().join(weight).exists());
+        }
+        Ok(())
+    }
+
+    /// Missing snapshot dir is best-effort: no error, no work.
+    #[test]
+    fn harvest_tolerates_missing_snapshot() -> anyhow::Result<()> {
+        let slug = tempfile::tempdir()?;
+        super::harvest_siblings(
+            &slug.path().join("does-not-exist"),
+            slug.path(),
+            &Default::default(),
+        )?;
+        Ok(())
+    }
+
+    /// Names in `typed_filenames` survive a harvest pass even when the
+    /// snapshot dir contains a different file at the same basename — the
+    /// resolve loop's typed slots own those.
+    #[test]
+    fn harvest_preserves_typed_filenames() -> anyhow::Result<()> {
+        let blob_dir = tempfile::tempdir()?;
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+
+        // Typed slot: blob in the dynamo cache; slug_dir links to it.
+        let typed_blob = blob_dir.path().join("config-blob");
+        std::fs::write(&typed_blob, b"typed-slot-content")?;
+        super::symlink_force(&typed_blob, &slug.path().join("config.json"))?;
+
+        // Snapshot dir has a different `config.json` — the stale-payload
+        // case the harvest must NOT import over the typed slot.
+        std::fs::write(snap.path().join("config.json"), b"STALE-DO-NOT-IMPORT")?;
+        std::fs::write(snap.path().join("special_tokens_map.json"), b"st")?;
+
+        let typed_filenames: std::collections::HashSet<String> =
+            ["config.json".to_string()].into_iter().collect();
+        super::harvest_siblings(snap.path(), slug.path(), &typed_filenames)?;
+
+        // Content equality is portable: `symlink_force` degrades to a copy
+        // on non-Unix, so we can't depend on `is_symlink()`.
+        assert_eq!(
+            std::fs::read(slug.path().join("config.json"))?,
+            b"typed-slot-content"
+        );
+        assert!(slug.path().join("special_tokens_map.json").exists());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod worker_type_tests {
+    //! Tests for the `worker_type` / `needs` fields on `ModelDeploymentCard`.
+    //! See `docs/proposals/health-disagg-readiness.md`.
+
+    use super::*;
+    use crate::worker_type::WorkerType;
+
+    #[test]
+    fn default_card_has_no_worker_type_and_no_needs() {
+        let card = ModelDeploymentCard::with_name_only("test-model");
+        assert_eq!(card.worker_type, None);
+        assert!(card.needs.is_empty());
+    }
+
+    #[test]
+    fn serde_round_trip_default() {
+        let card = ModelDeploymentCard::with_name_only("test-model");
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, None);
+        assert!(back.needs.is_empty());
+    }
+
+    #[test]
+    fn serde_round_trip_decode_needs_prefill() {
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Decode);
+        card.needs = vec![vec![WorkerType::Prefill]];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Decode));
+        assert_eq!(back.needs, vec![vec![WorkerType::Prefill]]);
+    }
+
+    #[test]
+    fn serde_round_trip_aggregated_needs_encode() {
+        // E-PD pattern: an aggregated worker with --route-to-encoder.
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.needs = vec![vec![WorkerType::Encode]];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Aggregated));
+        assert_eq!(back.needs, vec![vec![WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn serde_round_trip_encode_needs_dnf() {
+        // Encode worker: needs (Prefill AND Decode) OR Aggregated.
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Encode);
+        card.needs = vec![
+            vec![WorkerType::Prefill, WorkerType::Decode],
+            vec![WorkerType::Aggregated],
+        ];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Encode));
+        assert_eq!(back.needs.len(), 2);
+        assert_eq!(back.needs[0], vec![WorkerType::Prefill, WorkerType::Decode]);
+        assert_eq!(back.needs[1], vec![WorkerType::Aggregated]);
+    }
+
+    /// mdcsum must cover `worker_type` and `needs` so that a rolling update
+    /// which changes only topology metadata produces a different checksum,
+    /// triggering the drain-and-redeploy path in `watcher.rs` instead of
+    /// silently joining an existing WorkerSet with a stale card.
+    ///
+    /// Note: `mdcsum()` caches its result on first call via `OnceLock`, so
+    /// each case builds a fresh card rather than mutating one and re-hashing.
+    #[test]
+    fn mdcsum_covers_worker_type_and_needs() {
+        fn hash(worker_type: Option<WorkerType>, needs: Vec<Vec<WorkerType>>) -> String {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.worker_type = worker_type;
+            card.needs = needs;
+            card.mdcsum().to_string()
+        }
+
+        let baseline = hash(None, vec![]);
+        let prefill_only = hash(Some(WorkerType::Prefill), vec![]);
+        let decode_only = hash(Some(WorkerType::Decode), vec![]);
+        assert_ne!(baseline, prefill_only, "worker_type must change mdcsum");
+        assert_ne!(
+            prefill_only, decode_only,
+            "swapping worker_type must change mdcsum"
+        );
+
+        let prefill_with_decode = hash(Some(WorkerType::Prefill), vec![vec![WorkerType::Decode]]);
+        let prefill_with_decode_encode = hash(
+            Some(WorkerType::Prefill),
+            vec![vec![WorkerType::Decode, WorkerType::Encode]],
+        );
+        assert_ne!(
+            prefill_only, prefill_with_decode,
+            "adding needs must change mdcsum"
+        );
+        assert_ne!(
+            prefill_with_decode, prefill_with_decode_encode,
+            "extending an AND-set must change mdcsum"
+        );
+
+        let encode_dnf = hash(
+            Some(WorkerType::Encode),
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        );
+        let encode_single_alt = hash(
+            Some(WorkerType::Encode),
+            vec![vec![WorkerType::Prefill, WorkerType::Decode]],
+        );
+        assert_ne!(
+            encode_dnf, encode_single_alt,
+            "adding an OR alternative must change mdcsum"
+        );
+    }
+
+    /// Serde back-compat: an old-format card (no `worker_type` / `needs`
+    /// keys in the JSON payload) must deserialize with both fields defaulted
+    /// (`None` and empty `Vec`) — this is an attribute of the
+    /// `#[serde(default)]` contract and is independent of how readers
+    /// subsequently interpret the missing values. Construction of the test
+    /// payload strips the new keys from a fresh serialization so the test
+    /// tracks schema drift rather than a hand-rolled JSON literal.
+    #[test]
+    fn backward_compat_missing_fields_default_to_none_and_empty() {
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Prefill);
+        card.needs = vec![vec![WorkerType::Decode]];
+        let mut value: serde_json::Value = serde_json::to_value(&card).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        assert!(
+            obj.remove("worker_type").is_some(),
+            "precondition: serialized card must carry worker_type"
+        );
+        assert!(
+            obj.remove("needs").is_some(),
+            "precondition: serialized card must carry needs"
+        );
+        let stripped = serde_json::to_string(&value).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(back.worker_type, None);
+        assert!(back.needs.is_empty());
     }
 }

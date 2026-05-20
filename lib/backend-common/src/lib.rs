@@ -21,6 +21,7 @@ pub mod metrics;
 mod publisher;
 pub mod run;
 pub mod snapshot_publisher;
+pub mod telemetry;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 #[cfg(debug_assertions)]

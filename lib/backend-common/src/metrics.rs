@@ -179,7 +179,11 @@ pub struct ComponentGauges {
 }
 
 impl ComponentGauges {
-    pub fn new(metrics: &EngineMetrics) -> Result<Self, DynamoError> {
+    /// `dp_ranks` seeds per-rank child gauges at zero so empty `GaugeVec`
+    /// families still render — the prometheus text encoder skips families
+    /// with zero children. `kv_cache_hit_rate` is intentionally not
+    /// seeded (tri-state: None = no data).
+    pub fn new(metrics: &EngineMetrics, dp_ranks: &[u32]) -> Result<Self, DynamoError> {
         let const_label_values = const_labels(metrics);
         let hierarchy = metrics.hierarchy().as_ref();
         let build_int = |name: &str, help: &str| {
@@ -216,6 +220,11 @@ impl ComponentGauges {
             "kv_cache_hit_rate",
             "Prefix cache hit rate (0.0-1.0). Portable across engines.",
         )?;
+        for &rank in dp_ranks {
+            let r = rank.to_string();
+            total_blocks.with_label_values(&[&r]).set(0);
+            gpu_cache_usage_percent.with_label_values(&[&r]).set(0.0);
+        }
         Ok(Self {
             total_blocks,
             gpu_cache_usage_percent,

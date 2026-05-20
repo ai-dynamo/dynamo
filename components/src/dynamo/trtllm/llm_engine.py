@@ -32,6 +32,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
+from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
@@ -613,6 +614,7 @@ class TrtllmLLMEngine(LLMEngine):
             streaming=streaming,
             disaggregated_params=disaggregated_params,
             scheduling_params=scheduling_params,
+            **telemetry.engine_trace_kwargs(context),
         )
 
         request_id = context.id()

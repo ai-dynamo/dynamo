@@ -87,10 +87,7 @@ mod tests {
 
     fn make_publisher() -> SnapshotPublisher {
         let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
-        let gauges = Arc::new(ComponentGauges::new(&metrics).expect("component gauges"));
-        // No router publishers in this unit test — they need a real
-        // Component/NATS to construct. publish() handles missing ranks
-        // by silently skipping the router signal.
+        let gauges = Arc::new(ComponentGauges::new(&metrics, &[0]).expect("component gauges"));
         SnapshotPublisher::new(gauges, HashMap::new())
     }
 
@@ -118,7 +115,7 @@ mod tests {
     #[test]
     fn publish_updates_gauges_synchronously() {
         let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
-        let gauges = Arc::new(ComponentGauges::new(&metrics).expect("component gauges"));
+        let gauges = Arc::new(ComponentGauges::new(&metrics, &[0]).expect("component gauges"));
         let publisher = SnapshotPublisher::new(gauges, HashMap::new());
 
         publisher.publish(
@@ -137,8 +134,6 @@ mod tests {
             .get_metrics_registry()
             .prometheus_expfmt_combined()
             .expect("expfmt");
-        // The /metrics surface reflects the published snapshot without
-        // any tokio poll task or polling delay.
         assert!(
             text.contains("dynamo_component_total_blocks") && text.contains("100"),
             "total_blocks not in /metrics: {text}"
@@ -146,6 +141,33 @@ mod tests {
         assert!(
             text.contains("dynamo_component_gpu_cache_usage_percent"),
             "gpu_cache_usage_percent not in /metrics: {text}"
+        );
+    }
+
+    /// Constructor seeds each rank at zero so empty `GaugeVec` families
+    /// still render. Without this, the prometheus encoder skips them and
+    /// `/metrics` is missing `total_blocks` / `gpu_cache_usage_percent`.
+    #[test]
+    fn seeded_ranks_render_in_metrics() {
+        let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
+        let _gauges = ComponentGauges::new(&metrics, &[0, 1]).expect("component gauges");
+        let text = metrics
+            .hierarchy()
+            .get_metrics_registry()
+            .prometheus_expfmt_combined()
+            .expect("expfmt");
+        assert!(
+            text.contains(r#"dynamo_component_total_blocks{"#) && text.contains(r#"dp_rank="0""#),
+            "rank 0 total_blocks not seeded: {text}"
+        );
+        assert!(
+            text.contains(r#"dp_rank="1""#),
+            "rank 1 total_blocks not seeded: {text}"
+        );
+        // kv_cache_hit_rate is intentionally not seeded (tri-state None).
+        assert!(
+            !text.contains("dynamo_component_kv_cache_hit_rate"),
+            "kv_cache_hit_rate should not be seeded: {text}"
         );
     }
 }

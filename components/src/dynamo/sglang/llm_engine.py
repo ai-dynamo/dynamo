@@ -25,6 +25,7 @@ from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
+from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
@@ -38,7 +39,12 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
-from dynamo.sglang._disagg import compute_bootstrap_address, warmup_prefill_engine
+from dynamo.sglang._disagg import (
+    SGLANG_WORKER_GROUP_ID_KEY,
+    compute_bootstrap_address,
+    get_sglang_worker_group_id,
+    warmup_prefill_engine,
+)
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.publisher import format_zmq_endpoint
 
@@ -62,6 +68,13 @@ def _warmup_enabled() -> bool:
     return raw.strip().lower() not in ("1", "true", "yes", "on")
 
 
+def _get_runtime_data(server_args) -> dict[str, Any] | None:
+    worker_group_id = get_sglang_worker_group_id(server_args)
+    if worker_group_id is None:
+        return None
+    return {SGLANG_WORKER_GROUP_ID_KEY: worker_group_id}
+
+
 def _local_dp_rank_range(server_args) -> tuple[int, int]:
     """Per-node local-rank slice for this worker. Under DP attention each
     node owns ``dp_size // nnodes`` ranks starting at
@@ -83,6 +96,7 @@ class SglangLLMEngine(LLMEngine):
         self.dynamo_args = dynamo_args
         # SGLang's local name for disaggregation_mode. Same enum.
         self.serving_mode = serving_mode
+        self.enable_trace = getattr(server_args, "enable_trace", False)
         self.engine: Any = None
         self._bootstrap_host: str | None = None
         self._bootstrap_port: int | None = None
@@ -139,6 +153,11 @@ class SglangLLMEngine(LLMEngine):
         )
         self._input_param_manager = InputParamManager(tokenizer)
 
+        logger.info(
+            "Trace header forwarding: %s",
+            "enabled" if self.enable_trace else "disabled (--enable-trace=False)",
+        )
+
         if self.serving_mode == DisaggregationMode.PREFILL:
             self._bootstrap_host, self._bootstrap_port = compute_bootstrap_address(
                 self.engine
@@ -188,6 +207,7 @@ class SglangLLMEngine(LLMEngine):
             # Prefill-only — drives PrefillRouter's Bootstrap path.
             bootstrap_host=self._bootstrap_host,
             bootstrap_port=self._bootstrap_port,
+            runtime_data=_get_runtime_data(self.server_args),
         )
 
     def _kv_routing_enabled(self) -> bool:
@@ -201,7 +221,8 @@ class SglangLLMEngine(LLMEngine):
 
     def _start_metrics_task(self) -> None:
         assert self.engine is not None, "Engine not initialized"
-        if not (self._kv_routing_enabled() and self._is_metrics_leader()):
+        # Match legacy: gate only on node_rank, not router state.
+        if not self._is_metrics_leader():
             return
         self._metrics_zmq_ctx = zmq.asyncio.Context()
         self._metrics_zmq_sock = get_zmq_socket(
@@ -277,6 +298,11 @@ class SglangLLMEngine(LLMEngine):
             stream=True,
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
+            **telemetry.engine_trace_kwargs(
+                context,
+                kwarg_name="external_trace_header",
+                enabled=self.enable_trace,
+            ),
             **bootstrap_kwargs,
         )
 
@@ -572,7 +598,9 @@ class SglangLLMEngine(LLMEngine):
         return sources
 
     def component_metrics_dp_ranks(self) -> list[int]:
-        if not (self._kv_routing_enabled() and self._is_metrics_leader()):
+        # Leader-only to avoid multi-node double-counting; not gated on
+        # router state since gauges are observability data.
+        if not self._is_metrics_leader():
             return []
         start, end = _local_dp_rank_range(self.server_args)
         return list(range(start, end))

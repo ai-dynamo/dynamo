@@ -207,6 +207,52 @@ Standardize on:
   finish reasons.
 - `logger.error` only for unrecoverable failures.
 
+## Trace propagation
+
+Engines must forward W3C trace headers to their underlying inference engine
+so that vLLM / TRT-LLM / SGLang's internal OTel spans (scheduler, forward
+pass, KV transfer) nest under the framework's `engine.generate` span. Splat
+`telemetry.engine_trace_kwargs(context)` into the inference-engine call:
+
+```python
+from dynamo.common.backend import telemetry
+
+# vLLM / TRT-LLM: default kwarg name `trace_headers`, unconditional
+gen = self.engine_client.generate(
+    prompt, sampling_params, request_id,
+    **telemetry.engine_trace_kwargs(context),
+)
+
+# SGLang: different kwarg name + gated on --enable-trace
+stream = await self.engine.async_generate(
+    ...,
+    **telemetry.engine_trace_kwargs(
+        context,
+        kwarg_name="external_trace_header",
+        enabled=self.enable_trace,
+    ),
+)
+```
+
+`engine_trace_kwargs` returns an empty dict when no trace context is
+available or `enabled=False`, so the engine API kwarg is simply absent —
+downstream treats absence the same as `None`. Centralizes the build +
+gate logic so adding a new backend is one declaration, not three call
+sites that drift out of sync.
+
+| Backend | Method | Kwarg |
+|---|---|---|
+| vLLM | `engine_client.generate` | `trace_headers` (default) |
+| TRT-LLM | `engine.llm.generate_async` | `trace_headers` (default) |
+| SGLang | `engine.async_generate` | `external_trace_header`, gated on `enable_trace` |
+
+For the lower-level `Context.trace_headers()` method or the
+`telemetry.trace_headers(context)` wrapper, see their docstrings — most
+engine code should reach for `engine_trace_kwargs` first. Without this
+forwarding, the trace_id reaches the worker but never reaches the
+inference engine — the trace tree shows a gap where the engine's internal
+spans should be.
+
 ## Key Files
 
 | File | What it does |

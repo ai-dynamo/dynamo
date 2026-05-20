@@ -822,7 +822,6 @@ dependencies = [
  "figment",
  "futures",
  "humantime",
- "hyper-util",
  "k8s-openapi",
  "kube",
  "libc",

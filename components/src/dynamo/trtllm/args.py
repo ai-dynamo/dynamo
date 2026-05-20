@@ -20,9 +20,9 @@ from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
 
-DEFAULT_ENDPOINT_COMPONENT = "tensorrt_llm"
+DEFAULT_ENDPOINT_COMPONENT = "backend"
 DEFAULT_PREFILL_COMPONENT = "prefill"
-DEFAULT_ENCODE_COMPONENT = "tensorrt_llm_encode"
+DEFAULT_ENCODE_COMPONENT = "encode"
 DEFAULT_DIFFUSION_COMPONENT = "diffusion"
 DEFAULT_ENDPOINT_NAME = "generate"
 VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
