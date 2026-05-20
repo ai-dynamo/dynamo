@@ -390,7 +390,10 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             Vec::new()
         };
         let shard = Arc::clone(&self.shards[shard_idx]);
-        let mut shard_scores = shard.as_ref().find_matches_from_anchor(anchor, suffix).await?;
+        let mut shard_scores = shard
+            .as_ref()
+            .find_matches_from_anchor(anchor, suffix)
+            .await?;
         for (worker, shard_score) in shard_scores.scores.drain() {
             if !active.contains(&worker) {
                 continue;
@@ -671,7 +674,10 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                     }),
                 },
             };
-            self.shards[shard_idx].as_ref().apply_event(shard_event).await;
+            self.shards[shard_idx]
+                .as_ref()
+                .apply_event(shard_event)
+                .await;
         }
 
         if !broadcast_blocks.is_empty() {
@@ -823,7 +829,10 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
         self.remove_worker_entries(WorkerWithDpRank::new(worker_id, dp_rank));
         for shard in &self.shards {
-            shard.as_ref().remove_worker_dp_rank(worker_id, dp_rank).await;
+            shard
+                .as_ref()
+                .remove_worker_dp_rank(worker_id, dp_rank)
+                .await;
         }
     }
 
@@ -873,8 +882,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
     }
 
     async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
-        let mut set: tokio::task::JoinSet<(usize, ShardSizeSnapshot)> =
-            tokio::task::JoinSet::new();
+        let mut set: tokio::task::JoinSet<(usize, ShardSizeSnapshot)> = tokio::task::JoinSet::new();
         for (idx, shard) in self.shards.iter().enumerate() {
             let shard = Arc::clone(shard);
             set.spawn(async move { (idx, shard.as_ref().shard_sizes().await) });
