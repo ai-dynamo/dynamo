@@ -44,6 +44,9 @@ fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
         let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(labels);
+        // Engine-state labels are not worker-type-keyed; this is a no-op on the
+        // second call (decode vs prefill) for the same (worker_id, dp_rank).
+        m.remove_engine_state(worker_id, *dp_rank);
     }
 
     let unset_labels = &[worker_id_str.as_str(), UNSET_DP_RANK_LABEL, worker_type];
@@ -650,6 +653,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             state.kv_total_blocks.get(&dp_rank).copied()
                         };
 
+                        // Stamp engine-state gauges (and staleness timestamp) per (worker_id, dp_rank).
+                        WORKER_LOAD_METRICS.observe_engine_state(
+                            worker_id,
+                            dp_rank,
+                            active_load.num_waiting_reqs,
+                            active_load.num_running_reqs,
+                            active_load.kv_cache_usage_pct,
+                            active_load.prefix_cache_hit_rate,
+                        );
+
                         // Recalculate all overloaded instances and update.
                         let overloaded_instances: Vec<u64> = worker_load_states
                             .iter()
@@ -881,6 +894,7 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -900,6 +914,7 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -912,6 +927,7 @@ mod tests {
                 active_decode_blocks: Some(10),
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -924,6 +940,7 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -942,6 +959,7 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -954,6 +972,7 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -972,6 +991,7 @@ mod tests {
                 active_decode_blocks: Some(90),
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -984,6 +1004,7 @@ mod tests {
                 active_decode_blocks: Some(10),
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -1002,6 +1023,7 @@ mod tests {
                 active_decode_blocks: Some(90),
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -1014,6 +1036,7 @@ mod tests {
                 active_decode_blocks: Some(10),
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -1052,6 +1075,7 @@ mod tests {
                 active_decode_blocks: Some(90),
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
+                ..Default::default()
             },
             Some(0.6),
         );
@@ -1070,6 +1094,7 @@ mod tests {
                 active_decode_blocks: Some(90),
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
+                ..Default::default()
             },
             Some(0.6),
         );

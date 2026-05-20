@@ -22,7 +22,7 @@ use crate::{
     kv_router::{
         KvRouter,
         agent_controller::{AgentController, SessionCloseAction},
-        metrics::RouterRequestMetrics,
+        metrics::{ROUTING_DECISION_METRICS, RouterRequestMetrics},
         sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
     },
     preprocessor::PreprocessedRequest,
@@ -52,6 +52,14 @@ struct WorkerSelection {
     /// Whether the scheduler is tracking this request (add_request or
     /// find_best_match_details with update_states=true was called).
     scheduler_tracked: bool,
+    /// Winning candidate logit propagated from the selector, recorded on the
+    /// `dynamo_router_selected_logit` histogram. `None` when the routing
+    /// path bypassed the scoring selector (pinned-worker fallback, cache-hit
+    /// estimate only).
+    best_logit: Option<f64>,
+    /// Runner-up candidate logit propagated from the selector. Combined with
+    /// `best_logit` to compute the runner-up gap histogram.
+    runner_up_logit: Option<f64>,
 }
 
 /// Drop guard that manages the full lifecycle of a routed request:
@@ -355,6 +363,8 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 scheduler_tracked: !is_query_only,
+                best_logit: selection.best_logit,
+                runner_up_logit: selection.runner_up_logit,
             });
         };
 
@@ -391,6 +401,8 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 scheduler_tracked: true,
+                best_logit: selection.best_logit,
+                runner_up_logit: selection.runner_up_logit,
             });
         }
 
@@ -487,6 +499,10 @@ impl KvPushRouter {
             effective_overlap_blocks,
             cached_tokens,
             scheduler_tracked: !is_query_only && resolved_dp_rank.is_some(),
+            // This fallback path bypasses the scoring selector (cache-hit
+            // estimate only), so there is no logit to record.
+            best_logit: None,
+            runner_up_logit: None,
         })
     }
 }
@@ -563,7 +579,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             effective_overlap_blocks,
             cached_tokens,
             scheduler_tracked,
+            best_logit,
+            runner_up_logit,
         } = selection;
+
+        ROUTING_DECISION_METRICS.observe(
+            instance_id,
+            dp_rank,
+            self.chooser.worker_type(),
+            best_logit,
+            runner_up_logit,
+        );
 
         // Record the routing decision into the indexer when:
         //   - approximate mode (use_kv_events=false): primary indexer is the

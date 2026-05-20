@@ -15,6 +15,10 @@ struct WorkerMetrics {
     dp_rank: DpRank,
     active_decode_blocks: Option<u64>,
     kv_used_blocks: Option<u64>,
+    num_waiting_reqs: Option<u32>,
+    num_running_reqs: Option<u32>,
+    kv_cache_usage_pct: Option<f64>,
+    prefix_cache_hit_rate: Option<f64>,
 }
 
 pub struct WorkerMetricsPublisher {
@@ -33,6 +37,10 @@ impl WorkerMetricsPublisher {
         dp_rank: Option<DpRank>,
         active_decode_blocks: Option<u64>,
         kv_used_blocks: Option<u64>,
+        num_waiting_reqs: Option<u32>,
+        num_running_reqs: Option<u32>,
+        kv_cache_usage_pct: Option<f64>,
+        prefix_cache_hit_rate: Option<f64>,
     ) -> Result<()> {
         if active_decode_blocks.is_none() && kv_used_blocks.is_none() {
             anyhow::bail!("worker metrics publish requires at least one load metric");
@@ -42,12 +50,20 @@ impl WorkerMetricsPublisher {
             dp_rank: dp_rank.unwrap_or(0),
             active_decode_blocks,
             kv_used_blocks,
+            num_waiting_reqs,
+            num_running_reqs,
+            kv_cache_usage_pct,
+            prefix_cache_hit_rate,
         };
         tracing::trace!(
-            "Publish metrics: dp_rank={}, active_decode_blocks={:?}, kv_used_blocks={:?}",
+            "Publish metrics: dp_rank={}, active_decode_blocks={:?}, kv_used_blocks={:?}, num_waiting_reqs={:?}, num_running_reqs={:?}, kv_cache_usage_pct={:?}, prefix_cache_hit_rate={:?}",
             metrics.dp_rank,
             metrics.active_decode_blocks,
-            metrics.kv_used_blocks
+            metrics.kv_used_blocks,
+            metrics.num_waiting_reqs,
+            metrics.num_running_reqs,
+            metrics.kv_cache_usage_pct,
+            metrics.prefix_cache_hit_rate
         );
         self.tx
             .send(metrics)
@@ -110,6 +126,10 @@ impl WorkerMetricsPublisher {
                                 active_decode_blocks: metrics.active_decode_blocks,
                                 active_prefill_tokens: None,
                                 kv_used_blocks: metrics.kv_used_blocks,
+                                num_waiting_reqs: metrics.num_waiting_reqs,
+                                num_running_reqs: metrics.num_running_reqs,
+                                kv_cache_usage_pct: metrics.kv_cache_usage_pct,
+                                prefix_cache_hit_rate: metrics.prefix_cache_hit_rate,
                             };
 
                             if let Err(e) = event_publisher.publish(&active_load).await {

@@ -222,6 +222,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             active_decode_blocks: Some(active_blocks as u64),
             active_prefill_tokens: Some(active_tokens as u64),
             kv_used_blocks: None,
+            ..Default::default()
         };
 
         self.publisher.publish_load(active_load);

@@ -1520,7 +1520,9 @@ mod test_integration_publisher {
         // Only the last one should be published after 1ms of stability
         for i in 0..10 {
             let value = (i * 100) as u64;
-            publisher.publish(None, None, Some(value)).unwrap();
+            publisher
+                .publish(None, None, Some(value), None, None, None, None)
+                .unwrap();
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 
@@ -1546,7 +1548,9 @@ mod test_integration_publisher {
 
         // Test 2: Publish 10 more metrics with same active_decode_blocks - should not trigger publish
         for _ in 0..10 {
-            publisher.publish(None, None, Some(900)).unwrap(); // Keep same as last published
+            publisher
+                .publish(None, None, Some(900), None, None, None, None)
+                .unwrap(); // Keep same as last published
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 

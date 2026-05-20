@@ -19,7 +19,8 @@ use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
-    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
+    RoutingOverheadMetrics, register_router_queue_metrics, register_routing_decision_metrics,
+    register_worker_load_metrics,
 };
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
@@ -535,6 +536,12 @@ impl HttpServiceConfigBuilder {
         // These are updated by KvScheduler on enqueue/update/free
         if let Err(e) = register_router_queue_metrics(&registry) {
             tracing::warn!("Failed to register router queue metrics: {}", e);
+        }
+
+        // Register per-DP-rank routing decision metrics. Counter + winner/
+        // runner-up logit histograms; populated on every KvPushRouter decision.
+        if let Err(e) = register_routing_decision_metrics(&registry) {
+            tracing::warn!("Failed to register routing decision metrics: {}", e);
         }
 
         if let Some(ref discovery) = config.drt_discovery {

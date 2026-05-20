@@ -111,6 +111,12 @@ struct CacheHitEstimates {
 pub(crate) struct BestMatchDetails {
     pub worker: WorkerWithDpRank,
     pub cache_hit: WorkerCacheHitEstimate,
+    /// Logit of the winning candidate, propagated from the selector for
+    /// per-request routing observability metrics.
+    pub best_logit: Option<f64>,
+    /// Logit of the second-best candidate. `winner − best` ≈ the runner-up
+    /// gap that the `dynamo_router_runnerup_gap` histogram exposes.
+    pub runner_up_logit: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -711,6 +717,8 @@ where
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
             },
+            best_logit: response.best_logit,
+            runner_up_logit: response.runner_up_logit,
         })
     }
 
@@ -1260,6 +1268,8 @@ mod tests {
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
+                best_logit: None,
+                runner_up_logit: None,
             })
         }
     }

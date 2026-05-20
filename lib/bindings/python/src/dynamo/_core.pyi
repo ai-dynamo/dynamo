@@ -507,6 +507,10 @@ class WorkerMetricsPublisher:
         dp_rank: Optional[int] = None,
         active_decode_blocks: int | None = None,
         kv_used_blocks: int | None = None,
+        num_waiting_reqs: int | None = None,
+        num_running_reqs: int | None = None,
+        kv_cache_usage_pct: float | None = None,
+        prefix_cache_hit_rate: float | None = None,
     ) -> None:
         """
         Publish worker metrics for load monitoring.
@@ -515,6 +519,10 @@ class WorkerMetricsPublisher:
             dp_rank: Data parallel rank of the worker (None defaults to 0)
             active_decode_blocks: Optional scheduler-compatible decode-block signal
             kv_used_blocks: Optional authoritative total KV blocks currently in use
+            num_waiting_reqs: Optional worker-reported scheduler waiting queue depth
+            num_running_reqs: Optional worker-reported scheduler running request count
+            kv_cache_usage_pct: Optional worker-reported KV cache fractional usage (0.0-1.0)
+            prefix_cache_hit_rate: Optional worker-reported prefix cache hit rate (0.0-1.0)
         """
         ...
 
