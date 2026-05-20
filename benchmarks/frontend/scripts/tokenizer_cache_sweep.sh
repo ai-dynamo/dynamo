@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Tokenizer L1 cache impact sweep: cache_off vs cache_on across a concurrency grid.
 #
 # Isolates frontend overhead by pinning to 4 CPU cores and running the backend

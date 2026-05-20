@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-FileCopyrightText: Copyright (c) 2024 Simo Lin, Chang Su, Keyang Ru (llm-tokenizer authors)
 // SPDX-License-Identifier: Apache-2.0
+//
+// SPDX-FileCopyrightText: Copyright (c) 2024 Simo Lin, Chang Su, Keyang Ru (llm-tokenizer authors)
 //
 // Portions adapted from sgl-project/llm-tokenizer v1.3.2 (Apache-2.0).
 // Upstream: https://github.com/lightseekorg/smg
@@ -432,9 +433,8 @@ mod tests {
         let cache = L1Cache::new(4 * 1024);
         let tokenizer = load_tokenizer();
         for i in 0..50 {
-            let input = format!(
-                "<s>system\nPersona {i} chatty.</s><s>user\nTurn {i} content here.</s>"
-            );
+            let input =
+                format!("<s>system\nPersona {i} chatty.</s><s>user\nTurn {i} content here.</s>");
             cache
                 .insert_at_boundaries(&input, tokenizer.as_ref(), SPECIALS)
                 .unwrap();

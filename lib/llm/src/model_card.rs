@@ -983,9 +983,9 @@ impl ModelDeploymentCard {
                                     %e,
                                     "Failed to load fastokens, falling back to HuggingFace"
                                 );
-                                Arc::new(
-                                    crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf),
-                                )
+                                Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(
+                                    hf,
+                                ))
                             }
                         }
                     } else {

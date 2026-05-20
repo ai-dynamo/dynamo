@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Aggregate cache_on vs cache_off sweep cells into a single comparison table.
 
 Reads each cell's aiperf JSON output and prometheus metrics, extracts
@@ -7,6 +9,7 @@ request_throughput / latency / cache stats, and prints a formatted table.
 Usage:
     tokenizer_cache_aggregate.py <sweep_root_dir>
 """
+
 from __future__ import annotations
 
 import json
@@ -40,12 +43,29 @@ def parse_cell(cell_dir: Path) -> dict | None:
     duration = data.get("benchmark_duration")
 
     # Cache metric deltas
-    initial_text = (cell_dir / "metrics_initial.txt").read_text() if (cell_dir / "metrics_initial.txt").exists() else ""
-    final_text = (cell_dir / "metrics_final.txt").read_text() if (cell_dir / "metrics_final.txt").exists() else ""
-    hits_i = parse_metric(initial_text, "dynamo_frontend_tokenizer_cache_hits_total") or 0.0
-    hits_f = parse_metric(final_text, "dynamo_frontend_tokenizer_cache_hits_total") or 0.0
-    miss_i = parse_metric(initial_text, "dynamo_frontend_tokenizer_cache_misses_total") or 0.0
-    miss_f = parse_metric(final_text, "dynamo_frontend_tokenizer_cache_misses_total") or 0.0
+    initial_text = (
+        (cell_dir / "metrics_initial.txt").read_text()
+        if (cell_dir / "metrics_initial.txt").exists()
+        else ""
+    )
+    final_text = (
+        (cell_dir / "metrics_final.txt").read_text()
+        if (cell_dir / "metrics_final.txt").exists()
+        else ""
+    )
+    hits_i = (
+        parse_metric(initial_text, "dynamo_frontend_tokenizer_cache_hits_total") or 0.0
+    )
+    hits_f = (
+        parse_metric(final_text, "dynamo_frontend_tokenizer_cache_hits_total") or 0.0
+    )
+    miss_i = (
+        parse_metric(initial_text, "dynamo_frontend_tokenizer_cache_misses_total")
+        or 0.0
+    )
+    miss_f = (
+        parse_metric(final_text, "dynamo_frontend_tokenizer_cache_misses_total") or 0.0
+    )
     hits = hits_f - hits_i
     misses = miss_f - miss_i
     hit_rate = hits / (hits + misses) if (hits + misses) > 0 else 0.0
@@ -120,7 +140,11 @@ def main(root: Path) -> int:
             f"{speedup:>9.2f}x" if speedup else f"{'-':>9}",
             f"{p50_off:>12.1f}" if p50_off else f"{'-':>12}",
             f"{p50_on:>12.1f}" if p50_on else f"{'-':>12}",
-            f"{hit_rate * 100:>11.2f}%" if (on and (hits + misses) > 0) else f"{'-':>13}",
+            (
+                f"{hit_rate * 100:>11.2f}%"
+                if (on and (hits + misses) > 0)
+                else f"{'-':>13}"
+            ),
             f"{hits:>10.0f}" if hits else f"{'-':>10}",
             f"{misses:>10.0f}" if misses else f"{'-':>10}",
         ]

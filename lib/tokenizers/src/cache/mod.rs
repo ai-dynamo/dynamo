@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-FileCopyrightText: Copyright (c) 2024 Simo Lin, Chang Su, Keyang Ru (llm-tokenizer authors)
 // SPDX-License-Identifier: Apache-2.0
+//
+// SPDX-FileCopyrightText: Copyright (c) 2024 Simo Lin, Chang Su, Keyang Ru (llm-tokenizer authors)
 //
 // Portions adapted from sgl-project/llm-tokenizer v1.3.2 (Apache-2.0).
 // Upstream: https://github.com/lightseekorg/smg
@@ -112,9 +113,7 @@ impl Encoder for CachedTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
         let specials = special_token_refs(&self.special_tokens);
 
-        if let Some((prefix_tokens, prefix_len)) =
-            self.l1.longest_prefix_match(input, &specials)
-        {
+        if let Some((prefix_tokens, prefix_len)) = self.l1.longest_prefix_match(input, &specials) {
             let suffix = &input[prefix_len..];
             if suffix.is_empty() {
                 return Ok(Encoding::Sp(prefix_tokens));
@@ -233,9 +232,6 @@ mod tests {
         let outs = cached.encode_batch(&refs).unwrap();
         assert_eq!(outs.len(), 3);
         // First call populates, second/third hit.
-        assert!(
-            cached.cache_stats().hits >= 2,
-            "expected hits on q2 and q3"
-        );
+        assert!(cached.cache_stats().hits >= 2, "expected hits on q2 and q3");
     }
 }

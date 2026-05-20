@@ -513,7 +513,9 @@ impl OpenAIPreprocessor {
             return;
         };
         let stats = cached.cache_stats();
-        let prev_h = self.prev_cache_hits.fetch_max(stats.hits, Ordering::Relaxed);
+        let prev_h = self
+            .prev_cache_hits
+            .fetch_max(stats.hits, Ordering::Relaxed);
         let prev_m = self
             .prev_cache_misses
             .fetch_max(stats.misses, Ordering::Relaxed);
