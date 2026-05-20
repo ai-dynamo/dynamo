@@ -41,7 +41,7 @@ from dynamo.common.backend.publisher import (
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.llm import ModelInput
+from dynamo.llm import ModelInput, ModelOutput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
@@ -103,6 +103,10 @@ class SglangLLMEngine(LLMEngine):
         self._input_param_manager: InputParamManager | None = None
         self._skip_tokenizer_init = server_args.skip_tokenizer_init
         self._use_sglang_tokenizer = dynamo_args.use_sglang_tokenizer
+        self._preprocessing = dynamo_args.preprocessing or "dynamo"
+        self._postprocessing = dynamo_args.postprocessing or "dynamo"
+        self._tool_call_parser_name = dynamo_args.dyn_tool_call_parser
+        self._reasoning_parser_name = dynamo_args.dyn_reasoning_parser
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
@@ -126,7 +130,14 @@ class SglangLLMEngine(LLMEngine):
         dynamo_args = config.dynamo_args
 
         model_input = (
-            ModelInput.Text if dynamo_args.use_sglang_tokenizer else ModelInput.Tokens
+            ModelInput.Text
+            if dynamo_args.preprocessing == "sglang"
+            else ModelInput.Tokens
+        )
+        model_output = (
+            ModelOutput.Text
+            if dynamo_args.postprocessing == "sglang"
+            else ModelOutput.Tokens
         )
 
         engine = cls(server_args, dynamo_args, config.serving_mode)
@@ -135,6 +146,7 @@ class SglangLLMEngine(LLMEngine):
             model_name=server_args.model_path,
             served_model_name=server_args.served_model_name,
             model_input=model_input,
+            model_output=model_output,
             disaggregation_mode=config.serving_mode,
         )
         return engine, worker_config
@@ -302,6 +314,44 @@ class SglangLLMEngine(LLMEngine):
             )
             self._prefill_consume_tasks.add(task)
             task.add_done_callback(self._prefill_consume_tasks.discard)
+            return
+
+        if self._postprocessing == "sglang":
+            from dynamo.sglang.postprocessor import SglangPostProcessor
+
+            tools = request.get("tools") if self._preprocessing == "sglang" else None
+            pp = SglangPostProcessor(
+                tool_call_parser_name=self._tool_call_parser_name,
+                reasoning_parser_name=self._reasoning_parser_name,
+                tools=tools,
+            )
+
+            async for res in stream:
+                output_idx = res.get("index") or 0
+                meta_info = res["meta_info"]
+                finish_reason = meta_info.get("finish_reason")
+
+                if context.is_stopped():
+                    prompt_tokens = meta_info.get("prompt_tokens", 0)
+                    completion_tokens = meta_info.get("completion_tokens", 0)
+                    yield {
+                        "text": "",
+                        "index": output_idx,
+                        "finish_reason": "cancelled",
+                        "completion_usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
+                        },
+                    }
+                    break
+
+                is_final = finish_reason is not None
+                chunk = pp.process_chunk(res, is_final=is_final)
+                if chunk is not None:
+                    yield chunk
+                if is_final:
+                    break
             return
 
         async for res in stream:
@@ -586,7 +636,7 @@ class SglangLLMEngine(LLMEngine):
         ]
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
-        if not self._use_sglang_tokenizer:
+        if self._preprocessing != "sglang":
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
             param_mapping = {
@@ -627,7 +677,7 @@ class SglangLLMEngine(LLMEngine):
     def _get_input_param(self, request: GenerateRequest) -> dict:
         assert self._input_param_manager is not None, "Engine not initialized"
         request_input = self._input_param_manager.get_input_param(
-            dict(request), use_tokenizer=self._use_sglang_tokenizer
+            dict(request), use_tokenizer=(self._preprocessing == "sglang")
         )
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
