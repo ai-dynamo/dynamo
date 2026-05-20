@@ -2031,10 +2031,8 @@ fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &CudaStream) -> Result<(
 ///
 /// 1. **Cache lookup**: check `graph_cache` for `cache_key`.
 /// 2. **Cache miss — capture**:
-///    a. `cuStreamBeginCapture` on `capture_stream` (a temporary stream, never
-///       used for work; capture is per-stream in RELAXED mode).
-///    b. Issue `kvbm_kernels::memcpy_batch(FallbackOnly)` on `capture_stream` —
-///       N individual `cudaMemcpyAsync` calls captured as N graph nodes.
+///    a. `cuStreamBeginCapture` on `capture_stream` (a temporary stream, never used for work; capture is per-stream in RELAXED mode).
+///    b. Issue `kvbm_kernels::memcpy_batch(FallbackOnly)` on `capture_stream` — N individual `cudaMemcpyAsync` calls captured as N graph nodes.
 ///    c. `cuStreamEndCapture` → `CUgraph`.
 ///    d. `cuGraphInstantiate` → `CUgraphExec`.
 ///    e. `cuGraphGetNodes` → collect node handles in node-list order.

@@ -20,6 +20,9 @@ use super::{
     MemoryRegion, resolve_head_dims,
 };
 
+/// (axes, extents, strides) for the inner dims after the Outer axis.
+type InnerAxes = (Vec<KvDim>, Vec<usize>, Vec<usize>);
+
 /// Layer-separate layout where each layer has its own allocation.
 #[derive(Debug)]
 pub struct LayerSeparateLayout {
@@ -315,47 +318,44 @@ impl Layout for LayerSeparateLayout {
         let elem = cfg.dtype_width_bytes;
 
         // Per-region inner-axis strides (NHD vs HND).
-        let (s_hs, s_pre_outer, inner_axes_after_outer): (
-            usize,
-            usize,
-            (Vec<KvDim>, Vec<usize>, Vec<usize>),
-        ) = match block_layout {
-            KvBlockLayout::OperationalNHD => {
-                // Inside Outer: [Page, HeadCount, HeadSize]
-                let s_hs = elem;
-                let s_hc = s_hs * hd;
-                let s_pg = s_hc * nh;
-                let s_pre_outer = s_pg * cfg.page_size;
-                let inner = (
-                    vec![KvDim::Page, KvDim::HeadCount, KvDim::HeadSize],
-                    vec![cfg.page_size, nh, hd],
-                    vec![s_pg, s_hc, s_hs],
-                );
-                (s_hs, s_pre_outer, inner)
-            }
-            KvBlockLayout::OperationalHND => {
-                // Inside Outer: [HeadCount, Page, HeadSize]
-                let s_hs = elem;
-                let s_pg = s_hs * hd;
-                let s_hc = s_pg * cfg.page_size;
-                let s_pre_outer = s_hc * nh;
-                let inner = (
-                    vec![KvDim::HeadCount, KvDim::Page, KvDim::HeadSize],
-                    vec![nh, cfg.page_size, hd],
-                    vec![s_hc, s_pg, s_hs],
-                );
-                (s_hs, s_pre_outer, inner)
-            }
-            KvBlockLayout::Universal => bail!(
-                "LayerSeparateLayout::layout_view: cannot represent universal \
+        let (s_hs, s_pre_outer, inner_axes_after_outer): (usize, usize, InnerAxes) =
+            match block_layout {
+                KvBlockLayout::OperationalNHD => {
+                    // Inside Outer: [Page, HeadCount, HeadSize]
+                    let s_hs = elem;
+                    let s_hc = s_hs * hd;
+                    let s_pg = s_hc * nh;
+                    let s_pre_outer = s_pg * cfg.page_size;
+                    let inner = (
+                        vec![KvDim::Page, KvDim::HeadCount, KvDim::HeadSize],
+                        vec![cfg.page_size, nh, hd],
+                        vec![s_pg, s_hc, s_hs],
+                    );
+                    (s_hs, s_pre_outer, inner)
+                }
+                KvBlockLayout::OperationalHND => {
+                    // Inside Outer: [HeadCount, Page, HeadSize]
+                    let s_hs = elem;
+                    let s_pg = s_hs * hd;
+                    let s_hc = s_pg * cfg.page_size;
+                    let s_pre_outer = s_hc * nh;
+                    let inner = (
+                        vec![KvDim::HeadCount, KvDim::Page, KvDim::HeadSize],
+                        vec![nh, cfg.page_size, hd],
+                        vec![s_hc, s_pg, s_hs],
+                    );
+                    (s_hs, s_pre_outer, inner)
+                }
+                KvBlockLayout::Universal => bail!(
+                    "LayerSeparateLayout::layout_view: cannot represent universal \
                  KvBlockLayout (LayerSeparateLayout::build rejects it)"
-            ),
-            KvBlockLayout::Custom(_) => bail!(
-                "LayerSeparateLayout::layout_view: KvBlockLayout::Custom is not \
+                ),
+                KvBlockLayout::Custom(_) => bail!(
+                    "LayerSeparateLayout::layout_view: KvBlockLayout::Custom is not \
                  supported by the planner-driven path"
-            ),
-            KvBlockLayout::Unknown => unreachable!("Unknown rejected above"),
-        };
+                ),
+                KvBlockLayout::Unknown => unreachable!("Unknown rejected above"),
+            };
         let _ = s_hs;
 
         // Per-region prefix order depends on which axis is outermost in

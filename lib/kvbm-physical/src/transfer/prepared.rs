@@ -306,11 +306,11 @@ impl TransformScratchLease {
     pub(crate) fn univ_ptrs(&self) -> &[usize] {
         &self.scratch.as_ref().expect("lease alive").univ_ptrs
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-kvbm"))]
     pub(crate) fn op_ptrs_mut(&mut self) -> &mut Vec<usize> {
         &mut self.scratch.as_mut().expect("lease alive").op_ptrs
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-kvbm"))]
     pub(crate) fn univ_ptrs_mut(&mut self) -> &mut Vec<usize> {
         &mut self.scratch.as_mut().expect("lease alive").univ_ptrs
     }
@@ -546,7 +546,7 @@ impl PreparedTransferPlan {
     /// `PhysicalLayout`. Used by cache-only unit tests in
     /// `tests/prepared_plan.rs` that exercise `PreparedPlanCache`
     /// structural behaviour without emitting pointer arrays.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "testing-kvbm"))]
     pub(crate) fn synthetic_for_tests(
         invocation: KernelInvocation,
         univ_base: Option<usize>,

@@ -70,11 +70,11 @@ fn make_d2d_key(src: &PhysicalLayout, dst: &PhysicalLayout) -> BenchmarkKey {
             (KvDim::HeadSize, AxisExtent::full(cfg.inner_dim)),
         ],
         vec![
-            cfg.page_size * cfg.inner_dim * cfg.dtype_width_bytes as usize,
-            cfg.inner_dim * cfg.dtype_width_bytes as usize,
-            cfg.dtype_width_bytes as usize,
+            cfg.page_size * cfg.inner_dim * cfg.dtype_width_bytes,
+            cfg.inner_dim * cfg.dtype_width_bytes,
+            cfg.dtype_width_bytes,
         ],
-        cfg.dtype_width_bytes as usize,
+        cfg.dtype_width_bytes,
         None,
     );
     let _ = dst; // dst shape matches src for same-config pairs

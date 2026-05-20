@@ -119,7 +119,7 @@ fn build_layout_on_agent(
         LayoutType::FC => builder.fully_contiguous(),
         LayoutType::LW => builder.layer_separate(BlockDimension::BlockIsFirstDim),
     };
-    Ok(typed.allocate_device(0).build()?)
+    typed.allocate_device(0).build()
 }
 
 /// Run one cross-agent NIXL transfer and verify the destination
@@ -314,12 +314,12 @@ fn build_fc_with_block_layout_on_agent(
     num_blocks: usize,
 ) -> Result<PhysicalLayout> {
     let config = standard_config(num_blocks);
-    Ok(PhysicalLayout::builder(agent)
+    PhysicalLayout::builder(agent)
         .with_config(config)
         .with_block_layout(block_layout)
         .fully_contiguous()
         .allocate_device(0)
-        .build()?)
+        .build()
 }
 
 /// Verify the Pull-direction staged transform via round-trip:
@@ -689,7 +689,7 @@ async fn assert_staged_push_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Res
     let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
 
     let caps = crate::transfer::TransferCapabilities::default().with_gpu_rdma(true);
-    let ctx_owner = create_transfer_context(owner, Some(caps.clone()))?;
+    let ctx_owner = create_transfer_context(owner, Some(caps))?;
     let ctx_remote = create_transfer_context(remote, Some(caps))?;
 
     // Stage 1 (under test): staged Push src → final_dst through

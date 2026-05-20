@@ -26,7 +26,7 @@
 //!   `stream.synchronize()` → elapsed. Both submit and DMA transfer time
 //!   are included.
 //! - **`TransformKernel`**: same pattern with `dispatch_transform_kernel`
-//!   + `stream.synchronize()`. Includes pointer-table H2D upload and
+//!   then `stream.synchronize()`. Includes pointer-table H2D upload and
 //!   kernel execution.
 //! - **`NixlDirectDma`**: `Instant::now()` → `create_xfer_req` +
 //!   `post_xfer_req` → tight sync poll on `get_xfer_status()` until
@@ -264,7 +264,7 @@ impl BenchmarkCache {
     ///
     /// - [`BenchmarkCandidate::DirectDma`]: measures end-to-end via
     ///   `memcpy_batch` + `stream.synchronize()`.
-    /// - [`BenchmarkCandidate::TransformKernel`]: `dispatch_transform_kernel`
+    /// - [`BenchmarkCandidate::TransformKernel`][]: `dispatch_transform_kernel`
     ///   + `stream.synchronize()`.
     /// - [`BenchmarkCandidate::NixlDirectDma`]: `create_xfer_req` +
     ///   `post_xfer_req` + sync polling on `get_xfer_status()`.
@@ -564,6 +564,7 @@ fn dispatch_direct_dma_ops(ops: &[CopyOp], stream: &Arc<CudaStream>) -> Result<(
 ///
 /// These match `execute_planner_nixl_transfer`'s invariants.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_nixl_dma_ops_timed(
     ops: &[CopyOp],
     nixl_agent: &dynamo_memory::nixl::NixlAgent,
