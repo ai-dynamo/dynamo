@@ -1117,6 +1117,19 @@ fn leader_client(
     let Some(velo) = mgr.velo.get() else {
         return Err(service_unavailable("hub has no velo transport configured"));
     };
+    // The hub self-registers in its own registry (so leaders can discover it),
+    // which means its own velo id passes the `contains` check below. A control
+    // RPC to ourselves would route through velo to a peer that is never in the
+    // hub's own messenger peer table — "Peer <id> not registered" → 500 — and a
+    // client that learned `hub_velo_id` from its registration response can spam
+    // that on every poll. The hub has no leader control handlers anyway. Reject
+    // the self id up front for every control handler that funnels through here.
+    if instance_id == velo.instance_id() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "cannot issue leader control to the hub itself",
+        ));
+    }
     let Some(registry) = mgr.registry.get() else {
         return Err(service_unavailable("registry not attached"));
     };

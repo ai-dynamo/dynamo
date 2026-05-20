@@ -294,6 +294,42 @@ async fn cache_drops_stale_insert_after_unregister() {
     server.shutdown().await.unwrap();
 }
 
+/// Regression: a control call addressed to the hub's OWN velo instance id must
+/// be rejected with 400, not attempt a velo self-call. The hub self-registers
+/// in its own registry so its id passes `registry.contains`; without a self
+/// short-circuit in `leader_client`, the call routes through velo to a peer
+/// that is never in the hub's own messenger peer table — "Peer <id> not
+/// registered" → 500 — spammed on every control poll a client makes against
+/// the hub's id (which it learns from the registration response).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_to_hub_self_id_is_rejected() {
+    let server = start_hub_with_control_plane().await;
+    let peer = new_velo().await;
+    // The hub returns its own velo instance id on register — exactly the
+    // `hub_velo_id` a real leader learns and then (in the bug) polls control on.
+    let client = build_client(&server);
+    let hub_id = client
+        .register_instance(peer.peer_info())
+        .await
+        .expect("register")
+        .expect("hub returns its velo instance id on register");
+
+    let r = http()
+        .get(modules_url(&server, hub_id))
+        .send()
+        .await
+        .expect("GET modules for hub self id");
+    assert_eq!(
+        r.status().as_u16(),
+        400,
+        "control addressed to the hub's own velo id must be rejected with 400, \
+         not attempt a velo self-call (got {})",
+        r.status().as_u16()
+    );
+
+    server.shutdown().await.unwrap();
+}
+
 /// Cache is cleared when the instance unregisters via the RAII guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cache_cleared_on_unregister() {
