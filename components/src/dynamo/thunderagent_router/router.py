@@ -1,18 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""ThunderAgent program scheduler.
+"""ThunderAgent program scheduler: native port of upstream TA's algorithm.
 
-A native re-implementation of upstream ThunderAgent's algorithm: program
-lifecycle (REASONING / ACTING; ACTIVE / PAUSED), pause-smallest-ACTING-first,
-BFD restore, exponential decay (``2^(-t/tau)``) applied only on the resume
-side. v0's one mechanical change is real-token accounting from
-chat-completions ``usage`` instead of upstream's ``chars / 5`` proxy
-estimator -- available to us because the router runs in-path.
-
-Status: experimental. The substantial deviations from upstream (blended
-cost-function for worker selection, workflow-profile-aware pause, KV
-demote/prefetch) are explicitly future work.
+Pause-smallest-ACTING-first; BFD restore; exponential decay on the resume
+side. v0 reads real token counts from chat-completions ``usage`` instead of
+upstream's ``chars / 5`` proxy estimator.
 """
 
 from __future__ import annotations
@@ -23,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from dynamo.thunderagent_router.capacity import FpmCapacityProvider
+from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
 from dynamo.thunderagent_router.program_state import (
     Program,
     ProgramLifecycle,
@@ -36,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PauseDecision:
-    """Diagnostics returned by :meth:`ThunderAgentScheduler.before_request`."""
-
     program_id: str
     priority_jump: float = 0.0
     waited_seconds: float = 0.0
@@ -48,53 +39,23 @@ class PauseDecision:
 
 @dataclass
 class ThunderAgentConfig:
-    """Tunable parameters for the program scheduler."""
-
     pause_threshold: float = 0.95
-    """Pause workers whose utilization >= this fraction of capacity."""
-
     soft_demote_threshold: float = 0.80
-    """Soft-demote priority in [soft, pause); below pause_threshold."""
-
     soft_demote_priority_jump: float = -2.0
-    """priority_jump (seconds) for soft-demoted programs. Negative = later."""
-
     resume_priority_boost: float = 1.0
-    """priority_jump (seconds) added on resume from hard pause."""
-
     resume_timeout_seconds: float = 1800.0
-    """Forced-resume after this many seconds in PAUSED."""
-
     scheduler_interval_seconds: float = 5.0
-    """Period of the background scheduler tick."""
-
     resume_hysteresis: float = 0.10
-    """Util drop below pause_threshold required before any resume."""
-
     pause_target: float = 0.80
-    """Setpoint pause cycles drain util down to (must be <= pause_threshold)."""
-
     acting_token_weight: float = 1.0
-    """Weight on token_total for ACTING programs in the pause-side working set."""
-
     acting_decay_tau_seconds: float = 1.0
-    """Tau (s) for ``2^(-idle/tau)`` decay of ACTING tokens on the resume side."""
-
     buffer_per_program: int = 100
-    """Headroom reserved per program when BFD-packing during resume."""
 
 
 class ThunderAgentScheduler:
-    """Outer-loop program scheduler.
-
-    The handler in ``__main__`` calls :meth:`before_request` -> dispatch ->
-    :meth:`after_request` for each LLM turn. The scheduler is purely
-    coordination state; it does not own the request stream.
-    """
-
     def __init__(
         self,
-        capacity: FpmCapacityProvider,
+        capacity: WorkerCapacityProvider,
         config: ThunderAgentConfig,
     ) -> None:
         self._capacity = capacity
@@ -130,7 +91,6 @@ class ThunderAgentScheduler:
         program_id: str,
         estimated_prompt_tokens: int = 0,
     ) -> PauseDecision:
-        """Admission gate. Blocks if the program is currently PAUSED."""
         wait_started = time.monotonic()
         async with self._lock:
             wait_event, was_paused = self._admit_locked(
@@ -186,10 +146,7 @@ class ThunderAgentScheduler:
         program_id: str,
         estimated_prompt_tokens: int,
     ) -> tuple[Optional[asyncio.Event], bool]:
-        """Resolve the admission state for a turn. Returns (wait_event, was_paused).
-
-        Caller already holds ``self._lock``.
-        """
+        # Caller holds self._lock.
         was_new = program_id not in self._table.programs
         program = self._table.begin_request(program_id, estimated_prompt_tokens)
         if program.lifecycle == ProgramLifecycle.PAUSED:
@@ -199,9 +156,12 @@ class ThunderAgentScheduler:
         if not (was_new and program.assigned_worker_id is None):
             return None, False
 
-        # New program: assign a worker that has room, otherwise queue.
         capacities = self._capacity.snapshot()
         if not capacities:
+            # Cold start: MDC hasn't published yet. Let the request flow
+            # through with no pin; the chunk-loop callback will populate
+            # ``assigned_worker_id`` once the engine picks a worker, and
+            # subsequent turns get the sticky pin.
             return None, False
         worker_id = self._select_worker_for_new_program_locked(
             capacities, program.token_total
@@ -209,23 +169,21 @@ class ThunderAgentScheduler:
         if worker_id is not None:
             program.assigned_worker_id = worker_id
             return None, False
+
+        # All workers full: queue until the scheduler tick resumes us.
         program.waiting = program.waiting or asyncio.Event()
         program.lifecycle = ProgramLifecycle.PAUSED
-        self._table.paused[program_id] = None
-        logger.info(
-            "Queued new program %s before first request (tokens=%d)",
+        self._table.paused.add(program_id)
+        logger.debug(
+            "Queued new program %s (tokens=%d)",
             program_id,
             program.token_total,
         )
         return program.waiting, True
 
     def record_output_tokens(self, program_id: str, delta_tokens: int) -> None:
-        """Streaming token-progress accounting. ``after_request`` overwrites
-        with authoritative usage at end of turn.
-
-        Lock-free on the hot path: GIL covers the int add, and concurrent
-        scheduler reads tolerate a stale token_total by one tick.
-        """
+        # Lock-free: int += under GIL is atomic; scheduler tick tolerates
+        # a one-tick-stale token_total.
         program = self._table.programs.get(program_id)
         if program is not None and program.status == ProgramStatus.REASONING:
             program.token_total += delta_tokens
@@ -236,7 +194,6 @@ class ThunderAgentScheduler:
         prompt_tokens: int,
         completion_tokens: int,
     ) -> None:
-        """Transition program -> ACTING and record real token accounting."""
         do_pause = False
         async with self._lock:
             program = self._table.end_request(
@@ -251,12 +208,11 @@ class ThunderAgentScheduler:
         if do_pause:
             await self._pause_acting(program_id)
 
-    def assign_worker(self, program_id: str, worker_id: int) -> None:
-        """Record the dispatched worker. Lock-free; Program mutation is
-        single-threaded under asyncio."""
-        program = self._table.programs.get(program_id)
-        if program is not None:
-            program.assigned_worker_id = worker_id
+    async def assign_worker(self, program_id: str, worker_id: int) -> None:
+        async with self._lock:
+            program = self._table.programs.get(program_id)
+            if program is not None:
+                program.assigned_worker_id = worker_id
 
     async def _scheduler_loop(self) -> None:
         consecutive_failures = 0
@@ -282,8 +238,8 @@ class ThunderAgentScheduler:
         capacities = self._capacity.snapshot()
         if not capacities:
             return
-        # Upstream TA ordering: resume first, then pause. A program paused
-        # this tick can't resume until the next one.
+        # Upstream TA ordering: resume first, then pause -- a program paused
+        # this tick can't resume until the next.
         self._apply_soft_demotes(capacities)
         await self._greedy_resume(capacities)
         await self._pause_until_safe(capacities)
@@ -327,8 +283,7 @@ class ThunderAgentScheduler:
         capacities: dict[int, int],
         estimated_tokens: int,
     ) -> Optional[int]:
-        # Upstream TA queues new programs behind any existing paused program for
-        # fairness; don't let a fresh trajectory jump the global waiting queue.
+        # Fairness: new programs queue behind any existing paused program.
         if self._table.paused:
             return None
         buffer = self._cfg.buffer_per_program
@@ -358,12 +313,6 @@ class ThunderAgentScheduler:
                     program.soft_demoted_until = soft_until
 
     async def _pause_until_safe(self, capacities: dict[int, int]) -> None:
-        """Hard-pause smallest ACTING + mark smallest REASONING per worker.
-
-        ACTING programs are paused immediately. REASONING programs are marked;
-        they remain in the capacity math until they finish their current turn,
-        matching upstream TA's request-boundary enforcement.
-        """
         threshold = self._cfg.pause_threshold
         pause_target = min(self._cfg.pause_target, threshold)
 
@@ -375,11 +324,15 @@ class ThunderAgentScheduler:
             target_limit = capacity * pause_target
             paused_this_tick = 0
             marked_this_tick = 0
-            while self._worker_used(worker_id) > target_limit:
+            # Bound the inner loop by total program count so a candidate that
+            # transitions out from under us can't spin the tick.
+            for _ in range(len(self._table.programs) + 1):
+                if self._worker_used(worker_id) <= target_limit:
+                    break
                 acting, reasoning = self._smallest_candidates(worker_id)
                 if acting is not None:
-                    await self._pause_acting(acting.program_id)
-                    paused_this_tick += 1
+                    if await self._pause_acting(acting.program_id):
+                        paused_this_tick += 1
                     continue
                 if reasoning is not None:
                     async with self._lock:
@@ -397,7 +350,7 @@ class ThunderAgentScheduler:
 
             if paused_this_tick or marked_this_tick:
                 logger.info(
-                    "tick worker=%s paused=%d marked=%d util=%.4f -> %.4f",
+                    "scheduler.tick worker=%s paused=%d marked=%d util=%.4f -> %.4f",
                     worker_id,
                     paused_this_tick,
                     marked_this_tick,
@@ -431,33 +384,28 @@ class ThunderAgentScheduler:
                     smallest_reasoning = program
         return smallest_acting, smallest_reasoning
 
-    async def _pause_acting(self, program_id: str) -> None:
+    async def _pause_acting(self, program_id: str) -> bool:
         async with self._lock:
             program = self._table.programs.get(program_id)
             if program is None:
-                return
+                return False
             if program.lifecycle == ProgramLifecycle.PAUSED:
-                return
+                return False
             if program.status != ProgramStatus.ACTING:
-                return
+                return False
             program.lifecycle = ProgramLifecycle.PAUSED
             program.assigned_worker_id = None
             if program.waiting is None:
                 program.waiting = asyncio.Event()
             else:
                 program.waiting.clear()
-            self._table.paused[program_id] = None
-            logger.info(
+            self._table.paused.add(program_id)
+            logger.debug(
                 "Paused program %s (tokens=%d)", program_id, program.token_total
             )
+            return True
 
     async def _greedy_resume(self, capacities: dict[int, int]) -> None:
-        """Resume paused programs with ThunderAgent-style BFD packing.
-
-        Resume gate uses non-decayed used-tokens so paused programs only
-        re-admit when other ACTING programs have actually released capacity.
-        Priority order: REASONING (continuation) -> NEW (step==1) -> ACTING.
-        """
         if not self._table.paused:
             return
 
@@ -532,17 +480,17 @@ class ThunderAgentScheduler:
     def _resume_program(
         self, program: Program, target_worker_id: Optional[int]
     ) -> None:
-        """Caller already holds ``self._lock``."""
+        # Caller holds self._lock.
         if program.lifecycle != ProgramLifecycle.PAUSED:
             return
         program.lifecycle = ProgramLifecycle.ACTIVE
         program.assigned_worker_id = target_worker_id
         notify = program.waiting
         program.waiting = None
-        self._table.paused.pop(program.program_id, None)
+        self._table.paused.discard(program.program_id)
         if notify is not None:
             notify.set()
-        logger.info(
+        logger.debug(
             "Resumed program %s -> worker=%s (tokens=%d)",
             program.program_id,
             target_worker_id,

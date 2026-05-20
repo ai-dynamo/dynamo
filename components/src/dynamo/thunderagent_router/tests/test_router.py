@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 @dataclass
 class FakeCapacity:
-    """Stand-in for FpmCapacityProvider that returns a fixed snapshot."""
+    """Stand-in for WorkerCapacityProvider that returns a fixed snapshot."""
 
     workers: dict[int, int] = field(default_factory=dict)
 
@@ -73,7 +73,7 @@ async def test_before_request_records_exact_prompt_estimate_before_admission():
 async def test_assigned_worker_hint_reflects_sticky_assignment():
     router, _ = make_router()
     await router.before_request("p1", estimated_prompt_tokens=100)
-    router.assign_worker("p1", 3)
+    await router.assign_worker("p1", 3)
     decision = await router.before_request("p1", estimated_prompt_tokens=100)
     assert decision.assigned_worker_hint == 3
 
@@ -87,7 +87,7 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
     router, _ = make_router(config=cfg)
 
     await router.before_request("p1")
-    router.assign_worker("p1", 0)
+    await router.assign_worker("p1", 0)
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
     assert router._table.programs["p1"].lifecycle == ProgramLifecycle.PAUSED
@@ -113,7 +113,7 @@ async def test_forced_resume_after_timeout():
     )
     router, _ = make_router(config=cfg)
     await router.before_request("p1")
-    router.assign_worker("p1", 0)
+    await router.assign_worker("p1", 0)
     await router.after_request("p1", prompt_tokens=100, completion_tokens=10)
     await router._pause_acting("p1")
     decision = await router.before_request("p1")
@@ -135,7 +135,7 @@ async def test_new_program_queues_before_first_request_when_capacity_full():
     }
     router, _ = make_router(capacity_workers=workers, config=cfg)
     await router.before_request("existing", estimated_prompt_tokens=950)
-    router.assign_worker("existing", 1)
+    await router.assign_worker("existing", 1)
 
     waiter = asyncio.create_task(
         router.before_request("new", estimated_prompt_tokens=100)
@@ -151,6 +151,19 @@ async def test_new_program_queues_before_first_request_when_capacity_full():
 
 
 @pytest.mark.asyncio
+async def test_cold_start_admits_without_sticky_pin():
+    """No MDC visible yet: don't park, let the request through; the
+    chunk-loop callback will populate ``assigned_worker_id`` once the
+    engine picks a worker."""
+    router, _ = make_router(capacity_workers={})
+    decision = await router.before_request("cold_start")
+    assert decision.was_paused is False
+    assert decision.assigned_worker_hint is None
+    program = router._table.programs["cold_start"]
+    assert program.lifecycle == ProgramLifecycle.ACTIVE
+
+
+@pytest.mark.asyncio
 async def test_soft_demote_marks_borderline_workers():
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=10.0,
@@ -162,10 +175,10 @@ async def test_soft_demote_marks_borderline_workers():
     }
     router, _ = make_router(capacity_workers=workers, config=cfg)
     await router.before_request("p1")
-    router.assign_worker("p1", 1)
+    await router.assign_worker("p1", 1)
     await router.after_request("p1", prompt_tokens=750, completion_tokens=0)
     await router.before_request("p1")
-    router.assign_worker("p1", 1)
+    await router.assign_worker("p1", 1)
 
     router._apply_soft_demotes(router._capacity.snapshot())
     program = router._table.programs["p1"]
@@ -193,7 +206,7 @@ async def test_pause_until_safe_pauses_smallest_acting_first():
     # Used = 600 + 100 + 2*100 = 900; pausing small leaves 700 <= target.
     for pid, prompt_tokens in [("big", 600), ("small", 100)]:
         await router.before_request(pid)
-        router.assign_worker(pid, 1)
+        await router.assign_worker(pid, 1)
         await router.after_request(
             pid, prompt_tokens=prompt_tokens, completion_tokens=0
         )
@@ -224,7 +237,7 @@ async def test_pause_until_safe_is_scoped_to_overloaded_worker():
         ("cold", 2, 700),
     ]:
         await router.before_request(pid)
-        router.assign_worker(pid, worker_id)
+        await router.assign_worker(pid, worker_id)
         await router.after_request(
             pid, prompt_tokens=prompt_tokens, completion_tokens=0
         )
@@ -252,7 +265,7 @@ async def test_pause_drives_util_to_pause_target_not_threshold():
     for i in range(10):
         pid = f"p{i}"
         await router.before_request(pid)
-        router.assign_worker(pid, 1)
+        await router.assign_worker(pid, 1)
         await router.after_request(pid, prompt_tokens=100_000, completion_tokens=0)
 
     await router._pause_until_safe(router._capacity.snapshot())
@@ -287,7 +300,7 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
     for i in range(10):
         pid = f"p{i}"
         await router.before_request(pid)
-        router.assign_worker(pid, 1)
+        await router.assign_worker(pid, 1)
         await router.after_request(pid, prompt_tokens=100, completion_tokens=0)
         router._table.programs[pid].acting_since = time.monotonic() - 10.0
 

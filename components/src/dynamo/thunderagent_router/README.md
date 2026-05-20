@@ -108,63 +108,23 @@ and forwarded.
 
 ---
 
-## 4. Initial experimental results
-
-Benchmark stack — public repro:
-
-- Model: `MiniMaxAI/MiniMax-M2.7` (FP8), 2× TP4 on 8× H100.
-- Frontend: `dynamo.frontend --router-mode round-robin`.
-- Workers: 2× `dynamo.vllm` at TP4, KV events on.
-- Router: this package, knobs as below.
-- Bench: `mini-swe-agent` v1.14.4 against SWE-bench-Lite at 128 concurrent
-  workers, driven by [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)'s
-  `mini-extra swebench`. The fork carries a minimal `nvext.agent_context`
-  injector so each LLM call carries a stable `trajectory_id` and
-  `session_id`; everything else is upstream.
-- Window: bench start +10 min to +70 min (steady-state).
-- Metric: successful `chat_completions` per minute at the frontend.
-
-Two arms run with identical worker config and bench settings, varying
-only the router:
-
-| Arm | spm (10–67) | Pauses fired |
-|---|---:|---:|
-| Dynamo + stock `KvRouter` (no program scheduler) | ≈ 23.7 | 0 |
-| **`thunderagent_router`** | **27.54** | 651 |
-
-**Headline: program-aware pause/resume + working-set projection beats
-the stock KV router by +16%.** Both workers track at ~93% KV util with
-symmetric ~76% prefix-cache hit rates; BFD spreads paused programs
-evenly without losing meaningful cache locality, because mini-SWE
-programs share large system-prompt prefixes that both workers see
-within a few turns.
-
----
-
-## 5. Roadmap
+## 4. Roadmap
 
 Next, in rough priority:
 
-1. **Blended worker selection.** The admission path picks the
-   lightest-loaded worker and ignores cache state. Configure Dynamo's
-   `KvRouter` with `overlap_score_weight ∈ (0, 1)` so worker selection
-   blends load and prefix overlap. Sweep the weight on captured traces.
-2. **Frontend in `--router-mode kv`.** Richer per-request timing
-   (`prefill_wait_time_ms`, `ttft_ms`, `kv_hit_rate`, prefill/decode
-   worker IDs) is only populated by `push_router`'s markers; the
-   round-robin frontend skips them. Switching modes unlocks
-   prefill/decode breakdown for offline replay.
-3. **Workflow-profile-aware pause selection.** Profile per-session-type
-   tool-gap distributions from captured traces (P50/P90 acting seconds).
-   At pause time, prefer programs whose predicted idle exceeds the
-   resume cost.
-4. **Rust port of the hot path.** Per-response-chunk `Python::with_gil`
-   + `pythonize` cost is real at 128-concurrency. Port once the
-   algorithm stabilises.
-5. **Stronger correctness coverage.** Multi-worker resume placement,
+1. **Blended worker selection.** Admission currently picks the
+   lightest-loaded worker. Configure `KvRouter` with
+   `overlap_score_weight ∈ (0, 1)` so selection blends load and prefix
+   overlap.
+2. **Workflow-profile-aware pause selection.** Profile per-session-type
+   tool-gap distributions and prefer pausing programs whose predicted
+   idle exceeds the resume cost.
+3. **Rust port of the hot path.** Per-response-chunk `Python::with_gil`
+   + `pythonize` cost is real at 128-concurrency.
+4. **Stronger correctness coverage.** Multi-worker resume placement,
    restart durability of pause state, and `routing.backend_instance_id`
-   honouring are smoke-tested today; they need per-request log
-   assertions before this package leaves `experimental`.
+   honouring need per-request log assertions before this package leaves
+   `experimental`.
 
 ---
 

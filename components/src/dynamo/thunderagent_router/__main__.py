@@ -8,14 +8,9 @@ Usage:
         --endpoint dynamo.vllm.generate \\
         --router-block-size 64
 
-The service serves ``{namespace}.thunderagent_router.generate`` as a
-model-handler endpoint; the frontend's discovery picks it up the same way
-it would any other worker endpoint and dispatches LLM requests to it.
-
-Reads ``request["agent_context"]["trajectory_id"]`` to attach lifecycle decisions
-to programs (Dynamo's ``trajectory_id`` is the analogue of ThunderAgent's
-``program_id``). Requests that lack ``agent_context`` are routed normally with
-no pause/resume gating -- the v0 contract is "opt-in via nvext.agent_context".
+Serves ``{namespace}.thunderagent_router.generate``. Pause/resume is
+opt-in per-request via ``nvext.agent_context.trajectory_id``; requests
+without it are routed via plain KvRouter with no lifecycle.
 """
 
 from __future__ import annotations
@@ -34,7 +29,7 @@ from dynamo.thunderagent_router.args import (
     build_kv_router_config,
     parse_args,
 )
-from dynamo.thunderagent_router.capacity import FpmCapacityProvider
+from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
 from dynamo.thunderagent_router.router import ThunderAgentScheduler
 
 configure_dynamo_logging()
@@ -42,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 
 def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
-    """Pull the scheduling program_id off ``nvext.agent_context.trajectory_id``."""
     ctx = request.get("agent_context")
     if not isinstance(ctx, dict):
         return None
@@ -53,11 +47,9 @@ def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
 
 
 def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
-    """Build the PreprocessedRequest dict KvRouter.generate_from_request expects.
-
-    Duplicated from ``dynamo.router/__main__.py`` since neither package exports
-    it. Keep the field list in sync if the upstream wrapper grows new keys.
-    """
+    # Duplicated from dynamo.router/__main__.py since neither package exports
+    # it. TODO(idhanani): file follow-up to lift this into dynamo.router as a
+    # shared helper before the field list drifts.
     routing = request.get("routing")
     dp_rank = request.get("dp_rank")
     if routing is None and dp_rank is not None:
@@ -83,8 +75,6 @@ def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
 
 
 class ThunderAgentRouterHandler:
-    """Glue between the Dynamo endpoint runtime and ThunderAgentScheduler."""
-
     def __init__(
         self,
         runtime: DistributedRuntime,
@@ -93,12 +83,14 @@ class ThunderAgentRouterHandler:
         self._runtime = runtime
         self._config = config
         self._kv_router: Optional[KvRouter] = None
-        self._capacity: Optional[FpmCapacityProvider] = None
+        self._capacity: Optional[WorkerCapacityProvider] = None
         self._scheduler: Optional[ThunderAgentScheduler] = None
+        # First-chunk binding-shape sanity, logged once if the
+        # disaggregated_params.worker_id shape changes upstream.
+        self._worker_id_extract_warned = False
 
     async def initialize(self) -> None:
-        parts = self._config.endpoint.split(".")
-        if len(parts) != 3:
+        if self._config.endpoint.count(".") != 2:
             raise ValueError(
                 f"Invalid --endpoint {self._config.endpoint!r}; "
                 "expected namespace.component.endpoint"
@@ -113,7 +105,7 @@ class ThunderAgentRouterHandler:
             aic_perf_config=build_aic_perf_config(self._config),
         )
 
-        self._capacity = FpmCapacityProvider(worker_endpoint)
+        self._capacity = WorkerCapacityProvider(worker_endpoint)
         self._capacity.start()
 
         self._scheduler = ThunderAgentScheduler(
@@ -121,14 +113,6 @@ class ThunderAgentRouterHandler:
             config=self._config.to_thunderagent_config(),
         )
         self._scheduler.start()
-        logger.info(
-            "ThunderAgentRouterHandler initialized for %s "
-            "(block_size=%d, pause=%.2f, soft=%.2f)",
-            self._config.endpoint,
-            self._config.router_block_size,
-            self._config.pause_threshold,
-            self._config.soft_demote_threshold,
-        )
 
     async def shutdown(self) -> None:
         if self._scheduler is not None:
@@ -137,13 +121,11 @@ class ThunderAgentRouterHandler:
             self._capacity.stop()
 
     async def generate(self, request: dict[str, Any]):
-        """Wrap KvRouter.generate_from_request with ThunderAgent admission,
-        sticky-worker pinning, and real-token accounting."""
+        assert self._scheduler is not None and self._kv_router is not None
         program_id = _extract_program_id(request)
 
-        # Path A: no program_id -> behave like the standalone router (no
-        # admission, no lifecycle). Backward compat for clients that don't
-        # send agent_context.
+        # Path A: no program_id -> behave like the standalone router.
+        # Backward compat for clients that don't send agent_context.
         if program_id is None:
             preprocessed = _wrap_preprocessed_request(request)
             async for chunk in await self._kv_router.generate_from_request(
@@ -183,9 +165,9 @@ class ThunderAgentRouterHandler:
             ):
                 if first_chunk and worker_pin is None:
                     first_chunk = False
-                    selected_worker = _worker_id_from_chunk(chunk)
+                    selected_worker = self._extract_worker_id(chunk)
                     if selected_worker is not None:
-                        self._scheduler.assign_worker(program_id, selected_worker)
+                        await self._scheduler.assign_worker(program_id, selected_worker)
 
                 usage = (
                     chunk.get("completion_usage") if isinstance(chunk, dict) else None
@@ -206,8 +188,8 @@ class ThunderAgentRouterHandler:
 
                 yield chunk
         finally:
-            # Fall back to len(token_ids) if the engine didn't report usage,
-            # which is still better than upstream's chars/5 estimator.
+            # Fall back to len(token_ids) if the engine didn't report usage --
+            # still better than upstream's chars/5 estimator.
             if prompt_tokens_seen == 0 and isinstance(token_ids, list):
                 prompt_tokens_seen = len(token_ids)
             await self._scheduler.after_request(
@@ -216,28 +198,42 @@ class ThunderAgentRouterHandler:
                 completion_tokens_seen,
             )
 
+    def _extract_worker_id(self, chunk: Any) -> Optional[int]:
+        # Expects the shape set by ``inject_worker_id_from_tracker`` in the
+        # Python bindings. Log once if the shape no longer matches; silent
+        # extraction failure here means we lose worker-affinity on pin.
+        if not isinstance(chunk, dict):
+            self._warn_unexpected_chunk_shape("not a dict")
+            return None
+        dp = chunk.get("disaggregated_params")
+        if not isinstance(dp, dict):
+            self._warn_unexpected_chunk_shape("no disaggregated_params dict")
+            return None
+        info = dp.get("worker_id")
+        if isinstance(info, dict):
+            worker_id = info.get("worker_id")
+            if isinstance(worker_id, int):
+                return worker_id
+        self._warn_unexpected_chunk_shape("worker_id payload shape changed")
+        return None
 
-def _worker_id_from_chunk(chunk: Any) -> Optional[int]:
-    """Extract worker_id set by ``inject_worker_id_from_tracker`` in the
-    Python bindings."""
-    if not isinstance(chunk, dict):
-        return None
-    dp = chunk.get("disaggregated_params")
-    if not isinstance(dp, dict):
-        return None
-    info = dp.get("worker_id")
-    if isinstance(info, dict):
-        worker_id = info.get("worker_id")
-        if isinstance(worker_id, int):
-            return worker_id
-    return None
+    def _warn_unexpected_chunk_shape(self, reason: str) -> None:
+        if self._worker_id_extract_warned:
+            return
+        self._worker_id_extract_warned = True
+        logger.warning(
+            "ThunderAgent worker-id extraction failed (%s); sticky pinning is "
+            "off for this request. The disaggregated_params binding shape "
+            "may have changed.",
+            reason,
+        )
 
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime) -> None:
     config = parse_args()
     logger.info(
-        "Starting ThunderAgent Router (endpoint=%s, namespace=%s)",
+        "ThunderAgent Router starting (endpoint=%s, namespace=%s)",
         config.endpoint,
         config.namespace,
     )
@@ -251,12 +247,6 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     if config.model_name:
         model_path = config.model_path or config.model_name
-        logger.info(
-            "Registering thunderagent_router as model handler for %s "
-            "(model_path=%s)",
-            config.model_name,
-            model_path,
-        )
         await register_model(
             model_input=ModelInput.Tokens,
             model_type=ModelType.Chat | ModelType.Completions,
@@ -273,7 +263,6 @@ async def worker(runtime: DistributedRuntime) -> None:
         )
     finally:
         await handler.shutdown()
-        logger.info("ThunderAgent Router shutting down")
 
 
 def main() -> None:
