@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use super::tokcfg::{raise_exception, strftime_now, tojson, ChatTemplate};
+use super::tokcfg::{ChatTemplate, raise_exception, strftime_now, tojson};
 use super::{ContextMixins, HfTokenizerConfigJsonFormatter, JinjaEnvironment};
 use either::Either;
-use minijinja::{context, Environment, Value};
+use minijinja::{Environment, Value, context};
 use serde_json::json;
 use tracing;
 
