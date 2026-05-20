@@ -9,7 +9,6 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
