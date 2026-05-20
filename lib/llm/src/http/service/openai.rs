@@ -838,6 +838,13 @@ async fn embeddings(
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
 
+    // Start the embedding-specific latency timer. Distinct from
+    // `request_duration` (which has 1..512s LLM-gen buckets); pooling-model
+    // requests are sub-second and need finer-grained buckets to be useful for
+    // SLO tracking. Only observed on the success path -- error/cancel paths
+    // already increment requests_total with status=error.
+    let embedding_start = std::time::Instant::now();
+
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight = state.metrics_clone().create_inflight_guard(
         model,
@@ -898,6 +905,9 @@ async fn embeddings(
             err_response
         })?;
 
+    state
+        .metrics_clone()
+        .observe_embedding_latency(&model_name, embedding_start.elapsed().as_secs_f64());
     inflight.mark_ok();
     Ok(Json(response).into_response())
 }
