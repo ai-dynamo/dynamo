@@ -61,36 +61,44 @@ def instrument_llm_request(kwargs, agent_context):
 
 ## Enable output
 
-Minimal local setup (rotating gzip shards):
+The fast path is one environment variable:
 
 ```bash
-export DYN_AGENT_TRACE_SINKS=jsonl_gz
-export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace
+export DYN_AGENT_TRACE=1
 ```
 
-Optional tool ingestion (Dynamo **binds**; harness **connects** PUSH):
+That picks `jsonl_gz` output at `/tmp/dynamo-agent-trace.*.jsonl.gz` and binds
+the harness tool-event ZMQ endpoint at `tcp://127.0.0.1:20390`. Any of the
+per-knob variables below still wins when set explicitly, so you only need to
+reach for them to relocate output, add `stderr`, or tune buffers.
+
+To relocate captures only:
 
 ```bash
-export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
+export DYN_AGENT_TRACE=1
+export DYN_AGENT_TRACE_OUTPUT_PATH=/mnt/captures/run-42
 ```
-
-`DYN_AGENT_TRACE_SINKS` must be set for files/stderr; output path alone does not enable tracing. ZMQ alone ingests tools but still needs a sink if you want JSONL.
 
 <details>
 <summary>All agent trace environment variables</summary>
 
-| Variable                                   |        Required         | Default     | Notes                                                                                |
-| ------------------------------------------ | :---------------------: | ----------- | ------------------------------------------------------------------------------------ |
-| `DYN_AGENT_TRACE_SINKS`                    | For local files/stderr  | unset       | `jsonl`, `jsonl_gz`, `stderr`, or comma-separated (e.g. `jsonl_gz,stderr`).          |
-| `DYN_AGENT_TRACE_OUTPUT_PATH`              | If `jsonl` / `jsonl_gz` | unset       | File path for `jsonl`; segment **prefix** for `jsonl_gz` → `prefix.NNNNNN.jsonl.gz`. |
-| `DYN_AGENT_TRACE_CAPACITY`                 |           No            | `1024`      | Trace bus capacity.                                                                  |
-| `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES`       |           No            | `1048576`   | Buffer / gzip batch threshold.                                                       |
-| `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS`  |           No            | `1000`      | Flush interval.                                                                      |
-| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES`      |           No            | `268435456` | Roll gzip segment by uncompressed bytes.                                             |
-| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES`      |           No            | unset       | Optional roll by line count.                                                         |
-| `DYN_AGENT_TRACE_REPLAY_HASHES`            |           No            | on          | Falsey (`0`, `no`, …) disables `replay` hashes on requests.                          |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |           No            | unset       | PULL bind address for tool records.                                                  |
-| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |           No            | unset       | If set, first ZMQ frame must match.                                                  |
+| Variable                                   |        Required         | Default (when `DYN_AGENT_TRACE=1`) | Notes                                                                                |
+| ------------------------------------------ | :---------------------: | ---------------------------------- | ------------------------------------------------------------------------------------ |
+| `DYN_AGENT_TRACE`                          |        Master switch    | unset                              | Truthy (`1`, `true`, `on`, `yes`) enables tracing with all defaults below.            |
+| `DYN_AGENT_TRACE_SINKS`                    |           No            | `jsonl_gz`                         | `jsonl`, `jsonl_gz`, `stderr`, or comma-separated (e.g. `jsonl_gz,stderr`).          |
+| `DYN_AGENT_TRACE_OUTPUT_PATH`              |           No            | `/tmp/dynamo-agent-trace`          | File path for `jsonl`; segment **prefix** for `jsonl_gz` → `prefix.NNNNNN.jsonl.gz`. |
+| `DYN_AGENT_TRACE_CAPACITY`                 |           No            | `1024`                             | Trace bus capacity.                                                                  |
+| `DYN_AGENT_TRACE_JSONL_BUFFER_BYTES`       |           No            | `1048576`                          | Buffer / gzip batch threshold.                                                       |
+| `DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS`  |           No            | `1000`                             | Flush interval.                                                                      |
+| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES`      |           No            | `268435456`                        | Roll gzip segment by uncompressed bytes.                                             |
+| `DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES`      |           No            | unset                              | Optional roll by line count.                                                         |
+| `DYN_AGENT_TRACE_REPLAY_HASHES`            |           No            | on                                 | Falsey (`0`, `no`, …) disables `replay` hashes on requests.                          |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` |           No            | `tcp://127.0.0.1:20390`            | PULL bind address for tool records.                                                  |
+| `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`    |           No            | unset                              | If set, first ZMQ frame must match.                                                  |
+
+Without `DYN_AGENT_TRACE=1`, tracing is off unless you explicitly set
+`DYN_AGENT_TRACE_SINKS` or `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` -- both
+the legacy enable paths still work.
 
 </details>
 
