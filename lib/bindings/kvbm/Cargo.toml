@@ -37,18 +37,14 @@ kvbm-connector = { path = "../../kvbm-connector", optional = true }
 kvbm-kernels = { path = "../../kvbm-kernels", optional = true }
 
 anyhow = { version = "1" }
-derive-getters = "0.5"
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
-thiserror = { version = "2.0" }
-tokio = { version = "1.46.0", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { version = "0" }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10
-pyo3 = { version = "0.23.4", default-features = false, features = [
+pyo3 = { version = "0.28.3", default-features = false, features = [
   "macros",
   "experimental-async",
   "experimental-inspect",
@@ -57,15 +53,15 @@ pyo3 = { version = "0.23.4", default-features = false, features = [
   "abi3-py310",
 ] }
 
-pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [
-  "attributes",
-  "testing",
-  "tokio-runtime",
-  "unstable-streams",
-] }
+# pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [
+#   "attributes",
+#   "testing",
+#   "tokio-runtime",
+#   "unstable-streams",
+# ] }
 
 once_cell = { version = "1", optional = true }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
-rstest = "0.25"
+rstest = "0.26"

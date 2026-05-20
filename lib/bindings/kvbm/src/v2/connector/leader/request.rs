@@ -5,7 +5,7 @@ use super::*;
 use kvbm_connector::RequestMetadata;
 
 #[derive(Clone)]
-#[pyclass(name = "KvbmRequest")]
+#[pyclass(name = "KvbmRequest", from_py_object)]
 pub struct PyRequest {
     pub(crate) inner: Request,
 }
