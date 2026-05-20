@@ -345,6 +345,7 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
     assert kwargs["overlap_score_credit"] == 0.0
     assert kwargs["prefill_load_scale"] == 2.5
 
+
 def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
     config = KvRouterConfigBase.from_cli_args(argparse.Namespace())
     config.router_queue_depth_by_missing_isl = [(0, 2048), (2048, 512)]
