@@ -1548,13 +1548,12 @@ impl OpenAIPreprocessor {
         // before clamping to the guided grammar, so the model emits
         // `<reasoning></think><JSON>` and the parser strips the prefix so the
         // jail sees pure JSON.
-        let skip_reasoning_for_guided_json = matches!(
-            request.inner.tool_choice,
-            Some(ChatCompletionToolChoiceOption::Required)
-                | Some(ChatCompletionToolChoiceOption::Named(_))
-        ) && Self::is_force_reasoning_parser(
-            self.runtime_config.reasoning_parser.as_deref(),
-        );
+        let skip_reasoning_for_guided_json =
+            matches!(
+                request.inner.tool_choice,
+                Some(ChatCompletionToolChoiceOption::Required)
+                    | Some(ChatCompletionToolChoiceOption::Named(_))
+            ) && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
 
         let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
             self.runtime_config.reasoning_parser.as_deref(),
