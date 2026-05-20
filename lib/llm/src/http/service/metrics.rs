@@ -2508,6 +2508,14 @@ mod tests {
         collector.observe_response(100, 1);
         let _queue = metrics.clone().create_http_queue_guard(model);
 
+        // Drop the lifecycle guards so their Drop impls record
+        // completion-time metrics (request_counter, request_duration,
+        // detokenize observations) before we gather. Without this the
+        // regression only covers constructor-time labels.
+        drop(_inflight);
+        drop(collector);
+        drop(_queue);
+
         let metric_families = registry.gather();
         let observed: Vec<String> = metric_families
             .iter()
