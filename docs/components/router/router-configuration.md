@@ -51,6 +51,14 @@ Optional AIC knobs:
 
 - `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
 - `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
+- `--aic-moe-tp-size`: MoE tensor-parallel size for models that require AIC MoE parallelism
+- `--aic-moe-ep-size`: MoE expert-parallel size for models that require AIC MoE parallelism
+- `--aic-attention-dp-size`: attention data-parallel size for models that require AIC MoE parallelism
+
+For MoE models, these values must satisfy AIC's parallelism constraint:
+`aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`.
+For Kimi-style TP-only MoE runs, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
+`--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
 
 ## KV Event Transport and Persistence
 

@@ -22,7 +22,6 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     completion_payload,
     completion_payload_default,
-    kv_events_metrics_payload,
     metric_payload_default,
     multimodal_payload_default,
     router_selection_chat_payload_default,
@@ -206,10 +205,16 @@ trtllm_configs = {
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            router_selection_chat_payload_default(),
-            kv_events_metrics_payload(),
+            router_selection_chat_payload_default(
+                expected_log=[
+                    r"Event processor for worker_id \d+ processing event: Stored\(",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
+                ]
+            ),
         ],
-        env={},
+        env={
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
+        },
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",
@@ -277,12 +282,8 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
-            # E/P/D inference bug: chat-completion reaches encode+prefill+decode
-            # workers but never progresses (0 output_tokens, cancelled after 180s,
-            # both -n 1 and -n auto). Re-enable + restore VRAM markers once fixed.
-            # Bisected cap (for re-enable): profiled_vram_gib(22.9),
-            # requested_trtllm_kv_tokens(4224).
-            pytest.mark.skip(reason="E/P/D inference bug: chat-completion stalls"),
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -300,8 +301,33 @@ trtllm_configs = {
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
-    # Test Encoder with Aggregated PD worker on same GPU
-    # Make this pre-merge after TRTLLM #5938603 is fixed
+    "pd_multimodal": TRTLLMConfig(
+        name="pd_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=120,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "PREFILL_CUDA_VISIBLE_DEVICES": "0",
+            "DECODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
     "e_pd_multimodal": TRTLLMConfig(
         name="e_pd_multimodal",
         directory=trtllm_dir,
@@ -310,7 +336,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
