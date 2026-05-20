@@ -293,20 +293,7 @@ impl Indexer {
             | Self::Remote { approx, .. } => approx.as_ref(),
             Self::None => None,
         };
-
-        let Some(approx) = approx else {
-            return Ok(primary_details);
-        };
-        match approx.find_matches(sequence).await {
-            Ok(side) => Ok(merge_overlap_scores(primary_details, side)),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "predict-on-route side indexer query failed; using primary only"
-                );
-                Ok(primary_details)
-            }
-        }
+        Ok(merge_side_or_warn(approx, primary_details, sequence).await)
     }
 
     pub(crate) async fn find_primary_match_details(
@@ -352,21 +339,7 @@ impl Indexer {
                 // expects.
                 let primary_device = self.find_primary_match_details(sequence.clone()).await?;
                 let lt = query_lower_tiers(lower_tier, &sequence, &primary_device);
-
-                let device = if let Some(approx) = approx.as_ref() {
-                    match approx.find_matches(sequence).await {
-                        Ok(side) => merge_overlap_scores(primary_device, side),
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %error,
-                                "predict-on-route side indexer query failed; using primary only"
-                            );
-                            primary_device
-                        }
-                    }
-                } else {
-                    primary_device
-                };
+                let device = merge_side_or_warn(approx.as_ref(), primary_device, sequence).await;
 
                 Ok(TieredMatchDetails {
                     device,
@@ -381,19 +354,7 @@ impl Indexer {
                         tracing::warn!(error = %e, "Remote indexer tiered query failed");
                         KvRouterError::IndexerOffline
                     })?;
-                if let Some(approx) = approx {
-                    match approx.find_matches(sequence).await {
-                        Ok(side) => {
-                            tiered.device = merge_overlap_scores(tiered.device, side);
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %error,
-                                "predict-on-route side indexer query failed; using remote primary only"
-                            );
-                        }
-                    }
-                }
+                tiered.device = merge_side_or_warn(approx.as_ref(), tiered.device, sequence).await;
                 Ok(tiered)
             }
             Self::None => Ok(TieredMatchDetails::default()),
@@ -675,7 +636,7 @@ impl Indexer {
 /// indexer's short-TTL view isn't meaningful for those signals.
 ///
 /// IMPORTANT: the returned `MatchDetails` is no longer guaranteed to satisfy
-/// `overlap_scores.scores` <-> `last_matched_hashes` lockstep — side-only
+/// `overlap_scores.scores` <-> `last_matched_hashes` lockstep. Side-only
 /// workers gain a score with no paired hash by design. The result is safe
 /// for scheduling / cache-hit signal but MUST NOT be used to seed
 /// `query_lower_tiers`, which assumes the lockstep invariant. The local
@@ -695,6 +656,37 @@ fn merge_overlap_scores(mut primary: MatchDetails, side: OverlapScores) -> Match
             .or_insert(side_score);
     }
     primary
+}
+
+/// Query the predict-on-route side indexer (if present) and merge its scores
+/// into `primary`. On query error, log a warning and return `primary` unchanged
+/// so the caller still has a usable scheduling signal. See
+/// [`merge_overlap_scores`] for the lockstep caveat on the returned shape.
+///
+/// NOTE: when this merged `MatchDetails` is combined with lower-tier hits
+/// seeded from the primary-only anchor (e.g. in `find_matches_by_tier`), the
+/// total cached-token signal can in theory overcount: the device score is
+/// raised by the side indexer but the lower-tier walk used the lower primary
+/// depth. Accepted as edge for now since side scores are short-TTL
+/// approximations and the overcount is bounded and rare in practice.
+async fn merge_side_or_warn(
+    approx: Option<&SideIndexer>,
+    primary: MatchDetails,
+    sequence: Vec<LocalBlockHash>,
+) -> MatchDetails {
+    let Some(approx) = approx else {
+        return primary;
+    };
+    match approx.find_matches(sequence).await {
+        Ok(side) => merge_overlap_scores(primary, side),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "predict-on-route side indexer query failed; using primary only"
+            );
+            primary
+        }
+    }
 }
 
 #[cfg(test)]
