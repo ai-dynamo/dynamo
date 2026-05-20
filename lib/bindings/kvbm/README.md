@@ -120,25 +120,7 @@ For more detailed integration with dynamo, disaggregated serving support and ben
 
 ### TensorRT-LLM
 
-```bash
-cat >/tmp/kvbm_llm_api_config.yaml <<EOF
-cuda_graph_config: null
-kv_cache_config:
-  enable_partial_reuse: false
-  free_gpu_memory_fraction: 0.80
-kv_connector_config:
-  connector_module: kvbm.trtllm_integration.connector
-  connector_scheduler_class: DynamoKVBMConnectorLeader
-  connector_worker_class: DynamoKVBMConnectorWorker
-EOF
-
-DYN_KVBM_CPU_CACHE_GB=100 trtllm-serve Qwen/Qwen3-8B \
-  --host localhost --port 8000 \
-  --backend pytorch \
-  --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
-```
-
-For more detailed integration with dynamo and benchmarking, please check [trtllm-setup](../../../docs/components/kvbm/kvbm-guide.md#run-kvbm-in-dynamo-with-tensorrt-llm)
+TensorRT-LLM integration has been removed. KVBM now supports vLLM only.
 
 
 ## 📚 Docs

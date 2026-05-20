@@ -20,22 +20,15 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["v1", "v2"]
-dynamo = ["dep:dynamo-runtime"]
-v1 = ["dynamo", "dep:dynamo-llm", "dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
+default = ["v2"]
 v2 = [
     "dep:kvbm-connector",
     "kvbm-connector/static-kernels",
     "dep:kvbm-common",
 ]
 kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell"]
-nccl = ["v1", "dynamo-llm/nccl", "cudarc/nccl"]
 
 [dependencies]
-# v1 deps (optional)
-dynamo-llm = { path = "../../llm", optional = true }
-dynamo-runtime = { path = "../../runtime", optional = true }
-
 # v2 deps (optional)
 kvbm-common = { path = "../../kvbm-common", optional = true }
 kvbm-connector = { path = "../../kvbm-connector", optional = true }
@@ -72,7 +65,6 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
 ] }
 
 once_cell = { version = "1", optional = true }
-dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]

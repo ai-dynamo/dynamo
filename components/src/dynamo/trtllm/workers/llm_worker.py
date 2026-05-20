@@ -22,11 +22,7 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
-from tensorrt_llm.llmapi.llm_args import (
-    TOKENIZER_ALIASES,
-    KvCacheConnectorConfig,
-    LoadFormat,
-)
+from tensorrt_llm.llmapi.llm_args import TOKENIZER_ALIASES, LoadFormat
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -72,10 +68,9 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 def build_kv_connector_config(config: Config):
     if config.connector:
         if config.connector[0] == "kvbm":
-            return KvCacheConnectorConfig(
-                connector_module="kvbm.trtllm_integration.connector",
-                connector_scheduler_class="DynamoKVBMConnectorLeader",
-                connector_worker_class="DynamoKVBMConnectorWorker",
+            raise RuntimeError(
+                "KVBM TensorRT-LLM integration has been removed. "
+                "kvbm.trtllm_integration no longer exists."
             )
         elif config.connector[0] == "none":
             return None

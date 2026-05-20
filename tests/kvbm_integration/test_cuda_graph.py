@@ -159,7 +159,7 @@ def send_completion_request(
 @pytest.mark.nightly
 @pytest.mark.slow
 @pytest.mark.gpu_1
-@pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
+@pytest.mark.skip(reason="KVBM TRT-LLM integration removed")
 def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config not defined and
@@ -196,7 +196,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 @pytest.mark.slow
 @pytest.mark.nightly
 @pytest.mark.gpu_1
-@pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
+@pytest.mark.skip(reason="KVBM TRT-LLM integration removed")
 def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config defined and
