@@ -13,22 +13,29 @@
 FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
 
 ARG PYTHON_VERSION
+ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
 # dependencies in the builder stage. git/git-lfs are only needed because
 # aiconfigurator is currently installed from a Git URL with LFS-backed assets.
-# gcc + python3-dev are needed to compile aiperf's `crick` dep from sdist on
-# arm64 (no manylinux aarch64 wheel published); the toolchain is confined to
-# this builder stage and never reaches the final image.
+# On arm64, gcc is added so aiperf's `crick` dep can compile from sdist
+# (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64 the prebuilt
+# wheel from PyPI is used and the toolchain is skipped entirely. Python
+# headers come from the base image's /usr/local/include/python${PYTHON_VERSION}
+# (python:3.X-slim bundles them directly — no apt python*-dev needed, and
+# python${PYTHON_VERSION}-dev is not available in this base's apt index
+# anyway). The toolchain stays in this builder stage and never reaches the
+# final image.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y && \
+    EXTRA_PKGS=""; \
+    if [ "$TARGETARCH" = "arm64" ]; then EXTRA_PKGS="gcc"; fi; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
-        gcc \
         git \
         git-lfs \
         libgomp1 \
-        python${PYTHON_VERSION}-dev && \
+        $EXTRA_PKGS && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
