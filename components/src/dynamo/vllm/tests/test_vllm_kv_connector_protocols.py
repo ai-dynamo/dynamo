@@ -219,6 +219,11 @@ def test_make_kv_connector_protocol_dispatches_nixl():
     assert isinstance(proto, NixlConnectorProtocol)
 
 
+def test_make_kv_connector_protocol_dispatches_pdconnector_as_nixl():
+    proto = make_kv_connector_protocol(_config("PdConnector"))
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
 def test_make_kv_connector_protocol_dispatches_mooncake(fake_mooncake):
     proto = make_kv_connector_protocol(_config("MooncakeConnector"))
     assert isinstance(proto, MooncakeConnectorProtocol)
@@ -250,7 +255,11 @@ def test_make_kv_connector_protocol_raises_on_unknown_connector():
 def test_registry_keys_match_vllm_connector_names():
     """Wire-format guard: KV_CONNECTOR_PROTOCOLS keys must match the strings
     vLLM uses in ``KVTransferConfig.kv_connector``."""
-    assert set(KV_CONNECTOR_PROTOCOLS) == {"NixlConnector", "MooncakeConnector"}
+    assert set(KV_CONNECTOR_PROTOCOLS) == {
+        "NixlConnector",
+        "PdConnector",
+        "MooncakeConnector",
+    }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
         assert issubclass(cls, KvConnectorProtocol)
 

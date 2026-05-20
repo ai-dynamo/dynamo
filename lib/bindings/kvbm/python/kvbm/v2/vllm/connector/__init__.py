@@ -25,6 +25,18 @@ _V2_EXPORTS = {
         "kvbm.v2.vllm.schedulers.connector",
         "DynamoConnector",
     ),
+    "PdConnector": (
+        "kvbm.vllm_integration.connector.pd_connector",
+        "PdConnector",
+    ),
+    "PdConnectorMetadata": (
+        "kvbm.vllm_integration.connector.pd_connector",
+        "PdConnectorMetadata",
+    ),
+    "PdHandshakeMetadata": (
+        "kvbm.vllm_integration.connector.pd_connector",
+        "PdHandshakeMetadata",
+    ),
 }
 
 __all__ = list(_V2_EXPORTS)
