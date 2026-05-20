@@ -319,10 +319,11 @@ fn register_model<'p>(
 
     let model_type_obj = model_type.inner;
 
-    // Topology readiness fields. `worker_type = None` and `needs = []` is the
-    // pre-strict default — readers apply the missing-field shim. Backends are
-    // expected to pass explicit values (one of the four `WorkerType` variants
-    // and a DNF `needs` list); enforced strictly in a follow-up.
+    // Normalize the topology readiness fields `worker_type` and `needs` for
+    // the MDC. `worker_type = None` and `needs = []` is the pre-strict
+    // default — readers apply the missing-field shim. Backends are expected
+    // to pass explicit values (one of the four `WorkerType` variants and a
+    // DNF `needs` list); enforced strictly in a follow-up.
     let worker_type_value: Option<llm_rs::worker_type::WorkerType> = worker_type.map(|w| w.into());
     let needs_value: Vec<Vec<llm_rs::worker_type::WorkerType>> = needs
         .unwrap_or_default()
