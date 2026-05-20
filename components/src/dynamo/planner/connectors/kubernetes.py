@@ -422,7 +422,7 @@ class KubernetesConnector(PlannerConnector):
            see vllm/args.py:171-176, sglang/args.py:428, trtllm/args.py:137).
         2. The backend-specific default from
            :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
-           ``"backend"`` / ``"tensorrt_llm"``).
+           ``"backend"``).
 
         Note: the DGD services dict key (``service.name``) must NOT be used
         here -- it is typically PascalCase (``"VllmPrefillWorker"``) and

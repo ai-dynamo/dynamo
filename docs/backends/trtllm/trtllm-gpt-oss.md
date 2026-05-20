@@ -185,7 +185,7 @@ Make sure that both of the endpoints are available before sending an inference r
 ```
 {
   "endpoints": [
-    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.backend.generate",
     "dyn://dynamo.prefill.generate"
   ],
   "status": "healthy"
