@@ -215,7 +215,6 @@ def main() -> None:
                      tickvals=[1e3, 1e4, 1e5, 1e6, 1e7],
                      ticktext=["10³", "10⁴", "10⁵", "10⁶", "10⁷"],
                      range=[3.0, 7.0],
-                     minor=dict(showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.25),
                      row=1, col=1)
     fig.update_yaxes(title=dict(text="p90 ITL (ms)",
                                 font=dict(family=SANS, size=11, color=TEXT_MUTED)),

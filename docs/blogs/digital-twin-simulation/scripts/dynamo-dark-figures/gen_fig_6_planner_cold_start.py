@@ -198,7 +198,6 @@ def main() -> None:
         tickvals=[30, 60, 100, 200, 300],
         ticktext=["30", "60", "100", "200", "300"],
         range=[math.log10(25), math.log10(380)],
-        minor=dict(showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.25),
     )
     fig.update_yaxes(
         type="log",
@@ -209,7 +208,6 @@ def main() -> None:
         tickvals=[1e3, 1e4, 1e5, 1e6],
         ticktext=["10³", "10⁴", "10⁵", "10⁶"],
         range=[math.log10(1000), math.log10(1e6)],
-        minor=dict(showgrid=True, gridcolor=BORDER_SUBTLE, gridwidth=0.25),
     )
 
     out_svg = HERE.parent / "images" / "fig-6-planner-cold-start.svg"
