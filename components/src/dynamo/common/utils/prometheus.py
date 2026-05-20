@@ -341,9 +341,8 @@ def gather_with_labels(
     source metrics win over auto-labels of the same name.
 
     Lives here (as a leaf utility next to :func:`get_prometheus_expfmt`)
-    so both ``dynamo.common.backend.metrics`` and
-    ``dynamo.common.backend._internal_metrics`` can import it without
-    creating a module-level cycle between them.
+    so ``dynamo.common.backend.metrics`` can import it without dragging
+    in the broader backend module.
     """
     return get_prometheus_expfmt(
         registry,

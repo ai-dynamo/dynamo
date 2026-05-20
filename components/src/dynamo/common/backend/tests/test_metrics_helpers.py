@@ -2,11 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Behavioural tests for engine-facing helpers in
-``dynamo.common.backend.metrics``.
-
-Framework-only helpers (``make_component_metrics``,
-``register_engine_registry``) are tested in ``test_internal_metrics.py``.
-"""
+``dynamo.common.backend.metrics``."""
 
 from __future__ import annotations
 

@@ -401,7 +401,8 @@ common/backend/
     disagg.py            # Disagg request helpers (prefill clamp,
                          #   prefill_result extraction)
     metrics.py           # Prometheus helpers (gather_with_labels,
-                         #   make_component_metrics, registration)
+                         #   ensure_prometheus_multiproc_dir, registration)
+    publisher.py         # ComponentSnapshot dataclass (push payload)
     run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine

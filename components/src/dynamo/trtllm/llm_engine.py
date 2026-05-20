@@ -314,9 +314,9 @@ class TrtllmLLMEngine(LLMEngine):
         ) or getattr(self._trtllm_metrics_collector, "log_metrics_dict", None)
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
-        # Always start the metrics-poll thread: it populates the snapshot
-        # dict that `component_metrics_sources()` exposes, and forwards
-        # each snap to `_log_iteration_stats` for `trtllm_kv_cache_*`.
+        # Always start the metrics-poll thread: it pushes the latest
+        # ComponentSnapshot into the framework's SnapshotPublisher and
+        # forwards each snap to `_log_iteration_stats` for `trtllm_kv_cache_*`.
         self._metrics_thread = threading.Thread(
             target=self._metrics_poll_loop,
             daemon=True,

@@ -167,8 +167,7 @@ where
     // 2. KV-aware-routing source descriptors satisfy their contracts:
     //    - kv_event_sources doesn't error; rank set is stable across calls
     //    - setup_metrics doesn't error against a synthetic EngineMetrics
-    //    - returned ComponentMetricsPublisher (if any) has a stable rank set
-    //      and snapshot fns within the 1 ms cheap-read ceiling
+    //    - returned MetricsBindings.dp_ranks are stable across calls
     //
     //    Run before generate() to match Worker's actual call order
     //    (publishers wire up between start() and serve).
