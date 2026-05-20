@@ -101,7 +101,7 @@ cat <<EOF
 ✅ Pre-commit hooks configured
 
 Now build the project:
-  cargo build --features dynamo-llm/block-manager
+  cargo build
   cd lib/bindings/python && maturin develop --uv --features lightseek-mm && cd $WORKSPACE_DIR
   uv pip install --no-deps -e $WORKSPACE_DIR
 
