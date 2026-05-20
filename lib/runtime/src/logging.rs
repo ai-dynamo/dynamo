@@ -1092,7 +1092,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                 "OpenTelemetry OTLP export disabled, traces local only"
             );
         }
-    } else {
+
+      if otlp_exporter_enabled() {
+          eprintln!(
+              "WARNING: OTEL_EXPORT_ENABLED=1 has no effect without DYN_LOGGING_JSONL=1. \
+               OTel layers and OTLP exporter are not installed. Set DYN_LOGGING_JSONL=1 \
+               to enable trace/log export."
+          );
+      }
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
