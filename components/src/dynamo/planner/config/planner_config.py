@@ -23,7 +23,7 @@ from typing import Dict, Literal, Optional
 from urllib.parse import parse_qsl
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
@@ -159,6 +159,16 @@ class PlannerConfig(BaseModel):
             "read once at startup."
         ),
     )
+    metric_pulling_prometheus_token_file: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN_FILE"),
+        exclude=True,
+        description=(
+            "Optional path to a file containing a bearer token. When set, "
+            "the token is re-read before every PromQL request so rotated "
+            "tokens (Kubernetes projected ServiceAccount tokens, OpenShift "
+            "OAuth SA tokens) are picked up without restarting the planner."
+        ),
+    )
     metric_pulling_prometheus_ssl_verify: bool = Field(
         default_factory=_prometheus_ssl_verify_default,
         exclude=True,
@@ -186,6 +196,26 @@ class PlannerConfig(BaseModel):
             "e.g. `namespace=my-ns&tenant=foo`."
         ),
     )
+    metric_pulling_prometheus_ca_bundle: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_CA_BUNDLE"),
+        exclude=True,
+        validate_default=True,
+        description=(
+            "Path to a CA bundle for verifying the upstream Prometheus TLS certificate. "
+            "No-op unless ssl_verify is enabled."
+        ),
+    )
+
+    @field_validator("metric_pulling_prometheus_ca_bundle", mode="after")
+    @classmethod
+    def _validate_ca_bundle_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not Path(v).is_file():
+            raise ValueError(
+                f"metric_pulling_prometheus_ca_bundle path does not exist or is not a file: {v!r}. "
+                "Check that PROMETHEUS_CA_BUNDLE points to a valid CA bundle file."
+            )
+        return v
+
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )

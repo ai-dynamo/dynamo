@@ -56,7 +56,7 @@ docker compose -f dev/docker-compose.yml up -d
 python -m dynamo.trtllm \
     --model Qwen/Qwen2-VL-2B-Instruct \
     --namespace default \
-    --component trtllm \
+    --component backend \
     --endpoint generate \
     --modality multimodal \
     --publish-events-and-metrics &
@@ -68,7 +68,7 @@ python -m examples.backends.trtllm.mm_router_worker \
     --namespace default \
     --component mm_router \
     --endpoint generate \
-    --downstream-component trtllm \
+    --downstream-component backend \
     --downstream-endpoint generate &
 
 # 4. Start Frontend
@@ -105,7 +105,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `--namespace` | `default` | Dynamo namespace |
 | `--component` | `mm_router` | This worker's component name |
 | `--endpoint` | `generate` | This worker's endpoint name |
-| `--downstream-component` | `trtllm` | TRT-LLM workers' component name |
+| `--downstream-component` | `backend` | TRT-LLM workers' component name |
 | `--downstream-endpoint` | `generate` | TRT-LLM workers' endpoint name |
 
 ## How It Works

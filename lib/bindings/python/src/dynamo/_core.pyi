@@ -1674,6 +1674,27 @@ class MockEngineArgs:
         worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...
 
+class WorkerType:
+    """
+    Processing stage a worker handles.
+
+    Each worker has exactly one role; values are not combinable. Use the
+    `needs` argument on register_model to express dependencies in DNF form
+    (a list of alternative AND-sets) — for example, an encode worker that
+    needs (Prefill AND Decode) OR a single Aggregated peer is expressed as
+    `[[WorkerType.Prefill, WorkerType.Decode], [WorkerType.Aggregated]]`.
+
+    See `docs/proposals/health-disagg-readiness.md`.
+    """
+
+    Prefill: "WorkerType"
+    Decode: "WorkerType"
+    Encode: "WorkerType"
+    Aggregated: "WorkerType"
+
+    def __str__(self) -> str: ...
+    def __repr__(self) -> str: ...
+
 async def register_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -1690,6 +1711,8 @@ async def register_model(
     media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
+    worker_type: Optional[WorkerType] = None,
+    needs: Optional[List[List[WorkerType]]] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -1702,6 +1725,14 @@ async def register_model(
     For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
     and a minimal model card is registered directly. Use model_path as the display name
     for these models.
+
+    Topology readiness:
+        `worker_type` and `needs` describe the worker's processing stage and
+        peer dependencies. `needs` is a DNF list — each inner list is an
+        AND-set, the outer list is OR. When omitted, the card is registered
+        with `worker_type = None` and `needs = []`; readers apply a
+        temporary missing-field shim. Backends are expected to declare
+        these literally at each call site.
     """
     ...
 
