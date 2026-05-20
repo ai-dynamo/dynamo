@@ -26,7 +26,10 @@ ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
 ENV PATH=/usr/local/bin/etcd:${PATH}
 
-{% if device == "cpu" %}
+{% if device == "xpu" %}
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+{% elif device == "cpu" %}
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% endif %}
@@ -54,17 +57,18 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
+{% set pip_target = "--python /opt/venv/bin/python" if device == "xpu" else "--system" %}
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
-    uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then uv pip install --system --no-deps "$KVBM_WHEEL"; fi; \
+        if [ -n "$KVBM_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$KVBM_WHEEL"; fi; \
     fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
+        if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
 {% if device == "cuda" %}
@@ -99,6 +103,11 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
+
+# Remove the vLLM source tree shipped in the base image to avoid pytest
+# collection conflicts (duplicate conftest plugin registration) and stale
+# tool scripts referencing files not present in Dynamo's build context.
+RUN rm -rf /workspace/vllm
 
 USER dynamo
 

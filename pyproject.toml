@@ -163,6 +163,7 @@ addopts = [
     "--showlocals",
     "--strict-markers",
     "--strict-config",
+    "-p", "no:schemathesis",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
