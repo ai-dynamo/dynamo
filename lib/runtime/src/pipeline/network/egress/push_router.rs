@@ -580,10 +580,14 @@ where
         };
 
         if !found {
-            return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {}",
-                self.client.endpoint.id()
-            ));
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .message(format!(
+                    "instance_id={instance_id} not found for endpoint {}",
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into());
         }
 
         self.generate_with_fault_detection(instance_id, request)
