@@ -22,6 +22,7 @@
 //!   model, malformed JSON, binary frames) emit a spec-shaped
 //!   `RealtimeServerEvent::Error` while the loop continues so a well-behaved client
 //!   can recover.
+//!
 //! On selected engine:
 //! - The handler forwards all frames including `session.update` onto the engine's input stream.
 //! - The handler drains the engine's response stream onto the WebSocket.
