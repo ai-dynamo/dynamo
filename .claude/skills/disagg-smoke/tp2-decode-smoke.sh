@@ -70,7 +70,7 @@ while true; do
 done
 echo "BOTH UP $(date) (took ${ELAPSED}s)"
 
-INSTS=$(curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances)
+INSTS=$(curl -sS http://127.0.0.1:8337/v1/features/disagg/instances)
 PREFILL_ID=$(echo "$INSTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prefill"][0])')
 DECODE_ID=$(echo "$INSTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["decode"][0])')
 echo "PREFILL_ID=$PREFILL_ID DECODE_ID=$DECODE_ID"

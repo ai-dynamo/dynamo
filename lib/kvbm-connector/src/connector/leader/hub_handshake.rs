@@ -28,7 +28,7 @@ use kvbm_hub::{
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hub features a connector can participate in (all standalone-selectable).
-/// `conditional_disagg` additionally depends on `p2p` (co-registered).
+/// `disagg` additionally depends on `p2p` (co-registered).
 pub const CONNECTOR_CAPS: [FeatureKey; 3] = [
     FeatureKey::Indexer,
     FeatureKey::P2P,
@@ -194,7 +194,7 @@ fn must_match_mismatch(
     primary: &PrimaryConfig,
 ) -> Option<String> {
     // Fold in the requirements of `key` AND its (transitive) dependencies —
-    // e.g. conditional_disagg owns no must-match fields itself, but its P2P
+    // e.g. disagg owns no must-match fields itself, but its P2P
     // dependency requires block_size + block_layout. P2P is co-registered, so
     // the connector must honor P2P's requirements when CD is effective.
     let reqs = required_with_deps(aggregate, key);
@@ -335,7 +335,7 @@ mod tests {
         if features.contains(&"p2p") {
             b = b.add_feature_manager(Arc::new(P2pManager::new()) as Arc<dyn FeatureManager>);
         }
-        if features.contains(&"conditional_disagg") {
+        if features.contains(&"disagg") {
             b = b.add_feature_manager(
                 Arc::new(ConditionalDisaggManager::new()) as Arc<dyn FeatureManager>
             );
@@ -369,10 +369,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_intersects_caps_and_gates_cd_on_role() {
-        let server = start_hub(&["p2p", "conditional_disagg", "indexer"]).await;
+        let server = start_hub(&["p2p", "disagg", "indexer"]).await;
         let url = format!("http://{}", server.discovery_addr());
 
-        // Auto + disagg present → both indexer and conditional_disagg.
+        // Auto + disagg present → both indexer and disagg.
         let h = resolve(
             &hub_cfg(&url, &[]),
             BS,
@@ -397,7 +397,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn explicit_subset_validation() {
-        let server = start_hub(&["p2p", "conditional_disagg", "indexer"]).await;
+        let server = start_hub(&["p2p", "disagg", "indexer"]).await;
         let url = format!("http://{}", server.discovery_addr());
 
         // Explicit indexer only.
@@ -412,10 +412,10 @@ mod tests {
         assert!(h.has(FeatureKey::Indexer));
         assert!(!h.has(FeatureKey::ConditionalDisagg));
 
-        // Explicit conditional_disagg with a role validates its p2p dep.
+        // Explicit disagg with a role validates its p2p dep.
         assert!(
             resolve(
-                &hub_cfg(&url, &["conditional_disagg"]),
+                &hub_cfg(&url, &["disagg"]),
                 BS,
                 BlockLayoutMode::Operational,
                 Some(&disagg()),
@@ -424,10 +424,10 @@ mod tests {
             .is_ok()
         );
 
-        // Explicit conditional_disagg without a role → hard-fail.
+        // Explicit disagg without a role → hard-fail.
         assert!(
             resolve(
-                &hub_cfg(&url, &["conditional_disagg"]),
+                &hub_cfg(&url, &["disagg"]),
                 BS,
                 BlockLayoutMode::Operational,
                 None,
@@ -464,12 +464,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn explicit_feature_or_dep_not_offered_fails() {
-        // Hub offers only indexer → requesting conditional_disagg fails.
+        // Hub offers only indexer → requesting disagg fails.
         let server = start_hub(&["indexer"]).await;
         let url = format!("http://{}", server.discovery_addr());
         assert!(
             resolve(
-                &hub_cfg(&url, &["conditional_disagg"]),
+                &hub_cfg(&url, &["disagg"]),
                 BS,
                 BlockLayoutMode::Operational,
                 Some(&disagg()),
@@ -479,12 +479,12 @@ mod tests {
         );
         server.shutdown().await.unwrap();
 
-        // Hub offers conditional_disagg but not its p2p dependency → fails.
-        let server = start_hub(&["conditional_disagg"]).await;
+        // Hub offers disagg but not its p2p dependency → fails.
+        let server = start_hub(&["disagg"]).await;
         let url = format!("http://{}", server.discovery_addr());
         assert!(
             resolve(
-                &hub_cfg(&url, &["conditional_disagg"]),
+                &hub_cfg(&url, &["disagg"]),
                 BS,
                 BlockLayoutMode::Operational,
                 Some(&disagg()),
@@ -497,11 +497,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_drops_incompatible_block_size_explicit_fails() {
-        let server = start_hub(&["p2p", "conditional_disagg", "indexer"]).await;
+        let server = start_hub(&["p2p", "disagg", "indexer"]).await;
         let url = format!("http://{}", server.discovery_addr());
 
         // page_size 32 != hub primary block_size 16 → must-match features
-        // (indexer, conditional_disagg) are incompatible.
+        // (indexer, disagg) are incompatible.
         // Auto: dropped, no error.
         let h = resolve(
             &hub_cfg(&url, &[]),
@@ -534,9 +534,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_drops_cd_when_p2p_dependency_missing() {
-        // Hub offers conditional_disagg but not its p2p dependency. Auto mode
+        // Hub offers disagg but not its p2p dependency. Auto mode
         // must drop CD (best-effort), never hard-fail startup.
-        let server = start_hub(&["conditional_disagg"]).await;
+        let server = start_hub(&["disagg"]).await;
         let url = format!("http://{}", server.discovery_addr());
         let h = resolve(
             &hub_cfg(&url, &[]),

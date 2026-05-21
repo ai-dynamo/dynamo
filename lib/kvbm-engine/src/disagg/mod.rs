@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Engine-owned conditional-disaggregation session protocol and helpers.
+//! Engine-owned disaggregation session protocol and helpers.
 //!
 //! Hub-visible request metadata lives in `kvbm-protocols (disagg)`. The
 //! [`session`] submodule owns the symmetric `Session` API + its production

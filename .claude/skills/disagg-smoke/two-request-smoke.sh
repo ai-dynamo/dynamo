@@ -129,7 +129,7 @@ until curl -fsS -m 5 http://127.0.0.1:8000/v1/models >/dev/null 2>&1 \
 done
 echo "BOTH UP $(date)"
 
-INSTS=$(curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances)
+INSTS=$(curl -sS http://127.0.0.1:8337/v1/features/disagg/instances)
 PREFILL_ID=$(echo "$INSTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prefill"][0])')
 DECODE_ID=$(echo "$INSTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["decode"][0])')
 echo "PREFILL_ID=$PREFILL_ID DECODE_ID=$DECODE_ID"
@@ -144,9 +144,9 @@ bash "$SKILL_BRINGUP/verify-block-layout.sh" "$DECODE_ID"  "$KVBM_BLOCK_LAYOUT"
 echo "--- block layout OK ---"
 
 # Clear both caches before R1.
-curl -sS -X PUT http://127.0.0.1:8337/v1/instances/$PREFILL_ID/reset \
+curl -sS -X POST http://127.0.0.1:8337/v1/instances/$PREFILL_ID/control/dev/reset \
   -H 'content-type: application/json' -d '{}' >/dev/null
-curl -sS -X PUT http://127.0.0.1:8337/v1/instances/$DECODE_ID/reset \
+curl -sS -X POST http://127.0.0.1:8337/v1/instances/$DECODE_ID/control/dev/reset \
   -H 'content-type: application/json' -d '{}' >/dev/null
 
 # ---- R1 (cold cache) ----
@@ -162,7 +162,7 @@ sleep 2  # let any tail-end audit events flush
 
 # Reset prefill G2 ONLY — decode keeps its 3-block cache.
 echo === RESETTING prefill G2 ONLY ===
-curl -sS -X PUT http://127.0.0.1:8337/v1/instances/$PREFILL_ID/reset \
+curl -sS -X POST http://127.0.0.1:8337/v1/instances/$PREFILL_ID/control/dev/reset \
   -H 'content-type: application/json' -d '{}' ; echo
 
 # ---- R2 (warm decode, cleared prefill) ----
@@ -216,7 +216,7 @@ grep -aE "kvbm_audit.*event=\"(worker_pull_chunk_start|worker_session_pull_call|
 
 # ---- Intra-pass-onboard counts (informational under disagg) ---------------
 #
-# Heads-up: under P/D disagg the conditional-disagg coordinator wrapper
+# Heads-up: under P/D disagg the disagg coordinator wrapper
 # short-circuits `ConnectorLeader::update_state_after_alloc` and never
 # calls `prepare_intra_pass_onboarding`, so `metadata.intra_pass_load`
 # stays `None` regardless of `onboard.mode`. That means *this* smoke can

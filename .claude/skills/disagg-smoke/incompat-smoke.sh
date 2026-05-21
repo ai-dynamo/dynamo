@@ -154,7 +154,7 @@ peer = {
 }
 print(json.dumps({
     "peer_info": peer,
-    "features": [{"kind": "conditional_disagg", "config": {"role": "prefill"}}],
+    "features": [{"kind": "disagg", "config": {"role": "prefill"}}],
 }))
 PYEOF
 }
@@ -256,10 +256,10 @@ run "operational_page_size_mismatch" 400 "page_size\\|per_worker_config" "$CAND_
 # Scenario 6: CD register without P2P feature.
 # --------------------------------------------------------------------
 echo
-echo "[6] conditional_disagg without p2p feature"
+echo "[6] disagg without p2p feature"
 start_hub
 CD_ONLY=$(build_cd_only_payload)
-run "cd_without_p2p_reject" 400 "p2p\\|conditionaldisagg\\|conditional_disagg" "$CD_ONLY"
+run "cd_without_p2p_reject" 400 "p2p\\|conditionaldisagg\\|disagg" "$CD_ONLY"
 
 cleanup
 

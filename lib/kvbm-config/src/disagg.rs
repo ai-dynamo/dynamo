@@ -14,7 +14,7 @@ use validator::Validate;
 /// Disaggregation role.
 ///
 /// Identifies whether the leader participates as a prefill producer or a
-/// decode consumer in the conditional-disagg topology.
+/// decode consumer in the disagg topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisaggregationRole {
@@ -28,7 +28,7 @@ pub enum DisaggregationRole {
 ///
 /// The hub URL is **not** here — it comes from
 /// [`KvbmConfig::hub`](crate::KvbmConfig::hub). This block only carries the
-/// per-instance role (and admission budget); the `conditional_disagg` feature
+/// per-instance role (and admission budget); the `disagg` feature
 /// is enabled via `leader.hub.features`.
 ///
 /// # JSON example

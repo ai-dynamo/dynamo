@@ -52,7 +52,7 @@ impl PyConnectorLeader {
 
     /// Active `ConnectorLeaderApi` route.
     ///
-    /// `Cd` when the conditional-disagg dispatcher is installed (CD-bound
+    /// `Cd` when the disagg dispatcher is installed (CD-bound
     /// requests intercepted by decode/prefill wrappers); `Direct`
     /// otherwise (passthrough to the raw inner leader). Held as an enum
     /// rather than `Arc<dyn ConnectorLeaderApi>` because the trait impl
@@ -69,7 +69,7 @@ impl PyConnectorLeader {
 }
 
 /// Adapter for routing scheduler-facing API calls either through the
-/// conditional-disagg dispatcher (when configured) or directly against
+/// disagg dispatcher (when configured) or directly against
 /// the inner `Arc<ConnectorLeader>`.
 enum ApiRoute<'a> {
     Cd(Arc<dyn ConnectorLeaderApi>),

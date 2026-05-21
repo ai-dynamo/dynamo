@@ -12,7 +12,7 @@ same routes on both ports; pick whichever is reachable.
 
 | Path | Method | Purpose |
 |---|---|---|
-| `/v1/features/conditional-disagg/instances` | GET | List registered P/D participants by velo InstanceId |
+| `/v1/features/disagg/instances` | GET | List registered P/D participants by velo InstanceId |
 | `/v1/instances/{id}/reset` | PUT | Reset block manager tiers on a specific connector (proxied via velo) |
 | `/v1/instances/{id}/register_leader` | PUT | Tell connector `{id}` to register a remote leader for distributed search |
 | `/v1/instances/{id}/health` | GET | Probe a connector's velo handler and report last-heartbeat info |
@@ -24,7 +24,7 @@ run with `--velo-port`; without it they return 503.
 ## List P/D split
 
 ```bash
-curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances | jq
+curl -sS http://127.0.0.1:8337/v1/features/disagg/instances | jq
 # {"prefill": ["uuid-..."], "decode": ["uuid-..."]}
 ```
 

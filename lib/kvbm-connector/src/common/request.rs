@@ -13,7 +13,7 @@ use serde::Serialize;
 /// Holds optional data forwarded from the scheduler (e.g. a vLLM
 /// `Request`) into the connector layer. Today this carries the raw
 /// `kv_transfer_params` JSON as an opaque `serde_json::Value`, with typed
-/// conditional-disaggregation parsing available lazily on demand.
+/// disaggregation parsing available lazily on demand.
 #[derive(Debug, Clone, Default)]
 pub struct RequestMetadata {
     /// Connector-specific KV transfer parameters, as received from the
@@ -30,7 +30,7 @@ impl RequestMetadata {
         }
     }
 
-    /// Parse raw `kv_transfer_params` as conditional-disaggregation transfer
+    /// Parse raw `kv_transfer_params` as disaggregation transfer
     /// parameters.
     ///
     /// This keeps the request metadata wire-compatible with current vLLM JSON
@@ -303,7 +303,7 @@ impl Request {
             .and_then(|m| m.kv_transfer_params.as_ref())
     }
 
-    /// Parse raw `kv_transfer_params` as conditional-disaggregation transfer
+    /// Parse raw `kv_transfer_params` as disaggregation transfer
     /// parameters, if present.
     pub fn disagg_transfer_params(&self) -> Result<Option<TransferParams>, serde_json::Error> {
         self.metadata
@@ -368,7 +368,7 @@ mod tests {
     }
 
     /// Pin the wire format the hub dispatcher
-    /// (`kvbm-hub::features::conditional_disagg::dispatcher::HttpVllmDispatcher`)
+    /// (`kvbm-hub::features::disagg::dispatcher::HttpVllmDispatcher`)
     /// is required to emit.
     ///
     /// History: an earlier dispatcher build wrote

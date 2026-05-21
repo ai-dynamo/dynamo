@@ -59,7 +59,7 @@ pub struct KvbmRuntime {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) messenger: Arc<Messenger>,
     /// Full Velo instance, present when the runtime built (or was given)
-    /// one. Required by the conditional-disagg session machinery (anchor
+    /// one. Required by the disagg session machinery (anchor
     /// and rendezvous management). Test paths that inject only a bare
     /// `Messenger` leave this `None` — CD wiring will fail loudly if
     /// invoked against a runtime without a Velo.
@@ -108,7 +108,7 @@ impl KvbmRuntime {
     ///
     /// Production paths build a Velo (which carries the messenger plus
     /// streaming/anchor/rendezvous managers needed by the
-    /// conditional-disagg session machinery). Test paths that inject only
+    /// disagg session machinery). Test paths that inject only
     /// a bare Messenger return `None` here — those tests don't use CD.
     pub fn velo(&self) -> Option<&Arc<Velo>> {
         self.velo.as_ref()

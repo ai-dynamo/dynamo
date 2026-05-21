@@ -3,64 +3,70 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 # Launch the Decode vLLM instance for the disagg-bringup smoke.
-# Same as launch-prefill.sh but role=decode and port=8001.
+# Same as launch-prefill.sh but `--role decode` and port 8001.
 #
-# Env vars (mirrors start-hub.sh's pattern):
-#   KVBM_VENV          (default: <repo>/.sandbox)
-#   KVBM_HARDWARE_PROFILE (default: spark-gb10; also supports h100-a100, custom)
-#   KVBM_BLOCK_LAYOUT  (default: operational)  — injected into kv_connector_extra_config
-#                        so it survives vLLM's EngineCore subprocess spawn.
-#                        Valid values: operational | universal
-#   KVBM_ONBOARD_MODE  (default: inter)        — see launch-prefill.sh for semantics.
+# The `--kv-transfer-config` blob is RENDERED by kvbmctl from the live hub
+# (`--features disagg --role decode`). block_layout is hub-authoritative (set
+# via the hub's --layout / KVBM_HUB_LAYOUT), not a launcher knob.
+#
+# Env vars:
+#   KVBM_VENV / KVBM_HARDWARE_PROFILE / KVBM_HUB_URL / KVBM_KVBMCTL_BIN
+#   KVBM_ONBOARD_MODE  (default: inter) — inter | intra (free field)
+#   KVBM_CONNECTOR_MODULE_PATH (default: kvbm.v2.vllm.connector)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${KVBM_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 . "$SCRIPT_DIR/hardware-profiles.sh"
 kvbm_apply_disagg_bringup_profile
+. "$REPO/.claude/skills/kvbm-hub-bringup/hub-lib.sh"
 
 KVBM_VENV=${KVBM_VENV:-$REPO/.sandbox}
 KVBM_CONNECTOR_MODULE_PATH=${KVBM_CONNECTOR_MODULE_PATH:-kvbm.v2.vllm.connector}
-KVBM_BLOCK_LAYOUT=${KVBM_BLOCK_LAYOUT:-operational}
-case "$KVBM_BLOCK_LAYOUT" in
-  operational|universal) ;;
-  *) echo "KVBM_BLOCK_LAYOUT must be 'operational' or 'universal', got: '$KVBM_BLOCK_LAYOUT'" >&2; exit 1 ;;
-esac
+KVBMCTL=${KVBM_KVBMCTL_BIN:-$REPO/target/debug/kvbmctl}
+HUB_URL=${KVBM_HUB_URL:-http://127.0.0.1:1337}
 KVBM_ONBOARD_MODE=${KVBM_ONBOARD_MODE:-inter}
 case "$KVBM_ONBOARD_MODE" in
   inter|intra) ;;
   *) echo "KVBM_ONBOARD_MODE must be 'inter' or 'intra', got: '$KVBM_ONBOARD_MODE'" >&2; exit 1 ;;
 esac
 
+KV_RENDERED=$(kvbm_hub_render_vllm "$KVBMCTL" "$HUB_URL" disagg \
+    --role decode \
+    --kv-connector-module-path "$KVBM_CONNECTOR_MODULE_PATH" \
+    --kvbm leader.onboard.mode="$KVBM_ONBOARD_MODE" \
+    --kvbm leader.tokio.worker_threads=2 \
+    --kvbm worker.tokio.worker_threads=2 \
+    --kvbm leader.control.dev=true \
+    --kvbm leader.control.metrics=true \
+    --kvbm 'worker.nixl.backends.UCX={}' \
+    --kvbm 'worker.nixl.backends.POSIX={}') \
+  || { echo "kvbmctl render failed (is the hub up at $HUB_URL with --features disagg?)" >&2; exit 1; }
+eval "KV_ARGS=( $KV_RENDERED )"
+
 export CUDA_VISIBLE_DEVICES="$KVBM_DECODE_CUDA_VISIBLE_DEVICES"
 export DYN_KVBM_CPU_CACHE_GB="$KVBM_CPU_CACHE_GB"
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export KVBM_SKIP_VLLM_VERSION_CHECK=${KVBM_SKIP_VLLM_VERSION_CHECK:-1}
+
+NIXL_LIBS=${KVBM_NIXL_LIBS:-}
+if [ -z "$NIXL_LIBS" ]; then
+    for cand in "$KVBM_VENV"/lib/python*/site-packages/.nixl_cu12.mesonpy.libs \
+                "$KVBM_VENV"/lib/python*/site-packages/.nixl_cu13.mesonpy.libs; do
+        [ -d "$cand" ] && NIXL_LIBS="$cand" && break
+    done
+fi
+if [ -n "$NIXL_LIBS" ]; then
+    export LD_LIBRARY_PATH="$NIXL_LIBS:$NIXL_LIBS/plugins:${LD_LIBRARY_PATH:-}"
+    export NIXL_PLUGIN_DIR="$NIXL_LIBS/plugins"
+fi
+
 exec "$KVBM_VENV/bin/python3" -m vllm.entrypoints.openai.api_server \
   --model "$KVBM_MODEL" \
   --served-model-name "$KVBM_MODEL" \
-  --max-model-len "$KVBM_MAX_MODEL_LEN" \
   --max-num-seqs "$KVBM_MAX_NUM_SEQS" \
   --gpu-memory-utilization "$KVBM_DECODE_GPU_MEMORY_UTILIZATION" \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --port 8001 \
-  --kv-transfer-config '{
-    "kv_connector": "DynamoConnector",
-    "kv_role": "kv_both",
-    "kv_load_failure_policy": "recompute",
-    "kv_connector_module_path": "'"$KVBM_CONNECTOR_MODULE_PATH"'",
-    "kv_connector_extra_config": {
-      "default": { "block_layout": "'"$KVBM_BLOCK_LAYOUT"'" },
-      "leader": {
-        "disagg":  { "hub_url": "http://127.0.0.1:1337", "role": "decode" },
-        "cache":   { "host": { "cache_size_gb": '"$KVBM_CPU_CACHE_GB"' } },
-        "tokio":   { "worker_threads": 2 },
-        "control": { "metrics": true },
-        "onboard": { "mode": "'"$KVBM_ONBOARD_MODE"'" }
-      },
-      "worker": {
-        "nixl":  { "backends": { "UCX": {}, "POSIX": {} } },
-        "tokio": { "worker_threads": 2 }
-      }
-    }
-  }'
+  "${KV_ARGS[@]}"

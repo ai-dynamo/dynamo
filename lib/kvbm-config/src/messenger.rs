@@ -56,7 +56,7 @@ impl MessengerConfig {
     ///
     /// This is the production constructor — Velo wraps a Messenger plus the
     /// streaming AnchorManager and RendezvousManager, which are required by
-    /// the conditional-disagg session machinery. Callers that only need the
+    /// the disagg session machinery. Callers that only need the
     /// underlying Messenger should call [`Velo::messenger`] on the returned
     /// instance.
     pub async fn build_velo(&self) -> Result<std::sync::Arc<velo::Velo>> {

@@ -54,7 +54,7 @@ enum RequestRole {
     NonCd,
 }
 
-/// Per-request-dispatching conditional-disaggregation leader.
+/// Per-request-dispatching disaggregation leader.
 ///
 /// Construct with [`ConditionalDisaggLeader::builder`].
 ///

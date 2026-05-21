@@ -39,12 +39,12 @@ pub struct VllmRenderOptions {
     /// enabled (selectable) set.
     pub features: Vec<String>,
     /// Conditional-disagg role (`prefill` / `decode`). Required iff
-    /// `conditional_disagg` is in the effective set; rejected otherwise.
+    /// `disagg` is in the effective set; rejected otherwise.
     pub role: Option<String>,
     /// `--kvbm <dotted.path>=<value>` overrides. Highest precedence among free
     /// fields; hub-authoritative fields (`default.block_layout`,
     /// `leader.hub.{url,features}`, and `leader.disagg.role` when
-    /// conditional_disagg is active) are re-applied afterwards and always win.
+    /// disagg is active) are re-applied afterwards and always win.
     /// The first path segment may be a figment profile (`default` / `leader` /
     /// `worker`) or a flat config key — both are accepted by the connector.
     pub kvbm_overrides: Vec<String>,
@@ -67,7 +67,7 @@ pub struct VllmRenderOptions {
 /// - `requested` empty → every enabled selectable feature the hub advertises.
 /// - `requested` non-empty → validated as a subset of the enabled selectable
 ///   set, then dependency-closed using the aggregate's per-feature
-///   `dependencies` (e.g. `conditional_disagg` pulls in `p2p`). Any unknown
+///   `dependencies` (e.g. `disagg` pulls in `p2p`). Any unknown
 ///   label, unmet feature, or unmet dependency is a hard error.
 ///
 /// Returns the effective keys in [`SELECTABLE`] order (stable output).
@@ -153,12 +153,12 @@ fn build_extra_config(
     let primary = &aggregate.primary;
     let cd = effective.contains(&FeatureKey::ConditionalDisagg);
     match (cd, role) {
-        (true, None) => bail!(
-            "conditional_disagg is enabled but no --role was given; pass --role prefill|decode"
-        ),
-        (false, Some(r)) => bail!(
-            "--role {r:?} was given but conditional_disagg is not in the effective feature set"
-        ),
+        (true, None) => {
+            bail!("disagg is enabled but no --role was given; pass --role prefill|decode")
+        }
+        (false, Some(r)) => {
+            bail!("--role {r:?} was given but disagg is not in the effective feature set")
+        }
         _ => {}
     }
 
@@ -201,10 +201,10 @@ fn build_extra_config(
 ///   `block_layout` differs from its primary.
 /// - `leader.hub.{url,features}` — the URL kvbmctl queried and the
 ///   dependency-closed feature set it validated against that hub.
-/// - `leader.disagg.role` — only when `conditional_disagg` is effective. This
+/// - `leader.disagg.role` — only when `disagg` is effective. This
 ///   is re-applied here, **coupled to `features`**, so an override that drops
 ///   the disagg block (`--kvbm leader.disagg=…` / `--kvbm leader=…`) cannot
-///   leave `conditional_disagg` in `features` without its required role — a
+///   leave `disagg` in `features` without its required role — a
 ///   config the connector would hard-fail on. `disagg` is `Option`, so the
 ///   round-trip validator would otherwise accept the inconsistent blob.
 ///
@@ -331,7 +331,7 @@ pub fn render_vllm_cli(
     // the connector's registration get rejected), `hub.{url,features}` are the
     // validated identity kvbmctl resolved against this hub, and `disagg.role` is
     // re-coupled to `features` so an override can't strip the role off a
-    // conditional_disagg config.
+    // disagg config.
     deep_merge(
         &mut extra,
         authoritative_overlay(aggregate, &effective, hub_url, opts.role.as_deref()),
@@ -461,7 +461,7 @@ mod tests {
             descriptor(FeatureKey::ConditionalDisagg, vec![FeatureKey::P2P]),
         ]);
         let mut o = opts();
-        o.features = vec!["conditional_disagg".to_string()];
+        o.features = vec!["disagg".to_string()];
         // No role → hard error.
         assert!(render_vllm_cli(&agg, "http://hub:1337", &o).is_err());
         // With role → p2p is dependency-closed into the feature list.
@@ -470,14 +470,14 @@ mod tests {
         let extra = extract_config(&cli);
         let feats = extra["leader"]["hub"]["features"].as_array().unwrap();
         assert!(feats.contains(&json!("p2p")));
-        assert!(feats.contains(&json!("conditional_disagg")));
+        assert!(feats.contains(&json!("disagg")));
         assert_eq!(extra["leader"]["disagg"]["role"], "prefill");
     }
 
     #[test]
     fn cd_role_survives_override_that_drops_the_disagg_block() {
         // An override that overwrites the whole `leader.disagg` (or `leader`)
-        // subtree must not be able to leave conditional_disagg in `features`
+        // subtree must not be able to leave disagg in `features`
         // without its role: the authoritative overlay re-couples role to
         // features. Without that, `disagg: Option` lets the inconsistent blob
         // pass validation and the connector hard-fails at runtime.
@@ -486,7 +486,7 @@ mod tests {
             descriptor(FeatureKey::ConditionalDisagg, vec![FeatureKey::P2P]),
         ]);
         let mut o = opts();
-        o.features = vec!["conditional_disagg".to_string()];
+        o.features = vec!["disagg".to_string()];
         o.role = Some("prefill".to_string());
         // Overwrite the entire `disagg` object with one that has no role.
         o.kvbm_overrides =
@@ -494,7 +494,7 @@ mod tests {
         let cli = render_vllm_cli(&agg, "http://hub:1337", &o).unwrap();
         let extra = extract_config(&cli);
         let feats = extra["leader"]["hub"]["features"].as_array().unwrap();
-        assert!(feats.contains(&json!("conditional_disagg")));
+        assert!(feats.contains(&json!("disagg")));
         // Role is restored by the authoritative overlay; the free sibling key
         // the operator set is preserved.
         assert_eq!(extra["leader"]["disagg"]["role"], "prefill");
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn omitted_features_rejects_unmet_dependency() {
-        // Hub advertises conditional_disagg (dep: p2p) but NOT p2p. With
+        // Hub advertises disagg (dep: p2p) but NOT p2p. With
         // --features omitted, the full enabled set must still be dep-validated,
         // so this is rejected rather than emitted with an unmet dependency.
         let agg = aggregate(vec![descriptor(

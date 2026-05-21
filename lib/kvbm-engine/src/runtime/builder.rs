@@ -85,7 +85,7 @@ impl KvbmRuntimeBuilder {
     }
 
     /// Use an existing Messenger instance. Resulting `KvbmRuntime` has no
-    /// Velo — conditional-disagg wiring will fail at init time. For CD,
+    /// Velo — disagg wiring will fail at init time. For CD,
     /// inject a full Velo via [`with_velo`](Self::with_velo) instead.
     pub fn with_messenger(mut self, messenger: Arc<Messenger>) -> Self {
         self.messenger = Some(messenger);

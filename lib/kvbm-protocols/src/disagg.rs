@@ -11,10 +11,10 @@ use kvbm_common::SequenceHash;
 use serde::{Deserialize, Serialize};
 use velo_ext::InstanceId;
 
-/// Current conditional-disaggregation protocol version.
+/// Current disaggregation protocol version.
 pub const DISAGG_PROTOCOL_VERSION: u16 = 1;
 
-/// Unique identifier for a conditional-disaggregation session.
+/// Unique identifier for a disaggregation session.
 pub type SessionId = uuid::Uuid;
 
 /// JSON-safe representation of a KVBM sequence hash.

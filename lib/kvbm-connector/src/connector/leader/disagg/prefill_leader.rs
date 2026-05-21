@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Prefill-side conditional-disaggregation leader wrapper.
+//! Prefill-side disaggregation leader wrapper.
 //!
 //! `PrefillDisaggLeader` wraps a base inner [`InnerLeaderShim`]
 //! and intercepts the scheduler-facing API

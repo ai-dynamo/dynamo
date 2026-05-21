@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Decode-side end-to-end test for the conditional-disagg wrapper, against
+//! Decode-side end-to-end test for the disagg wrapper, against
 //! the symmetric `Session` API (MockSession + MockSessionFactory). No
 //! `KvbmRuntime`, no `nixl_agent`, no real RDMA.
 //!

@@ -1,6 +1,6 @@
 ---
 name: kvbm-hub-bringup
-description: Reusable kvbm_hub launcher + shell helpers. Builds kvbm_hub + kvbmctl, starts a hub serving a chosen feature set (indexer / p2p / conditional_disagg) as the runtime source of truth, and exposes sourceable functions to wait for health and render a vLLM --kv-transfer-config from the live hub via kvbmctl. Consumed by the kvbm smoke skills; not a standalone test.
+description: Reusable kvbm_hub launcher + shell helpers. Builds kvbm_hub + kvbmctl, starts a hub serving a chosen feature set (indexer / p2p / disagg) as the runtime source of truth, and exposes sourceable functions to wait for health and render a vLLM --kv-transfer-config from the live hub via kvbmctl. Consumed by the kvbm smoke skills; not a standalone test.
 ---
 
 # Skill: kvbm-hub-bringup
@@ -31,7 +31,7 @@ KVBM_HUB_BLOCK_SIZE=16 KVBM_HUB_MAX_SEQ_LEN=1024 KVBM_HUB_G2_MEMORY_GIB=2 \
 
 Key env (all optional; see the script header for the full list + defaults):
 
-- `KVBM_HUB_FEATURES` — csv subset of `p2p,conditional_disagg,indexer`;
+- `KVBM_HUB_FEATURES` — csv subset of `p2p,disagg,indexer`;
   empty = all supported (deps auto-added, e.g. CD pulls in P2P).
 - `KVBM_HUB_BLOCK_SIZE` / `KVBM_HUB_MAX_SEQ_LEN` — the hub `primary` must-match
   values. **Set `MAX_SEQ_LEN` to the model's `max_model_len`** so kvbmctl renders
@@ -58,7 +58,7 @@ eval "KV_ARGS=( $RENDERED )"
 exec python -m vllm.entrypoints.openai.api_server ... "${KV_ARGS[@]}"
 ```
 
-`kvbm_hub_render_vllm` wraps `kvbmctl get config vllm --hub <url> --features
+`kvbm_hub_render_vllm` wraps `kvbmctl config vllm --hub <url> --features
 <csv>` and passes extra args (`--role`, `--kv-connector-module-path`, repeated
 `--kvbm`) straight through. The hub fills in `block_size` / `max_model_len` /
 `block_layout` / `leader.hub` / advisory `cache.host`; the caller supplies only

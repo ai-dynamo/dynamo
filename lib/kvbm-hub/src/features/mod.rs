@@ -24,8 +24,8 @@ use crate::registry::PeerRegistry;
 /// excludes it.
 #[cfg(feature = "kvbmctl")]
 pub mod cli;
-pub mod conditional_disagg;
 pub mod control_plane;
+pub mod disagg;
 pub(crate) mod http;
 pub mod indexer;
 pub mod p2p;
@@ -177,7 +177,7 @@ pub trait FeatureManager: Send + Sync + 'static {
     /// manager's `control_router`/`public_router` under `/v1/features/x` —
     /// the manager declares **relative** routes (e.g. `/config`) and owns its
     /// whole namespace. Default `None` keeps the legacy behavior where the
-    /// manager declares full absolute paths itself (p2p, conditional_disagg,
+    /// manager declares full absolute paths itself (p2p, disagg,
     /// control_plane).
     fn route_prefix(&self) -> Option<&'static str> {
         None

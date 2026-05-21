@@ -1,6 +1,6 @@
 ---
 name: disagg-smoke
-description: KVBM conditional-disagg smokes — golden two-request flow (R1 cold + R2 warm), audit-equiv (legacy vs unified), and hub-side layout-mismatch rejection smoke. Golden modes use KVBM_DISAGG_LEADER / KVBM_BLOCK_LAYOUT from env; audit-equiv runs the smoke twice and diffs per-side kvbm_audit streams; incompat-smoke posts crafted P2P register payloads to a hub-only bringup and asserts each mismatch class is rejected with the expected error.
+description: KVBM disagg smokes — golden two-request flow (R1 cold + R2 warm), audit-equiv (legacy vs unified), and hub-side layout-mismatch rejection smoke. Golden modes use KVBM_DISAGG_LEADER / KVBM_BLOCK_LAYOUT from env; audit-equiv runs the smoke twice and diffs per-side kvbm_audit streams; incompat-smoke posts crafted P2P register payloads to a hub-only bringup and asserts each mismatch class is rejected with the expected error.
 ---
 
 # Skill: KVBM Disagg Smoke
@@ -137,7 +137,7 @@ Six scenarios:
 | 3 | Universal baseline + universal candidate with `num_heads_total` 64 → 48 | HTTP 400, body mentions `canonical` or `head` |
 | 4 | Operational NHD baseline + operational HND candidate | HTTP 400, body mentions an operational/NHD/HND term |
 | 5 | Operational NHD both sides + `page_size` 16 → 32 | HTTP 400, body mentions `page_size` or `per_worker_config` |
-| 6 | CD-only register (no P2P feature) | HTTP 400, body mentions `p2p` or `conditional_disagg` |
+| 6 | CD-only register (no P2P feature) | HTTP 400, body mentions `p2p` or `disagg` |
 
 Each scenario starts a fresh hub so the baseline state is deterministic; total runtime ~2 s. Exit 0 on all-pass, 1 if any scenario produces an unexpected status or missing error keyword (the failing scenario is named on stderr).
 

@@ -4,7 +4,7 @@
 //! Resolve a remote `InstanceId` to its `PeerInfo` and register it on the
 //! local velo messenger.
 //!
-//! The conditional-disagg prefill coordinator needs to talk velo with the
+//! The disagg prefill coordinator needs to talk velo with the
 //! decode peer that pushed it a request, but the only identifier carried in
 //! `RemotePrefillRequest` is decode's `initiator_instance_id`. The hub holds
 //! the `PeerInfo` (registered at decode-startup time); this trait closes the

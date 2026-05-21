@@ -950,10 +950,12 @@ impl ConnectorLeader {
             .as_ref()
             .filter(|h| h.has(kvbm_hub::FeatureKey::ConditionalDisagg))
         {
-            let disagg_cfg =
-                self.runtime.config().disagg.clone().expect(
-                    "hub handshake pre-flight guarantees a disagg role for conditional_disagg",
-                );
+            let disagg_cfg = self
+                .runtime
+                .config()
+                .disagg
+                .clone()
+                .expect("hub handshake pre-flight guarantees a disagg role for disagg");
             tracing::info!(
                 role = ?disagg_cfg.role,
                 hub_url = %handshake.url,
@@ -996,7 +998,7 @@ impl ConnectorLeader {
                 )],
             )
             .await
-            .context("conditional-disagg P2P foundation wiring failed")?;
+            .context("disagg P2P foundation wiring failed")?;
 
             // CD client around the shared hub (wire_p2p already registered);
             // seed the hub velo id for the prefill queue.

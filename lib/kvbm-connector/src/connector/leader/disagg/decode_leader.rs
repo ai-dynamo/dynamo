@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Decode-side conditional-disaggregation leader wrapper.
+//! Decode-side disaggregation leader wrapper.
 //!
 //! `DecodeDisaggLeader` wraps a base [`super::ConnectorLeaderApi`]
 //! and intercepts the scheduler-facing API to drive the
-//! conditional-disagg dataflow on the decode side, against the
+//! disagg dataflow on the decode side, against the
 //! symmetric [`Session`](kvbm_engine::disagg::session::Session)
 //! API.
 //!
@@ -1574,9 +1574,9 @@ impl DecodeDisaggLeader {
         tracing::error!(
             op,
             ?request_id,
-            "prefill-side conditional-disagg API hit an unimplemented path"
+            "prefill-side disagg API hit an unimplemented path"
         );
-        todo!("prefill-side conditional-disagg API: {op}")
+        todo!("prefill-side disagg API: {op}")
     }
 }
 

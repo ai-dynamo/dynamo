@@ -556,7 +556,7 @@ async fn sync_methods_callable_from_non_tokio_thread() -> Result<()> {
 // ============================================================================
 //
 // Regression for the prefill-side `Reset pool count mismatch: expected N,
-// got N-3` observed in the conditional-disagg two-request smoke (R1 cold,
+// got N-3` observed in the disagg two-request smoke (R1 cold,
 // `kv_load_failure_policy=recompute`).  When a peer pull errors before
 // emitting `Frame::PullAck`, holder pins inserted by `make_available`
 // stay live in `available_pins` indefinitely — the pin map is only

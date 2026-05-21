@@ -111,17 +111,13 @@ async fn aggregate_config_reports_primary_and_features() {
 
     // Features present, deterministically ordered by key.
     let keys: Vec<String> = resp.features.iter().map(|f| f.key.to_string()).collect();
-    assert_eq!(
-        keys,
-        vec!["conditional_disagg", "indexer", "p2p"],
-        "got {keys:?}"
-    );
+    assert_eq!(keys, vec!["disagg", "indexer", "p2p"], "got {keys:?}");
 
     // CD declares its P2P dependency in the aggregate.
     let cd = resp
         .features
         .iter()
-        .find(|f| f.key.as_str() == "conditional_disagg")
+        .find(|f| f.key.as_str() == "disagg")
         .unwrap();
     assert_eq!(
         cd.dependencies

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared lifecycle-watcher helper for the conditional-disagg coordinator.
+//! Shared lifecycle-watcher helper for the disagg coordinator.
 //!
 //! [`super::coordinator::ConditionalDisaggCoordinator`] spawns one tokio
 //! task per request that:

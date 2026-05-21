@@ -5,7 +5,7 @@
 //!
 //! Thin parity wrapper used by leaders that register `Feature::P2P` without
 //! also requesting `Feature::ConditionalDisagg`. CD callers register both
-//! features through [`crate::features::conditional_disagg::ConditionalDisaggClient`],
+//! features through [`crate::features::disagg::ConditionalDisaggClient`],
 //! which carries the same `LayoutCompatPayload` under the hood.
 
 use std::sync::Arc;

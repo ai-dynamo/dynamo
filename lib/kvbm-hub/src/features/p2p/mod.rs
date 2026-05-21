@@ -9,7 +9,7 @@
 //! subsequent registration is checked against the baseline via
 //! [`check_layout_compat`].
 //!
-//! CD ([`super::conditional_disagg`]) is a specialisation of P2P: any
+//! CD ([`super::disagg`]) is a specialisation of P2P: any
 //! `RegisterRequest` containing `Feature::ConditionalDisagg` MUST also
 //! contain `Feature::P2P` in the same request. The server enforces this
 //! pre-dispatch — see `crate::server::register_instance`. Do not duplicate

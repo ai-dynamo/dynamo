@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Block-transport seam for the conditional-disaggregation wrapper.
+//! Block-transport seam for the disaggregation wrapper.
 //!
 //! The wrapper drives only one kind of transfer through this seam now:
 //! **Local G2 → G1** — copy already-resident G2 data into vLLM's G1
@@ -26,7 +26,7 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request, SlotMatchSplit};
 use crate::{BlockId, G2, InstanceId};
 
-/// Transport seam used by the conditional-disagg wrapper to drive
+/// Transport seam used by the disagg wrapper to drive
 /// local G2→G1 transfers (decode's local-match kick at USAA-1, and
 /// the per-chunk onboard after pulling remote outputs).
 pub trait P2pBlockTransport: Send + Sync {
@@ -77,7 +77,7 @@ impl P2pBlockTransport for EngineP2pBlockTransport {
     }
 }
 
-/// Hook the conditional-disagg wrapper uses to notify workers when a
+/// Hook the disagg wrapper uses to notify workers when a
 /// CD-bound request finishes onboarding (or fails partway). Factored out
 /// of the wrapper so tests can record these calls without standing up
 /// real worker clients.
@@ -122,7 +122,7 @@ impl P2pWorkerHook for InnerLeaderWorkerHook {
     }
 }
 
-/// Trait abstraction over the connector leader the conditional-disagg
+/// Trait abstraction over the connector leader the disagg
 /// wrapper depends on. Production code wraps a concrete `ConnectorLeader`
 /// via [`ConnectorLeaderShim`]; tests inject a mock that scripts every
 /// inner call. Holding this trait object instead of `Arc<ConnectorLeader>`

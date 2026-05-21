@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bidirectional conditional-disagg end-to-end test.
+//! Bidirectional disagg end-to-end test.
 //!
 //! Proves that a single instance can hold BOTH a decode-side and a
 //! prefill-side `ConditionalDisaggCoordinator` concurrently, driven

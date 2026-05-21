@@ -42,7 +42,7 @@ use crate::leader::dispatch::{PullRef, WirePullOptions};
 use crate::{BlockId, G2, InstanceId, SequenceHash};
 
 /// Endpoint kind tag for the new symmetric-session wire format.
-/// Distinct from the legacy `kvbm_conditional_disagg_v1` so the
+/// Distinct from the legacy `kvbm_disagg_v1` so the
 /// two impls cannot accidentally interop.
 pub const SESSION_STREAM_SCHEMA: &str = "kvbm_cd_session_v2";
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Test doubles for conditional-disaggregation transport / worker-hook /
+//! Test doubles for disaggregation transport / worker-hook /
 //! inner-leader-shim / queue traits.
 //!
 //! Session-side mocks (`MockSession` + `MockSessionFactory`) live in the

@@ -99,23 +99,23 @@ export KVBMCTL_HUB=http://127.0.0.1:1337   # or pass --hub on each command
 KVBMCTL=./target/debug/kvbmctl             # built by start-hub.sh
 
 # Indexer config (assertion 0: sizing + ZMQ ingest endpoint)
-$KVBMCTL get indexer config
+$KVBMCTL indexer config
 # { "block_size": 16, "max_seq_len": 1024, "num_positions": 64,
 #   "zmq_endpoint": "tcp://127.0.0.1:33273" }
 
 # Assertion 2: which blocks are indexed at a position bucket, and who holds them
-$KVBMCTL get indexer by-pos 0
+$KVBMCTL indexer by-pos 0
 # { "position": 0, "entries": [ { "hash_u128": "1665…3376",
 #     "instances": ["<B-id>", "<A-id>"], … } ] }
 
 # Assertions 3+4: resolve a hash (decimal u128 from by-pos) to its holders.
 # kvbmctl packs the u128 into the wire byte-array — no manual encoding.
-$KVBMCTL get indexer query 166542759488764189892533901512933376
+$KVBMCTL indexer query 166542759488764189892533901512933376
 # { "hit": { "hash_u128": "1665…3376", "instances": ["<B-id>", "<A-id>"], … } }
 ```
 
 `--hub` (env `KVBMCTL_HUB`) may appear anywhere after the subcommand — it is a
-global arg, so `kvbmctl get indexer by-pos 0 --hub $HUB` also works. These are
+global arg, so `kvbmctl indexer by-pos 0 --hub $HUB` also works. These are
 read-only; run them at any point while the smoke (or any hub with the
 `indexer` feature) is up.
 

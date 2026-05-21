@@ -119,14 +119,14 @@ async fn render_against_live_hub_cd_dep_closes_p2p() {
     let aggregate = client.get_config().await.expect("get_config");
 
     let mut opts = base_opts();
-    opts.features = vec!["conditional_disagg".to_string()];
+    opts.features = vec!["disagg".to_string()];
     opts.role = Some("decode".to_string());
     let cli = render_vllm_cli(&aggregate, &hub_url, &opts).expect("render");
 
     let extra = extract_extra_config(&cli);
     let feats = extra["leader"]["hub"]["features"].as_array().unwrap();
     assert!(feats.contains(&serde_json::json!("p2p")));
-    assert!(feats.contains(&serde_json::json!("conditional_disagg")));
+    assert!(feats.contains(&serde_json::json!("disagg")));
     assert_eq!(extra["leader"]["disagg"]["role"], "decode");
 }
 
@@ -142,7 +142,7 @@ async fn render_against_live_hub_omitted_features_uses_full_enabled_set() {
     let aggregate = client.get_config().await.expect("get_config");
 
     // No --features and no --role: CD is enabled on the hub, so the full
-    // enabled set includes conditional_disagg and the render must demand a role.
+    // enabled set includes disagg and the render must demand a role.
     let err = render_vllm_cli(&aggregate, &hub_url, &base_opts()).unwrap_err();
     assert!(err.to_string().contains("--role"), "got: {err}");
 }

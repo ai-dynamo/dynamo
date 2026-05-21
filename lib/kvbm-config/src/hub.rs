@@ -6,7 +6,7 @@
 //! [`LeaderHubConfig`] is the **sole** way the connector reaches a `kvbm-hub`.
 //! When absent ([`KvbmConfig::hub`](crate::KvbmConfig::hub) is `None`), the
 //! connector does normal hub-less work and **none** of the hub features
-//! (`indexer`, `p2p`, `conditional_disagg`) are available.
+//! (`indexer`, `p2p`, `disagg`) are available.
 
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -26,7 +26,7 @@ pub struct LeaderHubConfig {
     pub url: String,
 
     /// Subset of hub features this connector participates in. Values:
-    /// `indexer`, `p2p`, `conditional_disagg`.
+    /// `indexer`, `p2p`, `disagg`.
     ///
     /// - **Empty / omitted** → discover the hub's enabled set, intersect with
     ///   the connector's capabilities, **best-effort** (a feature absent on the

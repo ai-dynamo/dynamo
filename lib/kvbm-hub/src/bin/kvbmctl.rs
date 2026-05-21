@@ -6,9 +6,13 @@
 //! CLI fragment so operators stop hand-writing `--kv-transfer-config` blobs:
 //!
 //! ```text
-//! kvbmctl get config vllm --hub http://hub:1337 [--features indexer,p2p,conditional_disagg] \
+//! kvbmctl config vllm --hub http://hub:1337 [--features indexer,p2p,disagg] \
 //!         [--role prefill|decode] [--kvbm leader.tokio.worker_threads=2] [--kvbm-config '{…}']
 //! ```
+//!
+//! Top-level subcommands are flat and consistent: `config` (render), the
+//! per-feature query groups from [`feature_clis`] (e.g. `indexer`), and `p2p`
+//! (transfer actions). There is no `get` wrapper.
 //!
 //! The hub fills in `block_size` / `max_seq_len` / `block_layout`, advisory
 //! `cache.host` sizing, and `leader.hub.{url,features}`; the operator overrides
@@ -29,11 +33,11 @@ struct VllmArgs {
 
     /// Feature subset to participate in (comma-separated or repeated). Omitted
     /// → the hub's full enabled set. Non-empty → validated ⊆ enabled, with
-    /// dependency closure (e.g. `conditional_disagg` pulls in `p2p`).
+    /// dependency closure (e.g. `disagg` pulls in `p2p`).
     #[arg(long, value_delimiter = ',')]
     features: Vec<String>,
 
-    /// Conditional-disagg role. Required iff `conditional_disagg` is effective.
+    /// Conditional-disagg role. Required iff `disagg` is effective.
     #[arg(long)]
     role: Option<String>,
 
@@ -42,14 +46,14 @@ struct VllmArgs {
     /// flat key. Values are parsed as JSON (`2`, `true`, `{…}`) with a string
     /// fallback. Highest precedence among free fields; hub-authoritative fields
     /// (`default.block_layout`, `leader.hub.{url,features}`, and
-    /// `leader.disagg.role` when conditional_disagg is active) still always win.
+    /// `leader.disagg.role` when disagg is active) still always win.
     #[arg(long = "kvbm", value_name = "KEY.PATH=VALUE")]
     kvbm: Vec<String>,
 
     /// Deep-merge a full `kv_connector_extra_config` JSON object over the
     /// rendered config (below individual `--kvbm` overrides). Hub-authoritative
     /// fields (`default.block_layout`, `leader.hub.{url,features}`, and
-    /// `leader.disagg.role` when conditional_disagg is active) are re-applied
+    /// `leader.disagg.role` when disagg is active) are re-applied
     /// last and cannot be overridden; free fields can.
     #[arg(long = "kvbm-config", value_name = "JSON")]
     kvbm_config: Option<String>,
@@ -71,9 +75,10 @@ struct VllmArgs {
     kv_connector_module_path: String,
 }
 
-/// Build the `kvbmctl` command tree: the typed `get config vllm` leaf plus one
-/// dynamic `get <feature>` subcommand per [`feature_clis`], each with `--hub`
-/// injected. Hybrid derive (`VllmArgs`) + builder (feature subcommands).
+/// Build the `kvbmctl` command tree. Top-level subcommands are flat: the typed
+/// `config vllm` leaf, one dynamic `<feature>` group per [`feature_clis`] (e.g.
+/// `indexer`), and `p2p` — each with `--hub` injected. Hybrid derive
+/// (`VllmArgs`) + builder (feature subcommands).
 fn build_cli() -> Command {
     let vllm = VllmArgs::augment_args(Command::new("vllm").about(
         "Render a vLLM CLI fragment: --block-size / --max-model-len + --kv-transfer-config",
@@ -84,39 +89,24 @@ fn build_cli() -> Command {
         .arg_required_else_help(true)
         .subcommand(vllm);
 
-    let mut get = Command::new("get")
-        .about("Fetch configuration from a hub, or query a feature")
-        .subcommand_required(true)
-        .arg_required_else_help(true)
-        .subcommand(config);
-    for fc in feature_clis() {
-        get = get.subcommand(fc.command().arg(hub_arg()));
-    }
-
-    Command::new("kvbmctl")
+    let mut cmd = Command::new("kvbmctl")
         .about("KVBM hub client — render connector configuration / query features")
         .subcommand_required(true)
         .arg_required_else_help(true)
-        .subcommand(get)
-        .subcommand(p2p_command().arg(hub_arg()))
+        .subcommand(config)
+        .subcommand(p2p_command().arg(hub_arg()));
+    // Per-feature query groups (e.g. `indexer`) sit at the top level alongside
+    // `config` and `p2p` — no `get` wrapper.
+    for fc in feature_clis() {
+        cmd = cmd.subcommand(fc.command().arg(hub_arg()));
+    }
+    cmd
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let matches = build_cli().get_matches();
     match matches.subcommand() {
-        Some(("get", get_m)) => dispatch_get(get_m).await,
-        Some(("p2p", p2p_m)) => {
-            let client = hub_client(p2p_m)?;
-            let value = run_p2p(&client, p2p_m).await?;
-            print_json(&value)
-        }
-        _ => unreachable!("subcommand_required guarantees a subcommand"),
-    }
-}
-
-async fn dispatch_get(get_m: &clap::ArgMatches) -> Result<()> {
-    match get_m.subcommand() {
         Some(("config", config_m)) => {
             let vllm_m = config_m
                 .subcommand_matches("vllm")
@@ -124,6 +114,12 @@ async fn dispatch_get(get_m: &clap::ArgMatches) -> Result<()> {
             let args = VllmArgs::from_arg_matches(vllm_m).map_err(|e| anyhow!(e))?;
             render_vllm(args).await
         }
+        Some(("p2p", p2p_m)) => {
+            let client = hub_client(p2p_m)?;
+            let value = run_p2p(&client, p2p_m).await?;
+            print_json(&value)
+        }
+        // Per-feature query groups from `feature_clis()` (e.g. `indexer`).
         Some((feature, feature_m)) => {
             let clis = feature_clis();
             let fc = clis

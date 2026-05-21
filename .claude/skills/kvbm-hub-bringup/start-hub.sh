@@ -26,7 +26,7 @@
 #   KVBM_HUB_CONTROL_PORT     (default: 8337)
 #   KVBM_HUB_VELO_PORT        (default: 1338)
 #   KVBM_HUB_FEATURES         (default: "" = all supported; csv subset of
-#                              p2p,conditional_disagg,indexer — deps auto-added)
+#                              p2p,disagg,indexer — deps auto-added)
 #   KVBM_HUB_BLOCK_SIZE       (default: 16; power of two in 16..=512)
 #   KVBM_HUB_MAX_SEQ_LEN      (default: 1024; non-zero multiple of block size)
 #   KVBM_HUB_G2_MEMORY_GIB    (default: 1 unless KVBM_HUB_G2_BLOCKS set; advisory)

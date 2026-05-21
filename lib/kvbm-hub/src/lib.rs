@@ -65,11 +65,11 @@ pub use client::{HubClient, HubClientBuilder, HubClientConfig, HubRegistrationGu
 pub use config::{HubConfig, IndexerConfig};
 #[cfg(feature = "kvbmctl")]
 pub use features::cli::{FeatureCli, feature_clis, hub_arg};
-pub use features::conditional_disagg::{
+pub use features::control_plane::ControlPlaneManager;
+pub use features::disagg::{
     ConditionalDisaggClient, ConditionalDisaggManager, DispatchOutcome, HttpVllmDispatcher,
     PrefillRequestDispatcher, RecordingDispatcher,
 };
-pub use features::control_plane::ControlPlaneManager;
 pub use features::indexer::{
     IndexerConfigResponse, IndexerManager, InstancesResponse, PositionalIndex, QueryRequest,
     QueryResponse,

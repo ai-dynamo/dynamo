@@ -89,8 +89,8 @@ struct Cli {
     layout: Option<String>,
 
     /// Comma-separated feature set the hub serves — subset of
-    /// `p2p,conditional_disagg,indexer`. Omitted = all. Dependencies are
-    /// auto-included (selecting `conditional_disagg` pulls in `p2p`).
+    /// `p2p,disagg,indexer`. Omitted = all. Dependencies are
+    /// auto-included (selecting `disagg` pulls in `p2p`).
     #[arg(long)]
     features: Option<String>,
 
@@ -260,8 +260,8 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
     // Reconcile implicit enablers with the explicit feature set.
     if cli.prefill_vllm_url.is_some() && !enabled.contains(&FeatureKey::ConditionalDisagg) {
         anyhow::bail!(
-            "--prefill-vllm-url enables the conditional_disagg dispatcher but \
-             conditional_disagg is not in --features"
+            "--prefill-vllm-url enables the disagg dispatcher but \
+             disagg is not in --features"
         );
     }
 

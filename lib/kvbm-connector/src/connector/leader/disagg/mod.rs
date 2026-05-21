@@ -4,7 +4,7 @@
 //! Leader-facing interfaces for conditional disaggregation.
 //!
 //! This module is deliberately narrow. It describes the pieces of a connector
-//! leader that conditional-disaggregation code needs, without putting the
+//! leader that disaggregation code needs, without putting the
 //! decode/prefill state machines into the base [`ConnectorLeader`].
 //!
 //! # Decode-side golden path
@@ -188,7 +188,7 @@ impl ConnectorLeaderApi for Arc<ConnectorLeader> {
     }
 }
 
-/// Outcome of a per-request conditional-disaggregation policy evaluation.
+/// Outcome of a per-request disaggregation policy evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefillSelection {
     Local,

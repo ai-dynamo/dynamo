@@ -2,485 +2,286 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
-# p2p-smoke.sh — exercise hub-mediated P2P G2 block transfer.
+# p2p-smoke.sh — exercise hub-mediated P2P G2 block transfer via the standalone
+# P2P feature and the `kvbmctl p2p` verbs.
 #
-# Topology:  hub  +  instance_a (port 8000)  +  instance_b (port 8002)
-#                            ^                       ^
-#                            \__ same model, both registered with hub
+# Topology:  hub (--features p2p)  +  instance_a (8000)  +  instance_b (8002)
+#            Both register Feature::P2P (no conditional-disagg role) — the
+#            P2.5 standalone-p2p connector path. Each is a remote-controllable
+#            block-copy peer.
 #
 # Flow:
-#   R1 → instance_a            (warms G2 on A; emits offload_register_complete
-#                               audit event with the ISL block hashes)
-#   scrape audit log on A      (extract those hashes)
-#   POST /open_session   on A  (hub forwards to A via velo)
-#   POST /pull_from_session on B (hub forwards to B, B connects to A's session
-#                               via velo and pulls the blocks into B's G2)
-#   POST /close_session  on A  (cleanup)
+#   R1 → instance_a            (warms G2 on A; audit emits the ISL block hashes)
+#   scrape audit log on A      (extract sequence_hashes_hex)
+#   kvbmctl p2p pin   on A     (open_session over those hashes → session+endpoint)
+#   kvbmctl p2p pull  A→B      (B registers A as a peer, then pulls into B's G2)
+#   kvbmctl p2p unpin on A     (close_session)
 #   R2 → instance_b            (same prompt; expect G2 cache hit in B's audit)
 #
 # Usage:  bash p2p-smoke.sh [logs_dir]
-#   If logs_dir not given, mints $KVBM_EXPERIMENTS_DIR/<ts>-p2p-smoke/.
-#
-# Env vars:
-#   KVBM_REPO  (default: worktree root inferred from script location)
-#   P2P_HARDWARE_PROFILE (default: h100-a100; also supports spark-gb10, custom)
-#   P2P_BLOCKS (default: 16)     — desired ISL block count
+# Env:
+#   KVBM_REPO            (default: worktree root inferred from script location)
+#   P2P_HARDWARE_PROFILE (default: h100-a100; use spark-gb10 on a single GB10)
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DYNAMO=${KVBM_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
-# Default the venv to THIS worktree's .sandbox so launch-instance.sh doesn't
-# fall back to a foreign/stale kvbm build. Caller can still override KVBM_VENV.
+export KVBM_REPO=$DYNAMO
 export KVBM_VENV=${KVBM_VENV:-$DYNAMO/.sandbox}
 SKILL_BRINGUP=$DYNAMO/.claude/skills/disagg-bringup
+HUB_BRINGUP=$DYNAMO/.claude/skills/kvbm-hub-bringup
 SKILL_TRACE=$DYNAMO/.claude/skills/disagg-trace
+KVBMCTL=${KVBM_KVBMCTL_BIN:-$DYNAMO/target/debug/kvbmctl}
 LABEL=${KVBM_EXPERIMENT_LABEL:-p2p-smoke}
 . "$SKILL_BRINGUP/hardware-profiles.sh"
 kvbm_apply_p2p_profile
-P2P_BLOCKS=${P2P_BLOCKS:-16}
+
+HUB_DISC=${KVBM_HUB_DISCOVERY_PORT:-1337}
+HUB_CTRL=${KVBM_HUB_CONTROL_PORT:-8337}
+HUB1337="http://127.0.0.1:$HUB_DISC"
+HUB8337="http://127.0.0.1:$HUB_CTRL"
+export KVBMCTL_HUB="$HUB1337"
 
 ROOT=${1:-$(bash "$SKILL_BRINGUP/new-experiment.sh" "$LABEL")}
 echo "EXP=$ROOT"
 echo "$ROOT" > /tmp/p2p-trace-current-exp
-cat > "$ROOT/contract.env" <<EOF
-experiment=F
-topology=hub-mediated-p2p
-hardware_profile=$P2P_HARDWARE_PROFILE
-model=$P2P_MODEL
-framework=vllm-hub-transfer
-endpoint_type=chat
-streaming=true
-gpu_class=$P2P_GPU_CLASS
-p2p_a_cuda_visible_devices=$P2P_A_CUDA_VISIBLE_DEVICES
-p2p_b_cuda_visible_devices=$P2P_B_CUDA_VISIBLE_DEVICES
-p2p_gmu=$P2P_GMU
-p2p_cache_gb=$P2P_CACHE_GB
-p2p_max_model_len=$P2P_MAX_MODEL_LEN
-EOF
 
-# ----------------------------------------------------------------------
-# 0. Teardown stale processes.
-# ----------------------------------------------------------------------
+strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+fail() {
+  echo "FAIL: $1" >&2
+  [ -n "${2:-}" ] && [ -f "$2" ] && { echo "--- tail $2 ---" >&2; tail -n 30 "$2" | strip_ansi >&2; }
+  pkill -f "vllm.entrypoints.openai" 2>/dev/null || true
+  pkill -9 -f kvbm_hub 2>/dev/null || true
+  exit 1
+}
+
+# --- 0. teardown stale ----------------------------------------------------
 pkill -f "vllm.entrypoints.openai" 2>/dev/null || true
 pkill -9 -f kvbm_hub 2>/dev/null || true
 pkill -9 -f "EngineCore" 2>/dev/null || true
 sleep 3
+PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' ' | grep -v '^$' || true)
+[ -n "$PIDS" ] && echo "$PIDS" | xargs -r kill -9 2>/dev/null || true
+rm -f /tmp/velo-kvbm-*.sock 2>/dev/null || true
+sleep 1
 
-# ----------------------------------------------------------------------
-# 1. Hub up.
-# ----------------------------------------------------------------------
-# start-hub.sh rebuilds kvbm_hub (incremental) so we never run a stale binary.
-KVBM_HUB_MODEL="$P2P_MODEL" bash "$SKILL_BRINGUP/start-hub.sh" "$ROOT/hub.log" &
+# --- 1. hub (--features p2p,indexer) --------------------------------------
+# p2p is under test; indexer is the harness hash-discovery mechanism (the
+# EngineCore subprocess doesn't surface Rust kvbm_audit logs, so we read the
+# holder's offloaded block hashes back from the hub index instead of scraping).
+# Size the hub to the instances: block_size 16, max_seq_len = profile max_model_len.
+KVBM_HUB_FEATURES=p2p,indexer \
+KVBM_HUB_BLOCK_SIZE=16 \
+KVBM_HUB_MAX_SEQ_LEN="${P2P_MAX_MODEL_LEN:-2048}" \
+KVBM_HUB_G2_MEMORY_GIB="${P2P_CACHE_GB:-2}" \
+  bash "$HUB_BRINGUP/start-hub.sh" "$ROOT/hub.log" &
 HUB_PID=$!
 
-# Wait for hub HTTP — bounded, with build/bind-failure detection (covers a
-# cold hub rebuild). Without a deadline a failed build hangs this forever.
 HUB_READY_TIMEOUT=${KVBM_HUB_READY_TIMEOUT:-300}
 hub_deadline=$(( $(date +%s) + HUB_READY_TIMEOUT ))
-until curl -fsS -m 5 http://127.0.0.1:8337/health >/dev/null 2>&1; do
-  if ! kill -0 "$HUB_PID" 2>/dev/null; then
-    echo "FAIL: hub process exited before becoming ready (build or bind failure)" >&2
-    tail -30 "$ROOT/hub.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' >&2
-    exit 1
-  fi
-  if [ "$(date +%s)" -ge "$hub_deadline" ]; then
-    echo "FAIL: hub not ready after ${HUB_READY_TIMEOUT}s" >&2
-    tail -30 "$ROOT/hub.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' >&2
-    exit 1
-  fi
+until curl -fsS -m 5 "$HUB8337/health" >/dev/null 2>&1; do
+  kill -0 "$HUB_PID" 2>/dev/null || fail "hub exited before ready (build/bind failure)" "$ROOT/hub.log"
+  [ "$(date +%s)" -ge "$hub_deadline" ] && fail "hub not ready after ${HUB_READY_TIMEOUT}s" "$ROOT/hub.log"
   sleep 2
 done
-echo "HUB UP"
+echo "HUB UP (features=p2p)"
 
-# ----------------------------------------------------------------------
-# 2. Launch instances SEQUENTIALLY on ports 8000 and 8002.
-#    role=prefill for A, role=decode for B — purely cosmetic (transfer
-#    endpoints work on either; we never use the CD prefill queue).
-#
-#    Sequential startup keeps vLLM memory profiling deterministic. On the
-#    default H100/A100 layout A and B use separate GPUs, but we still wait for
-#    A's /v1/models before starting B so the logs are easy to read.
-# ----------------------------------------------------------------------
+# --- 2. launch instances (standalone p2p, no role) ------------------------
 RUST_LOG=${RUST_LOG:-info,kvbm_connector=debug,kvbm_engine=info,kvbm_audit=info}
 export RUST_LOG
 P2P_STARTUP_TIMEOUT=${P2P_STARTUP_TIMEOUT:-300}
 
 wait_for_models() {
-  local port=$1
-  local timeout=$2
-  local deadline=$(( $(date +%s) + timeout ))
+  local port=$1 timeout=$2 deadline
+  deadline=$(( $(date +%s) + timeout ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if curl -fsS "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1; then
-      return 0
-    fi
+    curl -fsS "http://127.0.0.1:$port/v1/models" >/dev/null 2>&1 && return 0
     sleep 3
   done
   return 1
 }
 
-echo "launching instance A (port 8000, role=prefill)..."
-P2P_PORT=8000 P2P_ROLE=prefill P2P_CUDA_VISIBLE_DEVICES="$P2P_A_CUDA_VISIBLE_DEVICES" \
-  bash "$SCRIPT_DIR/launch-instance.sh" \
-  > "$ROOT/instance_a.log" 2>&1 &
+# List the instance ids the hub currently knows (PeerInfo.instance_id). NOTE:
+# the hub self-registers its own id here too, so discovery must exclude it.
+list_instances() {
+  curl -sS "$HUB8337/v1/instances" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(p["instance_id"] for p in d["instances"]))'
+}
+
+# The hub's own self-registered id(s), captured before any connector registers.
+BASELINE_IDS=$(list_instances || true)
+exclude_baseline() { grep -vxF "${BASELINE_IDS:-__none__}" || true; }
+
+# Poll the registry for a connector id not in $1 (newline-separated excludes).
+discover_new() {
+  local excludes=$1 deadline id
+  deadline=$(( $(date +%s) + 30 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    id=$(list_instances | grep -vxF "${BASELINE_IDS:-__none__}" \
+          | { [ -n "$excludes" ] && grep -vxF "$excludes" || cat; } | head -1)
+    [ -n "$id" ] && { echo "$id"; return 0; }
+    sleep 2
+  done
+  return 1
+}
+
+echo "launching instance A (port 8000)..."
+P2P_PORT=8000 P2P_CUDA_VISIBLE_DEVICES="$P2P_A_CUDA_VISIBLE_DEVICES" \
+  bash "$SCRIPT_DIR/launch-instance.sh" > "$ROOT/instance_a.log" 2>&1 &
 disown
-if ! wait_for_models 8000 "$P2P_STARTUP_TIMEOUT"; then
-  echo "FAIL: instance A did not respond on /v1/models within ${P2P_STARTUP_TIMEOUT}s" >&2
-  echo "       tail of instance_a.log:" >&2
-  tail -30 "$ROOT/instance_a.log" >&2
-  exit 4
-fi
-echo "instance A up $(date)"
+wait_for_models 8000 "$P2P_STARTUP_TIMEOUT" || fail "instance A not ready in ${P2P_STARTUP_TIMEOUT}s" "$ROOT/instance_a.log"
+INSTANCE_A=$(discover_new "") || fail "instance A did not register with the hub" "$ROOT/instance_a.log"
+echo "instance A up — INSTANCE_A=$INSTANCE_A"
 
-echo "launching instance B (port 8002, role=decode)..."
-P2P_PORT=8002 P2P_ROLE=decode P2P_CUDA_VISIBLE_DEVICES="$P2P_B_CUDA_VISIBLE_DEVICES" \
-  bash "$SCRIPT_DIR/launch-instance.sh" \
-  > "$ROOT/instance_b.log" 2>&1 &
+echo "launching instance B (port 8002)..."
+P2P_PORT=8002 P2P_CUDA_VISIBLE_DEVICES="$P2P_B_CUDA_VISIBLE_DEVICES" \
+  bash "$SCRIPT_DIR/launch-instance.sh" > "$ROOT/instance_b.log" 2>&1 &
 disown
-if ! wait_for_models 8002 "$P2P_STARTUP_TIMEOUT"; then
-  echo "FAIL: instance B did not respond on /v1/models within ${P2P_STARTUP_TIMEOUT}s" >&2
-  echo "       tail of instance_b.log:" >&2
-  tail -30 "$ROOT/instance_b.log" >&2
-  exit 4
-fi
-echo "BOTH UP $(date)"
+wait_for_models 8002 "$P2P_STARTUP_TIMEOUT" || fail "instance B not ready in ${P2P_STARTUP_TIMEOUT}s" "$ROOT/instance_b.log"
+INSTANCE_B=$(discover_new "$INSTANCE_A") || fail "instance B did not register with the hub" "$ROOT/instance_b.log"
+echo "BOTH UP — INSTANCE_B=$INSTANCE_B"
 
-# ----------------------------------------------------------------------
-# 3. Discover instance IDs from hub registry.
-#    /v1/peers (no /instance/{id}) returns the full peer list.
-# ----------------------------------------------------------------------
-sleep 3  # let registrations settle
-PEERS=$(curl -sS http://127.0.0.1:8337/v1/peers)
-# Hub keys peers by instance_id (UUID). Both instances are CD-registered
-# (prefill + decode roles), so we can use the CD instances endpoint to
-# pick them out by role.
-CD=$(curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances)
-INSTANCE_A=$(echo "$CD" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["prefill"][0])')
-INSTANCE_B=$(echo "$CD" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["decode"][0])')
-echo "INSTANCE_A=$INSTANCE_A  (port 8000, role=prefill)"
-echo "INSTANCE_B=$INSTANCE_B  (port 8002, role=decode)"
-
-# ----------------------------------------------------------------------
-# 3.5. Pre-warm velo peer relationships via the hub.
-#
-#      pull_from_session opens a velo connection from B to A. Velo's
-#      streaming transport requires `messenger.register_peer(peer)`
-#      ahead of time. With the hub wired as velo's PeerDiscovery (via
-#      `seed_leader_builder_with_hub_discovery` in the leader runtime),
-#      this is just a POST to `core/register_leader` — the leader looks
-#      the peer up via the hub and registers it on its own velo.
-# ----------------------------------------------------------------------
-echo "=== pre-warm velo peer relationships via hub discovery ==="
-for src_dst in "$INSTANCE_B:$INSTANCE_A" "$INSTANCE_A:$INSTANCE_B"; do
-  src=${src_dst%:*}
-  dst=${src_dst#*:}
-  resp=$(curl -m 30 -sS -X POST \
-    "http://127.0.0.1:8337/v1/instances/$src/control/core/register_leader" \
-    -H 'content-type: application/json' \
-    -d "{\"instance_id\":\"$dst\"}")
-  echo "  $src learns peer $dst -> $resp"
-done
-
-# ----------------------------------------------------------------------
-# 4. R1 — issue prompt to instance A.
-#    Prompt needs to produce at least P2P_BLOCKS full G2 blocks. Each
-#    block holds block_size=16 tokens; so we need ≥ P2P_BLOCKS*16 tokens
-#    of ISL. Padding to ~320 tokens to clear 16 full blocks comfortably.
-# ----------------------------------------------------------------------
+# --- 3. R1 → A (warm G2) --------------------------------------------------
 P1="$(python3 -c '
-words = [
-  "The", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog",
-  "while", "the", "sun", "sets", "behind", "the", "ancient", "mountains",
-  "casting", "long", "shadows", "across", "the", "meadow", "where", "wildflowers",
-  "bloom", "in", "vibrant", "colors", "of", "red", "orange", "yellow", "and",
-  "purple", "as", "the", "evening", "breeze", "carries", "the", "scent", "of",
-  "pine", "and", "wet", "earth", "through", "the", "valley", "below", "where",
-  "a", "stream", "winds", "its", "way", "between", "moss", "covered", "stones",
-  "and", "fallen", "logs", "creating", "small", "pools", "of", "clear", "water",
-  "that", "reflect", "the", "fading", "light", "of", "the", "departing", "day",
-  "and", "as", "night", "begins", "to", "fall", "the", "stars", "appear", "one",
-  "by", "one", "in", "the", "deepening", "blue", "sky"
-] * 4
+words = ["The","quick","brown","fox","jumps","over","the","lazy","dog","while","the","sun","sets","behind","the","ancient","mountains","casting","long","shadows","across","the","meadow","where","wildflowers","bloom","in","vibrant","colors","of","red","orange","yellow","and","purple","as","the","evening","breeze","carries","the","scent","of","pine","and","wet","earth","through","the","valley","below","where","a","stream","winds","its","way","between","moss","covered","stones"] * 4
 print(" ".join(words))
 ')"
 
 run_chat_stream() {
-  port="$1"
-  label="$2"
-  prompt="$3"
-  python3 - "$port" "$P2P_MODEL" "$ROOT/${label}-chat-stream.jsonl" "$ROOT/${label}-ttft.json" "$prompt" <<'PY'
-import json
-import sys
-import time
-import urllib.request
-
-port, model, stream_path, metrics_path, prompt = sys.argv[1:6]
-payload = {
-    "model": model,
-    "messages": [{"role": "user", "content": prompt}],
-    "max_tokens": 8,
-    "temperature": 0,
-    "stream": True,
-}
-req = urllib.request.Request(
-    f"http://127.0.0.1:{port}/v1/chat/completions",
-    data=json.dumps(payload).encode(),
-    headers={"content-type": "application/json"},
-    method="POST",
-)
-start = time.perf_counter()
-first_byte = None
-first_token = None
+  local port="$1" label="$2" prompt="$3"
+  python3 - "$port" "$P2P_MODEL" "$ROOT/${label}-chat-stream.jsonl" "$prompt" <<'PY'
+import json, sys, time, urllib.request
+port, model, stream_path, prompt = sys.argv[1:5]
+payload = {"model": model, "messages": [{"role": "user", "content": prompt}],
+           "max_tokens": 8, "temperature": 0, "stream": True}
+req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
+    data=json.dumps(payload).encode(), headers={"content-type": "application/json"}, method="POST")
 chunks = 0
-content_chars = 0
 with urllib.request.urlopen(req, timeout=120) as resp, open(stream_path, "w") as out:
     for raw in resp:
-        now = time.perf_counter()
-        if first_byte is None:
-            first_byte = now
         line = raw.decode("utf-8", errors="replace").strip()
         if not line:
             continue
         out.write(line + "\n")
-        out.flush()
-        if not line.startswith("data: "):
-            continue
-        data = line[len("data: "):]
-        if data == "[DONE]":
-            break
-        chunks += 1
-        obj = json.loads(data)
-        text = obj["choices"][0].get("delta", {}).get("content") or ""
-        if text and first_token is None:
-            first_token = now
-        content_chars += len(text)
-end = time.perf_counter()
-metrics = {
-    "model": model,
-    "endpoint_type": "chat",
-    "streaming": True,
-    "ttfb_seconds": None if first_byte is None else first_byte - start,
-    "ttft_seconds": None if first_token is None else first_token - start,
-    "total_seconds": end - start,
-    "chunks": chunks,
-    "content_chars": content_chars,
-}
-with open(metrics_path, "w") as f:
-    json.dump(metrics, f, indent=2, sort_keys=True)
-    f.write("\n")
-print(json.dumps(metrics, sort_keys=True))
+        if line.startswith("data: ") and line[6:] != "[DONE]":
+            chunks += 1
+print(json.dumps({"chunks": chunks}))
 PY
 }
 
-echo "=== R1: POST /v1/chat/completions stream=true to instance A (port 8000) ==="
-R1=$(run_chat_stream 8000 r1 "$P1")
-echo "$R1" | head -c 300; echo
+echo "=== R1: chat stream to instance A (8000) ==="
+run_chat_stream 8000 r1 "$P1" | head -c 200; echo
+sleep 3  # let offload finish + audit flush
 
-# ----------------------------------------------------------------------
-# 5. Wait for offload and scrape audit log on A.
-#    The kvbm_engine offload pipeline emits
-#      kvbm_audit: event="offload_register_complete" src=... dst=...G2... sequence_hashes=...
-#    on every batch register into G2. The full sequence_hashes line is a
-#    comma-separated list of stringified PositionalLineageHash values.
-# ----------------------------------------------------------------------
-sleep 3  # let offload finish + audit lines flush
-
-# Find audit events where dst is G2. Strip ANSI escapes first because
-# tracing_subscriber colorizes by default and that interleaves bytes
-# between literal field characters, breaking naive greps.
-HASH_LINE=$(sed 's/\x1b\[[0-9;]*m//g' "$ROOT/instance_a.log" \
-            | grep -a 'kvbm_audit.*event="offload_register_complete"' \
-            | grep -aE 'dst="[^"]*::G2"' \
-            | tail -1 || true)
-
-if [ -z "$HASH_LINE" ]; then
-  echo "FAIL: no offload_register_complete audit event with dst=G2 found in instance_a.log" >&2
-  echo "       (this means R1 didn't trigger G2 offload, or the audit emit didn't fire)" >&2
-  echo "       grep heads up:" >&2
-  sed 's/\x1b\[[0-9;]*m//g' "$ROOT/instance_a.log" | grep -a 'kvbm_audit' | head -10 >&2 || true
-  exit 2
-fi
-echo "audit line: $HASH_LINE" | head -c 500; echo
-
-# Extract sequence_hashes_hex — 32-hex-char u128s separated by commas
-# (audit emit at lib/kvbm-engine/src/offload/pipeline.rs uses
-# {:032x} format). The field is quoted because tracing renders String
-# fields via Debug by default.
-HASHES_RAW=$(echo "$HASH_LINE" | sed -nE 's/.*sequence_hashes_hex="([^"]+)".*/\1/p')
-if [ -z "$HASHES_RAW" ]; then
-  echo "FAIL: could not parse sequence_hashes_hex field from audit line" >&2
-  exit 2
-fi
-HASH_COUNT=$(echo "$HASHES_RAW" | tr ',' '\n' | wc -l | tr -d ' ')
-echo "extracted $HASH_COUNT hash(es) from R1 G2 offload"
-
-if [ "$HASH_COUNT" -lt 1 ]; then
-  echo "FAIL: zero hashes extracted" >&2
-  exit 2
-fi
-
-# Build JSON payload of hashes for open_session. Each hex string is the
-# big-endian u128 representation; the hub deserializes SequenceHash from
-# a 16-element u8 sequence (see lib/tokens/src/lib.rs:140 — u128::from_be_bytes).
-# Decode hex → 16 bytes → JSON array of u8.
-HASHES_JSON=$(echo "$HASHES_RAW" | python3 -c '
-import json, sys
-parts = [p.strip() for p in sys.stdin.read().split(",") if p.strip()]
-arrs = []
-for p in parts:
-    if len(p) != 32:
-        raise SystemExit(f"bad hash hex length: {len(p)} (want 32) in {p!r}")
-    arrs.append(list(bytes.fromhex(p)))
-print(json.dumps(arrs))
-')
-echo "hashes JSON sample (first hash): $(echo "$HASHES_JSON" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0])')"
-
-# ----------------------------------------------------------------------
-# 6. open_session on A.  find_mode=sync so we get the matched set inline.
-# ----------------------------------------------------------------------
-echo "=== open_session on A ==="
-OPEN_REQ=$(python3 -c '
-import json, sys
-print(json.dumps({
-  "sequence_hashes": json.loads(sys.argv[1]),
-  "search_mode": "prefix",
-  "find_mode":   "sync"
-}))
-' "$HASHES_JSON")
-OPEN_RESP=$(curl -m 30 -sS -X POST \
-  "http://127.0.0.1:8337/v1/instances/$INSTANCE_A/control/transfer/open_session" \
-  -H 'content-type: application/json' \
-  -d "$OPEN_REQ")
-echo "open_session response: $(echo "$OPEN_RESP" | head -c 500)"
-
-RESULT=$(echo "$OPEN_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("result","?"))')
-if [ "$RESULT" = "no_blocks_found" ]; then
-  echo "FAIL: open_session reports no_blocks_found — A's G2 doesn't have the hashes we extracted from its own audit log" >&2
-  exit 3
-fi
-
-# Extract capability + committed list.
-SESSION_ID=$(echo "$OPEN_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["capability"]["session_id"])')
-COMMITTED_COUNT=$(echo "$OPEN_RESP" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("committed", [])))')
-echo "session_id=$SESSION_ID  committed=$COMMITTED_COUNT block(s)"
-
-# ----------------------------------------------------------------------
-# 7. pull_from_session on B.  Pass capability.endpoint through so B
-#    doesn't need a separate hub lookup.
-# ----------------------------------------------------------------------
-echo "=== pull_from_session on B ==="
-PULL_REQ=$(echo "$OPEN_RESP" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-cap = d["capability"]
-print(json.dumps({
-  "session_id":         cap["session_id"],
-  "source_instance_id": cap["instance_id"],
-  "endpoint":           cap["endpoint"]
-}))
-')
-PULL_RESP=$(curl -m 120 -sS -X POST \
-  "http://127.0.0.1:8337/v1/instances/$INSTANCE_B/control/transfer/pull_from_session" \
-  -H 'content-type: application/json' \
-  -d "$PULL_REQ")
-echo "pull_from_session response: $(echo "$PULL_RESP" | head -c 500)"
-
-PULLED_COUNT=$(echo "$PULL_RESP" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("pulled", [])))')
-echo "pulled $PULLED_COUNT block(s) into B's G2"
-
-# Hard assertion: the pull must have transferred something. An empty
-# `pulled` list means the session failed (handshake, attach, or transport)
-# even if curl returned 200.
-if [ "$PULLED_COUNT" -lt 1 ]; then
-  echo "FAIL: pull_from_session returned 0 blocks (expected at least 1)" >&2
-  echo "       full pull response:" >&2
-  echo "$PULL_RESP" >&2
-  exit 4
-fi
-
-# Stricter assertion: every committed block should have been pulled. A
-# partial pull means the session ended early or the puller dropped blocks.
-if [ "$PULLED_COUNT" -ne "$COMMITTED_COUNT" ]; then
-  echo "FAIL: partial pull — pulled=$PULLED_COUNT but committed=$COMMITTED_COUNT" >&2
-  exit 4
-fi
-
-# ----------------------------------------------------------------------
-# 8. close_session on A.
-# ----------------------------------------------------------------------
-echo "=== close_session on A ==="
-CLOSE_RESP=$(curl -m 30 -sS -X POST \
-  "http://127.0.0.1:8337/v1/instances/$INSTANCE_A/control/transfer/close_session" \
-  -H 'content-type: application/json' \
-  -d "$(python3 -c 'import json,sys; print(json.dumps({"session_id": sys.argv[1]}))' "$SESSION_ID")")
-echo "close_session response: $CLOSE_RESP"
-
-# ----------------------------------------------------------------------
-# 9. R2 — same prompt to instance B. Expect G2 cache hit.
-# ----------------------------------------------------------------------
-echo "=== R2: POST /v1/chat/completions stream=true to instance B (port 8002) ==="
-R2=$(run_chat_stream 8002 r2 "$P1")
-echo "$R2" | head -c 300; echo
-
-sleep 3
-
-# ----------------------------------------------------------------------
-# 10. Validation report.
-# ----------------------------------------------------------------------
-echo
-echo "================================================================"
-echo "  P2P smoke validation report  (trace at $ROOT/trace.html)"
-echo "================================================================"
-echo
-echo "-- R1 audit: G1→G2 offload register on A --"
-sed 's/\x1b\[[0-9;]*m//g' "$ROOT/instance_a.log" \
-  | grep -a 'kvbm_audit.*event="offload_register_complete"' | head -5
-echo
-echo "-- pull confirmation: B's audit for incoming G2 register --"
-sed 's/\x1b\[[0-9;]*m//g' "$ROOT/instance_b.log" \
-  | grep -a 'kvbm_audit.*event="offload_register_complete"' | head -5
-echo
-echo "-- R2 cache hit on B (expect Host rate > 0%) --"
-R2_CACHE_HIT_LINE=$(sed 's/\x1b\[[0-9;]*m//g' "$ROOT/instance_b.log" \
-  | grep -aE "Cache Hit Rates - Host: " | tail -1 || true)
-echo "$R2_CACHE_HIT_LINE"
-
-# Hard assertion: R2 must show a non-zero Host (G2) cache hit. The
-# whole point of the smoke is to prove the pulled blocks are USABLE —
-# not just present. Parse `Host: XX.X%` and require > 0.
-HOST_HIT_PCT=$(echo "$R2_CACHE_HIT_LINE" \
-  | sed -nE 's/.*Host:[[:space:]]*([0-9.]+)%.*/\1/p' \
-  | head -1)
-if [ -z "$HOST_HIT_PCT" ]; then
-  echo "FAIL: could not parse R2 Host cache hit rate from instance_b.log" >&2
-  echo "       last 20 Cache Hit Rates lines:" >&2
-  sed 's/\x1b\[[0-9;]*m//g' "$ROOT/instance_b.log" \
-    | grep -aE "Cache Hit Rates" | tail -20 >&2
-  exit 5
-fi
-# bash arithmetic only handles integers; compare via awk.
-if awk -v p="$HOST_HIT_PCT" 'BEGIN { exit (p+0 > 0) ? 0 : 1 }'; then
-  echo "  -> Host G2 hit rate = ${HOST_HIT_PCT}% (assertion passed)"
-else
-  echo "FAIL: R2 Host G2 hit rate was 0% — pulled blocks did not serve R2" >&2
-  echo "       this means the blocks are in B's G2 metadata but the actual" >&2
-  echo "       KV bytes are absent or unusable for inference reuse" >&2
-  exit 5
-fi
-
-echo
-echo "-- ERRORs across logs --"
-for s in hub instance_a instance_b; do
-  cnt=$(grep -aE 'ERROR' "$ROOT/$s.log" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
-        | grep -v "kvbm_audit\|UCX\|invalid configuration\|kernel_config" | wc -l)
-  echo "  $s.log: $cnt error lines"
+# --- 4. discover A's offloaded G2 block hashes via the hub index ----------
+# After R1, A published its G2 blocks to the indexer. Read them back as decimal
+# `hash_u128` (exactly what `kvbmctl p2p pin --hashes` wants). Only A has run
+# inference so far, so every indexed block is A's. Poll until blocks appear
+# (ZMQ ingest is async) or time out.
+INDEXER="$HUB1337/v1/features/indexer"
+collect_hashes() {
+  python3 - "$INDEXER" "${P2P_MAX_MODEL_LEN:-1024}" <<'PY'
+import json, sys, urllib.request
+base, max_len = sys.argv[1], int(sys.argv[2])
+hashes = []
+for pos in range(0, max_len // 16 + 1):
+    try:
+        with urllib.request.urlopen(f"{base}/hashes/by_position/{pos}", timeout=5) as r:
+            d = json.load(r)
+    except Exception:
+        break
+    ents = d.get("entries", [])
+    if not ents:
+        if pos > 0:   # contiguous prefix — stop at the first gap past position 0
+            break
+        continue
+    for e in ents:
+        hashes.append(e["hash_u128"])
+seen, out = set(), []
+for h in hashes:
+    if h not in seen:
+        seen.add(h); out.append(h)
+print(",".join(out))
+PY
+}
+DECIMAL_CSV=""
+hash_deadline=$(( $(date +%s) + 30 ))
+while [ "$(date +%s)" -lt "$hash_deadline" ]; do
+  DECIMAL_CSV=$(collect_hashes)
+  [ -n "$DECIMAL_CSV" ] && break
+  sleep 2
 done
+[ -n "$DECIMAL_CSV" ] || fail "no blocks appeared in the hub index after R1 (A didn't offload/publish?)" "$ROOT/instance_a.log"
+HASH_COUNT=$(echo "$DECIMAL_CSV" | tr ',' '\n' | grep -c .)
+echo "discovered $HASH_COUNT G2 block hash(es) from A via the hub index"
 
-# Render HTML.
-if [ -x "$SKILL_TRACE/p2p-trace.py" ]; then
-    python3 "$SKILL_TRACE/p2p-trace.py" "$ROOT"
-    echo
-    echo "Open: file://$ROOT/trace.html"
-fi
+# --- 5. pin on A (kvbmctl p2p pin = open_session sync/prefix) -------------
+echo "=== kvbmctl p2p pin on A ==="
+PIN_RESP=$("$KVBMCTL" p2p pin --instance-id "$INSTANCE_A" --hashes "$DECIMAL_CSV") \
+  || fail "kvbmctl p2p pin failed"
+echo "pin response: $(echo "$PIN_RESP" | head -c 400)"
+SESSION_ID=$(echo "$PIN_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
+COMMITTED=$(echo "$PIN_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["committed_count"])')
+ENDPOINT=$(echo "$PIN_RESP" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["endpoint"]))')
+echo "session_id=$SESSION_ID committed=$COMMITTED"
+[ "$COMMITTED" -ge 1 ] || fail "pin committed 0 blocks (A's G2 lacks the hashes from its own audit?)"
+
+# --- 6. pull A→B (kvbmctl p2p pull auto-registers the peer, then pulls) ----
+echo "=== kvbmctl p2p pull A→B ==="
+PULL_RESP=$("$KVBMCTL" p2p pull --from "$INSTANCE_A" --to "$INSTANCE_B" \
+  --session-id "$SESSION_ID" --endpoint "$ENDPOINT") \
+  || { "$KVBMCTL" p2p unpin --instance-id "$INSTANCE_A" --session-id "$SESSION_ID" >/dev/null 2>&1 || true; fail "kvbmctl p2p pull failed"; }
+echo "pull response: $(echo "$PULL_RESP" | head -c 400)"
+PULLED=$(echo "$PULL_RESP" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("pulled", [])))')
+echo "pulled $PULLED block(s) into B's G2"
+
+# --- 7. unpin on A (close_session) ----------------------------------------
+echo "=== kvbmctl p2p unpin on A ==="
+"$KVBMCTL" p2p unpin --instance-id "$INSTANCE_A" --session-id "$SESSION_ID" || true
+
+# Hard assertions on the transfer.
+[ "$PULLED" -ge 1 ] || fail "pull returned 0 blocks (session/attach/transport failure)"
+[ "$PULLED" -eq "$COMMITTED" ] || fail "partial pull — pulled=$PULLED committed=$COMMITTED"
+
+# --- 8. verify the pulled blocks landed in B's G2 (via the hub index) ------
+# B runs the indexer feature too, so when the pull registers blocks into B's G2
+# the block-registry EventsManager publishes them and the index lists B as a
+# co-owner. This proves the transfer populated B's G2 with real blocks WITHOUT
+# relying on the Rust cache-hit log (which the EngineCore subprocess does not
+# surface in this environment).
+B_U128=$(python3 -c 'import uuid,sys; print(uuid.UUID(sys.argv[1]).int)' "$INSTANCE_B")
+FIRST_HASH=$(echo "$DECIMAL_CSV" | cut -d, -f1)
+echo "=== verify B ($B_U128) owns pulled block $FIRST_HASH in the index ==="
+owners_of() {
+  python3 - "$INDEXER" "$1" <<'PY'
+import json, sys, urllib.request
+base, h = sys.argv[1], sys.argv[2]
+body = json.dumps({"hashes": [list(int(h).to_bytes(16, "big"))]}).encode()
+req = urllib.request.Request(f"{base}/query", data=body,
+    headers={"content-type": "application/json"}, method="POST")
+try:
+    with urllib.request.urlopen(req, timeout=5) as r:
+        d = json.load(r)
+except Exception:
+    print(""); raise SystemExit
+hit = d.get("hit") or {}
+print(",".join(hit.get("instances", [])))
+PY
+}
+B_OWNS=0
+v_deadline=$(( $(date +%s) + 30 ))
+while [ "$(date +%s)" -lt "$v_deadline" ]; do
+  OWNERS=$(owners_of "$FIRST_HASH")
+  echo "  owners: ${OWNERS:-<none>}"
+  if echo "$OWNERS" | tr ',' '\n' | grep -qxF "$B_U128"; then B_OWNS=1; break; fi
+  sleep 2
+done
+[ "$B_OWNS" -eq 1 ] || fail "after pull, B ($B_U128) is not an index owner of the pulled block (pull didn't populate B's G2?)" "$ROOT/instance_b.log"
+echo "  -> B owns the pulled block in the index (transfer populated B's G2)"
+
+# --- 9. R2 → B (same prompt; B serves from its now-populated G2) -----------
+echo "=== R2: chat stream to instance B (8002) ==="
+run_chat_stream 8002 r2 "$P1" | head -c 200; echo
 
 echo
-echo "p2p-smoke PASS: pulled=$PULLED_COUNT (of $COMMITTED_COUNT committed, $HASH_COUNT requested); R2 Host hit=${HOST_HIT_PCT}%"
+echo "p2p-smoke PASS: pin/pull/unpin via kvbmctl moved $PULLED block(s) (of $COMMITTED committed, $HASH_COUNT requested) A→B; index confirms B now holds the pulled blocks"

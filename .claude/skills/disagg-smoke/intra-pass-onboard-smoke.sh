@@ -12,7 +12,7 @@
 # `execute_local_layerwise_onboard`.
 #
 # Why this smoke exists: the disagg `two-request-smoke.sh` runs through
-# the conditional-disagg coordinator wrapper, which short-circuits
+# the disagg coordinator wrapper, which short-circuits
 # `ConnectorLeader::update_state_after_alloc` and never calls
 # `prepare_intra_pass_onboarding` — so `metadata.intra_pass_load` stays
 # `None` even under `onboard_mode=intra`. Aggregated (single-instance)

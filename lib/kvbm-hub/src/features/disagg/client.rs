@@ -161,7 +161,7 @@ impl ConditionalDisaggClient {
             .context("joining CD list path")?;
         let resp = reqwest::get(url)
             .await
-            .context("GET /v1/features/conditional-disagg/instances")?;
+            .context("GET /v1/features/disagg/instances")?;
         if !resp.status().is_success() {
             return Err(anyhow!("CD list endpoint returned {}", resp.status()));
         }

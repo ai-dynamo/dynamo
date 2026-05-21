@@ -1,12 +1,12 @@
 ---
 name: run-vllm-qwen-pd
-description: Launch a single Qwen3-0.6B vLLM instance wired to KVBM DynamoConnector with a conditional-disagg role (prefill or decode). Sized small so two instances coexist on GPU 0.
+description: Launch a single Qwen3-0.6B vLLM instance wired to KVBM DynamoConnector with a disagg role (prefill or decode). Sized small so two instances coexist on GPU 0.
 ---
 
 # Skill: Run Qwen3-0.6B vLLM instance (P or D)
 
 Print (and optionally execute) the invocation that starts ONE
-Qwen3-0.6B vLLM in a conditional-disagg role. For the full P+D bring-up
+Qwen3-0.6B vLLM in a disagg role. For the full P+D bring-up
 including the hub and verification, prefer `/disagg-bringup` — this
 skill is the single-instance building block.
 

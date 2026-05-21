@@ -143,7 +143,7 @@ pub struct KvbmConfig {
     /// Connector→hub configuration. The sole way the connector reaches a
     /// `kvbm-hub`. `None` = no hub features (normal hub-less connector work);
     /// the hub is currently required for `indexer`, `p2p`, and
-    /// `conditional_disagg`.
+    /// `disagg`.
     #[validate(nested)]
     #[serde(default)]
     pub hub: Option<LeaderHubConfig>,
@@ -783,7 +783,7 @@ mod tests {
         temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH"], || {
             let json = r#"{
                 "leader": {
-                    "hub": { "url": "http://127.0.0.1:1337", "features": ["conditional_disagg"] },
+                    "hub": { "url": "http://127.0.0.1:1337", "features": ["disagg"] },
                     "disagg": { "role": "prefill" }
                 },
                 "worker": {}
@@ -794,7 +794,7 @@ mod tests {
             assert_eq!(disagg.role, DisaggregationRole::Prefill);
             let hub = leader_cfg.hub.expect("leader should have hub config");
             assert_eq!(hub.url, "http://127.0.0.1:1337");
-            assert_eq!(hub.features, vec!["conditional_disagg"]);
+            assert_eq!(hub.features, vec!["disagg"]);
 
             // Worker profile should not pick up the leader-only disagg block.
             let worker_cfg = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();

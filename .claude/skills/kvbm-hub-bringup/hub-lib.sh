@@ -61,5 +61,5 @@ kvbm_hub_render_vllm() {
         echo "[kvbm-hub-bringup] kvbmctl missing at $kvbmctl (start-hub.sh builds it)" >&2
         return 1
     fi
-    "$kvbmctl" get config vllm --hub "$hub" --features "$feats" "$@"
+    "$kvbmctl" config vllm --hub "$hub" --features "$feats" "$@"
 }

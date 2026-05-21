@@ -281,7 +281,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 3 — discover instance IDs
 # ---------------------------------------------------------------------------
-INSTS_JSON="$(curl -fsS -m 5 "http://${HUB_API}/v1/features/conditional-disagg/instances" 2>/dev/null || true)"
+INSTS_JSON="$(curl -fsS -m 5 "http://${HUB_API}/v1/features/disagg/instances" 2>/dev/null || true)"
 PREFILL_ID="$(printf '%s' "$INSTS_JSON" | jq -r '.prefill[0] // ""' 2>/dev/null || true)"
 DECODE_ID="$(printf '%s' "$INSTS_JSON" | jq -r '.decode[0] // ""' 2>/dev/null || true)"
 if [[ -z "$PREFILL_ID" || -z "$DECODE_ID" ]]; then

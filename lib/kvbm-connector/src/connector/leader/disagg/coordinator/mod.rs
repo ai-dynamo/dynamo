@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-request state for the unified conditional-disagg coordinator.
+//! Per-request state for the unified disagg coordinator.
 //!
 //! Both the decode side ([`super::decode_leader::DecodeDisaggLeader`])
 //! and the prefill side ([`super::prefill_leader::PrefillDisaggLeader`])

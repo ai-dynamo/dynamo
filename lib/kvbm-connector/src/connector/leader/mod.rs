@@ -33,7 +33,7 @@ pub use request::Request;
 pub use scheduler::{CachedRequestData, NewRequestData, SchedulerOutput};
 pub use slot::{CdOnboardingPayload, FinishedStatus};
 // SlotMatchSplit is defined further down in this file; re-exported here so
-// downstream code (e.g., the conditional-disagg `InnerLeaderShim` trait)
+// downstream code (e.g., the disagg `InnerLeaderShim` trait)
 // can name it.
 
 pub trait ConnectorLeaderInterface: Send + Sync {}
@@ -251,7 +251,7 @@ impl ConnectorLeader {
 
     /// Access the worker clients, if `initialize_async` has completed.
     ///
-    /// Used by the conditional-disagg wrapper to drive
+    /// Used by the disagg wrapper to drive
     /// `mark_onboarding_complete` after a remote-prefill request finishes its
     /// G2 → G1 onboarding. Currently dead in this crate; the call site
     /// lands with the `on_block_sets_added` output-pull wiring.
@@ -643,7 +643,7 @@ impl ConnectorLeader {
 
     /// Read the full token sequence for a slot.
     ///
-    /// Used by the conditional-disagg wrapper to populate
+    /// Used by the disagg wrapper to populate
     /// `RemotePrefillRequest.token_ids` so the prefill peer knows which
     /// tokens to compute.
     #[allow(dead_code)]
@@ -665,7 +665,7 @@ impl ConnectorLeader {
     /// Read the slot's parsed CD transfer params, if any. Returns `None`
     /// when the slot has no metadata or no `kv_transfer_params`.
     ///
-    /// Used by the prefill-side conditional-disagg wrapper to detect
+    /// Used by the prefill-side disagg wrapper to detect
     /// CD-bound requests at GNMT time.
     #[allow(dead_code)]
     pub(crate) fn slot_transfer_params(
@@ -699,7 +699,7 @@ impl ConnectorLeader {
 }
 
 /// Snapshot of a slot's match-side state taken mid-onboard, used by the
-/// conditional-disagg wrapper to split USAA's G1 block_ids into
+/// disagg wrapper to split USAA's G1 block_ids into
 /// `[computed | local_match | remote_prefill]` ranges.
 ///
 /// Methods/fields are `#[allow(dead_code)]` until `decode_usaa` rewrite

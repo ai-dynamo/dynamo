@@ -1036,7 +1036,7 @@ impl RequestSlot {
         self.request.kv_transfer_params()
     }
 
-    /// Parse this slot's `kv_transfer_params` as conditional-disagg
+    /// Parse this slot's `kv_transfer_params` as disagg
     /// transfer params. `Ok(None)` when no metadata / no params present.
     pub fn transfer_params(
         &self,

@@ -8,7 +8,7 @@
 //! shared by the connector, engine, and hub without making any one of those
 //! crates depend on another.
 //!
-//! - [`disagg`] — conditional-disaggregation session/request types.
+//! - [`disagg`] — disaggregation session/request types.
 //! - [`control`] — the public leader control plane: the `ControlReply`
 //!   envelope, per-module request/response types, the `ModuleId` registry,
 //!   and (with `--features client`) the `LeaderControlClient`.

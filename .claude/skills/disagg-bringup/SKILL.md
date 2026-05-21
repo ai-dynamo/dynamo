@@ -6,7 +6,7 @@ description: End-to-end bringup for KVBM conditional disaggregation — kill sta
 # Skill: KVBM Disagg Bringup
 
 Reproduce the validated single-GPU two-instance disagg topology. After
-this completes, `curl http://127.0.0.1:8337/v1/features/conditional-disagg/instances`
+this completes, `curl http://127.0.0.1:8337/v1/features/disagg/instances`
 returns one entry under `prefill` and one under `decode`.
 
 ## Skill assets (in this directory)
@@ -24,7 +24,7 @@ returns one entry under `prefill` and one under `decode`.
 
 Two stale-artifact traps have bitten this bringup; both are now guarded, do not regress them:
 
-1. **Stale hub binary.** `start-hub.sh` runs `cargo build --bin kvbm_hub` (incremental — a no-op when fresh) *before* launching, so it can never run an out-of-date binary. A `test -x $HUB` existence check does **not** catch staleness. The 2026-05-19 incident: a May-15 debug `kvbm_hub` ran against May-19 hub source; the fresh connector's CD registration handshake didn't match the old hub → `Exception: conditional-disagg hub registration failed` in `leader.initialize_workers()` → EngineCore died → the smoke hung on its readiness loop. If you ever pin `KVBM_HUB_BIN` or set `KVBM_HUB_SKIP_BUILD=1`, you own binary freshness yourself. Cheapest post-run check: `ls -l --time-style=+%F target/debug/kvbm_hub` should show *today*.
+1. **Stale hub binary.** `start-hub.sh` runs `cargo build --bin kvbm_hub` (incremental — a no-op when fresh) *before* launching, so it can never run an out-of-date binary. A `test -x $HUB` existence check does **not** catch staleness. The 2026-05-19 incident: a May-15 debug `kvbm_hub` ran against May-19 hub source; the fresh connector's CD registration handshake didn't match the old hub → `Exception: disagg hub registration failed` in `leader.initialize_workers()` → EngineCore died → the smoke hung on its readiness loop. If you ever pin `KVBM_HUB_BIN` or set `KVBM_HUB_SKIP_BUILD=1`, you own binary freshness yourself. Cheapest post-run check: `ls -l --time-style=+%F target/debug/kvbm_hub` should show *today*.
 2. **Wrong/foreign venv.** `launch-{prefill,decode}.sh` honor `KVBM_VENV`
    and default to `<worktree>/.sandbox`. Keep that default or export an
    explicit current venv so you exercise this worktree's kvbm build.
@@ -100,7 +100,7 @@ echo "logs in $LOGS"
 bash "$SKILL/start-hub.sh" "$LOGS/hub.log" &
 HUB_PID=$!
 sleep 2
-curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances
+curl -sS http://127.0.0.1:8337/v1/features/disagg/instances
 # expect: {"prefill":[],"decode":[]}
 ```
 
@@ -124,7 +124,7 @@ done
 ### Step 4 — Verify
 
 ```bash
-curl -sS http://127.0.0.1:8337/v1/features/conditional-disagg/instances | jq
+curl -sS http://127.0.0.1:8337/v1/features/disagg/instances | jq
 
 MODEL=${MODEL:-Qwen/Qwen3-0.6B}
 curl -sS http://127.0.0.1:8001/v1/completions \

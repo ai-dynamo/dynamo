@@ -75,9 +75,9 @@ pub mod paths {
 
     /// List ConditionalDisagg instances, split by role.
     ///
-    /// `GET /v1/features/conditional-disagg/instances`
+    /// `GET /v1/features/disagg/instances`
     /// → [`super::ConditionalDisaggInstancesResponse`]
-    pub const CD_INSTANCES: &str = "/v1/features/conditional-disagg/instances";
+    pub const CD_INSTANCES: &str = "/v1/features/disagg/instances";
 
     /// `GET` connector health (one-shot velo probe + last-heartbeat info).
     pub const CONNECTOR_HEALTH: &str = "/v1/instances/{instance_id}/health";
@@ -224,9 +224,11 @@ pub enum Feature {
     /// place `LayoutCompatPayload` lives on the wire.
     #[serde(rename = "p2p")]
     P2P(P2pConfig),
-    /// The client participates in the ConditionalDisagg feature.
+    /// The client participates in the disagg feature.
     /// Requires `Feature::P2P` to also be present in the same register
-    /// request (CD is a specialisation of P2P).
+    /// request (CD is a specialisation of P2P). The Rust variant keeps its
+    /// `ConditionalDisagg` name; the wire tag + feature label are `"disagg"`.
+    #[serde(rename = "disagg")]
     ConditionalDisagg(ConditionalDisaggConfig),
     /// The client participates in the hub-side KV block index: it publishes
     /// block create/remove events to the ZMQ ingest endpoint advertised in
@@ -265,7 +267,7 @@ impl FeatureKey {
     pub fn as_str(&self) -> &'static str {
         match self {
             FeatureKey::P2P => "p2p",
-            FeatureKey::ConditionalDisagg => "conditional_disagg",
+            FeatureKey::ConditionalDisagg => "disagg",
             FeatureKey::ConnectorControl => "connector_control",
             FeatureKey::Indexer => "indexer",
         }
@@ -275,7 +277,7 @@ impl FeatureKey {
     pub fn from_label(s: &str) -> Option<Self> {
         match s {
             "p2p" => Some(FeatureKey::P2P),
-            "conditional_disagg" => Some(FeatureKey::ConditionalDisagg),
+            "disagg" => Some(FeatureKey::ConditionalDisagg),
             "connector_control" => Some(FeatureKey::ConnectorControl),
             "indexer" => Some(FeatureKey::Indexer),
             _ => None,
@@ -466,7 +468,7 @@ pub enum ConditionalDisaggRole {
     Decode,
 }
 
-/// Response body for `GET /v1/features/conditional-disagg/instances`.
+/// Response body for `GET /v1/features/disagg/instances`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ConditionalDisaggInstancesResponse {
     /// Instance ids currently registered in the Prefill role.
@@ -662,8 +664,8 @@ mod tests {
             role: ConditionalDisaggRole::Decode,
         });
         let json = serde_json::to_string(&f).unwrap();
-        // Adjacently-tagged: {"kind":"conditional_disagg","config":{"role":"decode"}}
-        assert!(json.contains("\"kind\":\"conditional_disagg\""));
+        // Adjacently-tagged: {"kind":"disagg","config":{"role":"decode"}}
+        assert!(json.contains("\"kind\":\"disagg\""));
         assert!(json.contains("\"role\":\"decode\""));
         let back: Feature = serde_json::from_str(&json).unwrap();
         assert_eq!(back, f);
