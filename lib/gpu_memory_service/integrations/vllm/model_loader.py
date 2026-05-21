@@ -10,6 +10,7 @@ processes import from GMS metadata (RO).
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -19,7 +20,10 @@ from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
 )
-from gpu_memory_service.client.torch.module import materialize_module_from_gms
+from gpu_memory_service.client.torch.module import (
+    materialize_module_from_gms,
+    move_tensor_attrs_out_of_gms,
+)
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import (
@@ -30,6 +34,7 @@ from gpu_memory_service.integrations.common.utils import (
 )
 from gpu_memory_service.integrations.vllm.patches import (
     fused_moe_cpu_routing_buffers_during_meta_init,
+    meta_safe_module_to_during_meta_init,
 )
 
 if os.environ.get("MX_ENABLED", "0") == "1":
@@ -218,7 +223,8 @@ def _load_write_mode(
 
     mx_ctx = get_mx_load_context(vllm_config, model_config)
 
-    # Allocate model tensors using GMS memory pool
+    # Keep weight parameters in GMS, then move mutable runtime workspaces out
+    # before publishing the read-only layout.
     with set_default_torch_dtype(model_config.dtype):
         with gms_use_mem_pool("weights", target_device):
             with target_device:
@@ -233,7 +239,20 @@ def _load_write_mode(
                 default_loader.load_weights(model, model_config)
                 process_weights_after_loading(model, model_config, target_device)
 
-            torch.cuda.empty_cache()
+        moved = move_tensor_attrs_out_of_gms(
+            gms_client,
+            model,
+            device_index=target_device.index or 0,
+        )
+        if moved:
+            msg = (
+                f"[GMS] Moved {len(moved)} runtime tensor attrs out of GMS: "
+                f"{moved[:8]}"
+            )
+            logger.info(msg)
+            print(msg, flush=True)
+        gc.collect()
+        torch.cuda.empty_cache()
 
     _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
 
@@ -255,7 +274,10 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     setup_meta_tensor_workaround()
     meta_device = torch.device("meta")
 
-    with fused_moe_cpu_routing_buffers_during_meta_init():
+    with (
+        fused_moe_cpu_routing_buffers_during_meta_init(),
+        meta_safe_module_to_during_meta_init(),
+    ):
         with set_default_torch_dtype(model_config.dtype):
             with meta_device:
                 model = initialize_model(

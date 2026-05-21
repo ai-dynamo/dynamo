@@ -6,8 +6,7 @@
 Patches:
   - MemorySnapshot.measure: adds GMS-committed bytes to free_memory in RO mode.
   - FusedMoE routing-buffer initialization: creates deterministic expert maps
-    on CPU during RO/meta model construction so vLLM construction-time logging
-    and scalar lookups do not touch meta tensors.
+    on CPU during RO/meta model construction.
   - request_memory: bypasses the free>=requested check during deferred-KV init.
   - NixlConnector.register_kv_caches: defers registration during the scratch
     phase and stashes the dict for replay at wake.
@@ -32,11 +31,17 @@ logger = logging.getLogger(__name__)
 _memory_snapshot_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
+_moe_wna16_fake_patched = False
 _fused_moe_patch_lock = threading.Lock()
 _fused_moe_patch_depth = 0
 _fused_moe_layer_module: Any | None = None
 _fused_moe_original_determine_expert_map: Any | None = None
 _fused_moe_determine_expert_map_wrapper: Any | None = None
+_module_to_patch_lock = threading.Lock()
+_module_to_patch_depth = 0
+_module_to_module: Any | None = None
+_module_to_original: Any | None = None
+_module_to_wrapper: Any | None = None
 
 
 # =============================================================================
@@ -90,6 +95,174 @@ def patch_memory_snapshot() -> None:
     logger.info("[GMS Patch] Patched MemorySnapshot.measure")
 
 
+def patch_moe_wna16_marlin_gemm_fake_impl() -> None:
+    """Fix vLLM 0.21.0's stale fake signature for WNA16 Marlin MoE."""
+    global _moe_wna16_fake_patched
+
+    if _moe_wna16_fake_patched:
+        return
+
+    try:
+        import torch
+        from torch.library import register_fake
+
+        import vllm._custom_ops  # noqa: F401
+    except ImportError:
+        logger.debug("[GMS Patch] vLLM custom ops not available")
+        return
+
+    if not hasattr(torch.ops, "_moe_C") or not hasattr(
+        torch.ops._moe_C,
+        "moe_wna16_marlin_gemm",
+    ):
+        logger.debug("[GMS Patch] moe_wna16_marlin_gemm op not available")
+        return
+
+    def fake_impl(
+        input: torch.Tensor,
+        output: torch.Tensor | None,
+        b_qweight: torch.Tensor,
+        b_bias: torch.Tensor | None,
+        b_scales: torch.Tensor,
+        a_scales: torch.Tensor | None,
+        global_scale: torch.Tensor | None,
+        b_qzeros: torch.Tensor | None,
+        g_idx: torch.Tensor | None,
+        perm: torch.Tensor | None,
+        workspace: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_past_padded: torch.Tensor,
+        topk_weights: torch.Tensor,
+        moe_block_size: int,
+        top_k: int,
+        mul_topk_weights: bool,
+        b_q_type: Any,
+        size_m: int,
+        size_n: int,
+        size_k: int,
+        is_k_full: bool,
+        use_atomic_add: bool,
+        use_fp32_reduce: bool,
+        is_zp_float: bool,
+        thread_k: int = -1,
+        thread_n: int = -1,
+        blocks_per_sm: int = -1,
+    ) -> torch.Tensor:
+        del (
+            b_qweight,
+            b_bias,
+            b_scales,
+            a_scales,
+            global_scale,
+            b_qzeros,
+            g_idx,
+            perm,
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_past_padded,
+            topk_weights,
+            moe_block_size,
+            mul_topk_weights,
+            b_q_type,
+            size_k,
+            is_k_full,
+            use_atomic_add,
+            use_fp32_reduce,
+            is_zp_float,
+            thread_k,
+            thread_n,
+            blocks_per_sm,
+        )
+        if output is not None:
+            return output
+        return torch.empty(
+            (size_m * top_k, size_n), dtype=input.dtype, device=input.device
+        )
+
+    @register_fake("_moe_C::moe_wna16_marlin_gemm", allow_override=True)
+    def moe_wna16_marlin_gemm_fake(
+        input: torch.Tensor,
+        output: torch.Tensor | None,
+        b_qweight: torch.Tensor,
+        b_bias: torch.Tensor | None,
+        b_scales: torch.Tensor,
+        a_scales: torch.Tensor | None,
+        global_scale: torch.Tensor | None,
+        b_qzeros: torch.Tensor | None,
+        g_idx: torch.Tensor | None,
+        perm: torch.Tensor | None,
+        workspace: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_past_padded: torch.Tensor,
+        topk_weights: torch.Tensor,
+        moe_block_size: int,
+        top_k: int,
+        mul_topk_weights: bool,
+        b_q_type: Any,
+        size_m: int,
+        size_n: int,
+        size_k: int,
+        is_k_full: bool,
+        use_atomic_add: bool,
+        use_fp32_reduce: bool,
+        is_zp_float: bool,
+        thread_k: int = -1,
+        thread_n: int = -1,
+        blocks_per_sm: int = -1,
+    ) -> torch.Tensor:
+        return fake_impl(
+            input,
+            output,
+            b_qweight,
+            b_bias,
+            b_scales,
+            a_scales,
+            global_scale,
+            b_qzeros,
+            g_idx,
+            perm,
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_past_padded,
+            topk_weights,
+            moe_block_size,
+            top_k,
+            mul_topk_weights,
+            b_q_type,
+            size_m,
+            size_n,
+            size_k,
+            is_k_full,
+            use_atomic_add,
+            use_fp32_reduce,
+            is_zp_float,
+            thread_k,
+            thread_n,
+            blocks_per_sm,
+        )
+
+    try:
+        from torch._library.fake_impl import Kernel
+        from torch._library.simple_registry import singleton
+
+        entry = singleton.find("_moe_C::moe_wna16_marlin_gemm")
+        if len(entry.fake_impl.kernels) > 1:
+            entry.fake_impl.kernels[:] = [
+                Kernel(fake_impl, "[GMS] moe_wna16_marlin_gemm fake override")
+            ]
+    except Exception:
+        logger.debug(
+            "[GMS Patch] Could not prune stale WNA16 fake impls", exc_info=True
+        )
+
+    _moe_wna16_fake_patched = True
+    logger.info("[GMS Patch] Patched moe_wna16_marlin_gemm fake impl")
+
+
 # =============================================================================
 # Read-only/meta model construction helpers
 # =============================================================================
@@ -97,32 +270,14 @@ def patch_memory_snapshot() -> None:
 
 @contextmanager
 def fused_moe_cpu_routing_buffers_during_meta_init() -> Iterator[None]:
-    """Create vLLM FusedMoE expert maps on CPU during GMS RO meta init.
+    """Keep vLLM FusedMoE expert maps off meta tensors during GMS RO load.
 
-    GMS read-only loading constructs a vLLM module tree on ``torch.device("meta")``
-    and then replaces tensors from the committed GMS layout.  vLLM's FusedMoE
-    constructor currently also creates ``_expert_map`` in that default-device
-    context, then immediately formats/logs it via ``Tensor.item()``.  ``item()``
-    is invalid for meta tensors, so standby/shadow MoE engines can fail before
-    GMS has a chance to materialize the buffers.
+    vLLM builds ``_expert_map`` on the default device and immediately reads it
+    with ``Tensor.item()``. During GMS read-only loading the default device is
+    ``meta``, so construct this small deterministic buffer on CPU until GMS
+    materializes the saved CUDA buffers.
 
-    While constructing the read-only meta model, force vLLM's
-    ``determine_expert_map`` helper to allocate this small deterministic expert
-    map on CPU.  This also makes ``update_expert_map`` meta-safe if vLLM calls it
-    during post-processing.  After construction, ``materialize_module_from_gms``
-    replaces buffers saved by the writer with CUDA copies from the committed
-    layout.
-
-    Note that optional round-robin routing tables are created by vLLM from
-    ``_expert_map.device`` and are not read with ``item()`` during construction;
-    with this patch they may be CPU placeholders during meta init, then are
-    replaced by their CUDA writer copies when present in GMS metadata.
-
-    TODO: Replace this scoped monkey-patch with an upstream vLLM hook/meta-safe
-    initialization path.  Ideally vLLM would either make
-    ``get_compressed_expert_map``/construction-time scalar reads meta-aware or
-    expose a first-class way for meta-loaders to choose the device for
-    deterministic non-parameter routing buffers.
+    TODO: replace with an upstream vLLM meta-safe initialization hook.
     """
     try:
         import torch
@@ -171,6 +326,89 @@ def fused_moe_cpu_routing_buffers_during_meta_init() -> Iterator[None]:
                 _fused_moe_layer_module = None
                 _fused_moe_original_determine_expert_map = None
                 _fused_moe_determine_expert_map_wrapper = None
+
+
+@contextmanager
+def meta_safe_module_to_during_meta_init() -> Iterator[None]:
+    """Keep meta tensors on meta when constructors call ``Module.to(cuda)``."""
+    try:
+        import torch
+    except ImportError:
+        yield
+        return
+
+    def has_meta_tensors(module):
+        return any(
+            getattr(tensor, "is_meta", False)
+            for tensor in module.parameters(recurse=True)
+        ) or any(
+            getattr(tensor, "is_meta", False) for tensor in module.buffers(recurse=True)
+        )
+
+    global _module_to_module
+    global _module_to_original
+    global _module_to_patch_depth
+    global _module_to_wrapper
+
+    with _module_to_patch_lock:
+        if _module_to_patch_depth == 0:
+            _module_to_module = torch.nn.Module
+            _module_to_original = torch.nn.Module.to
+
+            def meta_safe_to(self, *args, **kwargs):
+                assert _module_to_original is not None
+                try:
+                    device, dtype, non_blocking, memory_format = (
+                        torch._C._nn._parse_to(*args, **kwargs)
+                    )
+                except Exception:
+                    return _module_to_original(self, *args, **kwargs)
+
+                if (
+                    device is None
+                    or device.type == "meta"
+                    or not has_meta_tensors(self)
+                ):
+                    return _module_to_original(self, *args, **kwargs)
+
+                def convert(tensor):
+                    target_device = torch.device("meta") if tensor.is_meta else device
+                    target_dtype = (
+                        dtype
+                        if dtype is not None
+                        and (tensor.is_floating_point() or tensor.is_complex())
+                        else None
+                    )
+                    if memory_format is not None and tensor.dim() in (4, 5):
+                        return tensor.to(
+                            target_device,
+                            target_dtype,
+                            non_blocking,
+                            memory_format=memory_format,
+                        )
+                    return tensor.to(target_device, target_dtype, non_blocking)
+
+                return self._apply(convert)
+
+            _module_to_wrapper = meta_safe_to
+            torch.nn.Module.to = meta_safe_to
+
+        _module_to_patch_depth += 1
+
+    try:
+        yield
+    finally:
+        with _module_to_patch_lock:
+            _module_to_patch_depth -= 1
+            if _module_to_patch_depth == 0:
+                if (
+                    _module_to_module is not None
+                    and _module_to_module.to is _module_to_wrapper
+                ):
+                    _module_to_module.to = _module_to_original
+                _module_to_module = None
+                _module_to_original = None
+                _module_to_wrapper = None
 
 
 # =============================================================================

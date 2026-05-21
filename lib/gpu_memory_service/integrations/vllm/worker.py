@@ -44,9 +44,11 @@ from gpu_memory_service.integrations.vllm.model_loader import (
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
+    patch_moe_wna16_marlin_gemm_fake_impl,
 )
 
 logger = logging.getLogger(__name__)
+_GIB = 1 << 30
 
 # Trigger model loader registration and utility patches on import
 register_gms_loader()
@@ -54,6 +56,7 @@ register_gms_loader()
 # Apply core utility patches (always needed for GMS)
 patch_empty_cache()
 patch_memory_snapshot()
+patch_moe_wna16_marlin_gemm_fake_impl()
 
 # Apply scratch-KV patches when DYN_GMS_SCRATCH_KV_ENABLED is set
 apply_scratch_kv_patches()
@@ -119,6 +122,49 @@ def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
     return adjusted_local_rank
 
 
+def _env_nonnegative_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = int(raw)
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
+    return value
+
+
+def _env_memory_gib(name: str) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return 0
+    value = float(raw)
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
+    return int(value * _GIB)
+
+
+def _scratch_kv_extra_reserve(requested_memory: int) -> int:
+    raw = os.environ.get("DYN_GMS_KV_CACHE_MEMORY_RESERVE_GB")
+    if raw is not None and raw != "":
+        return _env_memory_gib("DYN_GMS_KV_CACHE_MEMORY_RESERVE_GB")
+    if not _shadow_mode_enabled():
+        return 0
+    return min(4 * _GIB, max(1 * _GIB, int(requested_memory * 0.03)))
+
+
+def _shadow_mode_enabled() -> bool:
+    return os.environ.get("DYN_VLLM_GMS_SHADOW_MODE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _cudagraph_peer_count() -> int:
+    default = 1 if _shadow_mode_enabled() else 0
+    return _env_nonnegative_int("DYN_GMS_CUDAGRAPH_PEER_COUNT", default)
+
+
 class GMSWorker(Worker):
     """vLLM Worker subclass with GMS integration."""
 
@@ -152,20 +198,40 @@ class GMSWorker(Worker):
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
 
+    @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """
-        Determine actual available memory for the engine.
-
-        During a failover scenario, this function may be called while there is an active engine colocated on the same device.
-        We want our assessment to ignore the kv cache allocation of the active engine if there is one.
-        """
+        """Size KV cache for GMS scratch-KV failover."""
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
+
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            self.model_runner.profile_run()
+            self.available_kv_cache_memory_bytes = int(kv_cache_memory_bytes)
+            msg = (
+                "[GMS] using manual KV cache memory %.2f GiB "
+                "(kv_cache_memory_bytes)"
+                % (self.available_kv_cache_memory_bytes / _GIB)
+            )
+            logger.info(msg)
+            print(msg, flush=True)
+            return self.available_kv_cache_memory_bytes
 
         torch.cuda.reset_peak_memory_stats()
         self.model_runner.profile_run()
         torch.cuda.synchronize()
         torch_peak = torch.cuda.max_memory_allocated()
+
+        cudagraph_memory_estimate = 0
+        if (
+            not self.model_config.enforce_eager
+            and hasattr(self.model_runner, "profile_cudagraph_memory")
+        ):
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_rocm():
+                cudagraph_memory_estimate = int(
+                    self.model_runner.profile_cudagraph_memory()
+                )
 
         # GMS weights mapped via cuMemMap are invisible to PyTorch's memory
         # stats on RO engines. Add them explicitly. On RW engines, torch_peak
@@ -176,24 +242,49 @@ class GMSWorker(Worker):
         else:
             non_kv_cache_memory = torch_peak
 
-        projected_available = self.requested_memory - non_kv_cache_memory
+        peer_graphs = _cudagraph_peer_count()
+        cudagraph_reserve = cudagraph_memory_estimate * (1 + peer_graphs)
+        extra_reserve = _scratch_kv_extra_reserve(self.requested_memory)
+        projected_available = (
+            self.requested_memory
+            - non_kv_cache_memory
+            - cudagraph_reserve
+            - extra_reserve
+        )
+        if projected_available <= 0:
+            raise ValueError(
+                "GMS scratch-KV memory estimate is non-positive: "
+                f"{projected_available / _GIB:.2f} GiB. "
+                "Reduce gpu_memory_utilization, reduce "
+                "DYN_GMS_CUDAGRAPH_PEER_COUNT, or lower "
+                "DYN_GMS_KV_CACHE_MEMORY_RESERVE_GB."
+            )
+
+        self.non_torch_memory = 0
+        self.peak_activation_memory = max(non_kv_cache_memory - weights_memory, 0)
+        self.cudagraph_memory_estimate = cudagraph_memory_estimate
+        self.available_kv_cache_memory_bytes = int(projected_available)
 
         msg = (
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
-            "torch_peak=%.2f GiB, weights=%.2f GiB)"
+            "torch_peak=%.2f GiB, weights=%.2f GiB, cudagraph=%.2f GiB x%d, "
+            "extra_reserve=%.2f GiB)"
             % (
-                projected_available / (1 << 30),
-                self.requested_memory / (1 << 30),
-                non_kv_cache_memory / (1 << 30),
-                torch_peak / (1 << 30),
-                weights_memory / (1 << 30),
+                self.available_kv_cache_memory_bytes / _GIB,
+                self.requested_memory / _GIB,
+                non_kv_cache_memory / _GIB,
+                torch_peak / _GIB,
+                weights_memory / _GIB,
+                cudagraph_memory_estimate / _GIB,
+                1 + peer_graphs,
+                extra_reserve / _GIB,
             )
         )
         logger.info(msg)
         print(msg, flush=True)
 
-        return int(projected_available)
+        return self.available_kv_cache_memory_bytes
 
     def initialize_from_config(self, kv_cache_config) -> None:
         """Allocate KV cache backing.
