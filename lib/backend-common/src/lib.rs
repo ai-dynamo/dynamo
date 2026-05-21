@@ -37,22 +37,3 @@ pub use error::{BackendError, DynamoError, ErrorType};
 pub use run::run;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};
 
-/// Shape of `dynamo_llm::backend::ExecutionContext`; frontends assign one directly.
-pub type InProcessEngine = std::sync::Arc<
-    dyn dynamo_runtime::pipeline::AsyncEngine<
-            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
-            dynamo_runtime::pipeline::ManyOut<
-                dynamo_runtime::protocols::annotated::Annotated<LLMEngineOutput>,
-            >,
-            dynamo_runtime::pipeline::Error,
-        >,
->;
-
-/// Wrap an [`LLMEngine`] for embedding into a Dynamo frontend
-/// (`InProcessTokens` engine type). Multi-worker deployments use [`run`].
-pub fn wrap_in_process(
-    engine: std::sync::Arc<dyn LLMEngine>,
-    mode: DisaggregationMode,
-) -> InProcessEngine {
-    std::sync::Arc::new(adapter::EngineAdapter::new(engine, mode))
-}

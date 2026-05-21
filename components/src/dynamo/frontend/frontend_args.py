@@ -76,7 +76,6 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     request_plane: str
     event_plane: Optional[str] = None
     chat_processor: str
-    engine: str
     enable_anthropic_api: bool
     strip_anthropic_preamble: bool
     debug_perf: bool
@@ -443,20 +442,6 @@ class FrontendArgGroup(ArgGroup):
                 "parsing, and reasoning parsing."
             ),
             choices=["dynamo", "vllm", "sglang"],
-        )
-
-        add_argument(
-            g,
-            flag_name="--dyn-engine",
-            env_var="DYN_ENGINE",
-            default="dynamic",
-            dest="engine",
-            help=(
-                "Frontend backend. 'dynamic' (default) routes to workers via "
-                "etcd. 'sglang-grpc' embeds the dynamo-sglang-bridge and "
-                "dials a single SGLang `--enable-grpc` server (single-worker)."
-            ),
-            choices=["dynamic", "sglang-grpc"],
         )
 
         add_negatable_bool_argument(
