@@ -31,6 +31,8 @@ from tests.utils.payload_builder import (
     chat_payload_with_logprobs,
     completion_payload_default,
     completion_payload_with_logprobs,
+    embedding_payload,
+    embedding_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
     router_cached_tokens_chat_payload,
@@ -600,6 +602,51 @@ vllm_configs = {
                 temperature=0.0,
                 max_tokens=20,
                 extra_body={"guided_choice": ["red", "blue", "green"]},
+            ),
+        ],
+    ),
+    "embedding_agg": VLLMConfig(
+        name="embedding_agg",
+        directory=vllm_dir,
+        script_name="agg_embed.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            # Qwen3-Embedding-0.6B at float32 = ~2.4 GiB params + vLLM overhead.
+            # Refine after first CI run reports the actual profiled peak.
+            pytest.mark.profiled_vram_gib(5.0),
+            # Pooling models do not use a KV cache, but the test harness still
+            # needs a non-zero allocation budget. Use the minimum vLLM accepts.
+            pytest.mark.requested_vllm_kv_cache_bytes(559_693_824),
+            # Cold model load + vLLM startup + warmup for embedding pooling.
+            # Mirrors SGLang's 300s embedding-test timeout; refine after profiling.
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-Embedding-0.6B",
+        request_payloads=[
+            # Default helper sends two pre-defined inputs.
+            embedding_payload_default(
+                repeat_count=2,
+                expected_response=["Generated 2 embeddings with dimension"],
+            ),
+            # Single string input — exercises the str path in
+            # EmbeddingWorkerHandler.generate.
+            embedding_payload(
+                input_text="Hello, world!",
+                repeat_count=1,
+                expected_response=["Generated 1 embeddings with dimension"],
+            ),
+            # Batched list input — exercises the per-input loop and index
+            # preservation in EmbeddingWorkerHandler._transform_response.
+            embedding_payload(
+                input_text=[
+                    "The quick brown fox jumps over the lazy dog.",
+                    "Machine learning is transforming technology.",
+                    "Natural language processing enables computers to understand text.",
+                ],
+                repeat_count=1,
+                expected_response=["Generated 3 embeddings with dimension"],
             ),
         ],
     ),

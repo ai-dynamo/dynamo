@@ -77,3 +77,19 @@ def decode_arguments(args: Any) -> Any:
         return json.loads(args)
     except (json.JSONDecodeError, TypeError):
         return args
+
+
+def decode_stream_calls(
+    stream_calls: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    calls = []
+    for _, call in sorted(stream_calls.items()):
+        if not call.get("name") and not call.get("arguments"):
+            continue
+        calls.append(
+            {
+                "name": call.get("name") or "",
+                "arguments": decode_arguments(call.get("arguments") or ""),
+            }
+        )
+    return calls

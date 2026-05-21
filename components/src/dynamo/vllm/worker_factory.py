@@ -30,6 +30,7 @@ from .constants import DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
+    EmbeddingWorkerHandler,
     PrefillWorkerHandler,
     get_dp_range_for_worker,
 )
@@ -136,6 +137,16 @@ class WorkerFactory:
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
+        # Embedding worker is selected first because it crosses worker shapes
+        # (pooling AsyncLLM, ModelType.Embedding) rather than being a variant
+        # of decode. Aggregated-only — exclusivity with disagg modes is
+        # enforced earlier in DynamoVllmConfig._validate_embedding_worker_exclusivity.
+        if config.embedding_worker:
+            await self._create_embedding_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
+            return
+
         # NOTE: --benchmark-mode is only supported for prefill/decode workers.
         # The encode worker path does not wire benchmark waiting or
         # the get_perf_metrics endpoint.
@@ -189,6 +200,94 @@ class WorkerFactory:
             )
         except Exception as e:
             logger.error(f"Failed to serve encode worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    async def _create_embedding_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> None:
+        """Initialize an aggregated text-embedding worker.
+
+        Pooling models have no KV cache, no decode phase, and no streamed
+        output, so several pieces of the decode-worker setup are intentionally
+        skipped here:
+
+        - KV-events publisher: no KV cache → nothing to publish.
+        - Forward-pass-metrics relay: relays decode-phase ZMQ metrics; no
+          decode here.
+        - StatLoggerFactory wiring: built around per-batch sampling/decoding
+          stats which the pooling engine does not emit.
+        - InstrumentedScheduler: hard-codes ``pooling_params=None`` (see
+          components/src/dynamo/vllm/instrumented_scheduler.py), which would
+          silently disable the pooling pass. ``setup_vllm_engine`` only
+          installs it when ``--benchmark-mode`` is set, which is rejected
+          for embedding workers via config validation.
+
+          We are deliberately not extending ``--benchmark-mode`` with an
+          ``embed`` choice. That flag exists primarily to expose a worker's
+          capability curve (RPS / p99 vs. concurrency, throughput knee) at
+          startup for capacity planning, engine-arg tuning, and as input to
+          the Dynamo planner's auto-scaling decisions. Decode workloads
+          benefit because they have many interacting knobs (max-num-seqs,
+          chunked prefill, prefill/decode mix). Embedding workloads are
+          essentially ``(batch_size × ISL → latency)`` -- a clean two-axis
+          function -- so the value of in-process self-profiling is much
+          lower than external HTTP load testing, which is what every other
+          embedding-serving stack uses anyway. The single remaining wedge
+          is planner integration: if/when the Dynamo planner needs
+          in-process embedding capability curves to auto-scale embedding
+          fleets, add ``--benchmark-mode embed`` at that point together
+          with the planner's embedding-capability model.
+
+        The engine itself is the standard ``AsyncLLM`` constructed by
+        ``setup_vllm_engine``; pooling vs. generation is selected by the
+        user's ``--runner pooling`` argument flowing through ``engine_args``.
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        factory = StatLoggerFactory(endpoint=generate_endpoint)
+        (
+            engine_client,
+            vllm_config,
+            _default_sampling_params,
+            _prometheus_temp_dir,
+            _component_gauges,
+        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        handler = EmbeddingWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+
+        logger.info("Starting to serve the embedding worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Embedding,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to serve embedding worker endpoint: {e}")
             raise
         finally:
             handler.cleanup()

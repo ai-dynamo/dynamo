@@ -69,7 +69,7 @@ sglang = [
 ]
 
 mocker = [
-    "aiconfigurator>=0.7.0",
+    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@2103aa286a822d112ea83781ad14e3e022b603d9",
 ]
 
 [project.entry-points.pytest11]
@@ -163,6 +163,7 @@ addopts = [
     "--showlocals",
     "--strict-markers",
     "--strict-config",
+    "-p", "no:schemathesis",
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*trtllm_integration*",
