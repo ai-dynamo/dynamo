@@ -37,6 +37,8 @@ White-box helper unit tests of `detect_tool_call_start_*` /
 carry a numbered category since they have no cross-impl analogue and
 exist to pin internal Rust function behavior only.
 
+"Happy path" is used deliberately: it means a valid, well-formed parser flow where the parser should emit the expected calls/text without truncation recovery, malformed-input fallback, unknown-tool handling, or expected errors. If a category or sub-case is the happy case for that axis, the label says so explicitly.
+
 ## Quick reference
 
 ### Parser, batch mode
@@ -45,12 +47,12 @@ Universal behavior contract. Applies to every tool-call parser when
 fed the full model output as a single string.
 
 - **`PARSER.batch.1`** Single tool call — happy path (one complete, well-formed call).
-- **`PARSER.batch.2`** Multiple tool calls — sequential or parallel (2+ in one response).
+- **`PARSER.batch.2`** Multiple tool calls — multi-call happy path, sequential or parallel (2+ complete, well-formed calls in one response).
 - **`PARSER.batch.3`** No tool call (response is text only).
 - **`PARSER.batch.4`** Malformed / partial JSON args (truncated, missing close brace, invalid syntax). Recovery contract is impl-defined; document divergences rather than asserting one truth.
 - **`PARSER.batch.5`** Missing end-token recovery (recover calls when the closing fence is absent due to `max_tokens` / EOS).
-- **`PARSER.batch.6`** Empty args (`arguments={}` / no-arg call).
-- **`PARSER.batch.7`** Complex arg types (nested objects, arrays, bool, number, Unicode / newlines in values).
+- **`PARSER.batch.6`** Empty args — no-arg happy path (`arguments={}` / no-arg call).
+- **`PARSER.batch.7`** Complex arg types — typed-args happy path (nested objects, arrays, bool, number, Unicode / newlines in values).
 - **`PARSER.batch.8`** Normal text interleaved with tool calls.
 - **`PARSER.batch.9`** Empty content / empty `tool_calls` array / null response.
 - **`PARSER.batch.10`** Duplicate tool calls (same name twice, possibly with same args).
@@ -65,10 +67,16 @@ as batch mode, but driven through `parse_streaming_increment(delta)`.
 This requires a separate test harness; case numbers are independent
 of batch.
 
-- **`PARSER.stream.1`** Single tool call across N chunks (any chunk boundary).
-- **`PARSER.stream.2`** Multiple tool calls, each spanning multiple chunks.
+- **`PARSER.stream.1`** Single tool call across N chunks — streaming happy-path family (one complete, well-formed call with any legal chunk boundary).
+- **`PARSER.stream.1.a`** Single complete tool-call payload delivered in one content chunk — one-chunk streaming happy path.
+- **`PARSER.stream.1.b`** Single complete tool call split across parser-significant boundaries — buffering streaming happy path.
+- **`PARSER.stream.2`** Multiple tool calls, each spanning multiple chunks — multi-call streaming happy path.
 - **`PARSER.stream.3`** Partial-token chunking (chunk boundary splits a grammar token mid-string). Partial-token matching must return `keep buffering`, not flush as plain text.
 - **`PARSER.stream.4`** Streaming termination — final chunk arrives with `finish_reason=tool_calls` / EOS; parser flushes any in-flight call.
+- **`PARSER.stream.4.a`** Truncated before tool-call end — non-happy path where arguments are complete but the model omits `tool_call_end` / section end; recovery is implementation-defined and may diverge.
+- **`PARSER.stream.4.b`** Truncated mid-call body — non-happy path where the stream terminates before the in-flight argument payload is complete; recovery is implementation-defined and may diverge.
+
+Stream fixtures may include `delta_token_ids` on each chunk. Text-only chunks are enough for most parser families, but token-ID-dependent streaming parsers (currently vLLM's Harmony / `openai` parser) must record `delta_token_ids`; capture should mark those cases unavailable rather than inventing IDs.
 
 ### Format-conditional (scope narrower than "all parsers")
 
@@ -127,7 +135,7 @@ One complete, well-formed call in the response.
   see `PARSER.fmt.5` for the broader argument-shape contract.
   Reference: vLLM Kimi K2 PR #32768.
 
-## `PARSER.batch.2` — Multiple tool calls (sequential or parallel)
+## `PARSER.batch.2` — Multiple tool calls, multi-call happy path
 
 Two or more calls in one response, in the same block or back-to-back.
 
@@ -238,7 +246,7 @@ Five distinct truncation shapes with different recovery contracts:
   calls remain recoverable while the partial trailing call is dropped,
   preserved as text, or surfaced as an impl-defined error.
 
-## `PARSER.batch.6` — Empty args
+## `PARSER.batch.6` — Empty args, no-arg happy path
 
 Tool call with `arguments={}`, or a no-parameter invoke.
 
@@ -262,7 +270,7 @@ the API but exercise different parser code paths.
   `arguments` key is absent entirely (vs explicit `{}`). Tests that
   the parser treats missing-key as "no args" rather than "invalid".
 
-## `PARSER.batch.7` — Complex argument types
+## `PARSER.batch.7` — Complex argument types, typed-args happy path
 
 Nested objects, arrays, booleans, numbers, mixed types, Unicode
 values, and newlines inside argument values.
@@ -323,9 +331,9 @@ The `b8` column of the cross-impl parity matrix shows broad divergence
 families; Dynamo preserves it). The sub-cases pin which positional
 shape is being exercised so divergences land on a precise row.
 
-- **`PARSER.batch.8.a`** Narration **before** the tool call only —
+- **`PARSER.batch.8.a`** Narration **before** the tool call only — historical interleaved-text happy path.
   model emits text, then a single tool call, then nothing else. Most
-  parsers handle this; it's the historical happy path.
+  parsers handle this.
 - **`PARSER.batch.8.b`** Narration **after** the tool call only —
   model emits the tool call, then trailing text. Common divergence
   point: vLLM and SGLang typically truncate at the wrapper close.
@@ -460,14 +468,19 @@ separator-looking character before the real call separator.
 
 ---
 
-## `PARSER.stream.1` — Single tool call across N chunks
+## `PARSER.stream.1` — Single tool call across N chunks, streaming happy path
 
 One complete tool call delivered across multiple SSE chunks of any
 sizing. Parser incrementally reconstructs the call.
 
 - Applies to every tool-call parser. Dominant production path.
 
-## `PARSER.stream.2` — Multiple tool calls, each across N chunks
+### Sub-cases
+
+- **`PARSER.stream.1.a`** One-chunk streaming happy path. Single complete tool-call payload delivered in one content chunk, with stream termination handled separately. This protects the streaming path's non-buffered happy path, which is easy to regress when the jail only handles accumulated multi-chunk state.
+- **`PARSER.stream.1.b`** Buffering streaming happy path. Single complete tool call split across parser-significant boundaries such as start fence, function name, arguments, and end fence. This is the default buffering happy path for streaming parsers.
+
+## `PARSER.stream.2` — Multiple tool calls, each across N chunks, multi-call streaming happy path
 
 Two or more calls in the response, each spanning multiple chunks.
 Parser must emit each call as its complete invocation lands; must not
@@ -491,6 +504,11 @@ Final chunk arrives with `finish_reason=tool_calls` (or `length` /
 explicitly per `PARSER.batch.5`).
 
 - Applies to every tool-call parser.
+
+### Sub-cases
+
+- **`PARSER.stream.4.a`** Truncated before tool-call end. The model emits a start fence, function name, argument-begin marker, and complete JSON arguments, then terminates before `tool_call_end` / section end. This is a non-happy path: Dynamo currently treats the call as incomplete and emits no tool call, while vLLM/SGLang may recover the call from the complete argument JSON.
+- **`PARSER.stream.4.b`** Truncated mid-call body. The model emits a start fence and begins the argument payload, then terminates before the JSON/value body is complete. This is a non-happy path: parsers may drop the in-flight call, preserve residual markup as normal text, emit an error, or surface a raw partial argument string.
 
 ---
 
@@ -634,7 +652,7 @@ mirrored by `<|channel|>analysis<|message|>...<|end|>` for reasoning.
 The parser must walk the envelope correctly across its legal
 variations:
 
-- **Complete envelope** — all tags present (the happy path).
+- **Complete envelope happy path** — all tags present.
 - **Missing `<|start|>` / assistant prefix** — model output lands
   inside an existing turn.
 - **Missing `<|call|>` (truncation recovery)** — engine hit

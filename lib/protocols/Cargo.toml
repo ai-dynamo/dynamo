@@ -27,6 +27,7 @@ async-openai = { version = "0.34", default-features = false, features = [
     "completion-types",
     "embedding-types",
     "image-types",
+    "realtime-types",
 ] }
 
 # Serialization
