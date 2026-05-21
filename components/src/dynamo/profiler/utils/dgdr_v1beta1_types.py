@@ -253,7 +253,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1".',
+        description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1".',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,

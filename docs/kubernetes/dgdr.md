@@ -42,7 +42,7 @@ metadata:
   name: my-model
 spec:
   model: Qwen/Qwen3-0.6B
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 
 ### Field Reference
