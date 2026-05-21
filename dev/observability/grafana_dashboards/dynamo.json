@@ -58,7 +58,8 @@
               }
             ]
           },
-          "unit": "percent"
+          "unit": "percent",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -128,7 +129,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -205,7 +207,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -279,7 +282,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -354,7 +358,8 @@
               }
             ]
           },
-          "unit": "ms"
+          "unit": "ms",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -428,7 +433,8 @@
               }
             ]
           },
-          "unit": "ms"
+          "unit": "ms",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -498,7 +504,8 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "s",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -612,7 +619,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -715,7 +723,8 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "s",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -883,7 +892,8 @@
               }
             ]
           },
-          "unit": "reqps"
+          "unit": "reqps",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -1049,7 +1059,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -1159,7 +1170,8 @@
               }
             ]
           },
-          "unit": "ms"
+          "unit": "ms",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -1302,7 +1314,8 @@
               }
             ]
           },
-          "unit": "ms"
+          "unit": "ms",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -1445,7 +1458,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -1589,7 +1603,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -1734,7 +1749,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -1892,7 +1908,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -1991,7 +2008,8 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -2094,7 +2112,8 @@
               }
             ]
           },
-          "unit": "percentunit"
+          "unit": "percentunit",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -2226,7 +2245,8 @@
               }
             ]
           },
-          "unit": "ms"
+          "unit": "ms",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -2479,7 +2499,8 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "ops",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -2659,7 +2680,8 @@
               }
             ]
           },
-          "unit": "reqps"
+          "unit": "reqps",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -2780,7 +2802,8 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "s",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -2920,7 +2943,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -2975,7 +2999,10 @@
   "preload": false,
   "refresh": "",
   "schemaVersion": 40,
-  "tags": [],
+  "tags": [
+    "dynamo",
+    "generic"
+  ],
   "templating": {
     "list": [
       {

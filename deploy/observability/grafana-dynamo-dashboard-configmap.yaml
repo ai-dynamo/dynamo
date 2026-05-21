@@ -70,7 +70,8 @@ data:
                   }
                 ]
               },
-              "unit": "percent"
+              "unit": "percent",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -140,7 +141,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -217,7 +219,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -291,7 +294,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -366,7 +370,8 @@ data:
                   }
                 ]
               },
-              "unit": "ms"
+              "unit": "ms",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -440,7 +445,8 @@ data:
                   }
                 ]
               },
-              "unit": "ms"
+              "unit": "ms",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -510,7 +516,8 @@ data:
                   }
                 ]
               },
-              "unit": "s"
+              "unit": "s",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -624,7 +631,8 @@ data:
                     "value": 80
                   }
                 ]
-              }
+              },
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -727,7 +735,8 @@ data:
                   }
                 ]
               },
-              "unit": "s"
+              "unit": "s",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -895,7 +904,8 @@ data:
                   }
                 ]
               },
-              "unit": "reqps"
+              "unit": "reqps",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1061,7 +1071,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1171,7 +1182,8 @@ data:
                   }
                 ]
               },
-              "unit": "ms"
+              "unit": "ms",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1314,7 +1326,8 @@ data:
                   }
                 ]
               },
-              "unit": "ms"
+              "unit": "ms",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1457,7 +1470,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1601,7 +1615,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1746,7 +1761,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -1904,7 +1920,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -2003,7 +2020,8 @@ data:
                   }
                 ]
               },
-              "unit": "short"
+              "unit": "short",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -2106,7 +2124,8 @@ data:
                   }
                 ]
               },
-              "unit": "percentunit"
+              "unit": "percentunit",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -2238,7 +2257,8 @@ data:
                   }
                 ]
               },
-              "unit": "ms"
+              "unit": "ms",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -2491,7 +2511,8 @@ data:
                   }
                 ]
               },
-              "unit": "ops"
+              "unit": "ops",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -2671,7 +2692,8 @@ data:
                   }
                 ]
               },
-              "unit": "reqps"
+              "unit": "reqps",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -2792,7 +2814,8 @@ data:
                   }
                 ]
               },
-              "unit": "s"
+              "unit": "s",
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -2932,7 +2955,8 @@ data:
                     "value": 80
                   }
                 ]
-              }
+              },
+              "noValue": "0"
             },
             "overrides": []
           },
@@ -2987,7 +3011,10 @@ data:
       "preload": false,
       "refresh": "",
       "schemaVersion": 40,
-      "tags": [],
+      "tags": [
+        "dynamo",
+        "generic"
+      ],
       "templating": {
         "list": [
           {
