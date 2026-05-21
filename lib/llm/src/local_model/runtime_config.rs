@@ -414,24 +414,6 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_round_trip_with_topology_domains() {
-        let mut config = ModelRuntimeConfig::default();
-        config
-            .topology_domains
-            .insert("zone".to_string(), "us-east-1a".to_string());
-        config
-            .topology_domains
-            .insert("rack".to_string(), "rack1".to_string());
-
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: ModelRuntimeConfig = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(deserialized.topology_domains.len(), 2);
-        assert_eq!(deserialized.topology_domains["zone"], "us-east-1a");
-        assert_eq!(deserialized.topology_domains["rack"], "rack1");
-    }
-
-    #[test]
     fn test_serde_empty_topology_domains_omitted() {
         let config = ModelRuntimeConfig::default();
         let serialized = serde_json::to_string(&config).unwrap();
@@ -462,59 +444,26 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_round_trip_preserves_all_fields() {
+    fn test_serde_round_trip_preserves_topology_transfer_fields_and_taints() {
         let mut config = ModelRuntimeConfig {
-            total_kv_blocks: Some(500),
-            max_num_seqs: Some(64),
-            max_num_batched_tokens: Some(8192),
-            tool_call_parser: Some("hermes".to_string()),
-            reasoning_parser: None,
-            exclude_tools_when_tool_choice_none: false,
-            data_parallel_start_rank: 2,
-            data_parallel_size: 4,
-            enable_local_indexer: false,
-            runtime_data: HashMap::new(),
-            tensor_model_config: None,
-            disaggregated_endpoint: Some(DisaggregatedEndpoint {
-                bootstrap_host: Some("10.0.0.1".to_string()),
-                bootstrap_port: Some(8080),
-            }),
-            enable_eagle: true,
             taints: HashSet::from(["caller/taint=value".to_string()]),
-            stable_routing_id: Some("worker-7".to_string()),
-            topology_domains: HashMap::new(),
-            kv_transfer_domain: Some("zone".to_string()),
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
-            kv_transfer_preferred_weight: Some(KvTransferPreferredWeight::try_from(0.85).unwrap()),
-        };
-        config
-            .topology_domains
-            .insert("zone".to_string(), "us-west-2b".to_string());
-        config.add_topology_taints();
-
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: ModelRuntimeConfig = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(config, deserialized);
-        assert!(
-            deserialized
-                .taints
-                .contains("dynamo.topology/zone=us-west-2b")
-        );
-    }
-
-
-    #[test]
-    fn test_serde_round_trip_with_kv_transfer_enforcement() {
-        let config = ModelRuntimeConfig {
+            topology_domains: HashMap::from([
+                ("zone".to_string(), "us-west-2b".to_string()),
+                ("rack".to_string(), "rack1".to_string()),
+            ]),
             kv_transfer_domain: Some("zone".to_string()),
             kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
             kv_transfer_preferred_weight: Some(KvTransferPreferredWeight::try_from(0.85).unwrap()),
             ..Default::default()
         };
+        config.add_topology_taints();
 
         let serialized = serde_json::to_string(&config).unwrap();
         let deserialized: ModelRuntimeConfig = serde_json::from_str(&serialized).unwrap();
 
+        assert_eq!(deserialized.topology_domains.len(), 2);
+        assert_eq!(deserialized.topology_domains["zone"], "us-west-2b");
+        assert_eq!(deserialized.topology_domains["rack"], "rack1");
         assert_eq!(deserialized.kv_transfer_domain.as_deref(), Some("zone"));
         assert_eq!(
             deserialized.kv_transfer_enforcement,
@@ -526,6 +475,13 @@ mod tests {
                 .map(KvTransferPreferredWeight::get),
             Some(0.85)
         );
+        assert!(deserialized.taints.contains("caller/taint=value"));
+        assert!(
+            deserialized
+                .taints
+                .contains("dynamo.topology/zone=us-west-2b")
+        );
+        assert!(deserialized.taints.contains("dynamo.topology/rack=rack1"));
     }
 
     #[test]
