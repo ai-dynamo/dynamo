@@ -830,10 +830,17 @@ async fn build_local_model(
         .custom_template_path(config.custom_jinja_template.clone())
         .runtime_config(rt_cfg);
 
-    // Resolve WorkerConfig.model_name into a local path. Empty string means
-    // name-only mode (no tokenizer / chat template on the card).
-    if !config.model_name.is_empty() {
-        let source = config.model_name.clone();
+    // Resolve the tokenizer source. Priority:
+    //   WorkerConfig.model_name (operator CLI override) → EngineConfig.model
+    //   (engine's reported model, populated in `start()`).
+    // Empty in both → name-only mode (no tokenizer / chat template on the card).
+    let model_source = if !config.model_name.is_empty() {
+        config.model_name.clone()
+    } else {
+        engine_config.model.clone()
+    };
+    if !model_source.is_empty() {
+        let source = model_source;
         let local_path = if std::fs::exists(&source).map_err(|e| {
             err(
                 ErrorType::Backend(BackendError::InvalidArgument),

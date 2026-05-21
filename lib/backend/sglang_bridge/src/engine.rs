@@ -39,11 +39,9 @@ pub struct Args {
     #[arg(long, env = "SGLANG_GRPC_ENDPOINT", default_value = "http://127.0.0.1:30000")]
     pub sglang_grpc_endpoint: String,
 
-    /// HF repo or local path. Used by Dynamo to load tokenizer + chat template.
-    #[arg(long)]
-    pub model_path: String,
-
-    /// Friendly model name advertised to clients. Defaults to `model_path`.
+    /// Operator override for the public-facing model name. When unset, the
+    /// bridge advertises whatever SGLang reports in `GetServerInfo`
+    /// (its own `--served-model-name` flag, defaulted to model_path).
     #[arg(long)]
     pub served_model_name: Option<String>,
 
@@ -61,11 +59,13 @@ pub struct Args {
 
 pub struct SglangBridge {
     grpc_endpoint: String,
-    served_model_name: String,
     connect_timeout_secs: u64,
     disaggregation_mode: DisaggregationMode,
     bootstrap_host_override: Option<String>,
-    /// Resolved on `start()` from SGLang's `GetServerInfo` (prefill workers only).
+    served_model_name_override: Option<String>,
+    /// All resolved on `start()` from SGLang's `GetModelInfo` + `GetServerInfo`.
+    model_path: OnceCell<String>,
+    served_model_name: OnceCell<String>,
     bootstrap_host: OnceCell<String>,
     bootstrap_port: OnceCell<u16>,
     client: OnceCell<SglangServiceClient<Channel>>,
@@ -74,17 +74,19 @@ pub struct SglangBridge {
 impl SglangBridge {
     pub(crate) fn new(
         grpc_endpoint: String,
-        served_model_name: String,
         connect_timeout_secs: u64,
         disaggregation_mode: DisaggregationMode,
         bootstrap_host_override: Option<String>,
+        served_model_name_override: Option<String>,
     ) -> Self {
         Self {
             grpc_endpoint,
-            served_model_name,
             connect_timeout_secs,
             disaggregation_mode,
             bootstrap_host_override,
+            served_model_name_override,
+            model_path: OnceCell::new(),
+            served_model_name: OnceCell::new(),
             bootstrap_host: OnceCell::new(),
             bootstrap_port: OnceCell::new(),
             client: OnceCell::new(),
@@ -98,10 +100,6 @@ impl SglangBridge {
         }
         .map_err(|e| invalid_arg(e.to_string()))?;
 
-        let served = args
-            .served_model_name
-            .clone()
-            .unwrap_or_else(|| args.model_path.clone());
         let mode = args.common.disaggregation_mode;
 
         // Prefill workers register under component=prefill so the prefill
@@ -119,19 +117,21 @@ impl SglangBridge {
 
         let engine = SglangBridge::new(
             args.sglang_grpc_endpoint,
-            served.clone(),
             args.connect_timeout_secs,
             mode,
             args.bootstrap_host,
+            args.served_model_name,
         );
+        // model_name + served_model_name are left empty; the bridge populates
+        // them on `start()` from SGLang's GetModelInfo + GetServerInfo. The
+        // Worker falls back to EngineConfig.model when WorkerConfig.model_name
+        // is empty.
         let config = WorkerConfig {
             namespace: args.common.namespace,
             component,
             endpoint: args.common.endpoint,
             endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
-            model_name: args.model_path,
-            served_model_name: Some(served),
             ..Default::default()
         };
         Ok((engine, config))
@@ -220,31 +220,6 @@ fn parse_finish_reason(raw: &str) -> FinishReason {
     }
 }
 
-/// Pull `disaggregation_bootstrap_port` and `dist_init_addr` from the JSON
-/// blob in `GetServerInfoResponse.json_info`. ServerArgs may be nested under
-/// `server_args` or live at the top level.
-fn extract_bootstrap_from_server_info(json_info: &str) -> (Option<u16>, Option<String>) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json_info) else {
-        tracing::warn!("GetServerInfo.json_info is not valid JSON");
-        return (None, None);
-    };
-    let root = v.get("server_args").unwrap_or(&v);
-    let port = root
-        .get("disaggregation_bootstrap_port")
-        .and_then(|n| n.as_u64())
-        .map(|n| n as u16);
-    // `dist_init_addr` is "host:port"; bootstrap uses the host half.
-    let host = root
-        .get("dist_init_addr")
-        .and_then(|s| s.as_str())
-        .map(|addr| {
-            addr.rsplit_once(':')
-                .map(|(h, _)| h.to_string())
-                .unwrap_or_else(|| addr.to_string())
-        });
-    (port, host)
-}
-
 fn extract_context_length_from_model_info(json_info: &str) -> Option<u32> {
     let v: serde_json::Value = serde_json::from_str(json_info).ok()?;
     let n = v
@@ -255,6 +230,73 @@ fn extract_context_length_from_model_info(json_info: &str) -> Option<u32> {
         None
     } else {
         Some(n as u32)
+    }
+}
+
+/// Fields the bridge reads out of SGLang's `GetServerInfo.json_info`. Mirrors
+/// the subset that `components/src/dynamo/sglang/register.py:_get_runtime_config`
+/// pulls off `ServerArgs` + `scheduler_info` so the MDC populated here matches
+/// the one the in-process worker would have published.
+#[derive(Debug, Default)]
+struct SglangServerInfo {
+    /// `ServerArgs.model_path` — HF id or local dir SGLang loaded from.
+    model_path: Option<String>,
+    /// `ServerArgs.served_model_name` — public model name. SGLang defaults
+    /// this to model_path when the operator doesn't override.
+    served_model_name: Option<String>,
+    /// `ServerArgs.page_size`.
+    page_size: Option<u32>,
+    /// `ServerArgs.max_running_requests`.
+    max_running_requests: Option<u64>,
+    /// `ServerArgs.max_prefill_tokens`.
+    max_prefill_tokens: Option<u64>,
+    /// `ServerArgs.dp_size`.
+    dp_size: Option<u32>,
+    /// `scheduler_infos[0].max_total_num_tokens`. Used to derive total_kv_blocks
+    /// and as a fallback for max_num_batched_tokens (mirrors the Python path).
+    max_total_num_tokens: Option<u64>,
+    /// `ServerArgs.disaggregation_bootstrap_port` (prefill workers only).
+    bootstrap_port: Option<u16>,
+    /// Host half of `ServerArgs.dist_init_addr` (prefill workers only).
+    bootstrap_host: Option<String>,
+}
+
+/// Parse the subset of `GetServerInfo.json_info` fields the bridge cares about.
+/// ServerArgs may be nested under `server_args` or live at the top level
+/// depending on SGLang version.
+fn parse_server_info(json_info: &str) -> SglangServerInfo {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json_info) else {
+        tracing::warn!("GetServerInfo.json_info is not valid JSON");
+        return SglangServerInfo::default();
+    };
+    let args = v.get("server_args").unwrap_or(&v);
+    SglangServerInfo {
+        model_path: args
+            .get("model_path")
+            .and_then(|s| s.as_str())
+            .map(str::to_string),
+        served_model_name: args
+            .get("served_model_name")
+            .and_then(|s| s.as_str())
+            .map(str::to_string),
+        page_size: args.get("page_size").and_then(|n| n.as_u64()).map(|n| n as u32),
+        max_running_requests: args.get("max_running_requests").and_then(|n| n.as_u64()),
+        max_prefill_tokens: args.get("max_prefill_tokens").and_then(|n| n.as_u64()),
+        dp_size: args.get("dp_size").and_then(|n| n.as_u64()).map(|n| n as u32),
+        // scheduler_info lives at the top level alongside server_args.
+        max_total_num_tokens: v.get("max_total_num_tokens").and_then(|n| n.as_u64()),
+        bootstrap_port: args
+            .get("disaggregation_bootstrap_port")
+            .and_then(|n| n.as_u64())
+            .map(|n| n as u16),
+        bootstrap_host: args
+            .get("dist_init_addr")
+            .and_then(|s| s.as_str())
+            .map(|addr| {
+                addr.rsplit_once(':')
+                    .map(|(h, _)| h.to_string())
+                    .unwrap_or_else(|| addr.to_string())
+            }),
     }
 }
 
@@ -292,22 +334,42 @@ impl LLMEngine for SglangBridge {
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
 
-        let info = client
+        let model_info = client
             .get_model_info(GetModelInfoRequest {})
             .await
             .map_err(|e| backend_error(format!("GetModelInfo: {e}")))?
             .into_inner();
-        let context_length = extract_context_length_from_model_info(&info.json_info);
+        let context_length = extract_context_length_from_model_info(&model_info.json_info);
+
+        let server_info = client
+            .get_server_info(GetServerInfoRequest {})
+            .await
+            .map_err(|e| backend_error(format!("GetServerInfo: {e}")))?
+            .into_inner();
+        let info = parse_server_info(&server_info.json_info);
+
+        // `model_path` is the tokenizer source the frontend will load. Prefer
+        // GetModelInfo.model_path (always present) over GetServerInfo's copy.
+        let model_path = if !model_info.model_path.is_empty() {
+            model_info.model_path.clone()
+        } else {
+            info.model_path.clone().unwrap_or_default()
+        };
+        if model_path.is_empty() {
+            return Err(backend_error(
+                "SGLang reported empty model_path in GetModelInfo / GetServerInfo",
+            ));
+        }
+        let served_model_name = self
+            .served_model_name_override
+            .clone()
+            .or(info.served_model_name)
+            .unwrap_or_else(|| model_path.clone());
+        let _ = self.model_path.set(model_path.clone());
+        let _ = self.served_model_name.set(served_model_name.clone());
 
         if self.disaggregation_mode.is_prefill() {
-            let server_info = client
-                .get_server_info(GetServerInfoRequest {})
-                .await
-                .map_err(|e| backend_error(format!("GetServerInfo: {e}")))?
-                .into_inner();
-            let (port, host_from_args) =
-                extract_bootstrap_from_server_info(&server_info.json_info);
-            let port = port.ok_or_else(|| {
+            let port = info.bootstrap_port.ok_or_else(|| {
                 backend_error(
                     "GetServerInfo.json_info.disaggregation_bootstrap_port missing — \
                      is SGLang launched with `--disaggregation-mode prefill`?",
@@ -316,7 +378,7 @@ impl LLMEngine for SglangBridge {
             let host = self
                 .bootstrap_host_override
                 .clone()
-                .or(host_from_args)
+                .or(info.bootstrap_host)
                 .unwrap_or_else(|| "127.0.0.1".to_string());
             tracing::info!(
                 bootstrap_host = %host,
@@ -331,32 +393,36 @@ impl LLMEngine for SglangBridge {
             .set(client)
             .map_err(|_| backend_error("client already set"))?;
 
+        // Mirror dynamo.sglang's MDC: if max_prefill_tokens is unset, fall
+        // back to scheduler's max_total_num_tokens so the planner always has
+        // a prefill load signal.
+        let max_num_batched_tokens = info.max_prefill_tokens.or(info.max_total_num_tokens);
+        // total_kv_blocks = ceil(max_total_num_tokens / page_size).
+        let total_kv_blocks = match (info.max_total_num_tokens, info.page_size) {
+            (Some(t), Some(p)) if p > 0 => Some((t + p as u64 - 1) / p as u64),
+            _ => None,
+        };
+
         tracing::info!(
             endpoint = %self.grpc_endpoint,
-            model = %self.served_model_name,
+            model = %model_path,
+            served_as = %served_model_name,
             context_length = ?context_length,
             disagg_mode = %self.disaggregation_mode,
             "sglang_bridge: connected"
         );
 
-        // Advertise the bootstrap rendezvous on EngineConfig so the
-        // frontend's PrefillRouter can find the prefill worker without
-        // falling back to forwarding prefill output over the wire.
-        let (bootstrap_host, bootstrap_port) = if self.disaggregation_mode.is_prefill() {
-            (
-                self.bootstrap_host.get().cloned(),
-                self.bootstrap_port.get().copied(),
-            )
-        } else {
-            (None, None)
-        };
-
         Ok(EngineConfig {
-            model: self.served_model_name.clone(),
-            served_model_name: Some(self.served_model_name.clone()),
+            model: model_path,
+            served_model_name: Some(served_model_name),
             context_length,
-            bootstrap_host,
-            bootstrap_port,
+            kv_cache_block_size: info.page_size,
+            total_kv_blocks,
+            max_num_seqs: info.max_running_requests,
+            max_num_batched_tokens,
+            data_parallel_size: info.dp_size,
+            bootstrap_host: self.bootstrap_host.get().cloned(),
+            bootstrap_port: self.bootstrap_port.get().copied(),
             ..Default::default()
         })
     }
@@ -667,23 +733,44 @@ mod tests {
     }
 
     #[test]
-    fn extracts_bootstrap_from_both_layouts() {
-        // Top-level layout.
-        let (port, host) = extract_bootstrap_from_server_info(
-            r#"{"disaggregation_bootstrap_port": 8998, "dist_init_addr": "10.0.0.1:5555"}"#,
+    fn parses_server_info_both_layouts_and_fields() {
+        // Nested under `server_args`, with a full set of fields + scheduler info.
+        let info = parse_server_info(
+            r#"{
+              "server_args": {
+                "model_path": "Qwen/Qwen3-0.6B",
+                "served_model_name": "my-model",
+                "page_size": 16,
+                "max_running_requests": 256,
+                "max_prefill_tokens": 16384,
+                "dp_size": 2,
+                "disaggregation_bootstrap_port": 8998,
+                "dist_init_addr": "10.0.0.1:5555"
+              },
+              "max_total_num_tokens": 1048576
+            }"#,
         );
-        assert_eq!(port, Some(8998));
-        assert_eq!(host.as_deref(), Some("10.0.0.1"));
+        assert_eq!(info.model_path.as_deref(), Some("Qwen/Qwen3-0.6B"));
+        assert_eq!(info.served_model_name.as_deref(), Some("my-model"));
+        assert_eq!(info.page_size, Some(16));
+        assert_eq!(info.max_running_requests, Some(256));
+        assert_eq!(info.max_prefill_tokens, Some(16384));
+        assert_eq!(info.dp_size, Some(2));
+        assert_eq!(info.max_total_num_tokens, Some(1048576));
+        assert_eq!(info.bootstrap_port, Some(8998));
+        assert_eq!(info.bootstrap_host.as_deref(), Some("10.0.0.1"));
 
-        // Nested layout — strips ":port" from dist_init_addr.
-        let (port, host) = extract_bootstrap_from_server_info(
-            r#"{"server_args": {"disaggregation_bootstrap_port": 9000, "dist_init_addr": "node1"}}"#,
+        // Top-level layout + bare host in dist_init_addr.
+        let info = parse_server_info(
+            r#"{"model_path": "X", "disaggregation_bootstrap_port": 9000, "dist_init_addr": "node1"}"#,
         );
-        assert_eq!(port, Some(9000));
-        assert_eq!(host.as_deref(), Some("node1"));
+        assert_eq!(info.model_path.as_deref(), Some("X"));
+        assert_eq!(info.bootstrap_port, Some(9000));
+        assert_eq!(info.bootstrap_host.as_deref(), Some("node1"));
 
-        // Bad JSON → (None, None), no panic.
-        assert_eq!(extract_bootstrap_from_server_info("not json"), (None, None));
+        // Bad JSON → all-None, no panic.
+        let info = parse_server_info("not json");
+        assert!(info.model_path.is_none() && info.bootstrap_port.is_none());
     }
 
     #[test]

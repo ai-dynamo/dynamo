@@ -70,10 +70,10 @@ python3 -m dynamo.frontend \
 
 # run worker: dynamo.sglang_grpc supervises one (sglang.launch_server, in-process bridge) pair.
 # Args before `--` go to the bridge; args after `--` go verbatim to sglang.launch_server.
+# The bridge discovers model_path + served_model_name from sglang's GetServerInfo,
+# so only --sglang-grpc-endpoint is needed on the bridge side.
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang_grpc --spawn-sglang \
-    --model-path "$MODEL" \
-    --served-model-name "$MODEL" \
     --sglang-grpc-endpoint "http://127.0.0.1:$SGLANG_GRPC_PORT" \
     -- \
     --enable-grpc \
