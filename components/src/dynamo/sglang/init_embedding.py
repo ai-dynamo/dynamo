@@ -7,7 +7,7 @@ from typing import Awaitable, Callable
 
 import sglang as sgl
 
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import SglangHealthCheckPayload
@@ -65,6 +65,8 @@ async def init_embedding(
                 input_type=ModelInput.Text,
                 output_type=ModelType.Embedding,
                 readiness_gate=ready_event,
+                worker_type=WorkerType.Aggregated,
+                needs=[],
             ),
         )
     except Exception as e:

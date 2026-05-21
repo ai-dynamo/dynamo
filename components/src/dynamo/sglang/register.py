@@ -67,9 +67,13 @@ async def _register_model_with_runtime_config(
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
         worker_type: Topology role of this worker (Prefill/Decode/Encode/Aggregated).
-            None lets the missing-field shim treat the worker as Aggregated.
-        needs: DNF list of peer roles this worker requires to serve. None or empty
-            means no peers required.
+            Callers are expected to pass an explicit value; `None` is accepted only
+            so the optional kwarg can flow through the wrapper unchanged. Once the
+            PR 1 compat shim in `Model::ws_role_and_needs` is removed (Phase 3),
+            registration with `None` will fail in the Rust binding.
+        needs: DNF list of peer roles this worker requires to serve. Empty (or
+            `None`) means no peer dependency, which is the correct value for
+            Aggregated workers.
 
     Returns:
         True if registration succeeded, False otherwise.
@@ -476,6 +480,11 @@ async def register_image_diffusion_model(
             endpoint,
             server_args.model_path,
             model_name,
+            # Diffusion has no prefill/decode split: a single worker owns the
+            # whole pipeline, so it always advertises as Aggregated with no
+            # peer dependencies.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
         )
         logging.info(f"Successfully registered diffusion model: {model_name}")
     except Exception as e:
@@ -517,6 +526,10 @@ async def register_video_generation_model(
             endpoint,
             server_args.model_path,
             model_name,
+            # See `register_image_diffusion_model` — diffusion is always
+            # Aggregated.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
         )
         logging.info(f"Successfully registered video generation model: {model_name}")
     except Exception as e:

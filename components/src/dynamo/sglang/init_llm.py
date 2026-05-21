@@ -136,8 +136,7 @@ async def init_decode(
         )
         shutdown_endpoints.append(session_control_endpoint)
 
-    # Topology readiness role + DNF needs, derived literally from serving_mode.
-    # init_decode handles both aggregated and disagg-decode flavours.
+    # Worker type and needs, derived from serving_mode.
     if config.serving_mode == DisaggregationMode.DECODE:
         decode_worker_type = WorkerType.Decode
         decode_needs: list[list[WorkerType]] = [[WorkerType.Prefill]]
