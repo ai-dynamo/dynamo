@@ -271,6 +271,7 @@ impl AddressedPushRouter {
             request_type: RequestType::ManyIn,
             response_type: ResponseType::ManyOut,
             connection_info: resp_stream_conn_info,
+            metadata: BTreeMap::new(),
             frontend_send_ts_ns: None,
             request_stream_connection_info: Some(req_stream_conn_info),
         };
@@ -787,6 +788,7 @@ mod tests {
             },
             metadata,
             frontend_send_ts_ns: None,
+            request_stream_connection_info: None,
         }
     }
 

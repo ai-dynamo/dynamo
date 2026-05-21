@@ -1027,25 +1027,24 @@ where
         );
 
         if self.fault_detection_enabled {
-            let free_instances = self.client.instance_ids_free();
-            if free_instances.is_empty() {
-                let all_instances = self.client.instance_ids();
-                if !all_instances.is_empty() {
-                    tracing::warn!(
-                        instance_id,
-                        total_workers = all_instances.len(),
-                        "Rejecting bidirectional request: all workers are busy"
-                    );
-                    let cause = PipelineError::ServiceOverloaded(
-                        "All workers are busy, please retry later".to_string(),
-                    );
-                    return Err(DynamoError::builder()
-                        .error_type(ErrorType::ResourceExhausted)
-                        .message("All workers are busy, please retry later")
-                        .cause(cause)
-                        .build()
-                        .into());
-                }
+            let routing_instances = self.client.routing_instances();
+            if routing_instances.is_overloaded(instance_id) {
+                let counts = routing_instances.counts();
+                tracing::warn!(
+                    instance_id,
+                    overloaded_workers = counts.overloaded,
+                    total_workers = counts.discovered,
+                    "Rejecting bidirectional request: selected worker is overloaded"
+                );
+                let cause = PipelineError::ServiceOverloaded(
+                    "Selected worker is overloaded, please retry later".to_string(),
+                );
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("Selected worker is overloaded, please retry later")
+                    .cause(cause)
+                    .build()
+                    .into());
             }
         }
 
@@ -1059,9 +1058,6 @@ where
                     .find(|i| i.instance_id == id)
                     .map(|instance| {
                         let (addr, kind) = match &instance.transport {
-                            TransportType::Http(http_endpoint) => {
-                                (http_endpoint.clone(), "transport.http.request")
-                            }
                             TransportType::Tcp(tcp_endpoint) => {
                                 (tcp_endpoint.clone(), "transport.tcp.request")
                             }
@@ -1076,8 +1072,12 @@ where
             if let Some(result) = resolve_transport(instance_id) {
                 result
             } else {
-                let avail = self.client.instance_ids_avail();
-                let fallback_id = avail.iter().copied().find(|&id| id != instance_id);
+                let routing_instances = self.client.routing_instances();
+                let fallback_id = routing_instances
+                    .free_ids()
+                    .iter()
+                    .copied()
+                    .find(|&id| id != instance_id);
                 match fallback_id {
                     Some(id) => {
                         tracing::warn!(
