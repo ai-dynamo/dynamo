@@ -9,71 +9,32 @@ use crate::{
         common::{self, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
-            nvext::{NvExtProvider, NvExtResponseFieldSelection},
+            delta_common::{self, DeltaGeneratorOptions},
+            nvext::NvExtProvider,
         },
     },
     types::TokenIdType,
 };
 
 impl NvCreateCompletionRequest {
-    /// Enables usage tracking for non-streaming requests to comply with OpenAI API specification.
-    ///
-    /// According to OpenAI API spec, non-streaming completion responses (stream=false)
-    /// must always include usage statistics. This method ensures `stream_options.include_usage`
-    /// is set to `true` for non-streaming requests.
-    ///
-    /// Reference: https://platform.openai.com/docs/api-reference/completions/create
-    ///
-    /// # Arguments
-    /// * `original_stream_flag` - The original value of the `stream` field before any internal processing
     pub fn enable_usage_for_nonstreaming(&mut self, original_stream_flag: bool) {
-        if !original_stream_flag {
-            // For non-streaming requests (stream=false), enable usage by default
-            if self.inner.stream_options.is_none() {
-                self.inner.stream_options =
-                    Some(dynamo_protocols::types::ChatCompletionStreamOptions {
-                        include_usage: true,
-                        continuous_usage_stats: false,
-                    });
-            } else if let Some(ref mut opts) = self.inner.stream_options {
-                // If stream_options exists, ensure include_usage is true for non-streaming
-                opts.include_usage = true;
-            }
-        }
+        delta_common::enable_usage_for_nonstreaming(
+            &mut self.inner.stream_options,
+            original_stream_flag,
+        );
     }
 
     // put this method on the request
     // inspect the request to extract options
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
-        let response_fields = NvExtResponseFieldSelection::from_nvext(self.nvext());
-
-        let options = DeltaGeneratorOptions {
-            enable_usage: self
-                .inner
-                .stream_options
-                .as_ref()
-                .map(|opts| opts.include_usage)
-                .unwrap_or(false),
-            continuous_usage_stats: self
-                .inner
-                .stream_options
-                .as_ref()
-                .map(|opts| opts.continuous_usage_stats)
-                .unwrap_or(false),
-            enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
-            response_fields,
-        };
-
+        let options = DeltaGeneratorOptions::new(
+            self.inner.stream_options.as_ref(),
+            self.return_tokens_as_token_ids,
+            self.inner.logprobs.is_some(),
+            self.nvext(),
+        );
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DeltaGeneratorOptions {
-    pub enable_usage: bool,
-    pub continuous_usage_stats: bool,
-    pub enable_logprobs: bool,
-    pub response_fields: NvExtResponseFieldSelection,
 }
 
 pub struct DeltaGenerator {
@@ -84,39 +45,14 @@ pub struct DeltaGenerator {
     system_fingerprint: Option<String>,
     usage: dynamo_protocols::types::CompletionUsage,
     options: DeltaGeneratorOptions,
-    tracker: Option<Arc<RequestTracker>>,
+    tracker: Arc<RequestTracker>,
 }
 
 impl DeltaGenerator {
     pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // SAFETY: Casting from `u64` to `u32` could lead to precision loss after `u32::MAX`,
-        // but this will not be an issue until 2106.
-        let now: u32 = now.try_into().expect("timestamp exceeds u32::MAX");
-
-        // Previously, our home-rolled CompletionUsage impl'd Default
-        // PR !387 - https://github.com/64bit/async-openai/pull/387
-        let usage = dynamo_protocols::types::CompletionUsage {
-            completion_tokens: 0,
-            prompt_tokens: 0,
-            total_tokens: 0,
-            completion_tokens_details: None,
-            prompt_tokens_details: None,
-        };
-
-        let completion_id = format!("cmpl-{request_id}");
-
-        // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
-        // `response_fields` only controls which nvext fields are returned to the client;
-        // the tracker still records timing/ITL internally for metrics.
-        let tracker = Some(Arc::new(RequestTracker::new()));
-
+        let (now, usage, tracker) = delta_common::initial_state();
         Self {
-            id: completion_id,
+            id: format!("cmpl-{request_id}"),
             object: "text_completion".to_string(),
             created: now,
             model,
@@ -127,8 +63,8 @@ impl DeltaGenerator {
         }
     }
 
-    /// Returns the request tracker if tracking is enabled, for sharing with PreprocessedRequest.
-    pub fn tracker(&self) -> Option<Arc<RequestTracker>> {
+    /// Returns the request tracker. Tracking is always enabled. For sharing with PreprocessedRequest.
+    pub fn tracker(&self) -> Arc<RequestTracker> {
         self.tracker.clone()
     }
 
@@ -158,19 +94,32 @@ impl DeltaGenerator {
             .map(|(_, lp)| lp as f32)
             .collect::<Vec<f32>>();
 
+        let return_as_ids = self.options.return_tokens_as_token_ids;
         let top_lps = top_logprobs.map_or(vec![], |top_logprobs| {
             toks.iter()
                 .zip(tok_lps.iter())
                 .zip(top_logprobs.iter())
                 .map(|(((t, tid), lp), top_lps)| {
-                    let converted = convert_backend_top_logprobs(top_lps, t, *tid, *lp);
+                    let converted =
+                        convert_backend_top_logprobs(top_lps, t, *tid, *lp, return_as_ids);
                     serde_json::to_value(converted).unwrap()
                 })
                 .collect()
         });
 
+        let tokens_out: Vec<String> = toks
+            .iter()
+            .map(|(t, tid)| {
+                if return_as_ids {
+                    format!("token_id:{}", tid)
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
+
         Some(dynamo_protocols::types::Logprobs {
-            tokens: toks.iter().map(|(t, _)| t.clone()).collect(),
+            tokens: tokens_out,
             token_logprobs: tok_lps.into_iter().map(Some).collect(),
             text_offset: vec![],
             top_logprobs: top_lps,
@@ -291,6 +240,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         );
 
         let finish_reason = delta.finish_reason.map(Into::into);
+        let stop_reason = delta.stop_reason.clone();
 
         // create choice
         let index = delta.index.unwrap_or(0);
@@ -298,10 +248,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
-        if finish_reason.is_some()
-            && let Some(ref tracker) = self.tracker
-        {
-            tracker.record_finish();
+        if finish_reason.is_some() {
+            self.tracker.record_finish();
         }
 
         // Build the nvext response payload via the shared gating helper on
@@ -309,10 +257,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
-            self.tracker.as_ref(),
+            Some(&self.tracker),
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
+            stop_reason,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             response.nvext = Some(nvext_json);
@@ -354,8 +303,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         DeltaGenerator::get_usage(self)
     }
 
-    fn tracker(&self) -> Option<std::sync::Arc<crate::protocols::common::timing::RequestTracker>> {
-        self.tracker.clone()
+    fn tracker(&self) -> Option<Arc<RequestTracker>> {
+        Some(self.tracker.clone())
     }
 }
 
@@ -378,6 +327,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -406,6 +356,7 @@ mod tests {
                 "token_ids": [11, 22, 33],
                 "routed_experts": {"layer_0": [1, 3]}
             })),
+            worker_trace_link: None,
             engine_data: None,
         }
     }
@@ -427,6 +378,7 @@ mod tests {
                     .unwrap(),
             ),
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -444,6 +396,7 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: Some(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
                 "disaggregated_kv_transfer_time_ms": 8.1,
@@ -456,14 +409,111 @@ mod tests {
     fn test_plain_request_without_extra_fields_omits_nvext() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-no-nvext".to_string());
-        let tracker = generator.tracker().expect("tracker");
-        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        generator
+            .tracker()
+            .record_worker(42, Some(0), WORKER_TYPE_PREFILL);
 
         let response = generator
             .choice_from_postprocessor(final_backend_output())
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_stop_reason_is_suppressed_without_nvext_extra_field() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-stop-reason".to_string());
+        let mut output = final_backend_output();
+        output.stop_reason = Some(dynamo_protocols::types::StopReason::String(
+            "END".to_string(),
+        ));
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let response_json = serde_json::to_value(&response).expect("serialize response");
+        assert!(response_json["choices"][0].get("stop_reason").is_none());
+        assert!(response_json.get("nvext").is_none());
+    }
+
+    #[test]
+    fn test_stop_reason_emits_in_nvext_when_requested() {
+        let request = create_test_request_with_extra_fields(vec!["stop_reason".to_string()]);
+        let mut generator = request.response_generator("req-stop-reason-nvext".to_string());
+        let mut output = final_backend_output();
+        output.stop_reason = Some(dynamo_protocols::types::StopReason::String(
+            "END".to_string(),
+        ));
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let response_json = serde_json::to_value(&response).expect("serialize response");
+        assert!(response_json["choices"][0].get("stop_reason").is_none());
+        assert_eq!(response_json["nvext"]["stop_reason"], "END");
+    }
+
+    #[test]
+    fn test_logprobs_zero_emits_chosen_token_logprob() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(0);
+        let mut generator = request.response_generator("req-logprobs-zero".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.5]);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+        let logprobs = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs");
+
+        assert_eq!(logprobs.tokens, vec!["hello"]);
+        assert_eq!(logprobs.token_logprobs, vec![Some(-0.5)]);
+        assert!(logprobs.top_logprobs.is_empty());
+    }
+
+    #[test]
+    fn test_return_token_ids_formats_selected_top_logprob_fallback() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(1);
+        request.return_tokens_as_token_ids = Some(true);
+        let generator = request.response_generator("req-token-id-logprobs".to_string());
+
+        let logprobs = generator
+            .create_logprobs(
+                vec![Some("hello".to_string())],
+                vec![123],
+                Some(vec![-0.5]),
+                Some(vec![vec![common::llm_backend::TopLogprob {
+                    rank: 1,
+                    token_id: 999,
+                    token: Some("other".to_string()),
+                    logprob: -1.0,
+                    bytes: None,
+                }]]),
+            )
+            .expect("logprobs");
+
+        assert_eq!(logprobs.tokens, vec!["token_id:123"]);
+        let top_logprobs = logprobs.top_logprobs[0]
+            .as_array()
+            .expect("top_logprobs array");
+        let other = top_logprobs
+            .iter()
+            .find(|item| item["token"] == "token_id:999")
+            .expect("top token_id formatting");
+        assert_eq!(other["bytes"], serde_json::json!(b"token_id:999"));
+        let selected = top_logprobs
+            .iter()
+            .find(|item| item["token"] == "token_id:123")
+            .expect("selected token fallback");
+        assert_eq!(selected["token"], "token_id:123");
+        assert_eq!(selected["bytes"], serde_json::json!(b"token_id:123"));
     }
 
     #[test]
@@ -499,8 +549,9 @@ mod tests {
             .unwrap();
         let mut generator =
             make_request_with_nvext(nvext).response_generator("req-qid".to_string());
-        let tracker = generator.tracker().expect("tracker");
-        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        generator
+            .tracker()
+            .record_worker(42, Some(0), WORKER_TYPE_PREFILL);
 
         let response = generator
             .choice_from_postprocessor(final_backend_output())
@@ -618,6 +669,7 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
         };
 

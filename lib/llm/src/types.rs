@@ -114,7 +114,9 @@ pub mod openai {
 
 pub mod generic {
     use super::*;
-    use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine};
+    use dynamo_runtime::pipeline::{
+        BidirectionalStreamingEngine, ServerStreamingEngine, UnaryEngine,
+    };
 
     pub mod tensor {
         use super::*;
@@ -127,5 +129,22 @@ pub mod generic {
         /// A [`ServerStreamingEngine`] implementation for the generic Tensor API
         pub type TensorStreamingEngine =
             ServerStreamingEngine<NvCreateTensorRequest, Annotated<NvCreateTensorResponse>>;
+    }
+
+    pub mod realtime {
+        use super::*;
+
+        pub use dynamo_protocols::types::realtime::{RealtimeClientEvent, RealtimeServerEvent};
+
+        /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI
+        /// Realtime API.
+        ///
+        /// Many-in / many-out: the client streams a sequence of [`RealtimeClientEvent`]
+        /// frames over the lifetime of one session and receives a stream of
+        /// [`RealtimeServerEvent`] frames back. Used by the experimental
+        /// `/v1/realtime` WebSocket endpoint. The canonical concrete implementor of
+        /// the input side is [`dynamo_runtime::pipeline::RequestStream`].
+        pub type RealtimeBidirectionalEngine =
+            BidirectionalStreamingEngine<RealtimeClientEvent, Annotated<RealtimeServerEvent>>;
     }
 }

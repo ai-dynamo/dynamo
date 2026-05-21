@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
@@ -28,27 +29,74 @@ import (
 )
 
 func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) {
+	_ = ApplyRestorePodMetadataWithStorageConfig(
+		labels,
+		annotations,
+		checkpointInfo,
+		configv1alpha1.CheckpointStorageConfiguration{},
+	)
+}
+
+func ApplyRestorePodMetadataWithStorageConfig(
+	labels map[string]string,
+	annotations map[string]string,
+	checkpointInfo *CheckpointInfo,
+	storageConfig configv1alpha1.CheckpointStorageConfiguration,
+) error {
 	enabled := checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready
 	hash := ""
 	artifactVersion := ""
+	var (
+		storage snapshotprotocol.Storage
+		ok      bool
+		err     error
+	)
 	if enabled {
+		if labels == nil {
+			return fmt.Errorf("checkpoint restore labels map is required when checkpoint restore metadata is enabled")
+		}
+		if annotations == nil {
+			return fmt.Errorf("checkpoint restore annotations map is required when checkpoint restore metadata is enabled")
+		}
 		hash = checkpointInfo.Hash
 		artifactVersion = checkpointInfo.ArtifactVersion
-	}
-	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
-}
-
-// resolveMainContainer finds the container named "main" in the pod spec.
-// ExtraPodSpec.PodSpec.Containers can inject user containers before the main
-// container (mergo merge happens before main is appended), so index 0 is
-// not guaranteed to be the main container here.
-func resolveMainContainer(podSpec *corev1.PodSpec) *corev1.Container {
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
+		storage, ok, err = StorageFromConfig(storageConfig)
+		if err != nil {
+			return err
 		}
 	}
+
+	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
+	if annotations != nil {
+		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
+		delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
+		delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
+	}
+	if !enabled {
+		return nil
+	}
+
+	targets := checkpointInfo.RestoreTargetContainers
+	if len(targets) == 0 {
+		targets = []string{commonconsts.MainContainerName}
+	}
+	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
+	if ok {
+		snapshotprotocol.ApplyCheckpointStorageMetadata(annotations, storage)
+	}
 	return nil
+}
+
+func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
+	if podSpec == nil {
+		return nil, fmt.Errorf("pod spec is nil")
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podSpec.Containers[i], nil
+		}
+	}
+	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -57,15 +105,52 @@ func InjectCheckpointIntoPodSpec(
 	namespace string,
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
+	seccompProfile string,
+) error {
+	return injectCheckpointIntoPodSpec(
+		ctx,
+		reader,
+		namespace,
+		podSpec,
+		checkpointInfo,
+		configv1alpha1.CheckpointStorageConfiguration{},
+		seccompProfile,
+	)
+}
+
+func InjectCheckpointIntoPodSpecWithStorageConfig(
+	ctx context.Context,
+	reader ctrlclient.Reader,
+	namespace string,
+	podSpec *corev1.PodSpec,
+	checkpointInfo *CheckpointInfo,
+	storageConfig configv1alpha1.CheckpointStorageConfiguration,
+	seccompProfile string,
+) error {
+	return injectCheckpointIntoPodSpec(
+		ctx,
+		reader,
+		namespace,
+		podSpec,
+		checkpointInfo,
+		storageConfig,
+		seccompProfile,
+	)
+}
+
+func injectCheckpointIntoPodSpec(
+	ctx context.Context,
+	reader ctrlclient.Reader,
+	namespace string,
+	podSpec *corev1.PodSpec,
+	checkpointInfo *CheckpointInfo,
+	storageConfig configv1alpha1.CheckpointStorageConfiguration,
+	seccompProfile string,
 ) error {
 	// Only mutate the worker pod spec once the checkpoint is Ready. Before
 	// the checkpoint exists, the worker must cold-start normally without
 	// the snapshot-control volume, DYN_SNAPSHOT_CONTROL_DIR, checkpoint PVC
-	// mount, or localhost seccomp profile — otherwise the Python worker
-	// enters checkpoint mode on env-var presence and sits quiesced waiting
-	// for a sentinel that only the checkpoint Job and restore-target path
-	// produce. The checkpoint Job itself is built separately through
-	// buildCheckpointJob + NewCheckpointJob and does get these.
+	// mount, or localhost seccomp profile.
 	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
 		return nil
 	}
@@ -83,42 +168,65 @@ func InjectCheckpointIntoPodSpec(
 		info.Hash = hash
 	}
 
-	mainContainer := resolveMainContainer(podSpec)
-	if mainContainer == nil {
-		return fmt.Errorf("no container named %q found in pod spec", commonconsts.MainContainerName)
-	}
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
 	}
-	if err := snapshotprotocol.PrepareRestorePodSpecForCheckpoint(
+	targets := info.RestoreTargetContainers
+	if len(targets) == 0 {
+		targets = []string{commonconsts.MainContainerName}
+	}
+	annotations := map[string]string{
+		snapshotprotocol.TargetContainersAnnotation: snapshotprotocol.FormatTargetContainers(targets),
+	}
+
+	storage, err := ResolveStorage(
 		ctx,
 		reader,
 		namespace,
-		podSpec,
-		mainContainer,
 		info.Hash,
 		info.ArtifactVersion,
-		snapshotprotocol.DefaultSeccompLocalhostProfile,
+		storageConfig,
+	)
+	if err != nil {
+		return err
+	}
+	if err := snapshotprotocol.PrepareRestorePodSpec(
+		podSpec,
+		annotations,
+		storage,
+		seccompProfile,
 		info.Ready,
 	); err != nil {
 		return err
 	}
 
 	EnsurePodInfoVolume(podSpec)
-	EnsurePodInfoMount(mainContainer)
+	for _, name := range targets {
+		container := findPodSpecContainer(podSpec, name)
+		if container == nil {
+			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
+		}
+		EnsurePodInfoMount(container)
+	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
-		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
-			ctx,
-			reader,
-			namespace,
-			info.Hash,
-			info.ArtifactVersion,
-		)
+		mainContainer, err := RequireMainContainer(podSpec)
 		if err != nil {
-			return err
+			return fmt.Errorf("gpuMemoryService enabled: %w", err)
 		}
 		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
 	}
 
+	return nil
+}
+
+func findPodSpecContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
+	if podSpec == nil {
+		return nil
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == name {
+			return &podSpec.Containers[i]
+		}
+	}
 	return nil
 }

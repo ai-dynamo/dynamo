@@ -29,8 +29,13 @@ pub enum PrefillError {
 pub(super) enum PrefillOutcome {
     /// Bootstrap optimization: prefill spawned in background, bootstrap info ready
     Bootstrap(BootstrapInfo),
-    /// Synchronous prefill completed with result
-    Completed(PrefillResult),
+    /// Synchronous prefill completed with result. `worker_link` carries the
+    /// prefill worker's `engine.generate` span pointer for the decode side
+    /// to render as an OTel `Link` via `PreprocessedRequest.migration_link`.
+    Completed {
+        result: PrefillResult,
+        worker_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    },
 }
 
 pub(super) enum PrefillResolveDecision {
@@ -48,7 +53,7 @@ pub(super) fn build_decode_router_override(
     existing_override: Option<RouterConfigOverride>,
 ) -> RouterConfigOverride {
     RouterConfigOverride {
-        overlap_score_weight: Some(0.0),
+        overlap_score_credit: Some(0.0),
         assume_kv_reuse: Some(false),
         track_prefill_tokens: Some(false),
         ..existing_override.unwrap_or_default()

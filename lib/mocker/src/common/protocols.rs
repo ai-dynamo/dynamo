@@ -4,14 +4,13 @@
 use derive_builder::Builder;
 use dynamo_kv_router::config::RouterQueuePolicy;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use crate::common::perf_model::PerfModel;
-use dynamo_kv_router::protocols::KvCacheEvent;
+use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, Token};
 
@@ -36,6 +35,14 @@ pub enum MockerEvictionBackend {
 /// This abstracts the runtime dependency so mocker components can remain generic.
 pub trait KvCacheEventSink: Send + Sync {
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()>;
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        _storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.publish(event)
+    }
 }
 
 /// Raw KV event payload used by transport-specific publishers such as the
@@ -44,6 +51,7 @@ pub trait KvCacheEventSink: Send + Sync {
 pub struct RawKvEvent {
     pub event: KvCacheEvent,
     pub block_token_ids: Option<Vec<Vec<u32>>>,
+    pub storage_tier: StorageTier,
 }
 
 /// Trait for publishing transport-specific raw KV event payloads.
@@ -82,14 +90,24 @@ impl KvEventPublishers {
         event: KvCacheEvent,
         block_token_ids: Option<&[Vec<u32>]>,
     ) -> anyhow::Result<()> {
+        self.publish_with_storage_tier(event, block_token_ids, StorageTier::Device)
+    }
+
+    pub fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        block_token_ids: Option<&[Vec<u32>]>,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
         if let Some(sink) = self.event_sink.as_ref() {
-            sink.publish(event.clone())?;
+            sink.publish_with_storage_tier(event.clone(), storage_tier)?;
         }
 
         if let Some(sink) = self.raw_sink.as_ref() {
             sink.publish(RawKvEvent {
                 event,
                 block_token_ids: block_token_ids.map(|token_ids| token_ids.to_vec()),
+                storage_tier,
             })?;
         }
 
@@ -309,8 +327,145 @@ pub struct SglangArgs {
     pub schedule_conservativeness: Option<f64>,
 }
 
+/// Keeps omitted JSON fields distinct from explicit `null` so serde can replace
+/// the old hand-written parser without losing input-config semantics.
+#[derive(Debug, Clone, Default)]
+enum OptionalConfigValue<T> {
+    #[default]
+    Missing,
+    Present(Option<T>),
+}
+
+impl<'de, T> Deserialize<'de> for OptionalConfigValue<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Self::Present)
+    }
+}
+
+impl<T> OptionalConfigValue<T> {
+    fn into_nullable(self) -> Option<Option<T>> {
+        match self {
+            Self::Missing => None,
+            Self::Present(value) => Some(value),
+        }
+    }
+
+    fn into_non_null(self, field: &str) -> Result<Option<T>, String> {
+        match self {
+            Self::Missing => Ok(None),
+            Self::Present(Some(value)) => Ok(Some(value)),
+            Self::Present(None) => Err(format!("{field} must not be null")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct MockEngineArgsSerde {
+    engine_type: OptionalConfigValue<String>,
+    num_gpu_blocks: OptionalConfigValue<usize>,
+    block_size: OptionalConfigValue<usize>,
+    max_num_seqs: OptionalConfigValue<usize>,
+    max_num_batched_tokens: OptionalConfigValue<usize>,
+    enable_prefix_caching: OptionalConfigValue<bool>,
+    enable_chunked_prefill: OptionalConfigValue<bool>,
+    speedup_ratio: OptionalConfigValue<f64>,
+    decode_speedup_ratio: OptionalConfigValue<f64>,
+    dp_size: OptionalConfigValue<u32>,
+    startup_time: OptionalConfigValue<f64>,
+    worker_type: OptionalConfigValue<String>,
+    is_prefill: OptionalConfigValue<bool>,
+    is_decode: OptionalConfigValue<bool>,
+    planner_profile_data: OptionalConfigValue<PathBuf>,
+    aic_backend: OptionalConfigValue<String>,
+    aic_system: OptionalConfigValue<String>,
+    aic_backend_version: OptionalConfigValue<String>,
+    aic_tp_size: OptionalConfigValue<usize>,
+    aic_model_path: OptionalConfigValue<String>,
+    aic_moe_tp_size: OptionalConfigValue<usize>,
+    aic_moe_ep_size: OptionalConfigValue<usize>,
+    aic_attention_dp_size: OptionalConfigValue<usize>,
+    gpu_memory_utilization: OptionalConfigValue<f64>,
+    mem_fraction_static: OptionalConfigValue<f64>,
+    enable_local_indexer: OptionalConfigValue<bool>,
+    bootstrap_port: OptionalConfigValue<u16>,
+    kv_bytes_per_token: OptionalConfigValue<usize>,
+    kv_transfer_bandwidth: OptionalConfigValue<f64>,
+    num_g2_blocks: OptionalConfigValue<usize>,
+    num_g3_blocks: OptionalConfigValue<usize>,
+    offload_batch_size: OptionalConfigValue<usize>,
+    bandwidth_g1_to_g2_gbps: OptionalConfigValue<f64>,
+    bandwidth_g2_to_g1_gbps: OptionalConfigValue<f64>,
+    bandwidth_g2_to_g3_gbps: OptionalConfigValue<f64>,
+    bandwidth_g3_to_g2_gbps: OptionalConfigValue<f64>,
+    reasoning: OptionalConfigValue<ReasoningConfig>,
+    zmq_kv_events_port: OptionalConfigValue<u16>,
+    zmq_replay_port: OptionalConfigValue<u16>,
+    preemption_mode: OptionalConfigValue<String>,
+    router_queue_policy: OptionalConfigValue<String>,
+    sglang: OptionalConfigValue<SglangArgs>,
+    #[serde(rename = "has_perf_model")]
+    _has_perf_model: OptionalConfigValue<serde_json::Value>,
+}
+
+fn parse_engine_type(value: &str) -> Result<EngineType, String> {
+    match value {
+        "vllm" => Ok(EngineType::Vllm),
+        "sglang" => Ok(EngineType::Sglang),
+        other => Err(format!(
+            "Invalid engine_type '{other}'. Must be 'vllm' or 'sglang'."
+        )),
+    }
+}
+
+fn parse_worker_type(value: &str) -> Result<WorkerType, String> {
+    match value {
+        "aggregated" => Ok(WorkerType::Aggregated),
+        "prefill" => Ok(WorkerType::Prefill),
+        "decode" => Ok(WorkerType::Decode),
+        other => Err(format!(
+            "Invalid worker_type '{other}'. Must be 'aggregated', 'prefill', or 'decode'."
+        )),
+    }
+}
+
+fn parse_preemption_mode(value: &str) -> Result<PreemptionMode, String> {
+    match value {
+        "lifo" => Ok(PreemptionMode::Lifo),
+        "fifo" => Ok(PreemptionMode::Fifo),
+        other => Err(format!(
+            "Invalid preemption_mode: '{other}'. Must be 'lifo' or 'fifo'."
+        )),
+    }
+}
+
+fn load_perf_model(path: &Path) -> Arc<PerfModel> {
+    match PerfModel::from_npz(path) {
+        Ok(model) => {
+            tracing::info!("Successfully loaded performance model from: {:?}", path);
+            Arc::new(model)
+        }
+        Err(e) => {
+            tracing::error!(
+                "Failed to load performance model from {:?}: {}. Falling back to polynomial model.",
+                path,
+                e
+            );
+            Arc::new(PerfModel::default())
+        }
+    }
+}
+
 /// Configuration arguments for MockEngine
 #[derive(Debug, Clone, Serialize, Deserialize, Builder, Validate)]
+#[serde(try_from = "MockEngineArgsSerde")]
+#[validate(schema(function = "validate_mock_engine_args"))]
 #[builder(pattern = "owned", build_fn(public))]
 pub struct MockEngineArgs {
     /// Engine type: vLLM or SGLang simulation
@@ -422,6 +577,16 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_attention_dp_size: Option<usize>,
 
+    /// GPU memory fraction for AIC KV capacity estimation with vLLM.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub gpu_memory_utilization: Option<f64>,
+
+    /// Static memory fraction for AIC KV capacity estimation with SGLang.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub mem_fraction_static: Option<f64>,
+
     /// Enable worker-local KV indexer for tracking this worker's own KV cache state
     #[builder(default = "false")]
     pub enable_local_indexer: bool,
@@ -443,6 +608,53 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
+
+    /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
+    /// feature is enabled, setting this explicitly opts the mocker into
+    /// G2 offload simulation. When unset or set to 0, no G2 offload engine
+    /// is attached.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub num_g2_blocks: Option<usize>,
+
+    /// KVBM G3 shared lower-tier block capacity. Positive values require
+    /// `num_g2_blocks` and `kv_bytes_per_token`; 0 disables G3.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub num_g3_blocks: Option<usize>,
+
+    /// Batch size for the G1→G2 offload pipeline. Offloads are grouped
+    /// into batches of this size before being handed to the worker.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default when unset or 0.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub offload_batch_size: Option<usize>,
+
+    /// G1→G2 offload bandwidth in GB/s for the PS-queue simulation.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default (host DRAM PCIe
+    /// ballpark) when unset.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g1_to_g2_gbps: Option<f64>,
+
+    /// G2→G1 onboard bandwidth in GB/s for the PS-queue simulation.
+    /// Only consulted when the `kvbm-offload` feature is enabled;
+    /// falls back to the `KvbmOffloadConfig` default when unset.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g2_to_g1_gbps: Option<f64>,
+
+    /// G2→G3 offload bandwidth in GB/s for the shared PS-queue simulation.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g2_to_g3_gbps: Option<f64>,
+
+    /// G3→G2 staging bandwidth in GB/s for the shared PS-queue simulation.
+    #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
+    pub bandwidth_g3_to_g2_gbps: Option<f64>,
 
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
@@ -476,6 +688,241 @@ pub struct MockEngineArgs {
     pub sglang: Option<SglangArgs>,
 }
 
+fn mock_engine_args_validation_error(code: &'static str, message: String) -> ValidationError {
+    let mut error = ValidationError::new(code);
+    error.message = Some(message.into());
+    error
+}
+
+fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationError> {
+    if args.block_size == 0 {
+        return Err(mock_engine_args_validation_error(
+            "block_size_zero",
+            "block_size must be greater than 0".to_string(),
+        ));
+    }
+
+    if args.num_g3_blocks.is_some() && args.num_g2_blocks.is_none() {
+        return Err(mock_engine_args_validation_error(
+            "g3_requires_g2",
+            "num_g3_blocks requires num_g2_blocks because mocker stages G3 through G2".to_string(),
+        ));
+    }
+
+    if args.engine_type != EngineType::Sglang {
+        return Ok(());
+    }
+
+    if let Some(page_size) = args.sglang.as_ref().and_then(|sglang| sglang.page_size)
+        && args.block_size != page_size
+    {
+        return Err(mock_engine_args_validation_error(
+            "sglang_block_size_page_size_mismatch",
+            format!(
+                "engine_type=sglang requires block_size and sglang.page_size to match when both are set, got block_size={} and sglang.page_size={page_size}",
+                args.block_size,
+            ),
+        ));
+    }
+
+    if let Some(chunked_prefill_size) = args
+        .sglang
+        .as_ref()
+        .and_then(|sglang| sglang.chunked_prefill_size)
+        && chunked_prefill_size % args.block_size != 0
+    {
+        return Err(mock_engine_args_validation_error(
+            "sglang_chunked_prefill_size_not_divisible_by_block_size",
+            format!(
+                "engine_type=sglang requires sglang.chunked_prefill_size to be divisible by block_size, got chunked_prefill_size={} and block_size={}",
+                chunked_prefill_size, args.block_size,
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
+    type Error = String;
+
+    fn try_from(compat: MockEngineArgsSerde) -> Result<Self, Self::Error> {
+        let mut builder = Self::builder();
+
+        if let Some(engine_type) = compat.engine_type.into_non_null("engine_type")? {
+            builder = builder.engine_type(parse_engine_type(&engine_type)?);
+        }
+        if let Some(Some(num_gpu_blocks)) = compat.num_gpu_blocks.into_nullable() {
+            builder = builder.num_gpu_blocks(num_gpu_blocks);
+        }
+        if let Some(block_size) = compat.block_size.into_non_null("block_size")? {
+            builder = builder.block_size(block_size);
+        }
+        if let Some(max_num_seqs) = compat.max_num_seqs.into_nullable() {
+            builder = builder.max_num_seqs(max_num_seqs);
+        }
+        if let Some(max_num_batched_tokens) = compat.max_num_batched_tokens.into_nullable() {
+            builder = builder.max_num_batched_tokens(max_num_batched_tokens);
+        }
+        if let Some(enable_prefix_caching) = compat
+            .enable_prefix_caching
+            .into_non_null("enable_prefix_caching")?
+        {
+            builder = builder.enable_prefix_caching(enable_prefix_caching);
+        }
+        if let Some(enable_chunked_prefill) = compat
+            .enable_chunked_prefill
+            .into_non_null("enable_chunked_prefill")?
+        {
+            builder = builder.enable_chunked_prefill(enable_chunked_prefill);
+        }
+        if let Some(speedup_ratio) = compat.speedup_ratio.into_non_null("speedup_ratio")? {
+            builder = builder.speedup_ratio(speedup_ratio);
+        }
+        if let Some(decode_speedup_ratio) = compat
+            .decode_speedup_ratio
+            .into_non_null("decode_speedup_ratio")?
+        {
+            builder = builder.decode_speedup_ratio(decode_speedup_ratio);
+        }
+        if let Some(dp_size) = compat.dp_size.into_non_null("dp_size")? {
+            builder = builder.dp_size(dp_size);
+        }
+        if let Some(startup_time) = compat.startup_time.into_nullable() {
+            builder = builder.startup_time(startup_time);
+        }
+
+        let worker_type = if let Some(worker_type) =
+            compat.worker_type.into_non_null("worker_type")?
+        {
+            parse_worker_type(&worker_type)?
+        } else {
+            let is_prefill = compat
+                .is_prefill
+                .into_non_null("is_prefill")?
+                .unwrap_or(false);
+            let is_decode = compat
+                .is_decode
+                .into_non_null("is_decode")?
+                .unwrap_or(false);
+
+            match (is_prefill, is_decode) {
+                (false, false) => WorkerType::Aggregated,
+                (true, false) => WorkerType::Prefill,
+                (false, true) => WorkerType::Decode,
+                (true, true) => {
+                    return Err(
+                        "Invalid worker configuration: is_prefill and is_decode cannot both be true."
+                            .to_string(),
+                    );
+                }
+            }
+        };
+        builder = builder.worker_type(worker_type);
+
+        if let Some(planner_profile_data) = compat.planner_profile_data.into_nullable() {
+            builder = builder.planner_profile_data(planner_profile_data.clone());
+            if let Some(path) = planner_profile_data {
+                builder = builder.perf_model(load_perf_model(&path));
+            }
+        }
+
+        if let Some(aic_backend) = compat.aic_backend.into_nullable() {
+            builder = builder.aic_backend(aic_backend);
+        }
+        if let Some(aic_system) = compat.aic_system.into_nullable() {
+            builder = builder.aic_system(aic_system);
+        }
+        if let Some(aic_backend_version) = compat.aic_backend_version.into_nullable() {
+            builder = builder.aic_backend_version(aic_backend_version);
+        }
+        if let Some(aic_tp_size) = compat.aic_tp_size.into_nullable() {
+            builder = builder.aic_tp_size(aic_tp_size);
+        }
+        if let Some(aic_model_path) = compat.aic_model_path.into_nullable() {
+            builder = builder.aic_model_path(aic_model_path);
+        }
+        if let Some(aic_moe_tp_size) = compat.aic_moe_tp_size.into_nullable() {
+            builder = builder.aic_moe_tp_size(aic_moe_tp_size);
+        }
+        if let Some(aic_moe_ep_size) = compat.aic_moe_ep_size.into_nullable() {
+            builder = builder.aic_moe_ep_size(aic_moe_ep_size);
+        }
+        if let Some(aic_attention_dp_size) = compat.aic_attention_dp_size.into_nullable() {
+            builder = builder.aic_attention_dp_size(aic_attention_dp_size);
+        }
+        if let Some(gpu_memory_utilization) = compat.gpu_memory_utilization.into_nullable() {
+            builder = builder.gpu_memory_utilization(gpu_memory_utilization);
+        }
+        if let Some(mem_fraction_static) = compat.mem_fraction_static.into_nullable() {
+            builder = builder.mem_fraction_static(mem_fraction_static);
+        }
+        if let Some(enable_local_indexer) = compat
+            .enable_local_indexer
+            .into_non_null("enable_local_indexer")?
+        {
+            builder = builder.enable_local_indexer(enable_local_indexer);
+        }
+        if let Some(bootstrap_port) = compat.bootstrap_port.into_nullable() {
+            builder = builder.bootstrap_port(bootstrap_port);
+        }
+        if let Some(kv_bytes_per_token) = compat.kv_bytes_per_token.into_nullable() {
+            builder = builder.kv_bytes_per_token(kv_bytes_per_token);
+        }
+        if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
+            builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);
+        }
+        if let Some(num_g2_blocks) = compat.num_g2_blocks.into_nullable() {
+            builder = builder.num_g2_blocks(num_g2_blocks);
+        }
+        if let Some(num_g3_blocks) = compat.num_g3_blocks.into_nullable() {
+            builder = builder.num_g3_blocks(num_g3_blocks);
+        }
+        if let Some(offload_batch_size) = compat.offload_batch_size.into_nullable() {
+            builder = builder.offload_batch_size(offload_batch_size);
+        }
+        if let Some(bandwidth_g1_to_g2_gbps) = compat.bandwidth_g1_to_g2_gbps.into_nullable() {
+            builder = builder.bandwidth_g1_to_g2_gbps(bandwidth_g1_to_g2_gbps);
+        }
+        if let Some(bandwidth_g2_to_g1_gbps) = compat.bandwidth_g2_to_g1_gbps.into_nullable() {
+            builder = builder.bandwidth_g2_to_g1_gbps(bandwidth_g2_to_g1_gbps);
+        }
+        if let Some(bandwidth_g2_to_g3_gbps) = compat.bandwidth_g2_to_g3_gbps.into_nullable() {
+            builder = builder.bandwidth_g2_to_g3_gbps(bandwidth_g2_to_g3_gbps);
+        }
+        if let Some(bandwidth_g3_to_g2_gbps) = compat.bandwidth_g3_to_g2_gbps.into_nullable() {
+            builder = builder.bandwidth_g3_to_g2_gbps(bandwidth_g3_to_g2_gbps);
+        }
+        if let Some(reasoning) = compat.reasoning.into_nullable() {
+            builder = builder.reasoning(reasoning);
+        }
+        if let Some(zmq_kv_events_port) = compat.zmq_kv_events_port.into_nullable() {
+            builder = builder.zmq_kv_events_port(zmq_kv_events_port);
+        }
+        if let Some(zmq_replay_port) = compat.zmq_replay_port.into_nullable() {
+            builder = builder.zmq_replay_port(zmq_replay_port);
+        }
+        if let Some(preemption_mode) = compat.preemption_mode.into_non_null("preemption_mode")? {
+            builder = builder.preemption_mode(parse_preemption_mode(&preemption_mode)?);
+        }
+        if let Some(router_queue_policy) = compat.router_queue_policy.into_nullable() {
+            let router_queue_policy = router_queue_policy
+                .map(|policy| policy.parse().map_err(|e: String| e))
+                .transpose()?;
+            builder = builder.router_queue_policy(router_queue_policy);
+        }
+        if let Some(sglang) = compat.sglang.into_nullable() {
+            builder = builder.sglang(sglang);
+        }
+
+        builder
+            .build()
+            .map_err(|e| format!("Failed to build MockEngineArgs: {e}"))?
+            .normalized()
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl Default for MockEngineArgs {
     fn default() -> MockEngineArgs {
         MockEngineArgsBuilder::default()
@@ -495,6 +942,12 @@ impl MockEngineArgs {
     }
 
     pub fn normalized(mut self) -> anyhow::Result<Self> {
+        self.materialize_defaults();
+        self.validate_config()?;
+        Ok(self)
+    }
+
+    fn materialize_defaults(&mut self) {
         match self.engine_type {
             EngineType::Vllm => {
                 if self.block_size == 0 {
@@ -510,39 +963,27 @@ impl MockEngineArgs {
                     (0, Some(page_size)) => {
                         self.block_size = page_size;
                     }
-                    (block_size, Some(page_size)) if block_size == page_size => {}
-                    (_, Some(page_size)) => {
-                        return Err(anyhow::anyhow!(
-                            "engine_type=sglang requires block_size and sglang.page_size to match when both are set, got block_size={} and sglang.page_size={page_size}",
-                            self.block_size,
-                        ));
-                    }
+                    (_, Some(_)) => {}
                     (_, None) => {}
                 }
             }
         }
 
-        if self.engine_type == EngineType::Sglang
-            && let Some(chunked_prefill_size) = self
-                .sglang
-                .as_ref()
-                .and_then(|sglang| sglang.chunked_prefill_size)
-            && chunked_prefill_size % self.block_size != 0
-        {
-            return Err(anyhow::anyhow!(
-                "engine_type=sglang requires sglang.chunked_prefill_size to be divisible by block_size, got chunked_prefill_size={} and block_size={}",
-                chunked_prefill_size,
-                self.block_size,
-            ));
+        if self.num_g2_blocks == Some(0) {
+            self.num_g2_blocks = None;
         }
+        if self.num_g3_blocks == Some(0) {
+            self.num_g3_blocks = None;
+        }
+        if self.offload_batch_size == Some(0) {
+            self.offload_batch_size = None;
+        }
+    }
 
+    fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
-        if self.block_size == 0 {
-            return Err(anyhow::anyhow!("block_size must be greater than 0"));
-        }
-
-        Ok(self)
+        Ok(())
     }
 
     pub fn is_prefill(&self) -> bool {
@@ -564,332 +1005,13 @@ impl MockEngineArgs {
     }
 
     pub fn from_json_str(content: &str) -> anyhow::Result<Self> {
-        let mut builder = Self::builder();
-        let extra_args: HashMap<String, serde_json::Value> = serde_json::from_str(content)?;
-
-        // Define valid field names
-        let valid_fields: HashSet<&str> = [
-            "engine_type",
-            "num_gpu_blocks",
-            "block_size",
-            "max_num_seqs",
-            "max_num_batched_tokens",
-            "enable_prefix_caching",
-            "enable_chunked_prefill",
-            "speedup_ratio",
-            "decode_speedup_ratio",
-            "dp_size",
-            "startup_time",
-            "worker_type",
-            "is_prefill",
-            "is_decode",
-            "planner_profile_data",
-            "aic_backend",
-            "aic_system",
-            "aic_backend_version",
-            "aic_tp_size",
-            "aic_model_path",
-            "aic_moe_tp_size",
-            "aic_moe_ep_size",
-            "aic_attention_dp_size",
-            "enable_local_indexer",
-            "bootstrap_port",
-            "kv_bytes_per_token",
-            "kv_transfer_bandwidth",
-            "reasoning",
-            "zmq_kv_events_port",
-            "zmq_replay_port",
-            "preemption_mode",
-            "router_queue_policy",
-            "sglang",
-            "has_perf_model",
-        ]
-        .iter()
-        .cloned()
-        .collect();
-
-        // Check for invalid arguments
-        let invalid_args: Vec<String> = extra_args
-            .keys()
-            .filter(|key| !valid_fields.contains(key.as_str()))
-            .cloned()
-            .collect();
-
-        if !invalid_args.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Invalid arguments found in JSON file: {}. Valid arguments are: {:?}",
-                invalid_args.join(", "),
-                valid_fields
-            ));
-        }
-
-        // Apply each extra argument to the builder
-        if let Some(value) = extra_args.get("engine_type")
-            && let Some(s) = value.as_str()
-        {
-            let engine_type = match s {
-                "vllm" => EngineType::Vllm,
-                "sglang" => EngineType::Sglang,
-                other => {
-                    return Err(anyhow::anyhow!(
-                        "Invalid engine_type '{}'. Must be 'vllm' or 'sglang'.",
-                        other
-                    ));
-                }
-            };
-            builder = builder.engine_type(engine_type);
-        }
-
-        if let Some(value) = extra_args.get("num_gpu_blocks")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.num_gpu_blocks(num as usize);
-        }
-
-        if let Some(value) = extra_args.get("block_size")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.block_size(num as usize);
-        }
-
-        if let Some(value) = extra_args.get("max_num_seqs") {
-            if value.is_null() {
-                builder = builder.max_num_seqs(None);
-            } else if let Some(num) = value.as_u64() {
-                builder = builder.max_num_seqs(Some(num as usize));
-            }
-        }
-
-        if let Some(value) = extra_args.get("max_num_batched_tokens") {
-            if value.is_null() {
-                builder = builder.max_num_batched_tokens(None);
-            } else if let Some(num) = value.as_u64() {
-                builder = builder.max_num_batched_tokens(Some(num as usize));
-            }
-        }
-
-        if let Some(value) = extra_args.get("enable_prefix_caching")
-            && let Some(enabled) = value.as_bool()
-        {
-            builder = builder.enable_prefix_caching(enabled);
-        }
-
-        if let Some(value) = extra_args.get("enable_chunked_prefill")
-            && let Some(enabled) = value.as_bool()
-        {
-            builder = builder.enable_chunked_prefill(enabled);
-        }
-
-        if let Some(value) = extra_args.get("speedup_ratio")
-            && let Some(num) = value.as_f64()
-        {
-            builder = builder.speedup_ratio(num);
-        }
-
-        if let Some(value) = extra_args.get("decode_speedup_ratio")
-            && let Some(num) = value.as_f64()
-        {
-            builder = builder.decode_speedup_ratio(num);
-        }
-
-        if let Some(value) = extra_args.get("dp_size")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.dp_size(num as u32);
-        }
-
-        if let Some(value) = extra_args.get("startup_time")
-            && let Some(num) = value.as_f64()
-        {
-            builder = builder.startup_time(Some(num));
-        }
-
-        if let Some(value) = extra_args.get("enable_local_indexer")
-            && let Some(enabled) = value.as_bool()
-        {
-            builder = builder.enable_local_indexer(enabled);
-        }
-
-        if let Some(value) = extra_args.get("bootstrap_port")
-            && let Some(port) = value.as_u64()
-        {
-            builder = builder.bootstrap_port(Some(port as u16));
-        }
-
-        if let Some(value) = extra_args.get("kv_bytes_per_token")
-            && let Some(num) = value.as_u64()
-        {
-            builder = builder.kv_bytes_per_token(Some(num as usize));
-        }
-
-        if let Some(value) = extra_args.get("kv_transfer_bandwidth")
-            && let Some(num) = value.as_f64()
-        {
-            builder = builder.kv_transfer_bandwidth(Some(num));
-        }
-
-        if let Some(value) = extra_args.get("reasoning")
-            && !value.is_null()
-        {
-            let cfg: ReasoningConfig = serde_json::from_value(value.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse reasoning config: {}", e))?;
-            builder = builder.reasoning(Some(cfg));
-        }
-
-        if let Some(value) = extra_args.get("zmq_kv_events_port")
-            && let Some(port) = value.as_u64()
-        {
-            builder = builder.zmq_kv_events_port(Some(port as u16));
-        }
-
-        if let Some(value) = extra_args.get("zmq_replay_port")
-            && let Some(port) = value.as_u64()
-        {
-            builder = builder.zmq_replay_port(Some(port as u16));
-        }
-
-        if let Some(value) = extra_args.get("preemption_mode")
-            && let Some(mode_str) = value.as_str()
-        {
-            let mode = match mode_str {
-                "lifo" => PreemptionMode::Lifo,
-                "fifo" => PreemptionMode::Fifo,
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Invalid preemption_mode: '{}'. Must be 'lifo' or 'fifo'.",
-                        mode_str
-                    ));
-                }
-            };
-            builder = builder.preemption_mode(mode);
-        }
-
-        if let Some(value) = extra_args.get("router_queue_policy")
-            && let Some(policy_str) = value.as_str()
-        {
-            let policy = policy_str.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-            builder = builder.router_queue_policy(Some(policy));
-        }
-
-        if let Some(value) = extra_args.get("sglang")
-            && !value.is_null()
-        {
-            let cfg: SglangArgs = serde_json::from_value(value.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to parse sglang config: {}", e))?;
-            builder = builder.sglang(Some(cfg));
-        }
-
-        let worker_type = if let Some(value) = extra_args.get("worker_type") {
-            match value.as_str() {
-                Some("aggregated") => WorkerType::Aggregated,
-                Some("prefill") => WorkerType::Prefill,
-                Some("decode") => WorkerType::Decode,
-                Some(other) => {
-                    return Err(anyhow::anyhow!(
-                        "Invalid worker_type '{}'. Must be 'aggregated', 'prefill', or 'decode'.",
-                        other
-                    ));
-                }
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "Invalid worker_type: expected string value."
-                    ));
-                }
-            }
-        } else {
-            let is_prefill = extra_args
-                .get("is_prefill")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let is_decode = extra_args
-                .get("is_decode")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            match (is_prefill, is_decode) {
-                (false, false) => WorkerType::Aggregated,
-                (true, false) => WorkerType::Prefill,
-                (false, true) => WorkerType::Decode,
-                (true, true) => {
-                    return Err(anyhow::anyhow!(
-                        "Invalid worker configuration: is_prefill and is_decode cannot both be true."
-                    ));
-                }
-            }
-        };
-        builder = builder.worker_type(worker_type);
-
-        // Load performance model from NPZ file if provided.
-        let perf_model = if let Some(path_str) = extra_args.get("planner_profile_data")
-            && let Some(path_str) = path_str.as_str()
-        {
-            let npz_path = PathBuf::from(path_str);
-            builder = builder.planner_profile_data(Some(npz_path.clone()));
-            match PerfModel::from_npz(&npz_path) {
-                Ok(model) => {
-                    tracing::info!("Successfully loaded performance model from: {:?}", npz_path);
-                    Arc::new(model)
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to load performance model from {:?}: {}. Falling back to polynomial model.",
-                        npz_path,
-                        e
-                    );
-                    Arc::new(PerfModel::default())
-                }
-            }
-        } else {
-            Arc::new(PerfModel::default())
-        };
-        builder = builder.perf_model(perf_model);
-
-        // Check for AIC direct mode fields
-        if let Some(backend) = extra_args.get("aic_backend")
-            && let Some(backend_str) = backend.as_str()
-        {
-            builder = builder.aic_backend(Some(backend_str.to_string()));
-        }
-        if let Some(system) = extra_args.get("aic_system")
-            && let Some(s) = system.as_str()
-        {
-            builder = builder.aic_system(Some(s.to_string()));
-        }
-        if let Some(version) = extra_args.get("aic_backend_version")
-            && let Some(s) = version.as_str()
-        {
-            builder = builder.aic_backend_version(Some(s.to_string()));
-        }
-        if let Some(tp) = extra_args.get("aic_tp_size")
-            && let Some(n) = tp.as_u64()
-        {
-            builder = builder.aic_tp_size(Some(n as usize));
-        }
-        if let Some(mp) = extra_args.get("aic_model_path")
-            && let Some(s) = mp.as_str()
-        {
-            builder = builder.aic_model_path(Some(s.to_string()));
-        }
-        if let Some(v) = extra_args.get("aic_moe_tp_size")
-            && let Some(n) = v.as_u64()
-        {
-            builder = builder.aic_moe_tp_size(Some(n as usize));
-        }
-        if let Some(v) = extra_args.get("aic_moe_ep_size")
-            && let Some(n) = v.as_u64()
-        {
-            builder = builder.aic_moe_ep_size(Some(n as usize));
-        }
-        if let Some(v) = extra_args.get("aic_attention_dp_size")
-            && let Some(n) = v.as_u64()
-        {
-            builder = builder.aic_attention_dp_size(Some(n as usize));
-        }
-        // Build the MockEngineArgs with either defaults or overridden values
-        builder
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))
-            .and_then(Self::normalized)
+        let mut deserializer = serde_json::Deserializer::from_str(content);
+        let args = serde_path_to_error::deserialize(&mut deserializer)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        deserializer
+            .end()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok(args)
     }
 }
 
@@ -934,6 +1056,13 @@ mod tests {
             "bootstrap_port": args.bootstrap_port,
             "kv_bytes_per_token": args.kv_bytes_per_token,
             "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
+            "num_g2_blocks": args.num_g2_blocks,
+            "num_g3_blocks": args.num_g3_blocks,
+            "offload_batch_size": args.offload_batch_size,
+            "bandwidth_g1_to_g2_gbps": args.bandwidth_g1_to_g2_gbps,
+            "bandwidth_g2_to_g1_gbps": args.bandwidth_g2_to_g1_gbps,
+            "bandwidth_g2_to_g3_gbps": args.bandwidth_g2_to_g3_gbps,
+            "bandwidth_g3_to_g2_gbps": args.bandwidth_g3_to_g2_gbps,
             "reasoning": args.reasoning,
             "zmq_kv_events_port": args.zmq_kv_events_port,
             "zmq_replay_port": args.zmq_replay_port,
@@ -948,6 +1077,31 @@ mod tests {
         assert_eq!(restored.worker_type, WorkerType::Decode);
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+    }
+
+    #[test]
+    fn test_mock_engine_args_json_rejects_unknown_and_invalid_types() {
+        let unknown = MockEngineArgs::from_json_str(&json!({"unknown": true}).to_string())
+            .expect_err("unknown fields should be rejected");
+        assert!(
+            unknown.to_string().contains("unknown field"),
+            "unexpected error: {unknown}",
+        );
+
+        let invalid =
+            MockEngineArgs::from_json_str(&json!({"gpu_memory_utilization": "bad"}).to_string())
+                .expect_err("wrongly typed fields should be rejected");
+        assert!(
+            invalid.to_string().contains("gpu_memory_utilization"),
+            "unexpected error: {invalid}",
+        );
+
+        let trailing = MockEngineArgs::from_json_str(r#"{"block_size": 16} true"#)
+            .expect_err("trailing JSON should be rejected");
+        assert!(
+            trailing.to_string().contains("trailing characters"),
+            "unexpected error: {trailing}",
+        );
     }
 
     #[test]
@@ -1029,6 +1183,64 @@ mod tests {
                 .contains("block_size and sglang.page_size to match"),
             "unexpected error: {error}",
         );
+    }
+
+    #[test]
+    fn test_normalized_g3_requires_g2() {
+        let missing_g2 = MockEngineArgs::builder()
+            .num_g3_blocks(Some(10))
+            .kv_bytes_per_token(Some(1024))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(
+            missing_g2.to_string().contains("requires num_g2_blocks"),
+            "unexpected error: {missing_g2}",
+        );
+    }
+
+    #[test]
+    fn test_normalized_zero_disables_optional_offload_knobs() {
+        let args = MockEngineArgs::builder()
+            .num_g2_blocks(Some(0))
+            .num_g3_blocks(Some(0))
+            .offload_batch_size(Some(0))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.num_g2_blocks, None);
+        assert_eq!(args.num_g3_blocks, None);
+        assert_eq!(args.offload_batch_size, None);
+    }
+
+    #[test]
+    fn test_normalized_zero_g3_does_not_require_g2_or_kv_bytes() {
+        let args = MockEngineArgs::builder()
+            .num_g3_blocks(Some(0))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.num_g3_blocks, None);
+    }
+
+    #[test]
+    fn test_normalized_g3_allows_missing_kv_bytes_for_cli_auto_compute() {
+        let args = MockEngineArgs::builder()
+            .num_g2_blocks(Some(10))
+            .num_g3_blocks(Some(10))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        assert_eq!(args.num_g2_blocks, Some(10));
+        assert_eq!(args.num_g3_blocks, Some(10));
+        assert_eq!(args.kv_bytes_per_token, None);
     }
 
     #[test]

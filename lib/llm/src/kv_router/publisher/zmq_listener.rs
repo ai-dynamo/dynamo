@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt;
-use rmp_serde as rmps;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
 
+use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 pub(super) async fn start_zmq_listener(
@@ -29,7 +29,7 @@ pub(super) async fn start_zmq_listener(
         zmq_topic
     );
 
-    let warning_count = Arc::new(AtomicU32::new(0));
+    let mut normalizer = ZmqEventNormalizer::new(kv_block_size);
     let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
         Ok(socket) => socket,
         Err(error) => {
@@ -38,6 +38,7 @@ pub(super) async fn start_zmq_listener(
         }
     };
     let mut socket = socket;
+    let metrics = kv_publisher_metrics();
 
     if cancellation_token.is_cancelled() {
         return;
@@ -86,7 +87,7 @@ pub(super) async fn start_zmq_listener(
 
                 let engine_seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
 
-                let batch_result = rmps::from_slice::<KvEventBatch>(&payload);
+                let batch_result = decode_event_batch(&payload);
                 let Ok(batch) = batch_result else {
                     let e = batch_result.unwrap_err();
                     tracing::warn!("Failed to decode KVEventBatch msgpack: {e}");
@@ -103,10 +104,37 @@ pub(super) async fn start_zmq_listener(
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
                 for raw_event in batch.events {
-                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+                    let event_type = raw_event.event_type_label();
+                    if let Some(metrics) = &metrics {
+                        metrics.increment_zmq_event("received", event_type);
+                    }
                     let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                    let event =
-                        convert_event(raw_event, event_id, kv_block_size, worker, &warning_count);
+                    let raw_event = match normalizer.preprocess_with_reason(raw_event, worker) {
+                        Ok(raw_event) => raw_event,
+                        Err(reason) => {
+                            if let Some(metrics) = &metrics {
+                                metrics.increment_zmq_filtered_event(event_type, reason.as_label());
+                            }
+                            continue;
+                        }
+                    };
+                    if let Some(metrics) = &metrics {
+                        metrics.increment_zmq_event("accepted", event_type);
+                    }
+                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+                    let Some(event) =
+                        normalizer.normalize_preprocessed(raw_event, event_id, worker)
+                    else {
+                        if let Some(metrics) = &metrics {
+                            metrics.increment_zmq_conversion_issue(event_type, "conversion_none");
+                        }
+                        continue;
+                    };
+                    if matches!(event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
+                        && let Some(metrics) = &metrics
+                    {
+                        metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
+                    }
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         break 'main String::from("channel receiver dropped");

@@ -74,7 +74,11 @@ async fn try_recover_from_peer(
         let indexer = registry.get_or_create_indexer(key, entry.block_size);
 
         for event in entry.events {
-            indexer.apply_event(event).await;
+            // Use the tier-aware dispatcher so HostPinned/Disk events from the
+            // peer's dump land in the matching lower-tier slot rather than the
+            // device primary. The peer side retags lower-tier events in
+            // `Indexer::dump_events`, so the `storage_tier` here is correct.
+            indexer.apply_event_routed(event).await;
             total_events += 1;
         }
     }

@@ -86,6 +86,7 @@ python3 -m dynamo.sglang \
   --trust-remote-code \
   "${KV_EVENTS_ARGS_1[@]}" \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" &
 
@@ -98,6 +99,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --trust-remote-code \
   "${KV_EVENTS_ARGS_2[@]}" \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   $GPU_MEM_ARGS \
   "${TRACE_ARGS[@]}" &
 

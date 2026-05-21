@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use super::unified_client::RequestPlaneClient;
 use super::*;
+use crate::component::Instance;
+use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use crate::error::{DynamoError, ErrorType};
@@ -24,6 +27,7 @@ use crate::pipeline::network::codec::TwoPartMessage;
 use crate::pipeline::network::tcp;
 use crate::pipeline::{ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
+use crate::traits::DistributedRuntimeProvider;
 
 use anyhow::{Error, Result};
 use futures::stream::Stream;
@@ -34,31 +38,19 @@ use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RequestType {
-    SingleIn,
-    ManyIn,
-}
+const CONTROL_MESSAGE_MAX_BYTES: usize = 128 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ResponseType {
-    SingleOut,
-    ManyOut,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RequestControlMessage {
-    id: String,
-    request_type: RequestType,
-    response_type: ResponseType,
-    connection_info: ConnectionInfo,
-    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    frontend_send_ts_ns: Option<u64>,
+fn serialize_control_message(control_message: &RequestControlMessage) -> Result<Vec<u8>, Error> {
+    let ctrl = serde_json::to_vec(control_message)?;
+    if ctrl.len() > CONTROL_MESSAGE_MAX_BYTES {
+        return Err(PipelineError::Generic(format!(
+            "request control message too large: {} bytes exceeds limit {}",
+            ctrl.len(),
+            CONTROL_MESSAGE_MAX_BYTES
+        ))
+        .into());
+    }
+    Ok(ctrl)
 }
 
 /// RAII guard that decrements REQUEST_PLANE_INFLIGHT on drop unless disarmed.
@@ -113,15 +105,35 @@ impl<S> Drop for InflightDecStream<S> {
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
+    /// Carries endpoint name + instance_id so cancellation is scoped to the
+    /// exact (endpoint, instance) pair, not all endpoints on the same runtime.
+    instance: Option<Instance>,
 }
 
 impl<T> AddressedRequest<T> {
     pub fn new(request: T, address: String) -> Self {
-        Self { request, address }
+        Self {
+            request,
+            address,
+            instance: None,
+        }
     }
 
-    pub(crate) fn into_parts(self) -> (T, String) {
-        (self.request, self.address)
+    pub fn with_instance(request: T, address: String, instance: Instance) -> Self {
+        Self {
+            request,
+            address,
+            instance: Some(instance),
+        }
+    }
+
+    pub fn for_instance(request: T, instance: Instance) -> Self {
+        let address = instance.transport.address().to_string();
+        Self::with_instance(request, address, instance)
+    }
+
+    pub(crate) fn into_parts(self) -> (T, String, Option<Instance>) {
+        (self.request, self.address, self.instance)
     }
 }
 
@@ -147,6 +159,35 @@ impl AddressedPushRouter {
             resp_transport,
         }))
     }
+
+    pub async fn from_runtime_provider(
+        provider: &impl DistributedRuntimeProvider,
+    ) -> Result<Arc<Self>> {
+        let manager = provider.drt().network_manager();
+        let req_client = manager.create_client()?;
+        let resp_transport = provider.drt().tcp_server().await?;
+
+        tracing::debug!(
+            transport = req_client.transport_name(),
+            "Creating AddressedPushRouter with request plane client"
+        );
+
+        Self::new(req_client, resp_transport)
+    }
+
+    /// Cancel all pending response-stream registrations for an instance.
+    pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
+        self.resp_transport
+            .cancel_instance_streams(instance_id)
+            .await
+    }
+
+    /// Clear the tombstone after an instance reappears in discovery.
+    pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
+        self.resp_transport
+            .clear_instance_tombstone(instance_id)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -162,7 +203,7 @@ where
 
         let request_id = request.context().id().to_string();
         let (addressed_request, context) = request.transfer(());
-        let (request, address) = addressed_request.into_parts();
+        let (request, address, instance_info) = addressed_request.into_parts();
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
 
@@ -189,6 +230,32 @@ where
         // separate out the connection info and the stream provider from the registered stream
         let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
 
+        // Snapshot subject before connection_info is moved; used for cleanup.
+        let recv_subject: Option<String> =
+            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
+                .ok()
+                .map(|ci| ci.subject);
+
+        // If the instance is already tombstoned, fail fast with a migratable
+        // error instead of writing to the request plane.
+        if let (Some(subject), Some(inst)) = (&recv_subject, &instance_info) {
+            let endpoint_instance_id = inst.endpoint_instance_id();
+            if !self
+                .resp_transport
+                .associate_instance(subject, &endpoint_instance_id)
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message(
+                            "Worker removed before request could be sent (tombstoned instance)"
+                        )
+                        .build()
+                ));
+            }
+        }
+
         // package up the connection info as part of the "header" component of the two part message
         // used to issue the request on the
         // todo -- this object should be automatically created by the register call, and achieved by to the two into_parts()
@@ -198,14 +265,31 @@ where
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
             connection_info,
+            metadata: context.metadata().clone(),
             frontend_send_ts_ns: None,
         };
 
         // next build the two part message where we package the connection info and the request into
         // a single Vec<u8> that can be sent over the wire.
         // --- package this up in the WorkQueuePublisher ---
-        let ctrl = serde_json::to_vec(&control_message)?;
-        let data = serde_json::to_vec(&request)?;
+        let ctrl = match serialize_control_message(&control_message) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e);
+            }
+        };
+        let data = match serde_json::to_vec(&request) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e.into());
+            }
+        };
 
         tracing::trace!(
             request_id,
@@ -220,9 +304,14 @@ where
         // or it should take a two part message directly
         // todo - update this
         let codec = TwoPartCodec::default();
-        let buffer = {
-            let _nvtx = dynamo_nvtx_range!("codec.encode");
-            codec.encode_message(msg)?
+        let buffer = match codec.encode_message(msg) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e.into());
+            }
         };
 
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
@@ -253,19 +342,57 @@ where
 
         // Phase A: Frontend → Backend (network + queue + ack)
         let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
-        let _response = self
-            .req_client
-            .send_request(address, buffer, headers)
-            .await?;
+        let send_result = self.req_client.send_request(address, buffer, headers).await;
         drop(_nvtx_send);
+
+        if let Err(e) = send_result {
+            if let Some(subject) = &recv_subject {
+                self.resp_transport.cancel_recv_stream(subject).await;
+            }
+            return Err(e);
+        }
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
-        let response_stream = response_stream_provider
-            .await
-            .map_err(|_| PipelineError::DetachedStreamReceiver)?
-            .map_err(PipelineError::ConnectionFailed)?;
+
+        // RecvError → migratable Disconnected (watcher cancelled the subject
+        // or the worker died before establishing the response stream).
+        let response_stream = match response_stream_provider.await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                // generate() failed before any response bytes; migrate via
+                // CannotConnect since the dominant cause is a worker-local
+                // setup/version issue. The wire prologue carries only an
+                // opaque string today, so app-level rejections also retry
+                // -- safe because no side effects are visible yet. Follow-up:
+                // structured prologue error type for finer routing.
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::CannotConnect)
+                        .message(format!(
+                            "Worker generate() failed before response stream: {e}"
+                        ))
+                        .build()
+                ));
+            }
+            Err(_recv_err) => {
+                // oneshot dropped: either the discovery watcher cancelled
+                // this subject or the worker died mid-handshake.
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("Worker disconnected before response stream was established")
+                        .build()
+                ));
+            }
+        };
         drop(_nvtx_wait);
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
@@ -335,5 +462,53 @@ where
         inflight_guard.disarm();
         let stream = InflightDecStream { inner: stream };
         Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestType,
+        ResponseType, serialize_control_message,
+    };
+    use std::collections::BTreeMap;
+
+    fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
+        RequestControlMessage {
+            id: "request-123".to_string(),
+            request_type: RequestType::SingleIn,
+            response_type: ResponseType::ManyOut,
+            connection_info: ConnectionInfo {
+                transport: "tcp".to_string(),
+                info: "{}".to_string(),
+            },
+            metadata,
+            frontend_send_ts_ns: None,
+        }
+    }
+
+    #[test]
+    fn serialize_control_message_succeeds_under_limit() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("x-tiny-blob".to_string(), "alpha".to_string());
+
+        let ctrl = serialize_control_message(&base_control_message(metadata))
+            .expect("control message should serialize under the limit");
+        assert!(ctrl.len() <= CONTROL_MESSAGE_MAX_BYTES);
+    }
+
+    #[test]
+    fn serialize_control_message_errors_over_limit() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "x-large-blob".to_string(),
+            "x".repeat(CONTROL_MESSAGE_MAX_BYTES),
+        );
+
+        let err = serialize_control_message(&base_control_message(metadata))
+            .expect_err("oversized control message should fail")
+            .to_string();
+        assert!(err.contains("request control message too large"));
+        assert!(err.contains(&CONTROL_MESSAGE_MAX_BYTES.to_string()));
     }
 }

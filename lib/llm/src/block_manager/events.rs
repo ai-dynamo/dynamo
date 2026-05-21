@@ -201,18 +201,21 @@ impl DynamoEventManager {
             rt.spawn(async move {
                 for handle in handles {
                     // Extract block metadata from RegistrationHandle
-                    let block_hash = handle.sequence_hash().to_string();
-                    let parent_hash = handle.parent_sequence_hash().map(|h| h.to_string());
+                    let block_hash = handle.published_sequence_hash().to_string();
+                    let parent_hash = handle
+                        .published_parent_sequence_hash()
+                        .map(|h| h.to_string());
 
                     // Extract block_size and tokens from RegistrationHandle
                     let block_size = handle.block_size(); // usize
                     let tokens: Vec<u32> = handle.tokens().iter().copied().collect();
 
                     tracing::debug!(
-                        "DynamoEventManager sending store event to kv event consolidator: block_hash={}, block_size={}, tokens={}",
+                        "DynamoEventManager sending store event to kv event consolidator: block_hash={}, block_size={}, tokens={}, tier={:?}",
                         block_hash,
                         block_size,
-                        tokens.len()
+                        tokens.len(),
+                        handle.storage_tier()
                     );
 
                     // Send to consolidator with EventSource::Kvbm
@@ -224,7 +227,7 @@ impl DynamoEventManager {
                             parent_hash,
                             block_size,
                             None, // lora_name
-                            None, // tier
+                            Some(handle.storage_tier()),
                             None, // data_parallel_rank
                         )
                         .await;
@@ -242,11 +245,13 @@ impl DynamoEventManager {
     ///
     /// Called when a RegistrationHandle is dropped (block evicted from KVBM).
     fn publish_remove_event(&self, registration_handle: &RegistrationHandle) {
-        let block_hash = registration_handle.sequence_hash().to_string();
+        let block_hash = registration_handle.published_sequence_hash().to_string();
+        let tier = registration_handle.storage_tier();
 
         tracing::debug!(
-            "DynamoEventManager::publish_remove_event called: block_hash={}",
-            block_hash
+            %block_hash,
+            ?tier,
+            "DynamoEventManager sending remove event to kv event consolidator"
         );
 
         let kv_event_consolidator = self.consolidator_handle.clone();
@@ -254,7 +259,7 @@ impl DynamoEventManager {
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
                 kv_event_consolidator
-                    .handle_remove(&block_hash, EventSource::Kvbm)
+                    .handle_remove(&block_hash, EventSource::Kvbm, Some(tier))
                     .await;
             });
         } else {
@@ -288,14 +293,15 @@ impl EventReleaseManager for DynamoEventManager {
 
 #[cfg(test)]
 pub mod tests {
+    use crate::block_manager::kv_consolidator::StorageTier;
     use crate::tokens::SequenceHash;
 
     use super::*;
 
     #[derive(Debug, PartialEq, Eq)]
     pub enum EventType {
-        Register(SequenceHash),
-        Remove(SequenceHash),
+        Register(SequenceHash, StorageTier),
+        Remove(SequenceHash, StorageTier),
     }
 
     pub struct MockEventManager {
@@ -322,7 +328,7 @@ pub mod tests {
         fn publish(&self, handles: Vec<Arc<RegistrationHandle>>) {
             let events = handles
                 .iter()
-                .map(|handle| EventType::Register(handle.sequence_hash()))
+                .map(|handle| EventType::Register(handle.sequence_hash(), handle.storage_tier()))
                 .collect::<Vec<_>>();
             self.tx.send(events).unwrap();
         }
@@ -330,7 +336,10 @@ pub mod tests {
 
     impl EventReleaseManager for MockEventManager {
         fn block_release(&self, registration_handle: &RegistrationHandle) {
-            let events = vec![EventType::Remove(registration_handle.sequence_hash())];
+            let events = vec![EventType::Remove(
+                registration_handle.sequence_hash(),
+                registration_handle.storage_tier(),
+            )];
             self.tx.send(events).unwrap();
         }
     }

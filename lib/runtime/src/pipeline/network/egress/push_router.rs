@@ -5,8 +5,10 @@ use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
     component::{
-        Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state,
+        Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
+        get_or_create_routing_occupancy_state,
     },
+    discovery::EndpointInstanceId,
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
@@ -14,7 +16,7 @@ use crate::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
     },
-    protocols::maybe_error::MaybeError,
+    protocols::{EndpointId, maybe_error::MaybeError},
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
@@ -100,12 +102,12 @@ impl Drop for OccupancyPermit {
     }
 }
 
-/// Trait for monitoring worker load and determining busy state.
-/// Implementations can define custom load metrics and busy thresholds.
+/// Trait for monitoring worker load and determining overload state.
+/// Implementations can define custom load metrics and overload thresholds.
 #[async_trait]
 pub trait WorkerLoadMonitor: Send + Sync {
     /// Start background monitoring of worker load.
-    /// This should spawn background tasks that update the client's free instances.
+    /// This should spawn background tasks that update the client's overloaded instances.
     async fn start_monitoring(&self) -> anyhow::Result<()>;
 }
 
@@ -153,7 +155,8 @@ where
     _phantom: PhantomData<(T, U)>,
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouterMode {
     #[default]
     RoundRobin,
@@ -252,18 +255,131 @@ fn device_aware_candidate_group(
     }
 }
 
+/// At most one `list_and_watch` per endpoint, across all `PushRouter`
+/// instances. Entry removed on watcher exit so a later router can re-arm.
+static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
+    std::sync::OnceLock::new();
+
+/// Watch discovery for instance removals and cancel pending response-stream
+/// registrations on the removed instance, unblocking queued requests with
+/// a migratable `Disconnected` error. Uses raw `list_and_watch` events
+/// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
+/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
+fn spawn_instance_removal_watcher(
+    endpoint: Endpoint,
+    addressed: Arc<AddressedPushRouter>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) {
+    use crate::discovery::{
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    };
+    use tokio_stream::StreamExt as _;
+
+    // One watcher per endpoint: if one is already running, skip.
+    let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+    let endpoint_id = endpoint.id();
+    if guard.insert(endpoint_id.clone(), ()).is_some() {
+        tracing::debug!(
+            ?endpoint_id,
+            "Instance removal watcher already running for this endpoint, skipping"
+        );
+        return;
+    }
+
+    let endpoint_name = endpoint.name().to_string();
+
+    tokio::spawn(async move {
+        // Release on every exit path (including panic); a leaked entry
+        // silently disables removal cancellation until process restart.
+        struct GuardRelease(EndpointId);
+        impl Drop for GuardRelease {
+            fn drop(&mut self) {
+                if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                    map.remove(&self.0);
+                }
+            }
+        }
+        let _release = GuardRelease(endpoint_id);
+
+        let namespace = endpoint.component().namespace().name();
+        let component = endpoint.component().name().to_string();
+
+        // Reconnect on transient discovery failure; cancel-aware backoff.
+        const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+        'reconnect: loop {
+            let query = DiscoveryQuery::Endpoint {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint_name.clone(),
+            };
+
+            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        endpoint = %endpoint_name,
+                        "Failed to start instance removal watcher (will retry): {e}"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
+                        _ = cancel_token.cancelled() => break 'reconnect,
+                    }
+                }
+            };
+
+            loop {
+                tokio::select! {
+                    event = stream.next() => {
+                        match event {
+                            Some(Ok(DiscoveryEvent::Removed(id))) => {
+                                if let DiscoveryInstanceId::Endpoint(eid) = &id {
+                                    let n = addressed.cancel_instance_streams(eid).await;
+                                    if n > 0 {
+                                        tracing::warn!(
+                                            namespace = %eid.namespace,
+                                            component = %eid.component,
+                                            endpoint = %eid.endpoint,
+                                            instance_id = eid.instance_id,
+                                            cancelled = n,
+                                            "Cancelled pending response streams for removed \
+                                             instance (discovery-driven cleanup)"
+                                        );
+                                    }
+                                }
+                            }
+                            Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
+                                let eid: EndpointInstanceId = inst.endpoint_instance_id();
+                                addressed.clear_instance_tombstone(&eid).await;
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Instance removal watcher stream error: {e}"
+                                );
+                            }
+                            None => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Instance removal watcher stream ended; reconnecting"
+                                );
+                                continue 'reconnect;
+                            }
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {
+                        break 'reconnect;
+                    }
+                }
+            }
+        }
+
+        tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
+    });
+}
+
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
-    // Get network manager and create client (no mode checks!)
-    let manager = endpoint.drt().network_manager();
-    let req_client = manager.create_client()?;
-    let resp_transport = endpoint.drt().tcp_server().await?;
-
-    tracing::debug!(
-        transport = req_client.transport_name(),
-        "Creating AddressedPushRouter with request plane client"
-    );
-
-    AddressedPushRouter::new(req_client, resp_transport)
+    AddressedPushRouter::from_runtime_provider(endpoint).await
 }
 
 impl<T, U> PushRouter<T, U>
@@ -271,7 +387,7 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
-    /// Create a new PushRouter without a worker load monitor (no busy detection)
+    /// Create a new PushRouter without a worker load monitor (no overload detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         Self::from_client_with_monitor(client, router_mode, None).await
     }
@@ -298,6 +414,13 @@ where
             None
         };
 
+        // Cancel orphaned pending response streams when workers die.
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            addressed.clone(),
+            client.endpoint.drt().primary_token(),
+        );
+
         Ok(PushRouter {
             client,
             addressed,
@@ -313,9 +436,9 @@ where
     /// Create a new PushRouter with an optional worker load monitor.
     ///
     /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// busy detection itself is driven by the monitor via `client.update_free_instances(...)`.
+    /// overload detection itself is driven by the monitor via `client.set_overloaded_instances(...)`.
     /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// `client.instance_ids_free()` returns all instances and the gate never rejects.
+    /// the routing snapshot reports at least one free instance and the gate never rejects.
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
@@ -339,6 +462,13 @@ where
             None
         };
 
+        // Cancel orphaned pending response streams when workers die.
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            addressed.clone(),
+            client.endpoint.drt().primary_token(),
+        );
+
         let router = PushRouter {
             client,
             addressed,
@@ -353,20 +483,37 @@ where
         Ok(router)
     }
 
+    /// `ResourceExhausted` when workers are routable but all overloaded;
+    /// `anyhow!("no instances found")` when no routable workers exist.
+    fn empty_free_pool_error(&self, routing_instances: &RoutingInstances) -> anyhow::Error {
+        if !routing_instances.routable_ids().is_empty() {
+            let cause = PipelineError::ServiceOverloaded(
+                "All workers are busy, please retry later".to_string(),
+            );
+            return DynamoError::builder()
+                .error_type(ErrorType::ResourceExhausted)
+                .message("All workers are busy, please retry later")
+                .cause(cause)
+                .build()
+                .into();
+        }
+        anyhow::anyhow!(
+            "no instances found for endpoint {}",
+            self.client.endpoint.id()
+        )
+    }
+
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let instance_id = {
-            let instance_ids = self.client.instance_ids_avail();
-            let count = instance_ids.len();
+            let routing_instances = self.client.routing_instances();
+            let count = routing_instances.free_ids().len();
             if count == 0 {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
+                return Err(self.empty_free_pool_error(&routing_instances));
             }
-            instance_ids[counter % count]
+            routing_instances.free_ids()[counter % count]
         };
         tracing::trace!("round robin router selected {instance_id}");
 
@@ -377,16 +524,13 @@ where
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
-            let instance_ids = self.client.instance_ids_avail();
-            let count = instance_ids.len();
+            let routing_instances = self.client.routing_instances();
+            let count = routing_instances.free_ids().len();
             if count == 0 {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
+                return Err(self.empty_free_pool_error(&routing_instances));
             }
             let counter = rand::rng().random::<u64>() as usize;
-            instance_ids[counter % count]
+            routing_instances.free_ids()[counter % count]
         };
         tracing::trace!("random router selected {instance_id}");
 
@@ -399,19 +543,11 @@ where
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
         let instance_id = {
-            let instance_ids = self
-                .client
-                .instance_ids_avail()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>();
-            if instance_ids.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                ));
+            let routing_instances = self.client.routing_instances();
+            if routing_instances.free_ids().is_empty() {
+                return Err(self.empty_free_pool_error(&routing_instances));
             }
-            p2c_select_from(state.as_ref(), &instance_ids)
+            p2c_select_from(state.as_ref(), routing_instances.free_ids())
         };
         state.increment(instance_id);
         let permit = OccupancyPermit::new(state, instance_id);
@@ -434,10 +570,13 @@ where
         // When fault detection is disabled, check the raw discovery list
         // (not filtered by report_instance_down) so transient failures
         // don't poison the instance for subsequent retries.
-        let found = if self.fault_detection_enabled {
-            self.client.instance_ids_avail().contains(&instance_id)
-        } else {
-            self.client.instance_ids().contains(&instance_id)
+        let found = {
+            if self.fault_detection_enabled {
+                let routing_instances = self.client.routing_instances();
+                routing_instances.routable_ids().contains(&instance_id)
+            } else {
+                self.client.instance_ids().contains(&instance_id)
+            }
         };
 
         if !found {
@@ -461,18 +600,11 @@ where
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self
-            .client
-            .instance_ids_avail()
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids().to_vec();
 
         if instance_ids.is_empty() {
-            return Err(anyhow::anyhow!(
-                "no instances found for endpoint {}",
-                self.client.endpoint.id()
-            ));
+            return Err(self.empty_free_pool_error(&routing_instances));
         }
 
         // Apply a unified policy for all endpoints.
@@ -498,16 +630,11 @@ where
             cuda_to_cpu_ratio,
         );
 
-        // Select least-loaded within the chosen group
+        // Empty group: budget-selected device class has no free workers.
         let instance_id = state
             .select_exact_min_and_increment(&candidates)
             .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no instances in selected device group for endpoint {}",
-                    endpoint_id
-                )
-            })?;
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         let permit = OccupancyPermit::new(state.clone(), instance_id);
         let is_cpu = matches!(
             device_type_map.get(&instance_id),
@@ -532,21 +659,12 @@ where
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
-        let instance_ids = self
-            .client
-            .instance_ids_avail()
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids().to_vec();
         let instance_id = state
             .select_exact_min_and_increment(&instance_ids)
             .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no instances found for endpoint {}",
-                    self.client.endpoint.id()
-                )
-            })?;
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         let permit = OccupancyPermit::new(state.clone(), instance_id);
         tracing::trace!(
             "least loaded router selected {instance_id} (connections: {})",
@@ -566,8 +684,8 @@ where
     /// Increments round-robin counter if applicable.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn select_next_worker(&self) -> Option<u64> {
-        let instance_ids = self.client.instance_ids_avail();
-        let count = instance_ids.len();
+        let routing_instances = self.client.routing_instances();
+        let count = routing_instances.free_ids().len();
         if count == 0 {
             return None;
         }
@@ -575,11 +693,11 @@ where
         match self.router_mode {
             RouterMode::RoundRobin => {
                 let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
-                Some(instance_ids[counter % count])
+                Some(routing_instances.free_ids()[counter % count])
             }
             RouterMode::Random => {
                 let counter = rand::rng().random::<u64>() as usize;
-                Some(instance_ids[counter % count])
+                Some(routing_instances.free_ids()[counter % count])
             }
             RouterMode::PowerOfTwoChoices
             | RouterMode::Direct
@@ -598,8 +716,8 @@ where
     /// Useful for checking if a worker is suitable before committing to it.
     /// Returns None for modes that require request lifecycle tracking or explicit routing hints.
     pub fn peek_next_worker(&self) -> Option<u64> {
-        let instance_ids = self.client.instance_ids_avail();
-        let count = instance_ids.len();
+        let routing_instances = self.client.routing_instances();
+        let count = routing_instances.free_ids().len();
         if count == 0 {
             return None;
         }
@@ -608,13 +726,13 @@ where
             RouterMode::RoundRobin => {
                 // Just peek at the current counter value without incrementing
                 let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
-                Some(instance_ids[counter % count])
+                Some(routing_instances.free_ids()[counter % count])
             }
             RouterMode::Random => {
                 // For random, peeking implies a fresh random selection since it's stateless.
                 // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
                 let counter = rand::rng().random::<u64>() as usize;
-                Some(instance_ids[counter % count])
+                Some(routing_instances.free_ids()[counter % count])
             }
             RouterMode::PowerOfTwoChoices
             | RouterMode::Direct
@@ -666,36 +784,45 @@ where
             )
         };
 
-        // Check if all workers are busy (when fault detection is enabled).
+        // Check if the selected worker is overloaded (when fault detection is enabled).
         if self.fault_detection_enabled {
-            let free_instances = self.client.instance_ids_free();
-            if free_instances.is_empty() {
-                // Check if we actually have any instances at all
-                let all_instances = self.client.instance_ids();
-                if !all_instances.is_empty() {
-                    tracing::warn!(
-                        instance_id,
-                        total_workers = all_instances.len(),
-                        "Rejecting request: all workers are busy"
-                    );
-                    let cause = PipelineError::ServiceOverloaded(
-                        "All workers are busy, please retry later".to_string(),
-                    );
-                    return Err(DynamoError::builder()
-                        .error_type(ErrorType::ResourceExhausted)
-                        .message("All workers are busy, please retry later")
-                        .cause(cause)
-                        .build()
-                        .into());
-                }
+            let routing_instances = self.client.routing_instances();
+            let selected_worker_overloaded = routing_instances.is_overloaded(instance_id);
+            let counts = routing_instances.counts();
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
+                    request_id = %request_id,
+                    instance_id,
+                    router_mode = ?self.router_mode,
+                    free_workers = counts.free,
+                    overloaded_workers = counts.overloaded,
+                    total_workers = counts.discovered,
+                    selected_worker_overloaded,
+                    "checked worker overload state"
+                );
+            }
+            if selected_worker_overloaded {
+                tracing::warn!(
+                    instance_id,
+                    overloaded_workers = counts.overloaded,
+                    total_workers = counts.discovered,
+                    "Rejecting request: selected worker is overloaded"
+                );
+                let cause = PipelineError::ServiceOverloaded(
+                    "Selected worker is overloaded, please retry later".to_string(),
+                );
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("Selected worker is overloaded, please retry later")
+                    .cause(cause)
+                    .build()
+                    .into());
             }
         }
 
-        // Get the address based on discovered transport type.
-        // If the selected instance disappeared between selection and dispatch
-        // (e.g. deregistered during scale-down), fall back to another available
-        // instance rather than returning a spurious 500.
-        let (address, _transport_kind) = {
+        // Resolve transport address; if the selected instance disappeared
+        // between selection and dispatch, fall back to another available one.
+        let (address, _transport_kind, instance) = {
             use crate::component::TransportType;
 
             let resolve_transport = |id: u64| {
@@ -703,41 +830,40 @@ where
                 instances
                     .iter()
                     .find(|i| i.instance_id == id)
-                    .map(|instance| match &instance.transport {
-                        TransportType::Http(http_endpoint) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                http_endpoint = %http_endpoint,
-                                "Using HTTP transport for instance"
-                            );
-                            (http_endpoint.clone(), "transport.http.request")
-                        }
-                        TransportType::Tcp(tcp_endpoint) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                tcp_endpoint = %tcp_endpoint,
-                                "Using TCP transport for instance"
-                            );
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                subject = %subject,
-                                "Using NATS transport for instance"
-                            );
-                            (subject.clone(), "transport.nats.request")
-                        }
+                    .map(|instance| {
+                        let (addr, kind) = match &instance.transport {
+                            TransportType::Tcp(tcp_endpoint) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    tcp_endpoint = %tcp_endpoint,
+                                    "Using TCP transport for instance"
+                                );
+                                (tcp_endpoint.clone(), "transport.tcp.request")
+                            }
+                            TransportType::Nats(subject) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    subject = %subject,
+                                    "Using NATS transport for instance"
+                                );
+                                (subject.clone(), "transport.nats.request")
+                            }
+                        };
+                        (addr, kind, instance.clone())
                     })
             };
 
             if let Some(result) = resolve_transport(instance_id) {
                 result
             } else {
-                // Instance vanished — pick a different one from the current
-                // availability list and retry the lookup once.
-                let avail = self.client.instance_ids_avail();
-                let fallback_id = avail.iter().copied().find(|&id| id != instance_id);
+                // Instance vanished — pick another from free_ids (same filter
+                // as pre-selection) and retry the lookup once.
+                let routing_instances = self.client.routing_instances();
+                let fallback_id = routing_instances
+                    .free_ids()
+                    .iter()
+                    .copied()
+                    .find(|&id| id != instance_id);
                 match fallback_id {
                     Some(id) => {
                         tracing::warn!(
@@ -766,7 +892,7 @@ where
             }
         };
 
-        let request = request.map(|req| AddressedRequest::new(req, address));
+        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1102,6 +1228,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_overloaded_worker_is_rejected_before_dispatch() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_selected_overloaded_worker_rejected".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_avail().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+        assert!(
+            client.instance_ids_avail().contains(&worker_id),
+            "worker should be routable before marking it overloaded"
+        );
+
+        client.set_overloaded_instances(&[worker_id]);
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let result = router.generate(SingleIn::new(42u64)).await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        // With pre-selection filtering on free_ids, the single-overloaded-worker
+        // case is now caught before selection rather than after — the chosen
+        // worker is never overloaded because the candidate pool excludes it.
+        // The post-selection check in route() remains as a race-condition
+        // backstop.
+        assert!(
+            msg.contains("All workers are busy"),
+            "expected empty-free-pool rejection, got: {msg}"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn round_robin_excludes_overloaded_workers_from_candidates() {
+        // Long reconcile interval so the synthetic override below survives
+        // the test. We still register a real endpoint instance up front so
+        // the initial reconcile (which fires immediately when the monitor
+        // task spawns) settles on a non-empty source — without that, the
+        // first reconcile would clobber the override before it takes effect.
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_round_robin_excludes_overloaded".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let real_id = instances[0].id();
+        for _ in 0..50 {
+            if client.instance_ids_avail().contains(&real_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // Now override with two synthetic IDs and mark one overloaded.
+        // round_robin must never select the overloaded one — that's the
+        // whole point of selecting from free_ids instead of routable_ids.
+        // The post-selection overload check in route() would otherwise 503
+        // one of N requests on each pass, which is the bug this PR closes
+        // for non-KV selectors.
+        client.override_instance_avail(vec![1, 2]);
+        client.set_overloaded_instances(&[1]);
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        // Round-robin over N requests should land on worker 2 every time.
+        // We use peek_next_worker for a side-effect-free probe.
+        for _ in 0..6 {
+            let selected = router
+                .peek_next_worker()
+                .expect("peek should succeed with a free worker");
+            assert_eq!(
+                selected, 2,
+                "overloaded worker 1 must not appear in the candidate set"
+            );
+        }
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn device_aware_cpu_only_selects_least_loaded_instance() {
         let state = RoutingOccupancyState::default();
         // All candidates are CPU. Make worker 2 the least-loaded one.
@@ -1310,5 +1549,84 @@ mod tests {
         );
 
         rt.shutdown();
+    }
+
+    /// The watcher dedup guard must be released even if the spawned task panics.
+    /// Without this, a panic anywhere in the watcher body would leave a stale
+    /// `ENDPOINT_WATCHER_ACTIVE` entry, silently disabling orphaned-pending-
+    /// request cancellation for that endpoint until process restart.
+    ///
+    /// We exercise the Drop-guard pattern directly against the same static
+    /// rather than driving `spawn_instance_removal_watcher` end-to-end (which
+    /// would require staging a panicking discovery stream). The test mirrors
+    /// the production code's GuardRelease shape; if the production code stops
+    /// using a Drop guard, the integration would regress and the existing
+    /// orphan-cancellation tests would fail.
+    #[tokio::test]
+    async fn watcher_dedup_guard_released_on_panic() {
+        let endpoint_id = EndpointId {
+            namespace: "panic-test-ns".to_string(),
+            component: "panic-test-comp".to_string(),
+            name: "panic-test-endpoint".to_string(),
+        };
+
+        // Mimic the production code's pre-spawn dedup insert.
+        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+        map.insert(endpoint_id.clone(), ());
+
+        let endpoint_id_clone = endpoint_id.clone();
+        let join = tokio::spawn(async move {
+            // Same shape as in spawn_instance_removal_watcher.
+            struct GuardRelease(EndpointId);
+            impl Drop for GuardRelease {
+                fn drop(&mut self) {
+                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                        map.remove(&self.0);
+                    }
+                }
+            }
+            let _release = GuardRelease(endpoint_id_clone);
+            panic!("simulated watcher-task panic");
+        });
+
+        let result = join.await;
+        assert!(result.is_err() && result.unwrap_err().is_panic());
+        assert!(
+            !map.contains_key(&endpoint_id),
+            "Drop guard must release the dedup entry even on panic"
+        );
+    }
+
+    /// Normal-exit path: the Drop guard releases the entry when the task
+    /// finishes without panicking. This is the everyday case (cancel_token
+    /// fires or discovery stream closes).
+    #[tokio::test]
+    async fn watcher_dedup_guard_released_on_normal_exit() {
+        let endpoint_id = EndpointId {
+            namespace: "normal-test-ns".to_string(),
+            component: "normal-test-comp".to_string(),
+            name: "normal-test-endpoint".to_string(),
+        };
+
+        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+        map.insert(endpoint_id.clone(), ());
+
+        let endpoint_id_clone = endpoint_id.clone();
+        tokio::spawn(async move {
+            struct GuardRelease(EndpointId);
+            impl Drop for GuardRelease {
+                fn drop(&mut self) {
+                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
+                        map.remove(&self.0);
+                    }
+                }
+            }
+            let _release = GuardRelease(endpoint_id_clone);
+            // task body returns normally
+        })
+        .await
+        .unwrap();
+
+        assert!(!map.contains_key(&endpoint_id));
     }
 }

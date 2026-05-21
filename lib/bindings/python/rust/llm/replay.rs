@@ -14,13 +14,21 @@ use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
 use dynamo_mocker::replay::ReplayArgsMode;
-use pyo3::{exceptions::PyException, prelude::*};
+use pyo3::{
+    exceptions::{PyException, PyValueError},
+    prelude::*,
+};
 use pythonize::pythonize;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
+use super::aic_callback::{
+    create_aic_callback, create_aic_prefill_load_estimator, estimate_aic_num_gpu_blocks,
+};
 use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
+
+const DEFAULT_GPU_MEMORY_UTILIZATION: f64 = 0.9;
+const DEFAULT_MEM_FRACTION_STATIC: f64 = 0.88;
 
 fn parse_mocker_engine_type(engine_type: &str) -> PyResult<RsMockerEngineType> {
     match engine_type {
@@ -122,22 +130,27 @@ impl SglangArgs {
 #[derive(Clone, Debug, Default)]
 pub struct MockEngineArgs {
     inner: RsMockEngineArgs,
+    num_gpu_blocks_explicit: bool,
 }
 
 impl MockEngineArgs {
     pub fn inner(&self) -> RsMockEngineArgs {
         self.inner.clone()
     }
+
+    pub(crate) fn num_gpu_blocks_explicit(&self) -> bool {
+        self.num_gpu_blocks_explicit
+    }
 }
 
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=16384, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, gpu_memory_utilization=None, mem_fraction_static=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
-        num_gpu_blocks: usize,
+        num_gpu_blocks: Option<usize>,
         block_size: usize,
         max_num_seqs: Option<usize>,
         max_num_batched_tokens: Option<usize>,
@@ -157,6 +170,8 @@ impl MockEngineArgs {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        gpu_memory_utilization: Option<f64>,
+        mem_fraction_static: Option<f64>,
         enable_local_indexer: bool,
         bootstrap_port: Option<u16>,
         kv_bytes_per_token: Option<usize>,
@@ -167,6 +182,13 @@ impl MockEngineArgs {
         preemption_mode: &str,
         router_queue_policy: Option<&str>,
         sglang: Option<SglangArgs>,
+        num_g2_blocks: Option<usize>,
+        num_g3_blocks: Option<usize>,
+        offload_batch_size: Option<usize>,
+        bandwidth_g1_to_g2_gbps: Option<f64>,
+        bandwidth_g2_to_g1_gbps: Option<f64>,
+        bandwidth_g2_to_g3_gbps: Option<f64>,
+        bandwidth_g3_to_g2_gbps: Option<f64>,
     ) -> PyResult<Self> {
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
@@ -181,7 +203,6 @@ impl MockEngineArgs {
 
         let mut builder = RsMockEngineArgs::builder()
             .engine_type(engine_type)
-            .num_gpu_blocks(num_gpu_blocks)
             .block_size(block_size)
             .max_num_seqs(max_num_seqs)
             .max_num_batched_tokens(max_num_batched_tokens)
@@ -201,16 +222,29 @@ impl MockEngineArgs {
             .aic_moe_tp_size(aic_moe_tp_size)
             .aic_moe_ep_size(aic_moe_ep_size)
             .aic_attention_dp_size(aic_attention_dp_size)
+            .gpu_memory_utilization(gpu_memory_utilization)
+            .mem_fraction_static(mem_fraction_static)
             .enable_local_indexer(enable_local_indexer)
             .bootstrap_port(bootstrap_port)
             .kv_bytes_per_token(kv_bytes_per_token)
             .kv_transfer_bandwidth(kv_transfer_bandwidth)
+            .num_g2_blocks(num_g2_blocks)
+            .num_g3_blocks(num_g3_blocks)
+            .offload_batch_size(offload_batch_size)
+            .bandwidth_g1_to_g2_gbps(bandwidth_g1_to_g2_gbps)
+            .bandwidth_g2_to_g1_gbps(bandwidth_g2_to_g1_gbps)
+            .bandwidth_g2_to_g3_gbps(bandwidth_g2_to_g3_gbps)
+            .bandwidth_g3_to_g2_gbps(bandwidth_g3_to_g2_gbps)
             .reasoning(reasoning.map(|config| config.inner()))
             .zmq_kv_events_port(zmq_kv_events_port)
             .zmq_replay_port(zmq_replay_port)
             .preemption_mode(preemption_mode)
             .router_queue_policy(router_queue_policy)
             .sglang(sglang.map(|config| config.inner()));
+        let num_gpu_blocks_explicit = num_gpu_blocks.is_some();
+        if let Some(num_gpu_blocks) = num_gpu_blocks {
+            builder = builder.num_gpu_blocks(num_gpu_blocks);
+        }
 
         if let Some(npz_path) = planner_profile_data {
             let perf_model = PerfModel::from_npz(&npz_path).map_err(|e| {
@@ -230,70 +264,31 @@ impl MockEngineArgs {
                 PyException::new_err(format!("Failed to normalize MockEngineArgs: {e}"))
             })?;
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            num_gpu_blocks_explicit,
+        })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
+        let num_gpu_blocks_explicit = serde_json::from_str::<serde_json::Value>(config_json)
+            .ok()
+            .and_then(|value| {
+                value.as_object().map(|object| {
+                    object
+                        .get("num_gpu_blocks")
+                        .and_then(|value| value.as_u64())
+                        .is_some()
+                })
+            })
+            .unwrap_or(false);
         RsMockEngineArgs::from_json_str(config_json)
-            .map(|inner| Self { inner })
+            .map(|inner| Self {
+                inner,
+                num_gpu_blocks_explicit,
+            })
             .map_err(|e| PyException::new_err(format!("Failed to parse MockEngineArgs JSON: {e}")))
-    }
-
-    fn dump_json(&self) -> PyResult<String> {
-        let worker_type = match self.inner.worker_type {
-            RsWorkerType::Aggregated => "aggregated",
-            RsWorkerType::Prefill => "prefill",
-            RsWorkerType::Decode => "decode",
-        };
-        let engine_type = match self.inner.engine_type {
-            RsMockerEngineType::Vllm => "vllm",
-            RsMockerEngineType::Sglang => "sglang",
-        };
-        let preemption_mode = match self.inner.preemption_mode {
-            RsPreemptionMode::Lifo => "lifo",
-            RsPreemptionMode::Fifo => "fifo",
-        };
-        let router_queue_policy = self
-            .inner
-            .router_queue_policy
-            .as_ref()
-            .map(|policy| policy.to_string());
-        let payload = json!({
-            "engine_type": engine_type,
-            "num_gpu_blocks": self.inner.num_gpu_blocks,
-            "block_size": self.inner.block_size,
-            "max_num_seqs": self.inner.max_num_seqs,
-            "max_num_batched_tokens": self.inner.max_num_batched_tokens,
-            "enable_prefix_caching": self.inner.enable_prefix_caching,
-            "enable_chunked_prefill": self.inner.enable_chunked_prefill,
-            "speedup_ratio": self.inner.speedup_ratio,
-            "decode_speedup_ratio": self.inner.decode_speedup_ratio,
-            "dp_size": self.inner.dp_size,
-            "startup_time": self.inner.startup_time,
-            "worker_type": worker_type,
-            "planner_profile_data": self.inner.planner_profile_data,
-            "aic_backend": self.inner.aic_backend,
-            "aic_system": self.inner.aic_system,
-            "aic_backend_version": self.inner.aic_backend_version,
-            "aic_tp_size": self.inner.aic_tp_size,
-            "aic_model_path": self.inner.aic_model_path,
-            "aic_moe_tp_size": self.inner.aic_moe_tp_size,
-            "aic_moe_ep_size": self.inner.aic_moe_ep_size,
-            "aic_attention_dp_size": self.inner.aic_attention_dp_size,
-            "enable_local_indexer": self.inner.enable_local_indexer,
-            "bootstrap_port": self.inner.bootstrap_port,
-            "kv_bytes_per_token": self.inner.kv_bytes_per_token,
-            "kv_transfer_bandwidth": self.inner.kv_transfer_bandwidth,
-            "reasoning": self.inner.reasoning,
-            "zmq_kv_events_port": self.inner.zmq_kv_events_port,
-            "zmq_replay_port": self.inner.zmq_replay_port,
-            "preemption_mode": preemption_mode,
-            "router_queue_policy": router_queue_policy,
-            "sglang": self.inner.sglang,
-        });
-        serde_json::to_string_pretty(&payload)
-            .map_err(|e| PyException::new_err(format!("Failed to serialize MockEngineArgs: {e}")))
     }
 
     fn copy(&self) -> Self {
@@ -343,6 +338,46 @@ impl MockEngineArgs {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+
+    #[getter]
+    fn kv_bytes_per_token(&self) -> Option<usize> {
+        self.inner.kv_bytes_per_token
+    }
+
+    #[getter]
+    fn num_g2_blocks(&self) -> Option<usize> {
+        self.inner.num_g2_blocks
+    }
+
+    #[getter]
+    fn num_g3_blocks(&self) -> Option<usize> {
+        self.inner.num_g3_blocks
+    }
+
+    #[getter]
+    fn offload_batch_size(&self) -> Option<usize> {
+        self.inner.offload_batch_size
+    }
+
+    #[getter]
+    fn bandwidth_g1_to_g2_gbps(&self) -> Option<f64> {
+        self.inner.bandwidth_g1_to_g2_gbps
+    }
+
+    #[getter]
+    fn bandwidth_g2_to_g1_gbps(&self) -> Option<f64> {
+        self.inner.bandwidth_g2_to_g1_gbps
+    }
+
+    #[getter]
+    fn bandwidth_g2_to_g3_gbps(&self) -> Option<f64> {
+        self.inner.bandwidth_g2_to_g3_gbps
+    }
+
+    #[getter]
+    fn bandwidth_g3_to_g2_gbps(&self) -> Option<f64> {
+        self.inner.bandwidth_g3_to_g2_gbps
     }
 
     #[getter]
@@ -426,6 +461,42 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn gpu_memory_utilization(&self) -> Option<f64> {
+        self.inner.gpu_memory_utilization
+    }
+
+    #[setter]
+    fn set_gpu_memory_utilization(&mut self, value: Option<f64>) -> PyResult<()> {
+        if let Some(value) = value
+            && !(0.0..=1.0).contains(&value)
+        {
+            return Err(PyValueError::new_err(format!(
+                "gpu_memory_utilization must be in [0, 1], got {value}"
+            )));
+        }
+        self.inner.gpu_memory_utilization = value;
+        Ok(())
+    }
+
+    #[getter]
+    fn mem_fraction_static(&self) -> Option<f64> {
+        self.inner.mem_fraction_static
+    }
+
+    #[setter]
+    fn set_mem_fraction_static(&mut self, value: Option<f64>) -> PyResult<()> {
+        if let Some(value) = value
+            && !(0.0..=1.0).contains(&value)
+        {
+            return Err(PyValueError::new_err(format!(
+                "mem_fraction_static must be in [0, 1], got {value}"
+            )));
+        }
+        self.inner.mem_fraction_static = value;
+        Ok(())
+    }
+
+    #[getter]
     fn worker_type(&self) -> &'static str {
         match self.inner.worker_type {
             RsWorkerType::Aggregated => "aggregated",
@@ -443,6 +514,7 @@ impl MockEngineArgs {
     #[setter]
     fn set_num_gpu_blocks(&mut self, value: usize) {
         self.inner.num_gpu_blocks = value;
+        self.num_gpu_blocks_explicit = true;
     }
 
     fn is_prefill(&self) -> bool {
@@ -454,7 +526,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, gpu_memory_utilization=None, mem_fraction_static=None, enable_prefix_caching=None, worker_type=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -470,10 +542,13 @@ impl MockEngineArgs {
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
         aic_attention_dp_size: Option<usize>,
+        gpu_memory_utilization: Option<f64>,
+        mem_fraction_static: Option<f64>,
         enable_prefix_caching: Option<bool>,
         worker_type: Option<String>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
+        let mut num_gpu_blocks_explicit = self.num_gpu_blocks_explicit;
         if let Some(port) = bootstrap_port {
             inner.bootstrap_port = Some(port);
         }
@@ -488,6 +563,7 @@ impl MockEngineArgs {
         }
         if let Some(blocks) = num_gpu_blocks {
             inner.num_gpu_blocks = blocks;
+            num_gpu_blocks_explicit = true;
         }
         if let Some(backend) = aic_backend {
             inner.aic_backend = Some(backend);
@@ -513,20 +589,32 @@ impl MockEngineArgs {
         if let Some(attention_dp_size) = aic_attention_dp_size {
             inner.aic_attention_dp_size = Some(attention_dp_size);
         }
+        if let Some(gpu_memory_utilization) = gpu_memory_utilization {
+            inner.gpu_memory_utilization = Some(gpu_memory_utilization);
+        }
+        if let Some(mem_fraction_static) = mem_fraction_static {
+            inner.mem_fraction_static = Some(mem_fraction_static);
+        }
         if let Some(enable_prefix_caching) = enable_prefix_caching {
             inner.enable_prefix_caching = enable_prefix_caching;
         }
         if let Some(worker_type) = worker_type {
             inner.worker_type = parse_worker_type(&worker_type)?;
         }
-        inner.normalized().map(|inner| Self { inner }).map_err(|e| {
-            PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))
-        })
+        inner
+            .normalized()
+            .map(|inner| Self {
+                inner,
+                num_gpu_blocks_explicit,
+            })
+            .map_err(|e| {
+                PyException::new_err(format!("Failed to normalize MockEngineArgs overrides: {e}"))
+            })
     }
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512))]
+#[pyo3(signature = (trace_file, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=512, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -544,6 +632,11 @@ pub fn run_mocker_trace_replay(
     router_mode: &str,
     arrival_speedup_ratio: f64,
     trace_block_size: usize,
+    trace_format: &str,
+    trace_shared_prefix_ratio: f64,
+    trace_num_prefix_groups: usize,
+    report_jsonl_path: Option<PathBuf>,
+    max_sim_time_ms: Option<f64>,
 ) -> PyResult<PyObject> {
     let args_selection = load_replay_args_selection(
         py,
@@ -555,6 +648,7 @@ pub fn run_mocker_trace_replay(
         num_decode_workers,
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
+    let trace_format = parse_trace_file_format(trace_format)?;
     let prefill_load_estimator = load_replay_prefill_load_estimator(
         py,
         router_mode,
@@ -563,14 +657,40 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_config = load_replay_router_config(router_config);
     let replay_mode = replay_mode.to_owned();
+    if report_jsonl_path.is_some() && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "report_jsonl_path is only supported for replay_mode='offline'",
+        ));
+    }
+    let jsonl_path_for_emit = report_jsonl_path.clone();
+    let record_per_request = report_jsonl_path.is_some();
+    if let Some(ms) = max_sim_time_ms {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(PyValueError::new_err(
+                "max_sim_time_ms must be a finite, non-negative value",
+            ));
+        }
+        if replay_mode != "offline" {
+            return Err(PyValueError::new_err(
+                "max_sim_time_ms only supports replay_mode='offline'",
+            ));
+        }
+    }
     let report = py.allow_threads(move || {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
+            && replay_concurrency.is_none()
+        {
+            anyhow::bail!(
+                "trace_format='applied_compute_agentic' requires replay_concurrency because source traces do not contain first-turn timestamps"
+            );
+        }
 
         match args_selection {
             ReplayArgsSelection::Aggregated(args) => {
                 match (replay_mode.as_str(), replay_concurrency) {
                     ("offline", Some(max_in_flight)) => {
-                        dynamo_mocker::replay::simulate_concurrency_file_with_router_mode(
+                        dynamo_mocker::replay::simulate_concurrency_file_with_router_mode_and_format(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
@@ -579,10 +699,14 @@ pub fn run_mocker_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            trace_format,
+                            trace_shared_prefix_ratio,
+                            trace_num_prefix_groups,
+                            record_per_request, max_sim_time_ms,
                         )
                     }
                     ("offline", None) => {
-                        dynamo_mocker::replay::simulate_trace_file_with_router_mode(
+                        dynamo_mocker::replay::simulate_trace_file_with_router_mode_and_format(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
@@ -591,10 +715,14 @@ pub fn run_mocker_trace_replay(
                             num_workers,
                             arrival_speedup_ratio,
                             router_mode,
+                            trace_format,
+                            trace_shared_prefix_ratio,
+                            trace_num_prefix_groups,
+                            record_per_request, max_sim_time_ms,
                         )
                     }
                     ("online", Some(max_in_flight)) => {
-                        dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode(
+                        dynamo_mocker::replay::simulate_concurrency_live_file_with_router_mode_and_format(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
@@ -603,10 +731,13 @@ pub fn run_mocker_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            trace_format,
+                            trace_shared_prefix_ratio,
+                            trace_num_prefix_groups,
                         )
                     }
                     ("online", None) => {
-                        dynamo_mocker::replay::simulate_trace_live_file_with_router_mode(
+                        dynamo_mocker::replay::simulate_trace_live_file_with_router_mode_and_format(
                             *args,
                             router_config.clone(),
                             prefill_load_estimator.clone(),
@@ -615,6 +746,9 @@ pub fn run_mocker_trace_replay(
                             num_workers,
                             arrival_speedup_ratio,
                             router_mode,
+                            trace_format,
+                            trace_shared_prefix_ratio,
+                            trace_num_prefix_groups,
                         )
                     }
                     (other, _) => anyhow::bail!(
@@ -626,7 +760,7 @@ pub fn run_mocker_trace_replay(
             ReplayArgsSelection::Disagg(config) => match (replay_mode.as_str(), replay_concurrency)
             {
                 ("offline", Some(max_in_flight)) => {
-                    dynamo_mocker::replay::simulate_concurrency_file_disagg_with_router_mode(
+                    dynamo_mocker::replay::simulate_concurrency_file_disagg_with_router_mode_and_format(
                         *config,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -634,10 +768,14 @@ pub fn run_mocker_trace_replay(
                         trace_block_size,
                         max_in_flight,
                         router_mode,
+                        trace_format,
+                        trace_shared_prefix_ratio,
+                        trace_num_prefix_groups,
+                        record_per_request, max_sim_time_ms,
                     )
                 }
                 ("offline", None) => {
-                    dynamo_mocker::replay::simulate_trace_file_disagg_with_router_mode(
+                    dynamo_mocker::replay::simulate_trace_file_disagg_with_router_mode_and_format(
                         *config,
                         router_config.clone(),
                         prefill_load_estimator.clone(),
@@ -645,6 +783,10 @@ pub fn run_mocker_trace_replay(
                         trace_block_size,
                         arrival_speedup_ratio,
                         router_mode,
+                        trace_format,
+                        trace_shared_prefix_ratio,
+                        trace_num_prefix_groups,
+                        record_per_request, max_sim_time_ms,
                     )
                 }
                 ("online", _) => anyhow::bail!("disagg replay only supports replay_mode='offline'"),
@@ -656,9 +798,41 @@ pub fn run_mocker_trace_replay(
         }
     });
     let report = report.map_err(to_pyerr)?;
+    // Write per-request JSONL from Rust directly if requested, avoiding a
+    // potentially-large round trip through pyo3 / pythonize. Each line is one
+    // JSON object (matching AIPerf's profile_export.jsonl convention).
+    if let Some(path) = jsonl_path_for_emit.as_ref() {
+        py.allow_threads(|| write_per_request_jsonl(path, &report.per_request))
+            .map_err(to_pyerr)?;
+    }
     pythonize(py, &report)
         .map_err(to_pyerr)
         .map(|obj| obj.unbind())
+}
+
+/// Write per-request records to a JSONL file. One JSON object per line, no
+/// outer array wrapper — matches AIPerf's `profile_export.jsonl` convention
+/// and is friendlier to streaming consumers (pandas read_json with lines=True,
+/// jq -c, etc.).
+fn write_per_request_jsonl(
+    path: &std::path::Path,
+    records: &[dynamo_mocker::replay::PerRequestRecord],
+) -> anyhow::Result<()> {
+    use std::io::{BufWriter, Write};
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for record in records {
+        let line = serde_json::to_string(record)?;
+        writer.write_all(line.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 #[pyfunction]
@@ -953,14 +1127,17 @@ fn load_optional_replay_mocker_args(
     extra_engine_args: Option<MockEngineArgs>,
 ) -> PyResult<Option<RsMockEngineArgs>> {
     extra_engine_args
-        .map(|extra_args| materialize_replay_mocker_args(py, extra_args.inner()))
+        .map(|extra_args| materialize_replay_mocker_args(py, extra_args))
         .transpose()
 }
 
 fn materialize_replay_mocker_args(
     py: Python<'_>,
-    mut args: RsMockEngineArgs,
+    extra_args: MockEngineArgs,
 ) -> PyResult<RsMockEngineArgs> {
+    let mut args = extra_args.inner();
+    populate_missing_offload_kv_bytes_per_token(py, &mut args)?;
+
     if let Some(ref backend_name) = args.aic_backend.clone() {
         let backend = backend_name.clone();
         let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
@@ -973,6 +1150,33 @@ fn materialize_replay_mocker_args(
         let moe_tp_size = args.aic_moe_tp_size;
         let moe_ep_size = args.aic_moe_ep_size;
         let attention_dp_size = args.aic_attention_dp_size;
+        // AIC-backed config may intentionally omit num_gpu_blocks. Estimate it
+        // here, after candidate TP/backend/model overrides have been applied.
+        if !extra_args.num_gpu_blocks_explicit() {
+            args.num_gpu_blocks = estimate_aic_num_gpu_blocks(
+                py,
+                &backend,
+                &system,
+                &model_name,
+                tp_size,
+                args.block_size,
+                args.max_num_batched_tokens.unwrap_or(8192),
+                args.gpu_memory_utilization
+                    .unwrap_or(DEFAULT_GPU_MEMORY_UTILIZATION),
+                args.mem_fraction_static
+                    .or(Some(DEFAULT_MEM_FRACTION_STATIC)),
+                backend_version.as_deref(),
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+            )
+            .map_err(|e| {
+                PyException::new_err(format!(
+                    "Failed to estimate AIC KV cache capacity (--aic-perf-model was requested): {}",
+                    e
+                ))
+            })?;
+        }
         let callback = create_aic_callback(
             py,
             &backend,
@@ -1001,6 +1205,33 @@ fn materialize_replay_mocker_args(
     }
 
     Ok(args)
+}
+
+fn populate_missing_offload_kv_bytes_per_token(
+    py: Python<'_>,
+    args: &mut RsMockEngineArgs,
+) -> PyResult<()> {
+    if args.kv_bytes_per_token.is_some() {
+        return Ok(());
+    }
+    let offload_requested =
+        args.num_g2_blocks.unwrap_or_default() > 0 || args.num_g3_blocks.unwrap_or_default() > 0;
+    if !offload_requested {
+        return Ok(());
+    }
+    let Some(model_path) = args.aic_model_path.as_deref() else {
+        return Ok(());
+    };
+
+    let kv_cache_module = py.import("dynamo.mocker.utils.kv_cache")?;
+    let kv_bytes_per_token = kv_cache_module
+        .getattr("compute_kv_bytes_per_token")?
+        .call1((model_path,))?
+        .extract::<Option<usize>>()?;
+    if let Some(kv_bytes_per_token) = kv_bytes_per_token {
+        args.kv_bytes_per_token = Some(kv_bytes_per_token);
+    }
+    Ok(())
 }
 
 fn load_replay_router_config(
@@ -1056,6 +1287,9 @@ fn load_replay_prefill_load_estimator(
         aic_perf_config.model_path(),
         aic_perf_config.tp_size(),
         aic_perf_config.backend_version(),
+        aic_perf_config.moe_tp_size(),
+        aic_perf_config.moe_ep_size(),
+        aic_perf_config.attention_dp_size(),
     )
     .map(Some)
 }
@@ -1068,6 +1302,24 @@ fn parse_replay_router_mode(
         "kv_router" => Ok(dynamo_mocker::replay::ReplayRouterMode::KvRouter),
         other => Err(PyException::new_err(format!(
             "router_mode must be either 'round_robin' or 'kv_router', got '{}'",
+            other
+        ))),
+    }
+}
+
+fn parse_trace_file_format(
+    trace_format: &str,
+) -> PyResult<dynamo_mocker::loadgen::TraceFileFormat> {
+    match trace_format {
+        "mooncake" => Ok(dynamo_mocker::loadgen::TraceFileFormat::Mooncake),
+        "mooncake-delta" | "mooncake_delta" => {
+            Ok(dynamo_mocker::loadgen::TraceFileFormat::MooncakeDelta)
+        }
+        "applied_compute_agentic" => {
+            Ok(dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic)
+        }
+        other => Err(PyException::new_err(format!(
+            "trace_format must be 'mooncake', 'mooncake-delta', or 'applied_compute_agentic', got '{}'",
             other
         ))),
     }
@@ -1253,7 +1505,8 @@ impl PlannerReplayBridge {
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
     ) -> PyResult<Self> {
-        let args = extra_engine_args.inner();
+        let args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
         let router_mode = parse_replay_router_mode(router_mode)?;
         let router_config = load_replay_router_config(router_config);
 
@@ -1289,9 +1542,13 @@ impl PlannerReplayBridge {
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
     ) -> PyResult<Self> {
+        let prefill_args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, prefill_engine_args.clone()))?;
+        let decode_args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, decode_engine_args.clone()))?;
         let config = dynamo_mocker::replay::OfflineDisaggReplayConfig {
-            prefill_args: prefill_engine_args.inner(),
-            decode_args: decode_engine_args.inner(),
+            prefill_args,
+            decode_args,
             num_prefill_workers,
             num_decode_workers,
         };

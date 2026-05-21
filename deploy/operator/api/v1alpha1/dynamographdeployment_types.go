@@ -91,6 +91,21 @@ type DynamoGraphDeploymentSpec struct {
 	// Services without their own topologyConstraint inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// Experimental groups graph-level preview features whose API shape and
+	// behavior may change in breaking ways between releases.
+	// +optional
+	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+// features. Component-level experimental features are represented separately
+// on component specs.
+type DynamoGraphDeploymentExperimentalSpec struct {
+	// KvTransferPolicy configures topology-aware routing for KV-cache
+	// transfers between prefill and decode workers.
+	// +optional
+	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }
 
 type Restart struct {
@@ -264,6 +279,8 @@ type ServiceReplicaStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeployment is deprecated; use nvidia.com/v1beta1 DynamoGraphDeployment"
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgd
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Ready status of the graph deployment"

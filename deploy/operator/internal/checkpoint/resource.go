@@ -109,6 +109,10 @@ func CreateOrGetAutoCheckpoint(
 	podTemplate corev1.PodTemplateSpec,
 	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
+	if err := ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gpuMemoryService); err != nil {
+		return nil, err
+	}
+
 	hash, err := ComputeIdentityHash(identity)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute identity hash: %w", err)

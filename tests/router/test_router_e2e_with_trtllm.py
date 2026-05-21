@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 TRTLLM_BLOCK_SIZE = 32  # fixed internally to 32
 
+# Per-mode extra-engine-args YAMLs for disaggregated TRT-LLM. Both files
+# set cache_transceiver_config (required by TRT-LLM 1.3+ whenever
+# --disaggregation-mode is set). The prefill variant additionally sets
+# disable_overlap_scheduler=true, because pytorch-backend prefill workers
+# cannot run with the overlap scheduler enabled while KV block reuse is on.
+_DISAGG_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "configs")
+DISAGG_EXTRA_ENGINE_ARGS = {
+    "prefill": os.path.join(_DISAGG_CONFIG_DIR, "trtllm_disagg_prefill.yaml"),
+    "decode": os.path.join(_DISAGG_CONFIG_DIR, "trtllm_disagg_decode.yaml"),
+}
+
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.router,
@@ -84,7 +95,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                   multiple routing targets within a single TRT-LLM worker process.
             num_workers: Number of TRT-LLM worker processes
             single_gpu: If True, all workers share GPU 0
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
 
@@ -97,7 +108,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
         namespace_suffix = generate_random_suffix()
         self.namespace = namespace or f"test-namespace-{namespace_suffix}"
         self.component_name = (
-            "prefill" if disaggregation_mode == "prefill" else "tensorrt_llm"
+            "prefill" if disaggregation_mode == "prefill" else "backend"
         )
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
@@ -151,6 +162,12 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
+                command.extend(
+                    [
+                        "--extra-engine-args",
+                        DISAGG_EXTRA_ENGINE_ARGS[disaggregation_mode],
+                    ]
+                )
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
             if free_gpu_memory_fraction is not None:
@@ -269,7 +286,7 @@ def test_router_decisions_trtllm_attention_dp(
         request_plane=request_plane,
         model_name=MODEL_NAME,
         block_size=TRTLLM_BLOCK_SIZE,
-        component_name="tensorrt_llm",
+        component_name="backend",
         num_workers=1,
         single_gpu=False,
         test_dp_rank=True,
@@ -295,14 +312,13 @@ def test_router_decisions_trtllm_multiple_workers(
         request_plane=request_plane,
         model_name=MODEL_NAME,
         block_size=TRTLLM_BLOCK_SIZE,
-        component_name="tensorrt_llm",
+        component_name="backend",
         num_workers=2,
         single_gpu=True,
         test_dp_rank=False,
     )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2609")
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)

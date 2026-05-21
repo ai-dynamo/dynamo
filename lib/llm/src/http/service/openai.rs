@@ -60,15 +60,20 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
+use dynamo_protocols::types::Choice;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
+const X_REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Dynamo Annotation for the request ID
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+const ADMISSION_CONTROL_REJECTION_HINT: &str =
+    "If this rejection is not intended, consider passing --admission-control none to the frontend.";
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -226,7 +231,7 @@ impl ErrorMessage {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorMessage {
-                    message: err.to_string(),
+                    message: format!("{}. {}", err, ADMISSION_CONTROL_REJECTION_HINT),
                     error_type: map_error_code_to_error_type(StatusCode::SERVICE_UNAVAILABLE),
                     code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 }),
@@ -377,6 +382,38 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
+fn attach_x_request_id<T: Send + Sync + 'static>(request: &mut Context<T>, headers: &HeaderMap) {
+    if !crate::agents::trace::is_enabled() {
+        return;
+    }
+
+    if let Some(x_request_id) = headers
+        .get(X_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        request.insert(
+            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            x_request_id.to_string(),
+        );
+    }
+}
+
+fn copy_x_request_id<T: Send + Sync + 'static, U: Send + Sync + 'static>(
+    source: &Context<T>,
+    target: &mut Context<U>,
+) {
+    if !crate::agents::trace::is_enabled() {
+        return;
+    }
+
+    if let Ok(x_request_id) = source.get::<String>(crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY) {
+        target.insert(
+            crate::agents::trace::X_REQUEST_ID_CONTEXT_KEY,
+            x_request_id.as_ref().clone(),
+        );
+    }
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -403,7 +440,8 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles
@@ -542,6 +580,14 @@ async fn completions_single(
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream
+            .filter(|r| {
+                // Drop empty chunks from multi-byte token assembly
+                futures::future::ready(
+                    !r.data
+                        .as_ref()
+                        .is_some_and(is_empty_completion_stream_response),
+                )
+            })
             .map(move |response| {
                 // Calls observe_response() on each token
                 process_response_using_event_converter_and_observe_metrics(
@@ -657,7 +703,8 @@ async fn completions_batch(
 
         // Generate unique request_id for each prompt: original_id-{prompt_idx}
         let unique_request_id = format!("{}-{}", request.id(), prompt_idx);
-        let single_request_context = Context::with_id(single_request, unique_request_id);
+        let mut single_request_context = Context::with_id(single_request, unique_request_id);
+        copy_x_request_id(&request, &mut single_request_context);
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
@@ -721,6 +768,14 @@ async fn completions_batch(
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = merged_stream
+            .filter(|r| {
+                // Drop empty chunks from multi-byte token assembly
+                futures::future::ready(
+                    !r.data
+                        .as_ref()
+                        .is_some_and(is_empty_completion_stream_response),
+                )
+            })
             .map(move |response| {
                 // Calls observe_response() on each token
                 process_response_using_event_converter_and_observe_metrics(
@@ -883,7 +938,8 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles
@@ -1050,6 +1106,48 @@ fn make_dispatch_event(
             None
         }
     }
+}
+
+/// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
+/// `role` is excluded — backends set it on every delta.
+fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
+    if resp.nvext.is_some() {
+        return false;
+    }
+    resp.inner.usage.is_none()
+        && resp.inner.choices.iter().all(|c| {
+            let ChatCompletionStreamResponseDelta {
+                content,
+                function_call,
+                tool_calls,
+                role: _,
+                refusal,
+                reasoning_content,
+            } = &c.delta;
+            c.finish_reason.is_none()
+                && content.is_none()
+                && function_call.is_none()
+                && tool_calls.is_none()
+                && refusal.is_none()
+                && reasoning_content.is_none()
+        })
+}
+
+/// Completions variant of [`is_empty_stream_response`].
+fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
+    if resp.nvext.is_some() {
+        return false;
+    }
+    resp.inner.usage.is_none()
+        && resp.inner.choices.iter().all(|c| {
+            let Choice {
+                text,
+                index: _,
+                logprobs,
+                finish_reason,
+            } = c;
+            text.is_empty() && finish_reason.is_none() && logprobs.is_none()
+        })
 }
 
 /// Emits early `event: tool_call_dispatch` SSE events for any complete tool calls found in a
@@ -1288,6 +1386,10 @@ async fn chat_completions(
         let stream = stream.flat_map(move |response| {
             // Extract side-channel events before the response is consumed by EventConverter.
             let mut events: Vec<Result<Event, axum::Error>> = vec![];
+            // Drop empty chunks from multi-byte token assembly.
+            if response.data.as_ref().is_some_and(is_empty_stream_response) {
+                return stream::iter(events);
+            }
             if tool_dispatch_enabled {
                 events.extend(streaming_tool_dispatch_events(
                     &response,
@@ -1499,7 +1601,8 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = Context::with_id(request, request_id);
+    let mut request = Context::with_id(request, request_id);
+    attach_x_request_id(&mut request, &headers);
     let context = request.context();
 
     // create the connection handles
@@ -1537,12 +1640,9 @@ async fn responses(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Apply template values if present, with sensible defaults for the Responses API.
-    // Unlike chat completions where backends may have their own defaults, the Responses API
-    // should provide a generous default to avoid truncated responses (especially with
-    // reasoning models that emit <think> tokens).
-    const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
-
+    // Apply template values if present. When no template and no client-supplied
+    // max_output_tokens, leave it as None and let the underlying engine apply its
+    // own default — matching the chat completions path.
     if let Some(template) = template {
         if request.inner.model.as_deref().unwrap_or("").is_empty() {
             request.inner.model = Some(template.model.clone());
@@ -1553,8 +1653,6 @@ async fn responses(
         if request.inner.max_output_tokens.is_none() {
             request.inner.max_output_tokens = Some(template.max_completion_tokens);
         }
-    } else if request.inner.max_output_tokens.is_none() {
-        request.inner.max_output_tokens = Some(DEFAULT_MAX_OUTPUT_TOKENS);
     }
     tracing::trace!("Received responses request: {:?}", request.inner);
 
@@ -2223,8 +2321,7 @@ async fn videos(
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
 
-    // Videos are typically not streamed, so we default to non-streaming
-    let streaming = false;
+    let streaming = request.stream.unwrap_or(false);
 
     // Get the model name from the request (video generation model)
     let model = request.model.clone();
@@ -2260,30 +2357,69 @@ async fn videos(
         err_response
     })?;
 
-    // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
-    let stream = stream.inspect(move |response| {
-        // Calls observe_response() on each token - drops http_queue_guard on first token
-        process_response_and_observe_metrics(
-            response,
-            &mut response_collector,
-            &mut http_queue_guard,
-        );
-    });
 
-    // Videos are typically returned as a single response (non-streaming)
-    // so we fold the stream into a single response
-    let response = NvVideosResponse::from_annotated_stream(stream)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold videos stream");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    if streaming {
+        // [gluo TODO] revisit the cancellation handling here,
+        // should be unified with chat_completions.
+        let ctx = stream.context();
+        let (mut connection_handle, stream_handle) = create_connection_monitor(
+            ctx.clone(),
+            Some(state.metrics_clone()),
+            CancellationLabels {
+                model: model.clone(),
+                endpoint: Endpoint::Videos.to_string(),
+                request_type: "stream".to_string(),
+            },
+        )
+        .await;
+        let stream = stream.flat_map(move |response| {
+            let sse_result = process_response_using_event_converter_and_observe_metrics(
+                EventConverter::from(response),
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+            match sse_result {
+                Ok(Some(ev)) => stream::iter(vec![Ok(ev)]),
+                Ok(None) => stream::iter(vec![]),
+                Err(e) => stream::iter(vec![Err(e)]),
+            }
+        });
+        // monitor_for_disconnects: arms stream_handle, pre-marks inflight Cancelled,
+        // emits data:[DONE] on natural end, demotes to Internal on mid-stream Err,
+        // and kills the engine context when the client disconnects.
+        let stream = monitor_for_disconnects(stream, ctx, inflight, stream_handle);
 
-    inflight.mark_ok();
-    Ok(Json(response).into_response())
+        let mut sse_stream = Sse::new(stream);
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+        // Disarm immediately: we return the body directly, so disconnect detection
+        // transfers to stream_handle (armed inside monitor_for_disconnects).
+        connection_handle.disarm();
+        Ok(sse_stream.into_response())
+    } else {
+        let stream = stream.inspect(move |response| {
+            process_response_and_observe_metrics(
+                response,
+                &mut response_collector,
+                &mut http_queue_guard,
+            );
+        });
+
+        let response = NvVideosResponse::from_annotated_stream(stream)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
+                let err_response =
+                    ErrorMessage::internal_server_error("Failed to fold videos stream");
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+
+        inflight.mark_ok();
+        Ok(Json(response).into_response())
+    }
 }
 
 /// [EXPERIMENTAL] MJPEG streaming handler for `/v1/videos/stream`.
@@ -2463,7 +2599,6 @@ async fn audio_speech(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    let response_format = request.response_format.clone();
     let request_id = get_or_create_request_id(&headers);
     let request = Context::with_id(request, request_id);
     let request_id = request.id().to_string();
@@ -2524,13 +2659,14 @@ async fn audio_speech(
 
     inflight.mark_ok();
 
-    // If response contains b64_json audio data, decode and return as binary
+    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
+    // decode and return binary with content-type from AudioData.output_format.
     // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
     if let Some(first) = response.data.first()
         && let Some(b64) = &first.b64_json
         && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
     {
-        let content_type = match response_format.as_deref().unwrap_or("wav") {
+        let content_type = match first.output_format.as_str() {
             "mp3" => "audio/mpeg",
             "flac" => "audio/flac",
             "pcm" => "audio/pcm",
@@ -2663,7 +2799,9 @@ mod tests {
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.1.message,
-            "ResourceExhausted: All workers are busy, please retry later"
+            format!(
+                "ResourceExhausted: All workers are busy, please retry later. {ADMISSION_CONTROL_REJECTION_HINT}"
+            )
         );
     }
 
@@ -2804,6 +2942,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -2836,6 +2975,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -2873,6 +3013,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -2897,6 +3038,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -2920,6 +3062,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -2943,6 +3086,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -2968,6 +3112,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -2991,6 +3136,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3022,6 +3168,7 @@ mod tests {
                 "session": {"id": "session-1", "timestamp": 1640995200}
             })
             .into(),
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3052,6 +3199,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3082,6 +3230,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3111,6 +3260,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3140,6 +3290,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3171,6 +3322,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3200,6 +3352,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3536,7 +3689,8 @@ mod tests {
 
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
-        CreateChatCompletionStreamResponse, FinishReason, FunctionCallStream, FunctionType,
+        ChatCompletionStreamResponseDeltaFunctionCall, CreateChatCompletionStreamResponse,
+        FinishReason, FunctionCallStream, FunctionType, Role,
     };
     use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -3675,7 +3829,6 @@ mod tests {
                 reasoning_content: reasoning.map(|s| s.to_string()),
             },
             finish_reason: finish,
-            stop_reason: None,
             logprobs: None,
         }
     }
@@ -3707,7 +3860,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         }
     }
@@ -3809,7 +3961,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -3881,7 +4032,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -3918,7 +4068,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -4227,5 +4376,263 @@ mod tests {
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["reasoning_content"], "让我想想 🤔 分析完成 ✅");
+    }
+
+    /// Build a single-choice `NvCreateChatCompletionStreamResponse`.
+    #[allow(clippy::too_many_arguments)]
+    fn make_delta(
+        content: Option<&str>,
+        reasoning: Option<&str>,
+        tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
+        finish: Option<FinishReason>,
+        usage: Option<dynamo_protocols::types::CompletionUsage>,
+        role: Option<Role>,
+        refusal: Option<&str>,
+        function_call: Option<ChatCompletionStreamResponseDeltaFunctionCall>,
+    ) -> NvCreateChatCompletionStreamResponse {
+        use dynamo_protocols::types::ChatCompletionMessageContent;
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: content.map(|s| ChatCompletionMessageContent::Text(s.to_string())),
+                function_call,
+                tool_calls,
+                role,
+                refusal: refusal.map(|s| s.to_string()),
+                reasoning_content: reasoning.map(|s| s.to_string()),
+            },
+            finish_reason: finish,
+            logprobs: None,
+        };
+        NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: "m".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage,
+                service_tier: None,
+            },
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn test_is_empty_stream_response() {
+        // Empty: all-None, no finish, no usage
+        assert!(
+            is_empty_stream_response(&make_delta(None, None, None, None, None, None, None, None)),
+            "all-None delta → empty",
+        );
+
+        // Not empty: has content
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "content present → not empty",
+        );
+
+        // Not empty: has reasoning
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                Some("thinking"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "reasoning present → not empty",
+        );
+
+        // Not empty: has finish_reason
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                Some(FinishReason::Stop),
+                None,
+                None,
+                None,
+                None,
+            )),
+            "finish_reason → not empty",
+        );
+
+        // Not empty: has tool_calls
+        let tc = vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_1".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("f".to_string()),
+                arguments: Some("{}".to_string()),
+            }),
+        }];
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                Some(tc),
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "tool_calls present → not empty",
+        );
+
+        // Not empty: usage present
+        let usage = dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                Some(usage),
+                None,
+                None,
+                None
+            )),
+            "usage present → not empty",
+        );
+
+        // Role-only: still empty (backends repeat role on every chunk)
+        assert!(
+            is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(Role::Assistant),
+                None,
+                None,
+            )),
+            "role-only → empty",
+        );
+
+        // Not empty: has refusal
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("I can't help with that"),
+                None,
+            )),
+            "refusal present → not empty",
+        );
+
+        // Not empty: has function_call (deprecated but still in the struct)
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(ChatCompletionStreamResponseDeltaFunctionCall {
+                    name: Some("my_fn".to_string()),
+                    arguments: Some("{}".to_string()),
+                }),
+            )),
+            "function_call present → not empty",
+        );
+    }
+
+    // ── completions empty-stream-response tests ──────────────────────
+
+    use dynamo_protocols::types::{Choice, CompletionFinishReason, CreateCompletionResponse};
+
+    /// Build a single-choice `NvCreateCompletionResponse`.
+    fn make_completion_chunk(
+        text: &str,
+        finish: Option<CompletionFinishReason>,
+        usage: Option<dynamo_protocols::types::CompletionUsage>,
+    ) -> NvCreateCompletionResponse {
+        let choice = Choice {
+            text: text.to_string(),
+            index: 0,
+            logprobs: None,
+            finish_reason: finish,
+        };
+        NvCreateCompletionResponse {
+            inner: CreateCompletionResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: "m".to_string(),
+                system_fingerprint: None,
+                object: "text_completion".to_string(),
+                usage,
+            },
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn test_is_empty_completion_stream_response() {
+        // Empty: no text, no finish, no usage
+        assert!(
+            is_empty_completion_stream_response(&make_completion_chunk("", None, None)),
+            "empty text, no finish → empty",
+        );
+
+        // Not empty: has text
+        assert!(
+            !is_empty_completion_stream_response(&make_completion_chunk("hi", None, None)),
+            "text present → not empty",
+        );
+
+        // Not empty: has finish_reason
+        assert!(
+            !is_empty_completion_stream_response(&make_completion_chunk(
+                "",
+                Some(CompletionFinishReason::Stop),
+                None,
+            )),
+            "finish_reason → not empty",
+        );
+
+        // Not empty: usage present
+        let usage = dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        assert!(
+            !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
+            "usage present → not empty",
+        );
     }
 }

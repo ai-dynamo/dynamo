@@ -7,12 +7,13 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
-    protocols::{BlockExtraInfo, WorkerId},
+    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::agents::context::AgentContext;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -67,6 +68,10 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
 
+    /// Request routing constraints used for worker compatibility and soft preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_constraints: Option<RoutingConstraints>,
+
     /// Session control for subagent KV isolation and sticky routing.
     /// Contains session_id (for affinity) and optional action (open/close).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,9 +90,24 @@ pub struct BootstrapInfo {
     pub bootstrap_room: u64,
 }
 
+/// Directional pointer to a predecessor worker's `engine.generate` span.
+/// Used for prefill→decode handoff, migration retries, and multi-modal
+/// pipelines — wherever a downstream worker should render an OTel `Link`
+/// back to a previous worker that handled (or attempted) the same
+/// request. Framework-owned; engines do not read or write this.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TraceLink {
+    /// W3C trace_id of the predecessor span (32 hex chars).
+    pub trace_id: String,
+    /// W3C span_id of the predecessor span (16 hex chars).
+    pub span_id: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillResult {
-    /// Disaggregated execution parameters
+    /// Disaggregated execution parameters. Engine-owned; the framework
+    /// reads this through to the underlying inference engine without
+    /// interpretation.
     pub disaggregated_params: serde_json::Value,
     /// Prompt token details produced during prefill
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,6 +205,15 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
 
+    /// Directional link to a predecessor worker's `engine.generate` span.
+    /// Set by `PrefillRouter` on the decode side (prefill→decode handoff)
+    /// and by the migration `RetryManager` on retry attempts. Framework-
+    /// owned — engines must not read or write. Consumed by `EngineAdapter`
+    /// at request start to record an OTel `Link` on its `engine.generate`.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_link: Option<TraceLink>,
+
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,6 +223,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Optional agent identity metadata forwarded from nvext.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_context: Option<AgentContext>,
 
     /// Multimodal processor kwargs forwarded to the backend engine
     /// (e.g. `{"use_audio_in_video": true}` for omni models).

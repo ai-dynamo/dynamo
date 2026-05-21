@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -12,22 +15,25 @@ use dynamo_kv_router::{
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
-        compute_block_hash_for_seq,
+        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
+        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
+    scheduling::{OverloadedWorkerProvider, TierOverlapBlocks},
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
+    error::{DynamoError, ErrorType},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
-        async_trait,
+        async_trait, error::PipelineError,
     },
     protocols::EndpointId,
     protocols::annotated::Annotated,
     traits::DistributedRuntimeProvider,
 };
 use futures::stream;
+use serde::Serialize;
 use tracing::Instrument;
 use validator::Validate;
 
@@ -63,8 +69,6 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
 };
 
-use std::collections::HashSet;
-
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 
@@ -85,10 +89,235 @@ pub const RADIX_STATE_FILE: &str = "radix-state";
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WorkerCacheHitEstimate {
+    pub effective_overlap_blocks: f64,
+    pub cached_tokens: usize,
+}
+
+impl WorkerCacheHitEstimate {
+    pub fn rounded_overlap_blocks(self) -> u32 {
+        self.effective_overlap_blocks.round() as u32
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CacheHitEstimates {
+    effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
+    cached_tokens: HashMap<WorkerWithDpRank, usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BestMatchDetails {
+    pub worker: WorkerWithDpRank,
+    pub cache_hit: WorkerCacheHitEstimate,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerOverlapScore {
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
+    pub device_blocks: usize,
+    pub host_pinned_blocks: usize,
+    pub disk_blocks: usize,
+    pub host_pinned_extension_blocks: usize,
+    pub disk_extension_blocks: usize,
+    pub shared_beyond_device_blocks: Option<u32>,
+    pub router_credit_blocks: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SharedCacheOverlapScore {
+    pub enabled: bool,
+    pub total_hit_blocks: u32,
+    pub ranges: Vec<(u32, u32)>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OverlapScoresResponse {
+    pub block_size: u32,
+    pub num_blocks: usize,
+    pub workers: Vec<WorkerOverlapScore>,
+    pub shared_cache: SharedCacheOverlapScore,
+}
+
+fn cache_hit_weight_for_tier(
+    kv_router_config: &KvRouterConfig,
+    storage_tier: dynamo_kv_router::protocols::StorageTier,
+) -> f64 {
+    match storage_tier {
+        dynamo_kv_router::protocols::StorageTier::Device => 1.0,
+        dynamo_kv_router::protocols::StorageTier::HostPinned => {
+            kv_router_config.host_cache_hit_weight
+        }
+        dynamo_kv_router::protocols::StorageTier::Disk
+        | dynamo_kv_router::protocols::StorageTier::External => {
+            kv_router_config.disk_cache_hit_weight
+        }
+    }
+}
+
+fn cached_tokens_from_effective_overlap(block_size: u32, effective_overlap_blocks: f64) -> usize {
+    (effective_overlap_blocks * block_size as f64)
+        .round()
+        .max(0.0) as usize
+}
+
+fn cache_hit_estimates_from_tiered_matches(
+    kv_router_config: &KvRouterConfig,
+    block_size: u32,
+    tiered_matches: &indexer::TieredMatchDetails,
+) -> CacheHitEstimates {
+    let mut effective_overlap_blocks = HashMap::new();
+
+    for (worker, overlap) in &tiered_matches.device.overlap_scores.scores {
+        effective_overlap_blocks.insert(*worker, *overlap as f64);
+    }
+
+    for (storage_tier, tier_matches) in &tiered_matches.lower_tier {
+        let weight = cache_hit_weight_for_tier(kv_router_config, *storage_tier);
+        if weight == 0.0 {
+            continue;
+        }
+
+        for (worker, hits) in &tier_matches.hits {
+            if *hits == 0 {
+                continue;
+            }
+            *effective_overlap_blocks.entry(*worker).or_insert(0.0) += *hits as f64 * weight;
+        }
+    }
+
+    let cached_tokens = effective_overlap_blocks
+        .iter()
+        .map(|(worker, overlap)| {
+            (
+                *worker,
+                cached_tokens_from_effective_overlap(block_size, *overlap),
+            )
+        })
+        .collect();
+
+    CacheHitEstimates {
+        effective_overlap_blocks,
+        cached_tokens,
+    }
+}
+
+fn cache_hit_for_worker(
+    cache_hit_estimates: &CacheHitEstimates,
+    worker: WorkerWithDpRank,
+) -> WorkerCacheHitEstimate {
+    WorkerCacheHitEstimate {
+        effective_overlap_blocks: cache_hit_estimates
+            .effective_overlap_blocks
+            .get(&worker)
+            .copied()
+            .unwrap_or(0.0),
+        cached_tokens: cache_hit_estimates
+            .cached_tokens
+            .get(&worker)
+            .copied()
+            .unwrap_or(0),
+    }
+}
+
+fn tier_overlap_blocks_from_tiered_matches(
+    tiered_matches: &indexer::TieredMatchDetails,
+) -> TierOverlapBlocks {
+    let mut tier_overlap_blocks = TierOverlapBlocks::default();
+
+    tier_overlap_blocks.device.extend(
+        tiered_matches
+            .device
+            .overlap_scores
+            .scores
+            .iter()
+            .map(|(worker, hits)| (*worker, *hits as usize)),
+    );
+
+    if let Some(host_matches) = tiered_matches
+        .lower_tier
+        .get(&dynamo_kv_router::protocols::StorageTier::HostPinned)
+    {
+        tier_overlap_blocks.host_pinned.extend(
+            host_matches
+                .hits
+                .iter()
+                .map(|(worker, hits)| (*worker, *hits)),
+        );
+    }
+
+    // Disk and External share the same weighting (see `storage_tier_weight`),
+    // so accumulate both into the disk bucket.
+    for tier in [
+        dynamo_kv_router::protocols::StorageTier::Disk,
+        dynamo_kv_router::protocols::StorageTier::External,
+    ] {
+        if let Some(matches) = tiered_matches.lower_tier.get(&tier) {
+            for (worker, hits) in &matches.hits {
+                *tier_overlap_blocks.disk.entry(*worker).or_default() += *hits;
+            }
+        }
+    }
+
+    tier_overlap_blocks
+}
+
+fn shared_cache_overlap_score(
+    enabled: bool,
+    hits: Option<&dynamo_kv_router::protocols::SharedCacheHits>,
+    error: Option<String>,
+) -> SharedCacheOverlapScore {
+    let Some(hits) = hits else {
+        return SharedCacheOverlapScore {
+            enabled,
+            total_hit_blocks: 0,
+            ranges: Vec::new(),
+            error,
+        };
+    };
+
+    SharedCacheOverlapScore {
+        enabled,
+        total_hit_blocks: hits.total_hits,
+        ranges: hits
+            .ranges
+            .iter()
+            .map(|range| (range.start, range.end))
+            .collect(),
+        error,
+    }
+}
+
+fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
+    if !error.is_overload() {
+        return error.into();
+    }
+
+    let message = error.to_string();
+    let cause = PipelineError::ServiceOverloaded(message.clone());
+    DynamoError::builder()
+        .error_type(ErrorType::ResourceExhausted)
+        .message(message)
+        .cause(cause)
+        .build()
+        .into()
+}
+
 /// Generates a dp_rank-specific endpoint name for the worker KV indexer query service.
 /// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
 pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
     format!("worker_kv_indexer_query_dp{dp_rank}")
+}
+
+/// Generates a query endpoint name for a dp_rank whose events are attributed to `worker_id`.
+pub fn worker_kv_indexer_query_endpoint_for_worker(worker_id: WorkerId, dp_rank: DpRank) -> String {
+    format!(
+        "{}_worker{worker_id}",
+        worker_kv_indexer_query_endpoint(dp_rank)
+    )
 }
 
 fn log_routing_input_hashes(
@@ -200,6 +429,10 @@ where
                 })?;
         }
 
+        let client_for_overload = client.clone();
+        let overloaded_worker_provider: OverloadedWorkerProvider =
+            Arc::new(move || client_for_overload.overloaded_instance_ids());
+
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
@@ -207,6 +440,7 @@ where
             selector,
             &kv_router_config,
             prefill_load_estimator.clone(),
+            Some(overloaded_worker_provider),
             worker_type,
         )
         .await?;
@@ -219,9 +453,9 @@ where
                 .await?;
         } else {
             tracing::info!(
-                "Skipping KV event subscription (use_kv_events={}, overlap_score_weight={})",
+                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
                 kv_router_config.use_kv_events,
-                kv_router_config.overlap_score_weight,
+                kv_router_config.overlap_score_credit,
             );
         }
 
@@ -275,6 +509,25 @@ where
         self.is_eagle
     }
 
+    fn cache_hit_estimates_from_tiered_matches(
+        &self,
+        tiered_matches: &indexer::TieredMatchDetails,
+    ) -> CacheHitEstimates {
+        cache_hit_estimates_from_tiered_matches(
+            &self.kv_router_config,
+            self.block_size,
+            tiered_matches,
+        )
+    }
+
+    fn cache_hit_for_worker(
+        &self,
+        cache_hit_estimates: &CacheHitEstimates,
+        worker: WorkerWithDpRank,
+    ) -> WorkerCacheHitEstimate {
+        cache_hit_for_worker(cache_hit_estimates, worker)
+    }
+
     pub async fn record_routing_decision(
         &self,
         mut tokens_with_hashes: TokensWithHashes,
@@ -285,16 +538,15 @@ where
             .await
     }
 
-    /// Give these tokens, find the worker with the best match in it's KV cache.
-    /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
-    /// Now also takes optional context_id for request tracking.
+    /// Give these tokens, find the worker with the best weighted cache hit.
+    /// Returns the full match details for the selected worker.
     ///
     /// When `pinned_worker` is Some, scheduling and queueing are constrained to
     /// that exact worker/rank.
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
-    pub async fn find_best_match(
+    pub(crate) async fn find_best_match_details(
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
@@ -306,7 +558,8 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<BestMatchDetails> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -336,13 +589,13 @@ where
         });
         let seq_hash_elapsed = start.elapsed();
 
-        // Query indexer and shared cache in parallel when shared cache is configured.
+        // Query indexer (tiered) and shared cache in parallel when shared cache is configured.
         // Time each independently so metrics can separate indexer vs shared cache latency.
-        let (overlap_scores, shared_cache_hits, indexer_duration, shared_cache_duration) =
+        let (tiered_matches, shared_cache_hits, indexer_duration, shared_cache_duration) =
             if let Some(ref shared_cache) = self.shared_cache {
                 let indexer_fut = self
                     .indexer
-                    .find_matches(block_hashes.clone())
+                    .find_matches_by_tier(block_hashes)
                     .instrument(tracing::info_span!("kv_router.find_matches"));
                 let shared_fut = shared_cache
                     .check_blocks(tokens, self.block_size)
@@ -361,7 +614,7 @@ where
 
                 let ((indexer_result, idx_dur), (shared_result, sc_dur)) =
                     tokio::join!(indexer_timed, shared_timed);
-                let overlaps = indexer_result?;
+                let tiered = indexer_result?;
                 // Shared cache failure is non-fatal: log warning and fall back to empty hits.
                 let hits = match shared_result {
                     Ok(hits) => Some(hits),
@@ -373,16 +626,19 @@ where
                         None
                     }
                 };
-                (overlaps, hits, idx_dur, Some(sc_dur))
+                (tiered, hits, idx_dur, Some(sc_dur))
             } else {
                 let t = Instant::now();
-                let overlaps = self
+                let tiered = self
                     .indexer
-                    .find_matches(block_hashes)
+                    .find_matches_by_tier(block_hashes)
                     .instrument(tracing::info_span!("kv_router.find_matches"))
                     .await?;
-                (overlaps, None, t.elapsed(), None)
+                (tiered, None, t.elapsed(), None)
             };
+
+        let tier_overlap_blocks = tier_overlap_blocks_from_tiered_matches(&tiered_matches);
+        let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
@@ -397,7 +653,9 @@ where
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
-                overlap_scores,
+                tier_overlap_blocks,
+                cache_hit_estimates.effective_overlap_blocks,
+                cache_hit_estimates.cached_tokens,
                 router_config_override,
                 update_states,
                 lora_name,
@@ -405,10 +663,12 @@ where
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
+                routing_constraints,
                 shared_cache_hits,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
-            .await?;
+            .await
+            .map_err(map_scheduler_error)?;
         let total_elapsed = start.elapsed();
 
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
@@ -430,7 +690,7 @@ where
                 m.shared_cache_hit_rate
                     .observe(hits.total_hits as f64 / num_blocks as f64);
             }
-            let beyond = hits.hits_beyond(response.overlap_blocks);
+            let beyond = hits.hits_beyond(response.effective_overlap_blocks.round() as u32);
             m.shared_cache_beyond_blocks.observe(beyond as f64);
         }
 
@@ -445,7 +705,47 @@ where
             "find_best_match completed"
         );
 
-        Ok((response.best_worker, response.overlap_blocks))
+        Ok(BestMatchDetails {
+            worker: response.best_worker,
+            cache_hit: WorkerCacheHitEstimate {
+                effective_overlap_blocks: response.effective_overlap_blocks,
+                cached_tokens: response.cached_tokens,
+            },
+        })
+    }
+
+    /// Give these tokens, find the worker with the best match in its KV cache.
+    /// Returns the best worker (with dp_rank) and approximate effective overlap in blocks.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        expected_output_tokens: Option<u32>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
+        let result = self
+            .find_best_match_details(
+                context_id,
+                tokens,
+                block_mm_infos,
+                router_config_override,
+                update_states,
+                lora_name,
+                priority_jump,
+                expected_output_tokens,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+        Ok((result.worker, result.cache_hit.rounded_overlap_blocks()))
     }
 
     /// Register externally-provided workers in the slot tracker.
@@ -459,7 +759,7 @@ where
         request_id: String,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
@@ -483,7 +783,7 @@ where
             .kv_router_config
             .track_prefill_tokens(router_config_override);
         let prefill_load_hint =
-            self.prefill_load_hint_for(isl_tokens, overlap_blocks, track_prefill_tokens);
+            self.prefill_load_hint_for(isl_tokens, cached_tokens, track_prefill_tokens);
 
         if let Err(e) = self
             .scheduler
@@ -518,14 +818,14 @@ where
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let prefix = cached_tokens.min(isl_tokens);
         let effective_isl = isl_tokens.saturating_sub(prefix);
         if effective_isl == 0 {
             return None;
@@ -578,7 +878,7 @@ where
     }
 
     /// Compute the overlap blocks for a given token sequence and worker.
-    /// This queries the indexer to find how many blocks are already cached.
+    /// This queries the indexer to find the effective weighted cache hit.
     pub async fn get_overlap_blocks(
         &self,
         tokens: &[u32],
@@ -586,6 +886,19 @@ where
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
     ) -> Result<u32, KvRouterError> {
+        Ok(self
+            .get_cache_hit_estimate(tokens, block_mm_infos, worker, lora_name)
+            .await?
+            .rounded_overlap_blocks())
+    }
+
+    pub(crate) async fn get_cache_hit_estimate(
+        &self,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        worker: WorkerWithDpRank,
+        lora_name: Option<&str>,
+    ) -> Result<WorkerCacheHitEstimate, KvRouterError> {
         let block_hashes = compute_block_hash_for_seq(
             tokens,
             self.block_size,
@@ -595,9 +908,9 @@ where
                 is_eagle: Some(self.is_eagle),
             },
         );
-        log_routing_input_hashes(None, self.block_size, tokens, &block_hashes);
-        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
-        Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
+        let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
+        let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
+        Ok(self.cache_hit_for_worker(&cache_hit_estimates, worker))
     }
 
     /// Get potential prefill and decode loads for all workers
@@ -626,14 +939,146 @@ where
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
-        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+        let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
+        let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
 
         Ok(self.scheduler.get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            overlap_scores,
+            cache_hit_estimates.cached_tokens,
             track_prefill_tokens,
         ))
+    }
+
+    /// Return per-worker KV overlap by storage tier.
+    ///
+    /// Device, host-pinned, and disk values are keyed by `(worker_id, dp_rank)`.
+    /// Shared-cache hits are global to the request, so each worker row reports
+    /// only the shared blocks beyond that rank's device-local prefix.
+    pub async fn get_overlap_scores(
+        &self,
+        tokens: &[u32],
+        router_config_override: Option<&RouterConfigOverride>,
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        lora_name: Option<&str>,
+        include_shared: bool,
+    ) -> Result<OverlapScoresResponse, KvRouterError> {
+        let hash_options = BlockHashOptions {
+            block_mm_infos,
+            lora_name,
+            is_eagle: Some(self.is_eagle),
+        };
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
+        let num_blocks = block_hashes.len();
+
+        let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
+
+        let (shared_hits, shared_error) = if include_shared {
+            if let Some(shared_cache) = self.shared_cache.as_ref() {
+                match shared_cache.check_blocks(tokens, self.block_size).await {
+                    Ok(hits) => (Some(hits), None),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Shared cache overlap query failed");
+                        (None, Some(err.to_string()))
+                    }
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        let shared_enabled = include_shared && self.shared_cache.is_some();
+        let shared_cache =
+            shared_cache_overlap_score(shared_enabled, shared_hits.as_ref(), shared_error);
+        let shared_hits = shared_hits.as_ref();
+
+        let overlap_score_credit = router_config_override
+            .and_then(|cfg| cfg.overlap_score_credit)
+            .unwrap_or(self.kv_router_config.overlap_score_credit);
+        let shared_cache_multiplier = router_config_override
+            .and_then(|cfg| cfg.shared_cache_multiplier)
+            .unwrap_or(self.kv_router_config.shared_cache_multiplier);
+
+        let device = &tiered_matches.device.overlap_scores;
+        let host_extension = tiered_matches
+            .lower_tier
+            .get(&dynamo_kv_router::protocols::StorageTier::HostPinned);
+
+        let mut disk_extensions: HashMap<WorkerWithDpRank, usize> = HashMap::new();
+        for tier in [
+            dynamo_kv_router::protocols::StorageTier::Disk,
+            dynamo_kv_router::protocols::StorageTier::External,
+        ] {
+            if let Some(matches) = tiered_matches.lower_tier.get(&tier) {
+                for (worker, hits) in &matches.hits {
+                    *disk_extensions.entry(*worker).or_default() += *hits;
+                }
+            }
+        }
+
+        let mut workers = HashSet::new();
+        {
+            let configs = self.workers_with_configs.borrow();
+            for (&worker_id, config) in configs.iter() {
+                let start_rank = config.data_parallel_start_rank();
+                let end_rank = start_rank + config.data_parallel_size();
+                for dp_rank in start_rank..end_rank {
+                    workers.insert(WorkerWithDpRank::new(worker_id, dp_rank));
+                }
+            }
+        }
+        workers.extend(device.scores.keys().copied());
+        if let Some(host_matches) = host_extension {
+            workers.extend(host_matches.hits.keys().copied());
+        }
+        workers.extend(disk_extensions.keys().copied());
+
+        let mut workers: Vec<_> = workers.into_iter().collect();
+        workers.sort_by_key(|worker| (worker.worker_id, worker.dp_rank));
+
+        let workers = workers
+            .into_iter()
+            .map(|worker| {
+                let device_blocks = device.scores.get(&worker).copied().unwrap_or(0) as usize;
+                let host_pinned_extension_blocks = host_extension
+                    .and_then(|matches| matches.hits.get(&worker))
+                    .copied()
+                    .unwrap_or(0);
+                let disk_extension_blocks = disk_extensions.get(&worker).copied().unwrap_or(0);
+                let host_pinned_blocks = device_blocks + host_pinned_extension_blocks;
+                let disk_blocks = host_pinned_blocks + disk_extension_blocks;
+                let shared_beyond_device_blocks =
+                    shared_hits.map(|hits| hits.hits_beyond(device_blocks as u32));
+                let shared_credit_blocks =
+                    shared_beyond_device_blocks.unwrap_or(0) as f64 * shared_cache_multiplier;
+                let router_credit_blocks = overlap_score_credit * device_blocks as f64
+                    + self.kv_router_config.host_cache_hit_weight
+                        * host_pinned_extension_blocks as f64
+                    + self.kv_router_config.disk_cache_hit_weight * disk_extension_blocks as f64
+                    + shared_credit_blocks;
+
+                WorkerOverlapScore {
+                    worker_id: worker.worker_id,
+                    dp_rank: worker.dp_rank,
+                    device_blocks,
+                    host_pinned_blocks,
+                    disk_blocks,
+                    host_pinned_extension_blocks,
+                    disk_extension_blocks,
+                    shared_beyond_device_blocks,
+                    router_credit_blocks,
+                }
+            })
+            .collect();
+
+        Ok(OverlapScoresResponse {
+            block_size: self.block_size,
+            num_blocks,
+            workers,
+            shared_cache,
+        })
     }
 
     /// Dump all events from the indexer
@@ -661,6 +1106,7 @@ where
             RouterRequest::New {
                 tokens,
                 block_mm_infos,
+                routing_constraints,
             } => {
                 let (best_worker, overlap_blocks) = self
                     .find_best_match(
@@ -673,7 +1119,7 @@ where
                         0.0,
                         None,
                         None,
-                        None,
+                        routing_constraints,
                     )
                     .await?;
 
@@ -719,11 +1165,56 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
+    use dynamo_kv_router::{
+        indexer::{LowerTierMatchDetails, MatchDetails},
+        protocols::{OverlapScores, StorageTier},
+    };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
     use crate::kv_router::scheduler::KvSchedulerError;
     use crate::local_model::runtime_config::ModelRuntimeConfig;
+
+    #[test]
+    fn weighted_cache_hit_estimates_include_lower_tiers() {
+        let worker_1 = WorkerWithDpRank::new(1, 0);
+        let worker_2 = WorkerWithDpRank::new(2, 0);
+        let mut device_overlap_scores = OverlapScores::new();
+        device_overlap_scores.scores.insert(worker_1, 2);
+        let mut host_match_details = LowerTierMatchDetails::default();
+        host_match_details.hits.insert(worker_1, 1);
+        host_match_details.hits.insert(worker_2, 1);
+        let mut disk_match_details = LowerTierMatchDetails::default();
+        disk_match_details.hits.insert(worker_1, 2);
+
+        let tiered_matches = indexer::TieredMatchDetails {
+            device: MatchDetails {
+                overlap_scores: device_overlap_scores,
+                ..Default::default()
+            },
+            lower_tier: HashMap::from([
+                (StorageTier::HostPinned, host_match_details),
+                (StorageTier::Disk, disk_match_details),
+            ]),
+        };
+
+        let estimates = cache_hit_estimates_from_tiered_matches(
+            &KvRouterConfig::default(),
+            16,
+            &tiered_matches,
+        );
+
+        assert_eq!(
+            estimates.effective_overlap_blocks.get(&worker_1),
+            Some(&3.25)
+        );
+        assert_eq!(estimates.cached_tokens.get(&worker_1), Some(&52));
+        assert_eq!(
+            estimates.effective_overlap_blocks.get(&worker_2),
+            Some(&0.75)
+        );
+        assert_eq!(estimates.cached_tokens.get(&worker_2), Some(&12));
+    }
 
     struct FakeSharedCache {
         hits: Option<dynamo_kv_router::protocols::SharedCacheHits>,
@@ -755,6 +1246,7 @@ mod tests {
             &self,
             _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
             request: &dynamo_kv_router::scheduling::SchedulingRequest,
+            _eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
             block_size: u32,
         ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
             let observed_hits = request
@@ -766,8 +1258,23 @@ mod tests {
             Ok(dynamo_kv_router::protocols::WorkerSelectionResult {
                 worker: self.selected_worker,
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
-                overlap_blocks: 0,
+                effective_overlap_blocks: 0.0,
+                cached_tokens: 0,
             })
+        }
+    }
+
+    struct OverloadedSelector;
+
+    impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> for OverloadedSelector {
+        fn select_worker(
+            &self,
+            _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
+            _request: &dynamo_kv_router::scheduling::SchedulingRequest,
+            _eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
+            _block_size: u32,
+        ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
         }
     }
 
@@ -801,7 +1308,7 @@ mod tests {
         let (_tx, rx) = watch::channel(workers);
 
         let config = KvRouterConfig {
-            overlap_score_weight: 0.0,
+            overlap_score_credit: 0.0,
             router_temperature: 0.0,
             use_kv_events: false,
             router_track_active_blocks: false,
@@ -855,7 +1362,7 @@ mod tests {
                 0.0,
                 None,
                 None,
-                None,
+                RoutingConstraints::default(),
             )
             .await
             .unwrap();
@@ -889,12 +1396,84 @@ mod tests {
                 0.0,
                 None,
                 None,
-                None,
+                RoutingConstraints::default(),
             )
             .await
             .unwrap();
 
         assert_eq!(worker, WorkerWithDpRank::from_worker_id(0));
         assert_eq!(overlap, 0);
+    }
+
+    #[tokio::test]
+    async fn test_find_best_match_maps_overload_to_resource_exhausted() {
+        let router = make_test_router(OverloadedSelector, None).await;
+
+        let err = router
+            .find_best_match(
+                None,
+                &[11, 12],
+                None,
+                None,
+                false,
+                None,
+                0.0,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(dynamo_runtime::error::match_error_chain(
+            err.as_ref(),
+            &[dynamo_runtime::error::ErrorType::ResourceExhausted],
+            &[]
+        ));
+        assert!(
+            err.to_string()
+                .contains("all eligible workers are overloaded")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_overlap_scores_returns_tiered_rows_and_shared_hits() {
+        let router = make_test_router(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::from_worker_id(0),
+            },
+            Some(Box::new(FakeSharedCache {
+                #[allow(clippy::single_range_in_vec_init)]
+                hits: Some(dynamo_kv_router::protocols::SharedCacheHits::from_ranges(
+                    vec![0..2],
+                )),
+                should_error: false,
+            })),
+        )
+        .await;
+
+        let scores = router
+            .get_overlap_scores(&[11, 12, 21, 22], None, None, None, true)
+            .await
+            .unwrap();
+
+        assert_eq!(scores.block_size, 2);
+        assert_eq!(scores.num_blocks, 2);
+        assert!(scores.shared_cache.enabled);
+        assert_eq!(scores.shared_cache.total_hit_blocks, 2);
+        assert_eq!(scores.shared_cache.ranges, vec![(0, 2)]);
+        assert_eq!(scores.shared_cache.error, None);
+        assert_eq!(scores.workers.len(), 2);
+
+        for worker in scores.workers {
+            assert_eq!(worker.device_blocks, 0);
+            assert_eq!(worker.host_pinned_blocks, 0);
+            assert_eq!(worker.disk_blocks, 0);
+            assert_eq!(worker.host_pinned_extension_blocks, 0);
+            assert_eq!(worker.disk_extension_blocks, 0);
+            assert_eq!(worker.shared_beyond_device_blocks, Some(2));
+            assert!((worker.router_credit_blocks - 1.0).abs() < f64::EPSILON);
+        }
     }
 }

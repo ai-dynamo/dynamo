@@ -87,6 +87,7 @@ impl
         // Extract request data while preserving context
         let (mut req, context) = request.into_parts();
         let request_id = context.id().to_string();
+        let metadata = context.metadata().clone();
         let engine_ctx = context.context();
 
         // Save original max_tokens for decode
@@ -160,7 +161,11 @@ impl
                 // disconnects, wasting prefill compute. This is an accepted
                 // trade-off (wasted compute vs permanent KV block leak). Future
                 // work: add NIXL-level cancellation that properly frees blocks.
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                let prefill_context = Context::with_id_and_metadata(
+                    prefill_req,
+                    request_id.clone(),
+                    metadata.clone(),
+                );
 
                 // Pass the phase barrier to the spawned task. It is released after routing
                 // completes so worker recording finishes before phase changes to Decode.
@@ -179,11 +184,15 @@ impl
                 drop(prefill_phase_barrier);
 
                 // NVBugs 5969206: Do NOT link prefill as child (same rationale as bootstrap path).
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                let prefill_context = Context::with_id_and_metadata(
+                    prefill_req,
+                    request_id.clone(),
+                    metadata.clone(),
+                );
 
                 // In Direct mode, pass preselected_worker so execute_prefill uses
                 // router.direct() instead of router.generate() (which bails in Direct mode).
-                let (result, _worker_info) = Self::execute_prefill(
+                let completion = Self::execute_prefill(
                     self.prefill_router.get().cloned(),
                     prefill_context,
                     preselected_worker,
@@ -191,7 +200,10 @@ impl
                 )
                 .await?;
 
-                Ok(PrefillOutcome::Completed(result))
+                Ok(PrefillOutcome::Completed {
+                    result: completion.result,
+                    worker_link: completion.worker_link,
+                })
             }
         };
 
@@ -227,8 +239,12 @@ impl
                     PrefillOutcome::Bootstrap(info) => {
                         decode_req.bootstrap_info = Some(info);
                     }
-                    PrefillOutcome::Completed(result) => {
+                    PrefillOutcome::Completed {
+                        result,
+                        worker_link,
+                    } => {
                         decode_req.prefill_result = Some(result);
+                        decode_req.migration_link = worker_link;
                     }
                 }
 
@@ -236,7 +252,7 @@ impl
                 decode_req.stop_conditions.max_tokens = original_max_tokens;
 
                 // Set router_config_override for decode:
-                // - overlap_score_weight = 0 (no KV cache overlap scoring for decode)
+                // - overlap_score_credit = 0 (no KV cache overlap scoring for decode)
                 // - assume_kv_reuse = false (generate random hashes since decode workers
                 //   may already have blocks cached from prefill transfer)
                 // - track_prefill_tokens = false (decode router should ignore prompt-side load)
@@ -272,7 +288,7 @@ mod tests {
             ..Default::default()
         }));
 
-        assert_eq!(override_config.overlap_score_weight, Some(0.0));
+        assert_eq!(override_config.overlap_score_credit, Some(0.0));
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));

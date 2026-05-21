@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-lora
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - modelRef:
+      name: Qwen/Qwen3-0.6B
+    name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --enable-lora
+          - --max-lora-rank
+          - "64"
+          - --enforce-eager
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: DYN_LORA_ENABLED
+            value: "true"
+          - name: DYN_LORA_PATH
+            value: /tmp/dynamo_loras_minio
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: AWS_ENDPOINT
+            value: http://minio:9000
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                key: AWS_ACCESS_KEY_ID
+                name: minio-secret
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                key: AWS_SECRET_ACCESS_KEY
+                name: minio-secret
+          - name: AWS_REGION
+            value: us-east-1
+          - name: AWS_ALLOW_HTTP
+            value: "true"
+          - name: BUCKET_NAME
+            value: my-loras
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: decode

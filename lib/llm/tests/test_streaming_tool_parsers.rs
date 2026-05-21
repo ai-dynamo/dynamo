@@ -454,6 +454,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_gpt_oss_tool_parser_only_preserves_analysis_as_content_vllm() {
+        // Parent-ticket acceptance: if only tool parsing is configured, the
+        // Harmony analysis channel is not handled by a reasoning parser and
+        // should be surfaced as normal content while tool calls are parsed.
+        let file_path = format!(
+            "{}/vllm/gpt-oss-20b/chat_completion_stream_f0c86d72-tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+
+        let input_stream = stream::iter(test_data.stream_chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("harmony".to_string()), None)
+                .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+        assert_eq!(
+            aggregated.reasoning_content, "",
+            "Reasoning content should stay empty when no reasoning parser is configured"
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_reasoning_content,
+            "Tool-only parsing should preserve Harmony analysis as normal content"
+        );
+        assert!(
+            !aggregated.normal_content.contains("<|channel|>"),
+            "Normal content should not leak Harmony protocol tokens"
+        );
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool-only parsing case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gpt_oss_no_parsing_preserves_raw_content_vllm() {
+        // Parent-ticket acceptance: if parsing is not configured, the parser
+        // layer should not reinterpret Harmony output; all streamed text stays
+        // in content and no tool/reasoning fields are synthesized.
+        let file_path = format!(
+            "{}/vllm/gpt-oss-20b/chat_completion_stream_f0c86d72-tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+        let expected_raw_content = aggregate_content_from_chunks(&test_data.stream_chunks);
+
+        let input_stream = stream::iter(test_data.stream_chunks);
+        let output_chunks = parse_response_stream(input_stream, false, false, None, None).await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+        assert_eq!(
+            aggregated.normal_content, expected_raw_content.normal_content,
+            "No-parser mode should preserve the raw streamed content"
+        );
+        assert!(
+            aggregated.normal_content.contains("<|channel|>"),
+            "No-parser mode should leave Harmony protocol tokens in content"
+        );
+        assert_eq!(
+            aggregated.reasoning_content, "",
+            "No-parser mode should not synthesize reasoning content"
+        );
+        assert!(
+            !aggregated.has_tool_calls,
+            "No-parser mode should not synthesize tool calls"
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for no-parser case"
+        );
+    }
+
+    #[tokio::test]
     async fn test_qwen_e2e_with_no_tools_vllm() {
         // E2E Parsing test for Qwen with no tools.
 
@@ -1106,6 +1182,170 @@ mod tests {
         );
     }
 
+    // ---- DeepSeek V4 (DSML format) streaming parser tests ----
+    //
+    // V4 emits tool calls inside a DSML block:
+    //   <｜DSML｜tool_calls>
+    //   <｜DSML｜invoke name="fn">
+    //   <｜DSML｜parameter name="k" string="true|false">v</｜DSML｜parameter>
+    //   </｜DSML｜invoke>
+    //   </｜DSML｜tool_calls>
+    // Fixtures live under tests/data/vllm/deepseek-v4/.
+
+    /// Shared harness for DeepSeek V4 e2e fixtures that end in a tool call.
+    async fn run_deepseek_v4_tool_call_fixture(file_path: &str) {
+        let test_data = load_test_data(file_path);
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v4".to_string()),
+            Some("deepseek_v4".to_string()),
+        )
+        .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+
+        let expected_has_tool_calls = !test_data.expected_tool_calls.is_empty();
+        assert_eq!(
+            aggregated.has_tool_calls, expected_has_tool_calls,
+            "Tool calls presence should match expected value"
+        );
+        assert_tool_calls(&aggregated.tool_calls, &test_data.expected_tool_calls);
+
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for tool call case"
+        );
+    }
+
+    /// `PARSER.stream.1` — single tool call over the streaming pipeline,
+    /// paired with reasoning. Also validates finish_reason=tool_calls passthrough.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_with_tools_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// `PARSER.batch.3` over the streaming pipeline — no tool call,
+    /// reasoning plus plain body, and finish_reason=stop passthrough.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_with_no_tools_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_no_tool.json",
+            DATA_ROOT_PATH
+        );
+        let test_data = load_test_data(&file_path);
+        let input_stream = stream::iter(test_data.stream_chunks);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            true,
+            Some("deepseek_v4".to_string()),
+            Some("deepseek_v4".to_string()),
+        )
+        .await;
+
+        assert!(!output_chunks.is_empty(), "Should have output chunks");
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert_eq!(
+            aggregated.reasoning_content, test_data.expected_reasoning_content,
+            "Should have extracted reasoning content.",
+        );
+        assert_eq!(
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Normal content should match expected value.",
+        );
+        assert!(!aggregated.has_tool_calls, "Should not have any tool calls");
+
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason validation failed for non-tool call case"
+        );
+    }
+
+    /// `PARSER.stream.2` — two parallel tool calls inside one DSML block.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_multi_tool_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_multi_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// string="true" vs string="false" — numbers, booleans, arrays, objects must
+    /// round-trip as their proper JSON types inside arguments.
+    /// `PARSER.batch.7.a` over the streaming pipeline — complex args
+    /// (mixed string="true|false" to strings / numbers / bools / arrays / objects).
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_mixed_param_types_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_mixed_param_types.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Body text emitted before the DSML block — parser must populate both
+    /// normal_content and tool_calls.
+    /// `PARSER.batch.8.a` over the streaming pipeline — normal text
+    /// interleaved before the DSML block.
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_content_before_tool_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_content_before_tool.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Parameter value containing unicode, emoji, embedded quotes/newlines/tabs,
+    /// and fragments that look like sentinels but aren't — must not confuse the
+    /// parser, which anchors only on the exact </｜DSML｜parameter> token.
+    /// `PARSER.batch.7.b` over the streaming pipeline — Unicode / special
+    /// characters inside argument values. (`PARSER.xml.1` is N/A for DSML.)
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_special_chars_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_special_chars.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// Adversarial streaming: every DSML character is its own delta (~200 chunks).
+    /// Exercises buffer accumulation across chunk boundaries.
+    /// `PARSER.stream.3` — streaming chunk-boundary splits
+    /// (grammar tokens straddle chunks).
+    #[tokio::test]
+    async fn test_deepseek_v4_e2e_fragmented_tokens_vllm() {
+        let file_path = format!(
+            "{}/vllm/deepseek-v4/chat_completion_stream_fragmented_tokens.json",
+            DATA_ROOT_PATH
+        );
+        run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
     // ---- Kimi K2 streaming jail reproduction tests ----
     //
     // These reproduce the customer-reported issue (DIS-1765): Kimi K2 agentic
@@ -1129,7 +1369,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason,
-            stop_reason: None,
             logprobs: None,
         };
         Annotated {
@@ -1153,8 +1392,8 @@ mod tests {
         }
     }
 
-    /// Repro: complete Kimi K2 tool call stream, section_end present → should work.
-    /// This is the baseline / control test.
+    /// `PARSER.stream.1.b` — complete Kimi K2 tool call stream split
+    /// across parser-significant boundaries; section_end present.
     #[tokio::test]
     async fn test_kimi_k2_streaming_complete_section() {
         let chunks = vec![
@@ -1184,7 +1423,7 @@ mod tests {
         );
     }
 
-    /// Repro for DIS-1765: model hits max_tokens BEFORE emitting section_end.
+    /// `PARSER.stream.4.a` — model hits max_tokens before emitting section_end.
     /// Individual tool call is complete (call_begin + args + call_end), but
     /// section_end is missing. The jail should still extract the tool call at
     /// finalize time instead of emitting raw marker text.
@@ -1223,7 +1462,8 @@ mod tests {
         );
     }
 
-    /// Repro: multiple complete tool calls, no section_end (max_tokens).
+    /// `PARSER.stream.4.a` plus `PARSER.stream.2` — multiple complete tool
+    /// calls, no section_end (max_tokens).
     #[tokio::test]
     async fn test_kimi_k2_streaming_multiple_calls_missing_section_end() {
         let chunks = vec![
@@ -1255,5 +1495,76 @@ mod tests {
             "Should extract both tool calls even without section_end"
         );
         assert_eq!(aggregated.tool_calls.len(), 2);
+    }
+
+    /// `PARSER.stream.4.b` — Kimi K2 truncated mid-argument (no
+    /// `<|tool_call_end|>`), customer regression. Also validates
+    /// finish_reason=stop passthrough.
+    ///
+    /// Repro for the production leak observed against kimi-k2-6: the
+    /// model stops mid-argument with
+    /// `finish_reason: stop` (not max_tokens), having emitted
+    /// `<|tool_calls_section_begin|>`, `<|tool_call_begin|>`, the function id,
+    /// `<|tool_call_argument_begin|>`, and the JSON value — but **never**
+    /// emitting `<|tool_call_end|>` or `<|tool_calls_section_end|>`. This is
+    /// the most common failure mode under heavy concurrent load (multi-worker
+    /// batching causes occasional EOS-token confusion at the close-of-arg
+    /// boundary).
+    ///
+    /// The parser correctly returns 0 tool calls (no complete call found,
+    /// since `<|tool_call_end|>` is required by the kimi_k2 regex) and an
+    /// empty `normal_text` (the section body is consumed). Before the fix,
+    /// the jail's `create_tool_call_choice` ignored `normal_text` and emitted
+    /// the raw `accumulated_content` (with all special-token markers) as
+    /// plain user-visible content — leaking internal protocol tokens to the
+    /// client and breaking downstream agents that expect either a clean
+    /// `tool_calls` array or clean text.
+    #[tokio::test]
+    async fn test_kimi_k2_streaming_truncated_mid_argument_no_call_end() {
+        let chunks = vec![
+            make_chunk("<|tool_calls_section_begin|>", None),
+            make_chunk("<|tool_call_begin|>functions.Write:42", None),
+            make_chunk("<|tool_call_argument_begin|>", None),
+            make_chunk(
+                r#"{"file_path":"/app/main.rs","content":"fn main() {}"}"#,
+                None,
+            ),
+            // Stream ends here — model self-terminated without emitting
+            // <|tool_call_end|> or <|tool_calls_section_end|>.
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        // The parser cannot recover a structured tool call without
+        // <|tool_call_end|>, so tool_calls is expected to be empty.
+        assert!(
+            !aggregated.has_tool_calls,
+            "Truly truncated call (no call_end) should not produce structured tool_calls"
+        );
+
+        // The parser consumes the section body, so normal_text is expected
+        // to be empty. Asserting equality (not just marker-absence) locks the
+        // contract: any future regression that produced *other* garbage in
+        // normal_text would still fail this assertion.
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Truncated tool-call section should produce empty normal_content. \
+             Got: {:?}",
+            aggregated.normal_content
+        );
+
+        // finish_reason should pass through unchanged from the source chunk
+        // (Stop in this case). Locks the contract that the no-tool-calls
+        // branch doesn't remap the reason.
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Stop),
+            "finish_reason should pass through as Stop when no tool calls are emitted"
+        );
     }
 }
