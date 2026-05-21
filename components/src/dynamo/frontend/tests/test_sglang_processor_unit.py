@@ -1941,3 +1941,94 @@ class TestDeprecationWarning:  # FRONTEND.8 — legacy/deprecated field warnings
         assert "use_sglang_tokenizer" in source
         assert "FutureWarning" in source
         assert "--dyn-chat-processor sglang" in source
+
+
+# ---------------------------------------------------------------------------
+# chat_template_kwargs forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestChatTemplateKwargsForwarding:
+    """chat_template_kwargs from the request are forwarded to apply_chat_template.
+
+    Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
+    """
+
+    MESSAGES = [{"role": "user", "content": "Hello"}]
+
+    def _preprocess(self, request, tokenizer):
+        return preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+    def _decode(self, tokenizer, token_ids: list[int]) -> str:
+        return tokenizer.decode(token_ids, skip_special_tokens=False)
+
+    def test_qwen3_default_has_open_think_tag(self, tokenizer):
+        """Without enable_thinking=False, Qwen3 opens a <think> block."""
+        result = self._preprocess(
+            {"model": MODEL, "messages": self.MESSAGES}, tokenizer
+        )
+        prompt = self._decode(tokenizer, result.prompt_token_ids)
+        assert "<think>" in prompt
+
+    def test_qwen3_enable_thinking_false_closes_think_tag(self, tokenizer):
+        """enable_thinking=False makes Qwen3 emit <think>\\n\\n</think> (no reasoning)."""
+        result = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self.MESSAGES,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer,
+        )
+        prompt = self._decode(tokenizer, result.prompt_token_ids)
+        assert "<think>" in prompt
+        assert "</think>" in prompt
+
+    def test_qwen3_thinking_flag_changes_tokens(self, tokenizer):
+        """enable_thinking=False produces different token sequence than default."""
+        default = self._preprocess(
+            {"model": MODEL, "messages": self.MESSAGES}, tokenizer
+        )
+        no_think = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self.MESSAGES,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer,
+        )
+        assert default.prompt_token_ids != no_think.prompt_token_ids
+
+    def test_reasoning_effort_forwarded_to_template(self, tokenizer):
+        """Top-level reasoning_effort is forwarded to apply_chat_template."""
+        default = self._preprocess(
+            {"model": MODEL, "messages": self.MESSAGES}, tokenizer
+        )
+        with_effort = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self.MESSAGES,
+                "reasoning_effort": "low",
+            },
+            tokenizer,
+        )
+        # Qwen3 doesn't use reasoning_effort but it must not crash; tokens may differ
+        # only on models that consume it (e.g. gpt-oss-20b). We verify no exception.
+        assert len(with_effort.prompt_token_ids) > 0
+
+    def test_unknown_kwargs_ignored_by_template(self, tokenizer):
+        """Unknown keys in chat_template_kwargs do not crash preprocessing."""
+        result = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self.MESSAGES,
+                "chat_template_kwargs": {"nonexistent_flag": True},
+            },
+            tokenizer,
+        )
+        assert len(result.prompt_token_ids) > 0
