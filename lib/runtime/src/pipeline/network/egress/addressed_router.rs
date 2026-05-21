@@ -39,6 +39,79 @@ use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
+/// Wrap a response-stream `mpsc::Receiver<Bytes>` into the fully-shaped
+/// `ManyOut<U>` returned by both the unary `AsyncEngine::generate` impl and
+/// the bidirectional `generate_bidirectional` method: deserialize each frame
+/// as `NetworkStreamWrapper<U>`, emit per-stream TTFT + transport-roundtrip
+/// metrics on first response, and bridge the inflight-gauge from the
+/// caller-owned `InflightGuard` into a stream-lifetime `InflightDecStream`.
+fn finalize_response_stream<U>(
+    response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+    queue_start: Instant,
+    tx_start: Instant,
+    inflight_guard: InflightGuard,
+) -> ManyOut<U>
+where
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    let engine_ctx_for_stream = engine_ctx.clone();
+    let mut is_complete_final = false;
+    let mut first_response = true;
+    let stream = StreamNotifyClose::new(ReceiverStream::new(response_rx)).filter_map(move |res| {
+        if let Some(res_bytes) = res {
+            if first_response {
+                first_response = false;
+                REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(tx_start.elapsed().as_secs_f64());
+                STAGE_DURATION_SECONDS
+                    .with_label_values(&["transport_roundtrip"])
+                    .observe(queue_start.elapsed().as_secs_f64());
+            }
+            if is_complete_final {
+                let err = DynamoError::msg(
+                    "Response received after generation ended - this should never happen",
+                );
+                return Some(U::from_err(err));
+            }
+            match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
+                Ok(item) => {
+                    is_complete_final = item.complete_final;
+                    if let Some(data) = item.data {
+                        Some(data)
+                    } else if is_complete_final {
+                        None
+                    } else {
+                        let err =
+                            DynamoError::msg("Empty response received - this should never happen");
+                        Some(U::from_err(err))
+                    }
+                }
+                Err(err) => {
+                    let json_str = String::from_utf8_lossy(&res_bytes);
+                    tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                    Some(U::from_err(DynamoError::msg(err.to_string())))
+                }
+            }
+        } else if is_complete_final {
+            None
+        } else if engine_ctx_for_stream.is_stopped() {
+            tracing::debug!("Request cancelled and then trying to read a response");
+            None
+        } else {
+            let err = DynamoError::builder()
+                .error_type(ErrorType::Disconnected)
+                .message("Stream ended before generation completed")
+                .build();
+            tracing::debug!("{err}");
+            Some(U::from_err(err))
+        }
+    });
+
+    inflight_guard.disarm();
+    let stream = InflightDecStream { inner: stream };
+    ResponseStream::new(Box::pin(stream), engine_ctx)
+}
+
 const CONTROL_MESSAGE_MAX_BYTES: usize = 128 * 1024;
 
 fn serialize_control_message(control_message: &RequestControlMessage) -> Result<Vec<u8>, Error> {
@@ -214,7 +287,6 @@ impl AddressedPushRouter {
 
         let engine_ctx = input.context();
         let request_id = engine_ctx.id().to_string();
-        let engine_ctx_for_stream = engine_ctx.clone();
         let engine_ctx_for_forwarder = engine_ctx.clone();
 
         // Register both halves on the response transport: a `send_stream`
@@ -419,65 +491,13 @@ impl AddressedPushRouter {
             }
         });
 
-        // Build the response stream — same shape as the unary path.
-        let mut is_complete_final = false;
-        let mut first_response = true;
-        let stream = StreamNotifyClose::new(ReceiverStream::new(response_stream.rx)).filter_map(
-            move |res| {
-                if let Some(res_bytes) = res {
-                    if first_response {
-                        first_response = false;
-                        let roundtrip_ttft = tx_start.elapsed().as_secs_f64();
-                        REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(roundtrip_ttft);
-                        STAGE_DURATION_SECONDS
-                            .with_label_values(&["transport_roundtrip"])
-                            .observe(queue_start.elapsed().as_secs_f64());
-                    }
-                    if is_complete_final {
-                        let err = DynamoError::msg(
-                            "Response received after generation ended - this should never happen",
-                        );
-                        return Some(U::from_err(err));
-                    }
-                    match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
-                        Ok(item) => {
-                            is_complete_final = item.complete_final;
-                            if let Some(data) = item.data {
-                                Some(data)
-                            } else if is_complete_final {
-                                None
-                            } else {
-                                let err = DynamoError::msg(
-                                    "Empty response received - this should never happen",
-                                );
-                                Some(U::from_err(err))
-                            }
-                        }
-                        Err(err) => {
-                            let json_str = String::from_utf8_lossy(&res_bytes);
-                            tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
-                            Some(U::from_err(DynamoError::msg(err.to_string())))
-                        }
-                    }
-                } else if is_complete_final {
-                    None
-                } else if engine_ctx_for_stream.is_stopped() {
-                    tracing::debug!("Request cancelled and then trying to read a response");
-                    None
-                } else {
-                    let err = DynamoError::builder()
-                        .error_type(ErrorType::Disconnected)
-                        .message("Stream ended before generation completed")
-                        .build();
-                    tracing::debug!("{err}");
-                    Some(U::from_err(err))
-                }
-            },
-        );
-
-        inflight_guard.disarm();
-        let stream = InflightDecStream { inner: stream };
-        Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+        Ok(finalize_response_stream(
+            response_stream.rx,
+            engine_ctx,
+            queue_start,
+            tx_start,
+            inflight_guard,
+        ))
     }
 
     /// Cancel both halves of a bidirectional registration on the data plane.
@@ -508,7 +528,6 @@ where
         let (addressed_request, context) = request.transfer(());
         let (request, address, instance_info) = addressed_request.into_parts();
         let engine_ctx = context.context();
-        let engine_ctx_ = engine_ctx.clone();
 
         // registration options for the data plane in a singe in / many out configuration
         let options = StreamOptions::builder()
@@ -699,73 +718,13 @@ where
         };
         drop(_nvtx_wait);
 
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
-        let mut is_complete_final = false;
-        let mut first_response = true;
-        let stream = tokio_stream::StreamNotifyClose::new(
-            tokio_stream::wrappers::ReceiverStream::new(response_stream.rx),
-        )
-        .filter_map(move |res| {
-            if let Some(res_bytes) = res {
-                if first_response {
-                    first_response = false;
-                    let roundtrip_ttft = tx_start.elapsed().as_secs_f64();
-                    REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(roundtrip_ttft);
-                    STAGE_DURATION_SECONDS
-                        .with_label_values(&["transport_roundtrip"])
-                        .observe(queue_start.elapsed().as_secs_f64());
-                }
-                if is_complete_final {
-                    let err = DynamoError::msg(
-                        "Response received after generation ended - this should never happen",
-                    );
-                    return Some(U::from_err(err));
-                }
-                match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
-                    Ok(item) => {
-                        is_complete_final = item.complete_final;
-                        if let Some(data) = item.data {
-                            Some(data)
-                        } else if is_complete_final {
-                            None
-                        } else {
-                            let err = DynamoError::msg(
-                                "Empty response received - this should never happen",
-                            );
-                            Some(U::from_err(err))
-                        }
-                    }
-                    Err(err) => {
-                        // legacy log print
-                        let json_str = String::from_utf8_lossy(&res_bytes);
-                        tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
-
-                        Some(U::from_err(DynamoError::msg(err.to_string())))
-                    }
-                }
-            } else if is_complete_final {
-                // end of stream
-                None
-            } else if engine_ctx_.is_stopped() {
-                // Gracefully end the stream if 'stop_generating()' was called. Do NOT check for
-                // 'is_killed()' here because it implies the stream ended abnormally which should be
-                // handled by the error branch below.
-                tracing::debug!("Request cancelled and then trying to read a response");
-                None
-            } else {
-                // stream ended unexpectedly
-                let err = DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Stream ended before generation completed")
-                    .build();
-                tracing::debug!("{err}");
-                Some(U::from_err(err))
-            }
-        });
-
-        inflight_guard.disarm();
-        let stream = InflightDecStream { inner: stream };
-        Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+        Ok(finalize_response_stream(
+            response_stream.rx,
+            engine_ctx,
+            queue_start,
+            tx_start,
+            inflight_guard,
+        ))
     }
 }
 
