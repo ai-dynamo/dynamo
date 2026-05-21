@@ -126,45 +126,45 @@
 <rect x="1248.0" y="336.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="1279.0" y="359.0" class="bar-label" text-anchor="middle">4.0s</text>
 <line x1="220" y1="484" x2="1882" y2="484" stroke="#F1F5F9" stroke-width="1"/>
-<text x="206" y="442" class="model" text-anchor="end">GPT-OSS 120B</text>
+<text x="206" y="442" class="model" text-anchor="end">gpt-oss-120b</text>
 <rect x="220.0" y="411" width="187.7" height="46" rx="3" fill="#F28E2B" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B Python/Dynamo boot: 10.038s (0.000s -&gt; 10.038s); raw=Container startup excluded; Python/Dynamo boot starts at first Python/vLLM log</title>
+<title>gpt-oss-120b Python/Dynamo boot: 10.038s (0.000s -&gt; 10.038s); raw=Container startup excluded; Python/Dynamo boot starts at first Python/vLLM log</title>
 </rect>
 <rect x="288.3" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="313.8" y="441.0" class="bar-label" text-anchor="middle">10s</text>
 <rect x="408.2" y="411" width="321.2" height="46" rx="3" fill="#B07AA1" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B vLLM config + inspect: 17.181s (10.066s -&gt; 27.247s); raw=vLLM model-class inspection; engine config/tokenizer/renderer/child spawn</title>
+<title>gpt-oss-120b vLLM config + inspect: 17.181s (10.066s -&gt; 27.247s); raw=vLLM model-class inspection; engine config/tokenizer/renderer/child spawn</title>
 </rect>
 <rect x="543.3" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="568.8" y="441.0" class="bar-label" text-anchor="middle">17s</text>
 <rect x="729.4" y="411" width="70.9" height="46" rx="3" fill="#D4A6C8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B EngineCore setup: 3.791s (27.247s -&gt; 31.038s); raw=EngineCore child Python/bootstrap; EngineCore pre-load setup</title>
+<title>gpt-oss-120b EngineCore setup: 3.791s (27.247s -&gt; 31.038s); raw=EngineCore child Python/bootstrap; EngineCore pre-load setup</title>
 </rect>
 <rect x="733.9" y="418.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="764.9" y="441.0" class="bar-label" text-anchor="middle">3.8s</text>
 <rect x="800.3" y="411" width="253.8" height="46" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B Model load: 13.573s (31.038s -&gt; 44.611s); raw=Model load total</title>
+<title>gpt-oss-120b Model load: 13.573s (31.038s -&gt; 44.611s); raw=Model load total</title>
 </rect>
 <rect x="901.7" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="927.2" y="441.0" class="bar-label" text-anchor="middle">14s</text>
 <rect x="1054.1" y="411" width="2.4" height="46" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B Profile/KV sizing: 0.128s (44.612s -&gt; 44.740s); raw=Determine available memory before torch.compile</title>
+<title>gpt-oss-120b Profile/KV sizing: 0.128s (44.612s -&gt; 44.740s); raw=Determine available memory before torch.compile</title>
 </rect>
 <rect x="1056.5" y="411" width="293.0" height="46" rx="3" fill="#CC3311" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B torch.compile: 15.670s (44.740s -&gt; 60.410s); raw=torch.compile</title>
+<title>gpt-oss-120b torch.compile: 15.670s (44.740s -&gt; 60.410s); raw=torch.compile</title>
 </rect>
 <rect x="1177.5" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="1203.0" y="441.0" class="bar-label" text-anchor="middle">16s</text>
 <rect x="1349.5" y="411" width="44.8" height="46" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B Profile/KV sizing: 2.395s (60.410s -&gt; 62.805s); raw=Determine available memory after torch.compile</title>
+<title>gpt-oss-120b Profile/KV sizing: 2.395s (60.410s -&gt; 62.805s); raw=Determine available memory after torch.compile</title>
 </rect>
 <rect x="1394.6" y="411" width="179.9" height="46" rx="3" fill="#7F3C8D" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B Kernel warmup: 9.621s (62.822s -&gt; 72.443s); raw=Kernel warmup</title>
+<title>gpt-oss-120b Kernel warmup: 9.621s (62.822s -&gt; 72.443s); raw=Kernel warmup</title>
 </rect>
 <rect x="1453.5" y="418.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="1484.5" y="441.0" class="bar-label" text-anchor="middle">9.6s</text>
 <rect x="1574.5" y="411" width="243.6" height="46" rx="3" fill="#0072B2" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B CUDA graph capture: 13.030s (72.443s -&gt; 85.473s); raw=CUDA graph capture</title>
+<title>gpt-oss-120b CUDA graph capture: 13.030s (72.443s -&gt; 85.473s); raw=CUDA graph capture</title>
 </rect>
 <rect x="1670.8" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="1696.3" y="441.0" class="bar-label" text-anchor="middle">13s</text>

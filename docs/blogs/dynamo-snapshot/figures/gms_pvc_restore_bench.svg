@@ -93,44 +93,44 @@
 <rect x="633.0" y="580" width="3.9" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B wake / remap: 0.037s (3.755s -&gt; 3.792s); raw=main_gms_remap</title>
 </rect>
-<text class="model-label" x="230" y="674" text-anchor="end">GPT-OSS 120B</text>
+<text class="model-label" x="230" y="674" text-anchor="end">gpt-oss-120b</text>
 <text class="lane-label" x="230" y="717" text-anchor="end">GMS loader</text>
 <line x1="240" y1="740" x2="1810" y2="740" stroke="#f1f5f9"/>
 <rect x="242.4" y="686" width="108.2" height="50" rx="3" fill="#ffd92f" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B GMS load setup: 1.034s (0.023s -&gt; 1.057s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
+<title>gpt-oss-120b GMS load setup: 1.034s (0.023s -&gt; 1.057s); raw=gms_load_wait_for_rw, gms_load_phase_a_allocate_va</title>
 </rect>
 <rect x="265.5" y="695.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="296.5" y="718.0" class="bar-label" text-anchor="middle">1.0s</text>
 <rect x="350.6" y="686" width="965.3" height="50" rx="3" fill="#ff7f00" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B GMS load weights: 9.223s (1.057s -&gt; 10.280s); raw=gms_load_phase_b_stream_to_gpu</title>
+<title>gpt-oss-120b GMS load weights: 9.223s (1.057s -&gt; 10.280s); raw=gms_load_phase_b_stream_to_gpu</title>
 </rect>
 <rect x="802.3" y="695.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="833.3" y="718.0" class="bar-label" text-anchor="middle">9.2s</text>
 <rect x="1316.0" y="686" width="5.7" height="50" rx="3" fill="#a65628" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B GMS commit: 0.054s (10.280s -&gt; 10.334s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
+<title>gpt-oss-120b GMS commit: 0.054s (10.280s -&gt; 10.334s); raw=gms_load_metadata_commit, gms_load_sentinel</title>
 </rect>
 <text class="lane-label" x="230" y="781" text-anchor="end">snapshot agent</text>
 <line x1="240" y1="804" x2="1810" y2="804" stroke="#f1f5f9"/>
 <rect x="240.0" y="750" width="6.3" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B agent setup: 0.060s (0.000s -&gt; 0.060s); raw=restore_agent_to_nsrestore</title>
+<title>gpt-oss-120b agent setup: 0.060s (0.000s -&gt; 0.060s); raw=restore_agent_to_nsrestore</title>
 </rect>
 <rect x="247.7" y="750" width="472.2" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B CRIU restore: 4.511s (0.074s -&gt; 4.585s); raw=criu_restore</title>
+<title>gpt-oss-120b CRIU restore: 4.511s (0.074s -&gt; 4.585s); raw=criu_restore</title>
 </rect>
 <rect x="452.8" y="759.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="483.8" y="782.0" class="bar-label" text-anchor="middle">4.5s</text>
 <rect x="719.9" y="750" width="78.9" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B CUDA restore: 0.754s (4.585s -&gt; 5.339s); raw=cuda_restore</title>
+<title>gpt-oss-120b CUDA restore: 0.754s (4.585s -&gt; 5.339s); raw=cuda_restore</title>
 </rect>
 <rect x="799.1" y="750" width="522.5" height="50" rx="3" fill="#e41a1c" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B wait for GMS: 4.992s (5.342s -&gt; 10.334s); raw=agent_wait_after_nsrestore_for_gms</title>
+<title>gpt-oss-120b wait for GMS: 4.992s (5.342s -&gt; 10.334s); raw=agent_wait_after_nsrestore_for_gms</title>
 </rect>
 <rect x="1029.4" y="759.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="1060.4" y="782.0" class="bar-label" text-anchor="middle">5.0s</text>
 <text class="lane-label" x="230" y="845" text-anchor="end">worker main</text>
 <line x1="240" y1="868" x2="1810" y2="868" stroke="#f1f5f9"/>
 <rect x="1332.0" y="814" width="2.5" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B wake / remap: 0.024s (10.433s -&gt; 10.457s); raw=main_gms_remap</title>
+<title>gpt-oss-120b wake / remap: 0.024s (10.433s -&gt; 10.457s); raw=main_gms_remap</title>
 </rect>
 <rect x="240" y="925" width="22" height="22" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.20"/>
 <text class="legend-label" x="272" y="943">agent setup</text>

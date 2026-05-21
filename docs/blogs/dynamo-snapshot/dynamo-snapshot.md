@@ -143,7 +143,7 @@ Even more importantly, Linux native AIO is only truly asynchronous on files open
 ### Optimization #2.2: Parallel memfd Restore
 vLLM's sleep mode reduces GPU memory pressure by moving tagged GPU allocations into pinned CPU shadow buffers. Those buffers are not ordinary Python heap memory. vLLM asks PyTorch for pinned CPU tensors, PyTorch allocates them through CUDA's pinned-memory allocator, and CUDA backs them with shared anonymous memory that is then pinned through the NVIDIA driver. Inside the Linux kernel, these are memfds — anonymous, RAM-backed files that can be mapped with `MAP_SHARED`.
 
-For GPT-OSS 120B, we saw these buffers consume more than 120 GiB, but split up into many 2 GiB (or even smaller) buffers. These buffers are also independent. However, CRIU restored these serially — it would create one shmem-backed object, resize it, map it, read its contents from the checkpoint image, and only then move on to the next object.
+For gpt-oss-120b, we saw these buffers consume more than 120 GiB, but split up into many 2 GiB (or even smaller) buffers. These buffers are also independent. However, CRIU restored these serially — it would create one shmem-backed object, resize it, map it, read its contents from the checkpoint image, and only then move on to the next object.
 
 The solution was to modify CRIU to first enumerate all the unique shmem-backed objects, then launch a thread pool to parallelize the restore. Each worker allocates its buffer and reads from the checkpoint independently, allowing them to use the available storage bandwidth and CPU parallelism instead of processing buffers one at a time.
 
@@ -157,7 +157,7 @@ On the same setup, we saw a massive improvement in CRIU restore time, and it is 
 | Qwen3 14B | 47 GiB | 44 s | 19 s | 6.8 s | 6.5x | 3.5 s |
 | Qwen3 32B | 74 GiB | 69 s | 31 s | 9.9 s | 7.1x | 5.4 s|
 | Llama 3.3 70B FP8 | 86 GiB | 81 s | 36 s | 11 s | 7.5x | 6.5 s|
-| GPT-OSS 120B | 129 GiB | 119 s | 54 s | 15 s | 7.9x | 11 s|
+| gpt-oss-120b | 129 GiB | 119 s | 54 s | 15 s | 7.9x | 11 s|
 | Qwen2.5 72B | 164 GiB | 126 s | 66 s | 20 s | 6.4x | 13 s |
 
 ![Optimized snapshot restore time after AIO and parallel memfd changes — significantly faster than cold start across all model sizes.](./figures/regular_restore.svg)
@@ -196,7 +196,7 @@ The CRIU checkpoint now only contains the host-side state of the container's pro
 | Qwen3 14B | 47 GiB | 5.0 GiB | 28 GiB |
 | Qwen3 32B | 74 GiB | 5.5 GiB | 61 GiB |
 | Llama 3.3 70B FP8 | 86 GiB | 6.1 GiB | 68 GiB |
-| GPT-OSS 120B | 129 GiB | 6.7 GiB | 74 GiB |
+| gpt-oss-120b | 129 GiB | 6.7 GiB | 74 GiB |
 | Qwen2.5 72B | 164 GiB | 5.8 GiB | 135 GiB |
 
 ### Full Overlap with External Weight Restoration

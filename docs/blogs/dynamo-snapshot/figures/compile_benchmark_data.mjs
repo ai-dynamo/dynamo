@@ -27,7 +27,7 @@ const modelOrder = [
 const modelLabels = new Map([
   ["qwen3-06b", "Qwen3 0.6B"],
   ["qwen3-8b", "Qwen3 8B"],
-  ["gpt-oss-120b", "GPT-OSS 120B"],
+  ["gpt-oss-120b", "gpt-oss-120b"],
 ]);
 
 const phaseColors = new Map([
@@ -97,7 +97,7 @@ function addSegment(segments, source, phase, start, end, rawPhase, sourceFile, l
     figure: "",
     source_file: sourceFile,
     model_key: source.model_key,
-    model_label: source.model_label || modelLabels.get(source.model_key) || source.model_key,
+    model_label: modelLabels.get(source.model_key) || source.model_label || source.model_key,
     lane,
     phase,
     start_s: start,

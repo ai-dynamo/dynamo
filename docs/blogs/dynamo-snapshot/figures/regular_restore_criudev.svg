@@ -95,31 +95,31 @@
 <rect x="548.5" y="452" width="5.1" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B wake / remap: 0.452s (27.508s -&gt; 27.960s); raw=worker_wake_up</title>
 </rect>
-<text class="model-label" x="230" y="546" text-anchor="end">GPT-OSS 120B</text>
+<text class="model-label" x="230" y="546" text-anchor="end">gpt-oss-120b</text>
 <text class="lane-label" x="230" y="589" text-anchor="end">Cold Start</text>
 <line x1="240" y1="612" x2="1810" y2="612" stroke="#f1f5f9"/>
 <rect x="240.0" y="558" width="958.5" height="50" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B Cold Start: 85.473s (0.000s -&gt; 85.473s); raw=cold start total, excluding base container startup</title>
+<title>gpt-oss-120b Cold Start: 85.473s (0.000s -&gt; 85.473s); raw=cold start total, excluding base container startup</title>
 </rect>
 <rect x="693.8" y="567.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="719.3" y="590.0" class="bar-label" text-anchor="middle">85s</text>
 <text class="lane-label" x="230" y="653" text-anchor="end">Snapshot Restore</text>
 <line x1="240" y1="676" x2="1810" y2="676" stroke="#f1f5f9"/>
 <rect x="240.0" y="622" width="1.2" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B agent setup: 0.082s (0.000s -&gt; 0.082s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
+<title>gpt-oss-120b agent setup: 0.082s (0.000s -&gt; 0.082s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
 </rect>
 <rect x="240.9" y="622" width="1338.1" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B CRIU restore: 119.317s (0.082s -&gt; 119.399s); raw=criu_restore</title>
+<title>gpt-oss-120b CRIU restore: 119.317s (0.082s -&gt; 119.399s); raw=criu_restore</title>
 </rect>
 <rect x="878.9" y="631.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="909.9" y="654.0" class="bar-label" text-anchor="middle">119s</text>
 <rect x="1579.0" y="622" width="158.8" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B CUDA restore: 14.162s (119.399s -&gt; 133.561s); raw=cuda_restore</title>
+<title>gpt-oss-120b CUDA restore: 14.162s (119.399s -&gt; 133.561s); raw=cuda_restore</title>
 </rect>
 <rect x="1632.9" y="631.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
 <text x="1658.4" y="654.0" class="bar-label" text-anchor="middle">14s</text>
 <rect x="1737.9" y="622" width="18.0" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>GPT-OSS 120B wake / remap: 1.605s (133.568s -&gt; 135.173s); raw=worker_wake_up</title>
+<title>gpt-oss-120b wake / remap: 1.605s (133.568s -&gt; 135.173s); raw=worker_wake_up</title>
 </rect>
 <rect x="240" y="733" width="22" height="22" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.20"/>
 <text class="legend-label" x="272" y="751">Cold Start</text>
