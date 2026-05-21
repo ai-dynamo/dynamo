@@ -780,6 +780,9 @@ impl ModelWatcher {
                         // Create prefill-specific config with track_active_blocks disabled
                         let mut prefill_config = router_config.kv_router_config.clone();
                         prefill_config.router_track_active_blocks = false;
+                        // Prefill KV events are emitted by prefill workers; do not inherit
+                        // decode-only speculative hash mode.
+                        let prefill_enable_eagle = false;
 
                         PrefillRouter::new(
                             rx,
@@ -791,7 +794,7 @@ impl ModelWatcher {
                             router_config.enforce_disagg,
                             model_name.clone(),
                             namespace.clone(),
-                            card.runtime_config.enable_eagle,
+                            prefill_enable_eagle,
                         )
                     })
             } else {
