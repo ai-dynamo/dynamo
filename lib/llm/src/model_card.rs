@@ -683,6 +683,29 @@ pub struct ModelDeploymentCard {
     /// `Text` for engines that take care of pre-processing themselves.
     pub model_input: ModelInput,
 
+    /// Processing stage this worker handles (Prefill, Decode, Encode, Aggregated).
+    /// Orthogonal to `model_type` (which describes endpoints exposed).
+    ///
+    /// Every worker is expected to set this explicitly; `None` means the
+    /// worker has not declared a role and is treated as misconfiguration
+    /// (workers not ready). A temporary shim in `Model::ws_role_and_needs`
+    /// softens this while backends are being migrated — see
+    /// `docs/proposals/health-disagg-readiness.md`. `#[serde(default)]` is
+    /// kept so pre-field cards still deserialize.
+    #[serde(default)]
+    pub worker_type: Option<crate::worker_type::WorkerType>,
+
+    /// Peer worker types this worker requires to serve traffic, in DNF form.
+    /// The outer `Vec` is OR; each inner `Vec` is an AND-set of required
+    /// worker types. Empty outer `Vec` means "no peers required."
+    ///
+    /// Examples:
+    /// - Prefill worker: `[[Decode]]` — needs a Decode peer.
+    /// - Encode worker: `[[Prefill, Decode], [Aggregated]]` — needs either a
+    ///   P+D pair or a single Aggregated peer.
+    #[serde(default)]
+    pub needs: Vec<Vec<crate::worker_type::WorkerType>>,
+
     /// LoRA metadata for routing
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraInfo>,
@@ -817,6 +840,35 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
+                // Topology fields participate in the checksum so that a rolling
+                // update that changes only worker_type/needs is correctly
+                // rejected as incompatible with the existing WorkerSet (forcing
+                // drain-and-redeploy) instead of silently joining and serving
+                // stale readiness data.
+                //
+                // worker_type discriminator: 0 = None, then the variant ordinal.
+                match self.worker_type {
+                    None => bytes_to_hash.push(0),
+                    Some(crate::worker_type::WorkerType::Prefill) => bytes_to_hash.push(1),
+                    Some(crate::worker_type::WorkerType::Decode) => bytes_to_hash.push(2),
+                    Some(crate::worker_type::WorkerType::Encode) => bytes_to_hash.push(3),
+                    Some(crate::worker_type::WorkerType::Aggregated) => bytes_to_hash.push(4),
+                }
+                // needs is DNF: hash length(outer) || for each alt { length(inner) || each variant }
+                bytes_to_hash.extend((self.needs.len() as u32).to_be_bytes());
+                for alt in &self.needs {
+                    bytes_to_hash.extend((alt.len() as u32).to_be_bytes());
+                    for w in alt {
+                        let v: u8 = match w {
+                            crate::worker_type::WorkerType::Prefill => 1,
+                            crate::worker_type::WorkerType::Decode => 2,
+                            crate::worker_type::WorkerType::Encode => 3,
+                            crate::worker_type::WorkerType::Aggregated => 4,
+                        };
+                        bytes_to_hash.push(v);
+                    }
+                }
+
                 if let Some(router_config) = self.router_config.as_ref()
                     && let Ok(bytes) = serde_json::to_vec(router_config)
                 {
@@ -827,6 +879,8 @@ impl ModelDeploymentCard {
                     // should be defined.
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
+
+                // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -1286,6 +1340,8 @@ impl ModelDeploymentCard {
             migration_limit: 0,
             model_type: Default::default(),  // set later
             model_input: Default::default(), // set later
+            worker_type: Default::default(), // set later
+            needs: Default::default(),       // set later
             lora: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
@@ -2128,5 +2184,154 @@ mod tests {
         );
         assert!(slug.path().join("special_tokens_map.json").exists());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod worker_type_tests {
+    //! Tests for the `worker_type` / `needs` fields on `ModelDeploymentCard`.
+    //! See `docs/proposals/health-disagg-readiness.md`.
+
+    use super::*;
+    use crate::worker_type::WorkerType;
+
+    #[test]
+    fn default_card_has_no_worker_type_and_no_needs() {
+        let card = ModelDeploymentCard::with_name_only("test-model");
+        assert_eq!(card.worker_type, None);
+        assert!(card.needs.is_empty());
+    }
+
+    #[test]
+    fn serde_round_trip_default() {
+        let card = ModelDeploymentCard::with_name_only("test-model");
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, None);
+        assert!(back.needs.is_empty());
+    }
+
+    #[test]
+    fn serde_round_trip_decode_needs_prefill() {
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Decode);
+        card.needs = vec![vec![WorkerType::Prefill]];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Decode));
+        assert_eq!(back.needs, vec![vec![WorkerType::Prefill]]);
+    }
+
+    #[test]
+    fn serde_round_trip_aggregated_needs_encode() {
+        // E-PD pattern: an aggregated worker with --route-to-encoder.
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.needs = vec![vec![WorkerType::Encode]];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Aggregated));
+        assert_eq!(back.needs, vec![vec![WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn serde_round_trip_encode_needs_dnf() {
+        // Encode worker: needs (Prefill AND Decode) OR Aggregated.
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Encode);
+        card.needs = vec![
+            vec![WorkerType::Prefill, WorkerType::Decode],
+            vec![WorkerType::Aggregated],
+        ];
+        let json = serde_json::to_string(&card).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.worker_type, Some(WorkerType::Encode));
+        assert_eq!(back.needs.len(), 2);
+        assert_eq!(back.needs[0], vec![WorkerType::Prefill, WorkerType::Decode]);
+        assert_eq!(back.needs[1], vec![WorkerType::Aggregated]);
+    }
+
+    /// mdcsum must cover `worker_type` and `needs` so that a rolling update
+    /// which changes only topology metadata produces a different checksum,
+    /// triggering the drain-and-redeploy path in `watcher.rs` instead of
+    /// silently joining an existing WorkerSet with a stale card.
+    ///
+    /// Note: `mdcsum()` caches its result on first call via `OnceLock`, so
+    /// each case builds a fresh card rather than mutating one and re-hashing.
+    #[test]
+    fn mdcsum_covers_worker_type_and_needs() {
+        fn hash(worker_type: Option<WorkerType>, needs: Vec<Vec<WorkerType>>) -> String {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.worker_type = worker_type;
+            card.needs = needs;
+            card.mdcsum().to_string()
+        }
+
+        let baseline = hash(None, vec![]);
+        let prefill_only = hash(Some(WorkerType::Prefill), vec![]);
+        let decode_only = hash(Some(WorkerType::Decode), vec![]);
+        assert_ne!(baseline, prefill_only, "worker_type must change mdcsum");
+        assert_ne!(
+            prefill_only, decode_only,
+            "swapping worker_type must change mdcsum"
+        );
+
+        let prefill_with_decode = hash(Some(WorkerType::Prefill), vec![vec![WorkerType::Decode]]);
+        let prefill_with_decode_encode = hash(
+            Some(WorkerType::Prefill),
+            vec![vec![WorkerType::Decode, WorkerType::Encode]],
+        );
+        assert_ne!(
+            prefill_only, prefill_with_decode,
+            "adding needs must change mdcsum"
+        );
+        assert_ne!(
+            prefill_with_decode, prefill_with_decode_encode,
+            "extending an AND-set must change mdcsum"
+        );
+
+        let encode_dnf = hash(
+            Some(WorkerType::Encode),
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        );
+        let encode_single_alt = hash(
+            Some(WorkerType::Encode),
+            vec![vec![WorkerType::Prefill, WorkerType::Decode]],
+        );
+        assert_ne!(
+            encode_dnf, encode_single_alt,
+            "adding an OR alternative must change mdcsum"
+        );
+    }
+
+    /// Serde back-compat: an old-format card (no `worker_type` / `needs`
+    /// keys in the JSON payload) must deserialize with both fields defaulted
+    /// (`None` and empty `Vec`) — this is an attribute of the
+    /// `#[serde(default)]` contract and is independent of how readers
+    /// subsequently interpret the missing values. Construction of the test
+    /// payload strips the new keys from a fresh serialization so the test
+    /// tracks schema drift rather than a hand-rolled JSON literal.
+    #[test]
+    fn backward_compat_missing_fields_default_to_none_and_empty() {
+        let mut card = ModelDeploymentCard::with_name_only("test-model");
+        card.worker_type = Some(WorkerType::Prefill);
+        card.needs = vec![vec![WorkerType::Decode]];
+        let mut value: serde_json::Value = serde_json::to_value(&card).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        assert!(
+            obj.remove("worker_type").is_some(),
+            "precondition: serialized card must carry worker_type"
+        );
+        assert!(
+            obj.remove("needs").is_some(),
+            "precondition: serialized card must carry needs"
+        );
+        let stripped = serde_json::to_string(&value).unwrap();
+        let back: ModelDeploymentCard = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(back.worker_type, None);
+        assert!(back.needs.is_empty());
     }
 }

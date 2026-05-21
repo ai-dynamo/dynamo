@@ -113,6 +113,8 @@ pub fn simulate_trace_file_with_router_mode(
         TraceFileFormat::Mooncake,
         0.0,
         0,
+        false,
+        None,
     )
 }
 
@@ -129,6 +131,8 @@ pub fn simulate_trace_file_with_router_mode_and_format(
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode)?;
@@ -155,6 +159,8 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             num_workers,
             1.0,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     } else if trace_accumulates_session_deltas(trace_format) {
         crate::replay::offline::simulate_trace_workload_accumulating_deltas(
@@ -164,6 +170,8 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             trace,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     } else {
         crate::replay::offline::simulate_trace_workload(
@@ -173,6 +181,8 @@ pub fn simulate_trace_file_with_router_mode_and_format(
             trace,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     };
     Ok(report)
@@ -198,6 +208,8 @@ pub fn simulate_trace_file_disagg_with_router_mode(
         TraceFileFormat::Mooncake,
         0.0,
         0,
+        false,
+        None,
     )
 }
 
@@ -213,6 +225,8 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
@@ -241,6 +255,8 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
             requests,
             1.0,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     } else {
         crate::replay::offline::simulate_trace_workload_disagg(
@@ -249,6 +265,8 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
             prefill_load_estimator,
             trace,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     };
     Ok(report)
@@ -394,6 +412,8 @@ pub fn simulate_trace_requests_with_router_mode(
         num_workers,
         arrival_speedup_ratio,
         router_mode,
+        false,
+        None,
     )?;
     Ok(report)
 }
@@ -419,6 +439,8 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         requests,
         arrival_speedup_ratio,
         router_mode,
+        false,
+        None,
     )?;
     Ok(report)
 }
@@ -508,6 +530,8 @@ pub fn simulate_concurrency_file_with_router_mode(
         TraceFileFormat::Mooncake,
         0.0,
         0,
+        false,
+        None,
     )
 }
 
@@ -524,6 +548,8 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_concurrency_args(&args, num_workers, max_in_flight, router_mode)?;
@@ -543,9 +569,11 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
             max_in_flight,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     } else {
-        simulate_concurrency_workload_with_router_mode(
+        crate::replay::offline::simulate_concurrency_workload(
             args,
             router_config,
             prefill_load_estimator,
@@ -553,6 +581,8 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
             max_in_flight,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )?
     };
     Ok(report)
@@ -578,6 +608,8 @@ pub fn simulate_concurrency_file_disagg_with_router_mode(
         TraceFileFormat::Mooncake,
         0.0,
         0,
+        false,
+        None,
     )
 }
 
@@ -593,6 +625,8 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
     trace_format: TraceFileFormat,
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
@@ -606,13 +640,15 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
         trace_shared_prefix_ratio,
         trace_num_prefix_groups,
     )?;
-    let report = simulate_concurrency_workload_disagg_with_router_mode(
+    let report = crate::replay::offline::simulate_concurrency_workload_disagg(
         config,
         router_config,
         prefill_load_estimator,
         trace,
         max_in_flight,
         router_mode,
+        record_per_request,
+        max_sim_time_ms,
     )?;
     Ok(report)
 }
@@ -782,6 +818,8 @@ pub fn simulate_concurrency_requests_with_router_mode(
         max_in_flight,
         num_workers,
         router_mode,
+        false,
+        None,
     )
 }
 
@@ -806,6 +844,8 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
         requests,
         max_in_flight,
         router_mode,
+        false,
+        None,
     )
 }
 
@@ -841,6 +881,8 @@ pub fn simulate_trace_workload_with_router_mode(
         trace,
         num_workers,
         router_mode,
+        false,
+        None,
     )?;
     Ok(report)
 }
@@ -860,6 +902,8 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
         prefill_load_estimator,
         trace,
         router_mode,
+        false,
+        None,
     )?;
     Ok(report)
 }
@@ -935,6 +979,8 @@ pub fn simulate_concurrency_workload_with_router_mode(
         max_in_flight,
         num_workers,
         router_mode,
+        false,
+        None,
     )
 }
 
@@ -955,6 +1001,8 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode(
         trace,
         max_in_flight,
         router_mode,
+        false,
+        None,
     )
 }
 
