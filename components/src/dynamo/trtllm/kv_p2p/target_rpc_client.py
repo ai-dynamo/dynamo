@@ -37,6 +37,7 @@ class _TargetRpcClient:
         # Lazy-init: clients are constructed on first use of each endpoint.
         self._resolve_client: Optional[Any] = None
         self._release_client: Optional[Any] = None
+        self._metadata_client: Optional[Any] = None
         self._client_init_lock = asyncio.Lock()
 
     async def _prime_discovery(self, client: Any, endpoint_name: str) -> None:
@@ -77,6 +78,72 @@ class _TargetRpcClient:
                     await self._prime_discovery(client, "remote-g2-release")
                     self._release_client = client
         return self._release_client
+
+    async def _metadata_endpoint_client(self) -> Any:
+        if self._metadata_client is None:
+            async with self._client_init_lock:
+                if self._metadata_client is None:
+                    ep = self._runtime.endpoint(
+                        f"{self._namespace}.{self._component}.remote-g2-metadata"
+                    )
+                    client = await ep.client()
+                    await self._prime_discovery(client, "remote-g2-metadata")
+                    self._metadata_client = client
+        return self._metadata_client
+
+    async def get_source_metadata(
+        self,
+        source_worker_id: int,
+        peer_name: str = "",
+        peer_connection_info: str = "",
+    ) -> Optional[dict]:
+        """Fetch the source worker's NIXL agent identity for transfer setup.
+
+        When ``peer_name`` + ``peer_connection_info`` are provided, the
+        source side will pre-load us as a NIXL peer (bidirectional
+        handshake) before returning its metadata. UCX needs both peers
+        to know each other's connection info for the subsequent
+        createXferReq's rkey lookup to work.
+
+        Returns the inner result dict (with ``remote_name``, ``agent_desc``,
+        ``source_generation``, ``source_worker_id``, ``source_dp_rank``) on
+        success, or ``None`` on transport/RPC failure.
+        """
+        try:
+            client = await self._metadata_endpoint_client()
+        except Exception:
+            logging.exception(
+                "remote_g2: failed to obtain metadata endpoint client"
+            )
+            return None
+
+        payload: dict = {}
+        if peer_name:
+            payload["peer_name"] = peer_name
+        if peer_connection_info:
+            payload["peer_connection_info"] = peer_connection_info
+        try:
+            stream = await client.direct(payload, instance_id=source_worker_id)
+            async for response in stream:
+                if hasattr(response, "data") and callable(response.data):
+                    response = response.data()
+                if not isinstance(response, dict):
+                    return None
+                if not response.get("ok"):
+                    logging.warning(
+                        "remote_g2: get_source_metadata returned not-ok: %s",
+                        response.get("error"),
+                    )
+                    return None
+                inner = response.get("result")
+                return inner if isinstance(inner, dict) else None
+        except Exception:
+            logging.exception(
+                "remote_g2: get_source_metadata RPC to source_worker_id=%s failed",
+                source_worker_id,
+            )
+            return None
+        return None
 
     async def resolve_and_lease(
         self, plan: dict, source_worker_id: int

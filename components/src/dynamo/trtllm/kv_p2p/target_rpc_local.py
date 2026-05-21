@@ -124,6 +124,49 @@ def _dispatch_resolve(
     return response
 
 
+def _dispatch_metadata(
+    client: _TargetRpcClient,
+    payload: dict,
+    loop: asyncio.AbstractEventLoop,
+    timeout_s: float,
+) -> dict:
+    """Forward a get_metadata call from the engine subprocess via the
+    target parent's dynamo client to the source worker's
+    remote-g2-metadata endpoint. Returns the standard
+    ``{"ok": True, "result": <flat_dict>}`` envelope the engine
+    subprocess's _TargetReqWrapper expects.
+
+    Note: ``agent_desc`` is raw bytes; both pickle and dynamo NATS
+    transports carry it transparently."""
+    source_worker_id = payload.get("source_worker_id")
+    if source_worker_id is None:
+        return {"ok": False, "error": "missing source_worker_id"}
+    try:
+        source_worker_id = int(source_worker_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": f"invalid source_worker_id: {source_worker_id!r}"}
+
+    # Pass through peer_name + peer_connection_info to enable the
+    # bidirectional NIXL handshake.
+    peer_name = payload.get("peer_name", "")
+    peer_conn = payload.get("peer_connection_info", "")
+    coro = client.get_source_metadata(
+        source_worker_id,
+        peer_name=str(peer_name) if peer_name else "",
+        peer_connection_info=str(peer_conn) if peer_conn else "",
+    )
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        response = future.result(timeout=timeout_s)
+    except Exception as exc:
+        logging.exception("remote_g2: target REP metadata dispatch raised")
+        return {"ok": False, "error": repr(exc)}
+
+    if response is None:
+        return {"ok": False, "error": "transport_failure"}
+    return {"ok": True, "result": response}
+
+
 def _dispatch_release(
     client: _TargetRpcClient,
     payload: dict,
@@ -223,6 +266,10 @@ def setup_target_rpc_local(
                 elif method == "release":
                     response = _dispatch_release(
                         client, payload, loop, lease_map, timeout_s
+                    )
+                elif method == "metadata":
+                    response = _dispatch_metadata(
+                        client, payload, loop, timeout_s
                     )
                 else:
                     response = {
