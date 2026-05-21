@@ -23,6 +23,7 @@ velo     = { workspace = true, features = ["queue-messenger"] }
 velo-ext = { workspace = true }
 
 # KVBM
+kvbm-common    = { workspace = true }
 kvbm-protocols = { workspace = true, features = ["client"] }
 kvbm-logical   = { workspace = true }
 dynamo-tokens  = { workspace = true }
@@ -53,7 +54,6 @@ axum       = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
-kvbm-common        = { workspace = true }
 tokio              = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true }
 velo-transports    = { version = "0.1.0" }

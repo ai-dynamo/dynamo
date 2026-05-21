@@ -212,7 +212,8 @@ impl HubClient {
     /// [`discover_by_instance_id`](velo::discovery::PeerDiscovery::discover_by_instance_id)
     /// and wire it into their own Velo for bidirectional messaging.
     pub async fn register_instance(&self, peer_info: PeerInfo) -> Result<Option<InstanceId>> {
-        self.register_instance_inner(peer_info, Vec::new()).await
+        self.register_instance_inner(peer_info, Vec::new(), None)
+            .await
     }
 
     /// Register an instance with the hub, declaring feature participation.
@@ -228,13 +229,30 @@ impl HubClient {
         peer_info: PeerInfo,
         features: Vec<Feature>,
     ) -> Result<Option<InstanceId>> {
-        self.register_instance_inner(peer_info, features).await
+        self.register_instance_inner(peer_info, features, None)
+            .await
+    }
+
+    /// Register declaring feature participation *and* a must-match runtime
+    /// config summary. The hub validates each field required by a declared
+    /// feature against its `PrimaryConfig` and rolls back (returns `Err`) on
+    /// mismatch. Used by the connector handshake so consistency is checked
+    /// even when `kvbmctl` was not used to generate the config.
+    pub async fn register_instance_with_features_and_runtime(
+        &self,
+        peer_info: PeerInfo,
+        features: Vec<Feature>,
+        runtime: crate::protocol::RuntimeConfigSummary,
+    ) -> Result<Option<InstanceId>> {
+        self.register_instance_inner(peer_info, features, Some(runtime))
+            .await
     }
 
     async fn register_instance_inner(
         &self,
         peer_info: PeerInfo,
         features: Vec<Feature>,
+        runtime: Option<crate::protocol::RuntimeConfigSummary>,
     ) -> Result<Option<InstanceId>> {
         if self.guard.get().is_some() {
             anyhow::bail!("HubClient: instance already registered");
@@ -244,6 +262,7 @@ impl HubClient {
         let body = RegisterRequest {
             peer_info,
             features,
+            runtime,
         };
         let resp = self
             .http

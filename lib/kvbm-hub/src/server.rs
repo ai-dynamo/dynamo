@@ -38,8 +38,9 @@ use velo_ext::{InstanceId, PeerInfo, WorkerId};
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 use crate::protocol::{
-    self, ErrorBody, ErrorCode, FeatureKey, HeartbeatResponse, ListInstancesResponse,
-    PeerLookupResponse, ProbeResponse, RegisterRequest, RegisterResponse,
+    self, ErrorBody, ErrorCode, FeatureDescriptor, FeatureKey, HeartbeatResponse,
+    HubConfigResponse, ListInstancesResponse, PeerLookupResponse, PrimaryConfig, ProbeResponse,
+    RegisterRequest, RegisterResponse, RuntimeConfigSummary,
 };
 use crate::registry::{InMemoryRegistry, PeerRegistry, RegistryError};
 
@@ -62,6 +63,9 @@ pub struct HubServerState {
     registry: Arc<dyn PeerRegistry>,
     velo: Option<Arc<velo::Velo>>,
     managers: Arc<HashMap<FeatureKey, Arc<dyn FeatureManager>>>,
+    /// Hub-wide shared config served by `GET /v1/config` and used for
+    /// must-match validation at registration.
+    primary: Arc<PrimaryConfig>,
 }
 
 impl std::fmt::Debug for HubServerState {
@@ -89,6 +93,7 @@ impl HubServerState {
             registry: mem,
             velo: None,
             managers: Arc::new(HashMap::new()),
+            primary: Arc::new(PrimaryConfig::default()),
         }
     }
 
@@ -127,6 +132,7 @@ pub struct HubServerBuilder {
     heartbeat_interval: Duration,
     heartbeat_max_failures: u32,
     feature_managers: Vec<Arc<dyn FeatureManager>>,
+    primary: PrimaryConfig,
 }
 
 impl std::fmt::Debug for HubServerBuilder {
@@ -157,6 +163,7 @@ impl Default for HubServerBuilder {
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             heartbeat_max_failures: DEFAULT_HEARTBEAT_MAX_FAILURES,
             feature_managers: Vec::new(),
+            primary: PrimaryConfig::default(),
         }
     }
 }
@@ -240,6 +247,14 @@ impl HubServerBuilder {
         self
     }
 
+    /// Set the hub-wide shared [`PrimaryConfig`] served by `GET /v1/config` and
+    /// validated against every registrant's must-match summary. Defaults to
+    /// [`PrimaryConfig::default`] (no authoritative fields → validation skipped).
+    pub fn primary_config(mut self, primary: PrimaryConfig) -> Self {
+        self.primary = primary;
+        self
+    }
+
     /// Bind both listeners and spawn them. Returns a running [`HubServer`].
     pub async fn serve(self) -> Result<HubServer> {
         // Duplicate-key guard — enforced once at startup.
@@ -250,6 +265,38 @@ impl HubServerBuilder {
                 return Err(anyhow::anyhow!(
                     "duplicate FeatureManager registered for key {key:?}"
                 ));
+            }
+        }
+
+        // Reconcile feature-owned authoritative sizing into `primary`. This
+        // makes `primary` the guaranteed source of truth for must-match
+        // validation: a feature that owns sizing (e.g. KV-index) fills unset
+        // primary fields and any explicit primary that disagrees is a config
+        // error. Without this, a library hub built with a sizing-owning
+        // feature but no `primary_config` would leave the must-match check
+        // with nothing to validate against (a registration bypass).
+        let mut primary = self.primary;
+        for (key, mgr) in &managers {
+            let Some((block_size, max_seq_len)) = mgr.authoritative_sizing() else {
+                continue;
+            };
+            match primary.block_size {
+                Some(existing) if existing != block_size => {
+                    return Err(anyhow::anyhow!(
+                        "primary.block_size ({existing}) conflicts with {key:?} \
+                         feature sizing ({block_size})"
+                    ));
+                }
+                _ => primary.block_size = Some(block_size),
+            }
+            match primary.max_seq_len {
+                Some(existing) if existing != max_seq_len => {
+                    return Err(anyhow::anyhow!(
+                        "primary.max_seq_len ({existing}) conflicts with {key:?} \
+                         feature sizing ({max_seq_len})"
+                    ));
+                }
+                _ => primary.max_seq_len = Some(max_seq_len),
             }
         }
 
@@ -361,6 +408,7 @@ impl HubServerBuilder {
             registry: registry.clone(),
             velo,
             managers: Arc::clone(&managers),
+            primary: Arc::new(primary),
         };
         if heartbeat_task.is_none() {
             tracing::info!(
@@ -682,6 +730,7 @@ fn discovery_router(state: HubServerState) -> Router {
         )
         .route(protocol::paths::PEERS_BY_WORKER, get(get_peer_by_worker))
         .route(protocol::paths::HEALTH, get(health))
+        .route(protocol::paths::HUB_CONFIG, get(get_hub_config))
         .with_state(state)
 }
 
@@ -701,6 +750,7 @@ fn control_router(state: HubServerState) -> Router {
         )
         .route(protocol::paths::PEERS_BY_WORKER, get(get_peer_by_worker))
         .route(protocol::paths::HEALTH, get(health))
+        .route(protocol::paths::HUB_CONFIG, get(get_hub_config))
         .with_state(state)
 }
 
@@ -710,6 +760,25 @@ fn control_router(state: HubServerState) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// `GET /v1/config` — the aggregate config the connector and `kvbmctl` consume.
+/// Reports the hub's `primary` config plus one [`FeatureDescriptor`] per
+/// attached feature manager (the hub's advertised capability set).
+async fn get_hub_config(State(state): State<HubServerState>) -> Json<HubConfigResponse> {
+    let primary = (*state.primary).clone();
+    let mut features: Vec<FeatureDescriptor> = state
+        .managers
+        .values()
+        .map(|mgr| FeatureDescriptor {
+            key: mgr.key(),
+            dependencies: mgr.dependencies().to_vec(),
+            config: mgr.descriptor(&primary),
+        })
+        .collect();
+    // Deterministic order for stable responses / tests.
+    features.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
+    Json(HubConfigResponse { primary, features })
 }
 
 async fn list_instances(State(state): State<HubServerState>) -> Json<ListInstancesResponse> {
@@ -725,26 +794,10 @@ async fn register_instance(
     let peer = req.peer_info;
     let instance_id = peer.instance_id();
 
-    // Cross-feature dependency (c2): CD is a specialisation of P2P. Reject
-    // pre-dispatch — cheaper than rolling back base registration. This is
-    // the ONLY site where this rule is enforced; individual managers do
-    // not duplicate it.
-    let has_p2p = req
-        .features
-        .iter()
-        .any(|f| matches!(f.key(), crate::protocol::FeatureKey::P2P));
-    let has_cd = req
-        .features
-        .iter()
-        .any(|f| matches!(f.key(), crate::protocol::FeatureKey::ConditionalDisagg));
-    if has_cd && !has_p2p {
-        return Err(HubError::bad_request(
-            "Feature::ConditionalDisagg requires Feature::P2P to also be \
-             present in the same register request (CD is a specialisation \
-             of P2P; layout_compat lives in the P2P payload)"
-                .to_string(),
-        ));
-    }
+    // Validate feature dependencies + must-match consistency *pre-dispatch* —
+    // cheaper than rolling back base registration. This is the ONLY site where
+    // these rules are enforced; individual managers do not duplicate them.
+    validate_register(&req.features, req.runtime.as_ref(), &state)?;
 
     state
         .registry
@@ -882,6 +935,102 @@ async fn get_peer_by_worker(
         .await
         .map(|peer_info| Json(PeerLookupResponse { peer_info }))
         .map_err(|_| HubError::not_found(format!("worker {worker_id} not found")))
+}
+
+/// Pre-dispatch validation for `POST /v1/instances`:
+///
+/// 1. **Dependency closure** — every declared feature's `dependencies()` must
+///    also be declared in the same request (e.g. CD requires P2P).
+/// 2. **Must-match consistency** — the union of `config_requirements()` across
+///    declared features defines which [`PrimaryConfig`] fields the registrant
+///    must match. When the request carries a [`RuntimeConfigSummary`], each
+///    required field for which the hub is authoritative (`primary.* == Some`,
+///    and `block_layout` always) must be declared and equal. A request with no
+///    summary skips must-match (legacy clients).
+fn validate_register(
+    features: &[crate::protocol::Feature],
+    runtime: Option<&RuntimeConfigSummary>,
+    state: &HubServerState,
+) -> Result<(), HubError> {
+    use std::collections::HashSet;
+
+    let declared: HashSet<FeatureKey> = features.iter().map(|f| f.key()).collect();
+
+    // 1. Dependency closure.
+    let mut required = crate::features::FeatureConfigRequirements::default();
+    for feature in features {
+        let key = feature.key();
+        let Some(mgr) = state.managers.get(&key) else {
+            // Unknown manager surfaces in the dispatch loop with a clear
+            // per-feature error; nothing to validate here.
+            continue;
+        };
+        for dep in mgr.dependencies() {
+            if !declared.contains(dep) {
+                return Err(HubError::bad_request(format!(
+                    "Feature::{key} requires Feature::{dep} to also be declared \
+                     in the same register request",
+                )));
+            }
+        }
+        let r = mgr.config_requirements();
+        required.block_size |= r.block_size;
+        required.max_seq_len |= r.max_seq_len;
+        required.block_layout |= r.block_layout;
+    }
+
+    // 2. Must-match consistency.
+    let Some(summary) = runtime else {
+        // No summary. Reject if any declared feature mandates one (features
+        // introduced with the runtime summary, e.g. KV-index); tolerate for
+        // legacy features (P2P / CD predate the field).
+        for feature in features {
+            let key = feature.key();
+            if let Some(mgr) = state.managers.get(&key)
+                && mgr.requires_runtime_summary()
+            {
+                return Err(HubError::bad_request(format!(
+                    "Feature::{key} requires a runtime config summary \
+                     (block_size / max_seq_len / block_layout) in the register request"
+                )));
+            }
+        }
+        return Ok(());
+    };
+    let primary = &state.primary;
+
+    if required.block_size
+        && let Some(want) = primary.block_size
+    {
+        check_match("block_size", want, summary.block_size)?;
+    }
+    if required.max_seq_len
+        && let Some(want) = primary.max_seq_len
+    {
+        check_match("max_seq_len", want, summary.max_seq_len)?;
+    }
+    if required.block_layout {
+        // `block_layout` is always authoritative on the hub (non-Option).
+        check_match("block_layout", primary.block_layout, summary.block_layout)?;
+    }
+    Ok(())
+}
+
+/// One must-match field check: the client must declare `got == Some(want)`.
+fn check_match<T: PartialEq + std::fmt::Debug>(
+    field: &str,
+    want: T,
+    got: Option<T>,
+) -> Result<(), HubError> {
+    match got {
+        Some(got) if got == want => Ok(()),
+        Some(got) => Err(HubError::bad_request(format!(
+            "{field} mismatch: hub requires {want:?}, registrant declared {got:?}"
+        ))),
+        None => Err(HubError::bad_request(format!(
+            "{field} must be declared in the register runtime summary (hub requires {want:?})"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------

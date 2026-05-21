@@ -15,8 +15,21 @@ use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 use velo_ext::{InstanceId, PeerInfo};
 
-use crate::protocol::{Feature, FeatureKey};
+use crate::protocol::{Feature, FeatureKey, PrimaryConfig};
 use crate::registry::PeerRegistry;
+
+/// Which [`PrimaryConfig`] must-match fields a feature requires a registrant to
+/// declare (via [`RuntimeConfigSummary`](crate::protocol::RuntimeConfigSummary))
+/// and that the hub validates for consistency. All `false` by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeatureConfigRequirements {
+    /// Requires `block_size` to be declared and to match the hub's primary.
+    pub block_size: bool,
+    /// Requires `max_seq_len` to be declared and to match the hub's primary.
+    pub max_seq_len: bool,
+    /// Requires `block_layout` to be declared and to match the hub's primary.
+    pub block_layout: bool,
+}
 
 pub mod conditional_disagg;
 pub mod control_plane;
@@ -74,6 +87,58 @@ pub enum FeatureError {
 pub trait FeatureManager: Send + Sync + 'static {
     /// Stable discriminant this manager handles.
     fn key(&self) -> FeatureKey;
+
+    /// Other features this one depends on. A registration declaring this
+    /// feature MUST also declare every dependency (transitively); the server
+    /// enforces the closure pre-dispatch in
+    /// [`register_instance`](crate::server). Default: no dependencies.
+    ///
+    /// Example: `ConditionalDisagg` returns `&[FeatureKey::P2P]`.
+    fn dependencies(&self) -> &'static [FeatureKey] {
+        &[]
+    }
+
+    /// Which [`PrimaryConfig`] must-match fields a registrant must declare and
+    /// match for this feature. Default: none.
+    fn config_requirements(&self) -> FeatureConfigRequirements {
+        FeatureConfigRequirements::default()
+    }
+
+    /// The authoritative must-match sizing this feature owns, as
+    /// `(block_size, max_seq_len)`, if any. The hub reconciles this into
+    /// [`PrimaryConfig`] at startup
+    /// ([`HubServerBuilder::serve`](crate::HubServerBuilder::serve)) — filling
+    /// unset primary fields and rejecting an explicit primary that conflicts —
+    /// so registrant validation always has a source of truth even when the
+    /// operator did not set `primary` explicitly.
+    ///
+    /// Default `None` (the feature owns no sizing). KV-index returns its index
+    /// dimensions.
+    fn authoritative_sizing(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Whether a registrant declaring this feature MUST include a
+    /// [`RuntimeConfigSummary`](crate::protocol::RuntimeConfigSummary) — i.e.
+    /// must-match validation may not be skipped for it.
+    ///
+    /// Default `false`: features that predate the runtime-summary field (P2P,
+    /// ConditionalDisagg) tolerate a missing summary so legacy clients keep
+    /// registering (their fields are still validated when a summary *is*
+    /// present). Features introduced together with the summary (KV-index)
+    /// override to `true` so a misconfigured publisher cannot bypass the
+    /// block-size / sequence-length consistency check by omitting it.
+    fn requires_runtime_summary(&self) -> bool {
+        false
+    }
+
+    /// Feature-specific config view for the aggregate `GET /v1/config`
+    /// response, given the resolved hub `primary`. Default: `null` (the feature
+    /// exposes nothing beyond its key + dependencies). KV-index overrides this
+    /// to advertise its ZMQ ingest endpoint.
+    fn descriptor(&self, _primary: &PrimaryConfig) -> serde_json::Value {
+        serde_json::Value::Null
+    }
 
     /// Called exactly once during [`HubServerBuilder::serve`](crate::HubServerBuilder::serve)
     /// after the registry and (optional) hub Velo are built. Implementations

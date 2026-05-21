@@ -10,6 +10,7 @@
 //!
 //! All request/response bodies are JSON.
 
+use kvbm_common::BlockLayoutMode;
 use kvbm_protocols::control::MetricsSnapshotResponse;
 pub use kvbm_protocols::control::layout_compat::LayoutCompatPayload;
 /// Remote-prefill request payload carried by the hub's CD queue.
@@ -64,6 +65,13 @@ pub mod paths {
     ///
     /// `GET /health` → `200 OK`
     pub const HEALTH: &str = "/health";
+
+    /// Aggregate hub configuration — the single source of truth a connector
+    /// (or `kvbmctl`) pulls to learn the hub's shared `primary` config and its
+    /// enabled feature set.
+    ///
+    /// `GET /v1/config` → [`super::HubConfigResponse`]
+    pub const HUB_CONFIG: &str = "/v1/config";
 
     /// List ConditionalDisagg instances, split by role.
     ///
@@ -184,6 +192,13 @@ pub struct RegisterRequest {
     /// backward-compatibility with clients that predate the feature surface.
     #[serde(default)]
     pub features: Vec<Feature>,
+    /// Optional must-match runtime config summary. When present, the hub
+    /// validates each field required by a declared feature against its
+    /// [`PrimaryConfig`] and rejects the registration on mismatch. May be
+    /// omitted by legacy clients (P2P / CD), but features that mandate it
+    /// (e.g. KV-index) reject a registration without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeConfigSummary>,
 }
 
 /// Feature participation declared by a client at registration time.
@@ -210,6 +225,13 @@ pub enum Feature {
     /// Requires `Feature::P2P` to also be present in the same register
     /// request (CD is a specialisation of P2P).
     ConditionalDisagg(ConditionalDisaggConfig),
+    /// The client participates in the hub-side KV block index: it publishes
+    /// block create/remove events to the ZMQ ingest endpoint advertised in
+    /// the aggregate config, and registers here so the hub sweeps its index
+    /// entries on unregister (TTL or explicit `DELETE`). Carries no payload
+    /// today — block-size consistency is validated via [`RuntimeConfigSummary`]
+    /// at registration, not a per-feature config.
+    KvIndexer(KvIndexerFeatureConfig),
 }
 
 /// Stable discriminant for [`Feature`] — lets managers match by kind
@@ -225,12 +247,140 @@ pub enum FeatureKey {
     /// payload — the manager only contributes axum routes, so this key
     /// never matches an incoming registration.
     ConnectorControl,
-    /// Hub-side KV block index. No client-side `Feature` payload — workers
-    /// opt in by publishing block events to the ZMQ ingest endpoint
-    /// advertised by `GET /v1/features/kv-index/config`, not via the
-    /// registration feature list. The manager only contributes axum routes
-    /// and the ingest loop, so this key never matches a registration.
+    /// Hub-side KV block index. The client publishes block events to the ZMQ
+    /// ingest endpoint (advertised in the aggregate config) *and* declares
+    /// [`Feature::KvIndexer`] at registration so the hub reclaims its index
+    /// entries on unregister. The manager also contributes axum routes and the
+    /// ingest loop.
     KvIndexer,
+}
+
+impl FeatureKey {
+    /// Stable wire/label string for this key. Used in the aggregate config
+    /// response, `--features` CLI parsing, and the connector's feature-subset
+    /// selection. Keep these in sync with the connector's capability list.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FeatureKey::P2P => "p2p",
+            FeatureKey::ConditionalDisagg => "conditional_disagg",
+            FeatureKey::ConnectorControl => "connector_control",
+            FeatureKey::KvIndexer => "kv_indexer",
+        }
+    }
+
+    /// Parse a [`FeatureKey`] from its [`as_str`](Self::as_str) label.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "p2p" => Some(FeatureKey::P2P),
+            "conditional_disagg" => Some(FeatureKey::ConditionalDisagg),
+            "connector_control" => Some(FeatureKey::ConnectorControl),
+            "kv_indexer" => Some(FeatureKey::KvIndexer),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for FeatureKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for FeatureKey {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FeatureKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        FeatureKey::from_label(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown feature key {s:?}")))
+    }
+}
+
+/// Hub-wide shared configuration ("primary"). Split into two classes:
+///
+/// - **Must-match** (`block_size`, `max_seq_len`, `block_layout`): the hub
+///   validates every registrant's [`RuntimeConfigSummary`] against these and
+///   rejects on mismatch — they define cross-instance compatibility.
+/// - **Free / advisory** (`g2_memory_gib`, `g2_blocks`, `advertise_host`): the
+///   hub publishes these as defaults for config generation (`kvbmctl`) but does
+///   not enforce them; the connector may override per-instance.
+///
+/// All must-match sizing fields are `Option` so the library / tests can build a
+/// hub that is not authoritative for a given field (validation is skipped when
+/// `None`). The `kvbm-hub` binary enforces the required subset (`max_seq_len`,
+/// `block_size`, at least one of `g2_*`) at startup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PrimaryConfig {
+    /// Block size (tokens per block). Must-match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_size: Option<usize>,
+    /// Maximum sequence length (tokens). Must-match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seq_len: Option<usize>,
+    /// Cross-leader block-layout compatibility mode. Must-match.
+    #[serde(default)]
+    pub block_layout: BlockLayoutMode,
+    /// Advisory G2 (host) cache size in GiB. Populated into generated connector
+    /// config; not validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g2_memory_gib: Option<f64>,
+    /// Advisory G2 (host) cache size in blocks. Populated into generated
+    /// connector config; not validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g2_blocks: Option<usize>,
+    /// Host advertised to publishers (e.g. KV-index ZMQ endpoint). Advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_host: Option<String>,
+}
+
+/// Must-match runtime values a client reports at registration so the hub can
+/// validate consistency against its [`PrimaryConfig`]. Sent in
+/// [`RegisterRequest::runtime`].
+///
+/// Absent → the hub skips must-match validation, *unless* a declared feature
+/// mandates the summary (`FeatureManager::requires_runtime_summary`, e.g.
+/// KV-index), in which case registration is rejected. Present → each field
+/// required by a declared feature must be `Some` and equal the hub's
+/// authoritative value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeConfigSummary {
+    /// The client's effective block size (page size). Must equal
+    /// `primary.block_size` when the hub is authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_size: Option<usize>,
+    /// The client's max sequence length. Must equal `primary.max_seq_len`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seq_len: Option<usize>,
+    /// The client's block-layout mode. Must equal `primary.block_layout`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_layout: Option<BlockLayoutMode>,
+}
+
+/// Response body for `GET /v1/config` — the aggregate the connector and
+/// `kvbmctl` consume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubConfigResponse {
+    /// The hub's shared `primary` config.
+    pub primary: PrimaryConfig,
+    /// One entry per attached feature manager (the hub's advertised
+    /// capability set).
+    pub features: Vec<FeatureDescriptor>,
+}
+
+/// One feature's contribution to [`HubConfigResponse`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureDescriptor {
+    /// Stable feature key (e.g. `"kv_indexer"`).
+    pub key: FeatureKey,
+    /// Feature keys this feature depends on (must also be enabled / declared).
+    pub dependencies: Vec<FeatureKey>,
+    /// Feature-specific config view (e.g. KV-index `zmq_endpoint`). `null` when
+    /// the feature exposes nothing extra beyond its key.
+    pub config: serde_json::Value,
 }
 
 impl Feature {
@@ -239,9 +389,20 @@ impl Feature {
         match self {
             Feature::P2P(_) => FeatureKey::P2P,
             Feature::ConditionalDisagg(_) => FeatureKey::ConditionalDisagg,
+            Feature::KvIndexer(_) => FeatureKey::KvIndexer,
         }
     }
 }
+
+/// Configuration payload for the [`Feature::KvIndexer`] participation marker.
+///
+/// Empty today: the connector opts into hub-side indexing and the hub records
+/// the registration so it can reclaim the instance's index entries on
+/// unregister. Block-size / sequence-length consistency is enforced centrally
+/// via [`RuntimeConfigSummary`]. Kept as a struct (not a unit variant) so
+/// fields can be added later without a wire break.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KvIndexerFeatureConfig {}
 
 /// Configuration payload for the P2P feature. Carries the
 /// `layout_compat` payload that the hub validates against the baseline
@@ -446,6 +607,7 @@ mod tests {
             features: vec![Feature::ConditionalDisagg(ConditionalDisaggConfig {
                 role: ConditionalDisaggRole::Prefill,
             })],
+            runtime: None,
         };
         let json = serde_json::to_string(&orig).unwrap();
         let back: RegisterRequest = serde_json::from_str(&json).unwrap();

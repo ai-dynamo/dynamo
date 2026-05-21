@@ -160,6 +160,7 @@ async fn post_register(
     let req = RegisterRequest {
         peer_info: peer.clone(),
         features: cd_features(role, layout),
+        runtime: None,
     };
     http()
         .post(control_url(server, paths::INSTANCES))
@@ -337,6 +338,7 @@ async fn cd_register_without_p2p_feature_is_rejected() {
         features: vec![Feature::ConditionalDisagg(ConditionalDisaggConfig {
             role: ConditionalDisaggRole::Prefill,
         })],
+        runtime: None,
     };
     let resp = http()
         .post(control_url(&server, paths::INSTANCES))
@@ -372,6 +374,7 @@ async fn p2p_register_with_self_inconsistent_payload_is_rejected() {
     let req = RegisterRequest {
         peer_info: peer.clone(),
         features: vec![Feature::P2P(P2pConfig { layout_compat: bad })],
+        runtime: None,
     };
     let resp = http()
         .post(control_url(&server, paths::INSTANCES))
@@ -869,6 +872,7 @@ async fn post_p2p_register(
         features: vec![Feature::P2P(P2pConfig {
             layout_compat: layout,
         })],
+        runtime: None,
     };
     http()
         .post(control_url(server, paths::INSTANCES))
@@ -882,6 +886,7 @@ async fn post_bare_register(server: &HubServer, peer: &PeerInfo) -> reqwest::Res
     let req = RegisterRequest {
         peer_info: peer.clone(),
         features: vec![],
+        runtime: None,
     };
     http()
         .post(control_url(server, paths::INSTANCES))
@@ -1173,6 +1178,7 @@ async fn register_peer_with_p2p(
         features: vec![Feature::P2P(P2pConfig {
             layout_compat: layout,
         })],
+        runtime: None,
     };
     let resp = http()
         .post(control_url(server, paths::INSTANCES))

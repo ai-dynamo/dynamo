@@ -178,6 +178,7 @@ async fn register_success() {
         .json(&RegisterRequest {
             peer_info: peer.clone(),
             features: Vec::new(),
+            runtime: None,
         })
         .send()
         .await
@@ -194,6 +195,7 @@ async fn reregister_same_instance_is_idempotent() {
     let req = RegisterRequest {
         peer_info: peer.clone(),
         features: Vec::new(),
+        runtime: None,
     };
     let post = || {
         http()
@@ -214,6 +216,7 @@ async fn unregister_success() {
         .json(&RegisterRequest {
             peer_info: peer.clone(),
             features: Vec::new(),
+            runtime: None,
         })
         .send()
         .await
@@ -248,6 +251,7 @@ async fn heartbeat_registered_instance() {
         .json(&RegisterRequest {
             peer_info: peer.clone(),
             features: Vec::new(),
+            runtime: None,
         })
         .send()
         .await
@@ -290,6 +294,7 @@ async fn get_peer_by_instance_found() {
         .json(&RegisterRequest {
             peer_info: peer.clone(),
             features: Vec::new(),
+            runtime: None,
         })
         .send()
         .await
@@ -332,6 +337,7 @@ async fn get_peer_by_worker_found() {
         .json(&RegisterRequest {
             peer_info: peer.clone(),
             features: Vec::new(),
+            runtime: None,
         })
         .send()
         .await
@@ -371,6 +377,7 @@ async fn control_port_mirrors_discovery_endpoints() {
         .json(&RegisterRequest {
             peer_info: peer.clone(),
             features: Vec::new(),
+            runtime: None,
         })
         .send()
         .await
@@ -392,6 +399,7 @@ async fn peers_snapshot_tracks_registrations() {
             .json(&RegisterRequest {
                 peer_info: make_peer(),
                 features: Vec::new(),
+                runtime: None,
             })
             .send()
             .await
@@ -411,6 +419,7 @@ async fn peers_snapshot_tracks_unregistrations() {
             .json(&RegisterRequest {
                 peer_info: peer.clone(),
                 features: Vec::new(),
+                runtime: None,
             })
             .send()
             .await
@@ -837,6 +846,7 @@ async fn feature_register_without_manager_rejects() {
     let req = RegisterRequest {
         peer_info: peer.clone(),
         features: p2p_cd_features(ConditionalDisaggRole::Prefill),
+        runtime: None,
     };
     let resp = http()
         .post(control_url(&server, paths::INSTANCES))
@@ -909,6 +919,7 @@ async fn feature_cd_role_conflict_on_reregister() {
         let req = RegisterRequest {
             peer_info: peer.clone(),
             features: p2p_cd_features(role),
+            runtime: None,
         };
         http()
             .post(control_url(&server, paths::INSTANCES))
@@ -931,6 +942,7 @@ async fn feature_cd_unregister_removes_from_lists() {
     let req = RegisterRequest {
         peer_info: peer.clone(),
         features: p2p_cd_features(ConditionalDisaggRole::Prefill),
+        runtime: None,
     };
     http()
         .post(control_url(&server, paths::INSTANCES))
@@ -971,6 +983,7 @@ async fn feature_cd_reaper_evicts_from_lists() {
     let req = RegisterRequest {
         peer_info: peer.clone(),
         features: p2p_cd_features(ConditionalDisaggRole::Prefill),
+        runtime: None,
     };
     http()
         .post(control_url(&server, paths::INSTANCES))

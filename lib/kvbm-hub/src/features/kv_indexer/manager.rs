@@ -102,6 +102,38 @@ impl FeatureManager for KvIndexerManager {
         FeatureKey::KvIndexer
     }
 
+    fn config_requirements(&self) -> crate::features::FeatureConfigRequirements {
+        // The publisher's page size must match the index's block size, and the
+        // index is presized to `max_seq_len / block_size` buckets — both must
+        // agree with the hub's primary or events land in the wrong (or no)
+        // bucket.
+        crate::features::FeatureConfigRequirements {
+            block_size: true,
+            max_seq_len: true,
+            block_layout: false,
+        }
+    }
+
+    fn requires_runtime_summary(&self) -> bool {
+        // KV-index is new (introduced with the runtime summary): mandate it so
+        // a publisher cannot register without its block_size / max_seq_len
+        // being checked against the hub's index sizing.
+        true
+    }
+
+    fn authoritative_sizing(&self) -> Option<(usize, usize)> {
+        // The index dimensions are the source of truth publishers must match.
+        // Reconciled into `primary` at startup so validation never depends on
+        // the operator having also set `primary` explicitly.
+        Some((self.index.block_size(), self.index.max_seq_len()))
+    }
+
+    fn descriptor(&self, _primary: &crate::protocol::PrimaryConfig) -> serde_json::Value {
+        // Advertise the ZMQ ingest endpoint + sizing so the connector can wire
+        // its publisher straight from the aggregate config (no separate probe).
+        serde_json::to_value(self.config_response()).unwrap_or(serde_json::Value::Null)
+    }
+
     fn route_prefix(&self) -> Option<&'static str> {
         Some(protocol::ROUTE_PREFIX)
     }
@@ -132,17 +164,26 @@ impl FeatureManager for KvIndexerManager {
 
     fn on_register<'a>(
         &'a self,
-        _instance_id: InstanceId,
+        instance_id: InstanceId,
         feature: &'a Feature,
     ) -> BoxFuture<'a, Result<(), FeatureError>> {
-        // No client-side `Feature::KvIndexer` payload exists — workers opt in
-        // by publishing to the ZMQ endpoint, not via the registration list.
-        // This is only reachable if the dispatcher misroutes a key.
+        // The client declares `Feature::KvIndexer` so the hub can reclaim its
+        // index entries on unregister (`on_unregister` → `remove_instance`).
+        // The index itself is populated out-of-band via the ZMQ ingest socket,
+        // so there is nothing to do here beyond accepting the (empty) payload
+        // and rejecting a misrouted key. Block-size / max-seq-len consistency
+        // is validated centrally via `RuntimeConfigSummary`.
         Box::pin(async move {
-            Err(FeatureError::KeyMismatch {
-                manager: FeatureKey::KvIndexer,
-                payload: feature.key(),
-            })
+            match feature {
+                Feature::KvIndexer(_) => {
+                    tracing::debug!(instance = %instance_id, "kv-index participation registered");
+                    Ok(())
+                }
+                _ => Err(FeatureError::KeyMismatch {
+                    manager: FeatureKey::KvIndexer,
+                    payload: feature.key(),
+                }),
+            }
         })
     }
 

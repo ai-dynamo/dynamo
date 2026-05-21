@@ -146,6 +146,12 @@ impl FeatureManager for ConditionalDisaggManager {
         FeatureKey::ConditionalDisagg
     }
 
+    fn dependencies(&self) -> &'static [FeatureKey] {
+        // CD is a specialisation of P2P (layout_compat lives in the P2P
+        // payload). Every CD registration must also declare P2P.
+        &[FeatureKey::P2P]
+    }
+
     fn attach<'a>(&'a self, ctx: HubContext) -> BoxFuture<'a, Result<(), FeatureError>> {
         Box::pin(async move {
             let Some(velo) = ctx.velo else {

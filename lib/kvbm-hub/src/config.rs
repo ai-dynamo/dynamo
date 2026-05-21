@@ -9,6 +9,7 @@ use figment::providers::{Env, Format, Json, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol;
+use crate::protocol::PrimaryConfig;
 
 /// Hub server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +47,12 @@ pub struct HubConfig {
     /// is in use.
     #[serde(default = "default_heartbeat_max_failures")]
     pub heartbeat_max_failures: u32,
+    /// Hub-wide shared config ("primary"). Must-match fields here are validated
+    /// against every registrant; advisory fields seed generated connector
+    /// config. Feature configs (e.g. `kv_indexer`) inherit unset sizing from
+    /// here. See [`PrimaryConfig`].
+    #[serde(default)]
+    pub primary: PrimaryConfig,
     /// Optional KV indexer feature. When set, the hub binds a ZMQ `SUB`
     /// ingest socket and serves the index under `/v1/features/kv-index`.
     /// `None` (default) leaves the feature off.
@@ -54,14 +61,22 @@ pub struct HubConfig {
 }
 
 /// Configuration for the optional KV indexer feature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Sizing (`max_seq_len` / `block_size`) is optional and inherits from
+/// [`HubConfig::primary`] when unset — they are the same must-match values, so
+/// operators set them once on `primary`. The binary resolves the effective
+/// sizing before constructing the [`KvIndexerManager`](crate::KvIndexerManager).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KvIndexerConfig {
     /// Maximum sequence length (tokens). Must be evenly divisible by
     /// `block_size`; the index is presized to `max_seq_len / block_size`
-    /// position buckets.
-    pub max_seq_len: usize,
+    /// position buckets. Inherits from `primary.max_seq_len` when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seq_len: Option<usize>,
     /// Block size (tokens per block). Must match the publishers' page size.
-    pub block_size: usize,
+    /// Inherits from `primary.block_size` when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_size: Option<usize>,
     /// ZMQ bind spec for the ingest `SUB` socket. Default `tcp://0.0.0.0:0`
     /// (OS-assigned port, reported via `GET /config`).
     #[serde(default)]
@@ -97,6 +112,7 @@ impl Default for HubConfig {
             velo_port: None,
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             heartbeat_max_failures: default_heartbeat_max_failures(),
+            primary: PrimaryConfig::default(),
             kv_indexer: None,
         }
     }

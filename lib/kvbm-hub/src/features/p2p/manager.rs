@@ -123,6 +123,18 @@ impl FeatureManager for P2pManager {
         FeatureKey::P2P
     }
 
+    fn config_requirements(&self) -> crate::features::FeatureConfigRequirements {
+        // P2P transfers require both peers to agree on block size and the
+        // cross-leader layout-compat mode. (The detailed layout_compat payload
+        // is still validated separately in `on_register`; this is the cheap
+        // primary-consistency gate.) CD inherits these via its P2P dependency.
+        crate::features::FeatureConfigRequirements {
+            block_size: true,
+            max_seq_len: false,
+            block_layout: true,
+        }
+    }
+
     fn attach<'a>(&'a self, _ctx: HubContext) -> BoxFuture<'a, Result<(), FeatureError>> {
         // P2P is a gate-only feature; nothing to attach.
         Box::pin(async { Ok(()) })

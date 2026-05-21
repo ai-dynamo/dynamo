@@ -67,12 +67,14 @@ pub use features::kv_indexer::{
     KvIndexerConfigResponse, KvIndexerManager, PositionalIndex, QueryRequest, QueryResponse,
 };
 pub use features::p2p::{P2pClient, P2pManager};
-pub use features::{FeatureError, FeatureManager, HubContext};
+pub use features::{FeatureConfigRequirements, FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
+pub use kvbm_common::BlockLayoutMode;
 pub use protocol::{
     CD_PREFILL_QUEUE, ConditionalDisaggConfig, ConditionalDisaggInstancesResponse,
-    ConditionalDisaggRole, DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, Feature, FeatureKey,
-    P2pConfig, PrefillRequest, ProbeResponse,
+    ConditionalDisaggRole, DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, Feature,
+    FeatureDescriptor, FeatureKey, HubConfigResponse, KvIndexerFeatureConfig, P2pConfig,
+    PrefillRequest, PrimaryConfig, ProbeResponse, RuntimeConfigSummary,
 };
 pub use registry::{EvictionCallback, InMemoryRegistry, PeerRegistry, RegistryError};
 pub use server::{HubServer, HubServerBuilder, HubServerState};
