@@ -263,6 +263,17 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
+    # Forward pytest-cov flags so orchestrator children record coverage.
+    # Without this, profiled GPU tests run under run_gpu_parallel_tests=true
+    # bypass --cov entirely and contribute no .coverage data to the nightly
+    # coverage-report merge. Per-child COVERAGE_FILE (set in run_parallel)
+    # prevents siblings from clobbering each other's session-end output.
+    if config.pluginmanager.get_plugin("_cov") is not None:
+        for src in config.getoption("cov_source", default=None) or []:
+            extra_args.append(f"--cov={src}")
+        for rpt in config.getoption("cov_report", default=None) or []:
+            extra_args.append(f"--cov-report={rpt}")
+
     # Forward -o cache_dir= so workers don't fall back to <cwd>/.pytest_cache.
     # In CI cwd=/workspace is read-only for the runner uid, and pyproject's
     # filterwarnings=["error"] escalates the resulting PytestCacheWarning into
