@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use crate::protocols::{
-    DpRank, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    DpRank, RouterBackpressureReason, RoutingConstraints, SharedCacheHits, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::sequences::PrefillTokenDeltas;
 
@@ -40,6 +41,15 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
+    #[error(
+        "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+    )]
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
+
     #[error("all eligible workers are overloaded")]
     AllEligibleWorkersOverloaded,
 
@@ -60,7 +70,9 @@ impl KvSchedulerError {
     pub fn is_overload(&self) -> bool {
         matches!(
             self,
-            Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. }
+            Self::Backpressure { .. }
+                | Self::AllEligibleWorkersOverloaded
+                | Self::PinnedWorkerOverloaded { .. }
         )
     }
 }

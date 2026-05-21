@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::protocols::SharedCacheHits;
+use dynamo_kv_router::protocols::{RouterBackpressureReason, SharedCacheHits};
 pub use dynamo_kv_router::scheduling::policy::RouterSchedulingPolicy;
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
@@ -83,6 +83,9 @@ where
             slots,
             workers_with_configs.clone(),
             kv_router_config.router_queue_threshold,
+            kv_router_config
+                .router_queue_by_incoming_missing_isl
+                .clone(),
             block_size,
             selector,
             policy,
@@ -113,6 +116,10 @@ where
                         }
                         ROUTER_QUEUE_METRICS
                             .set_pending(worker_type, metrics_scheduler.pending_count());
+                        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(
+                            worker_type,
+                            metrics_scheduler.pending_isl_tokens(),
+                        );
                     }
                     _ = recheck_interval.tick() => {
                         ROUTER_QUEUE_METRICS.set_pending(worker_type, metrics_scheduler.pending_count());
@@ -167,6 +174,10 @@ where
                 shared_cache_hits,
             )
             .await;
+        if let Err(KvSchedulerError::Backpressure { reason, .. }) = &response {
+            ROUTER_QUEUE_METRICS
+                .inc_backpressure(self.worker_type(), router_backpressure_reason_label(reason));
+        }
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());
         ROUTER_QUEUE_METRICS.set_pending_isl_tokens(self.worker_type(), self.pending_isl_tokens());
         response
@@ -231,5 +242,11 @@ where
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.inner.get_active_lora_counts()
+    }
+}
+
+fn router_backpressure_reason_label(reason: &RouterBackpressureReason) -> &'static str {
+    match reason {
+        RouterBackpressureReason::MaxQueuedIslTokensExceeded => "max_queued_isl_tokens_exceeded",
     }
 }

@@ -27,6 +27,21 @@ def test_tensorrt_llm_metrics_collector_import():
             warnings.simplefilter("ignore")  # Ignore warnings during import
             from tensorrt_llm.metrics.collector import MetricsCollector
 
+        # TRT-LLM's MetricsCollector registers `trtllm_request_success_*`
+        # against the global prometheus_client REGISTRY at construction.
+        # When pytest-xdist groups this test in the same worker as any
+        # other test that already instantiated a MetricsCollector (via
+        # LegacyWorker startup paths or transitive imports), the second
+        # construction raises ValueError("Duplicated timeseries"). Clear
+        # any pre-existing trtllm_* collectors before constructing so the
+        # test is self-isolating.
+        from prometheus_client import REGISTRY
+
+        for collector in list(REGISTRY._collector_to_names.keys()):
+            names = REGISTRY._collector_to_names.get(collector, set())
+            if any(n.startswith("trtllm_") for n in names):
+                REGISTRY.unregister(collector)
+
         # Test basic initialization (only once to avoid registry conflicts)
         metrics_collector = MetricsCollector(
             {"model_name": "test-model-unique", "engine_type": "trtllm"}

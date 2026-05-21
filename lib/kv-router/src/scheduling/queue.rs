@@ -10,14 +10,17 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+use super::config::RouterQueueDepthTiers;
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    OverloadedWorkerProvider, RoutingEligibility, SchedulingContext, SchedulingRequest,
-    SchedulingResponse, pinned_worker_config,
+    KvSchedulerError, OverloadedWorkerProvider, RoutingEligibility, SchedulingContext,
+    SchedulingRequest, SchedulingResponse, pinned_worker_config,
 };
-use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -72,6 +75,8 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
+    /// Per-tier pending ISL token caps keyed on cache-miss tokens.
+    queue_depth_tiers: RouterQueueDepthTiers,
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
@@ -88,10 +93,12 @@ impl<
     Sel: WorkerSelector<C>,
 > SchedulerQueue<P, C, S, Sel>
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
+        queue_depth_tiers: RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         policy: S,
@@ -101,6 +108,7 @@ impl<
             slots,
             workers_with_configs,
             threshold_frac,
+            queue_depth_tiers,
             block_size,
             selector,
             policy,
@@ -114,6 +122,7 @@ impl<
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
+        queue_depth_tiers: RouterQueueDepthTiers,
         block_size: u32,
         selector: Sel,
         policy: S,
@@ -123,6 +132,9 @@ impl<
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
         }
+        if !queue_depth_tiers.is_unbounded() {
+            tracing::info!("Router queue tiered by cache-miss: pending ISL token caps configured");
+        }
         Self {
             pending: Mutex::new(BinaryHeap::new()),
             admission_gate: Mutex::new(()),
@@ -131,6 +143,7 @@ impl<
             slots,
             workers_with_configs,
             threshold_frac,
+            queue_depth_tiers,
             start_time: Instant::now(),
             block_size,
             selector,
@@ -192,6 +205,21 @@ impl<
         }
 
         if self.all_workers_prefill_busy(threshold, request.eligibility(), decay_now) {
+            if !self.queue_depth_tiers.is_unbounded() {
+                let pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
+                // This is a rejection threshold on current queued ISL, not a hard
+                // post-admission bound on `pending + incoming`.
+                if let Some(max_isl_tokens) = self.tier_cap_for_request(&request)
+                    && pending_isl_tokens >= max_isl_tokens
+                {
+                    request.respond(Err(KvSchedulerError::Backpressure {
+                        reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
+                        queued_isl_tokens: pending_isl_tokens,
+                        max_queued_isl_tokens: Some(max_isl_tokens),
+                    }));
+                    return;
+                }
+            }
             tracing::debug!("all workers prefill-busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = {
@@ -252,7 +280,19 @@ impl<
             }
             let entry = heap.pop().expect("heap front vanished before pop");
             drop(heap);
+            let current_pending_count = self.pending_count.load(AtomicOrdering::Relaxed);
+            debug_assert!(
+                current_pending_count > 0,
+                "pending_count underflow on queue drain"
+            );
             self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+            let current_pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
+            debug_assert!(
+                current_pending_isl_tokens >= entry.request.isl_tokens,
+                "pending_isl_tokens underflow: pending={} request_isl_tokens={}",
+                current_pending_isl_tokens,
+                entry.request.isl_tokens
+            );
             self.pending_isl_tokens
                 .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
@@ -375,6 +415,24 @@ impl<
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
 
+    /// Resolve the admission cap for `request` from the cache-miss tier table.
+    ///
+    /// Returns `None` when capping is disabled.
+    fn tier_cap_for_request(&self, request: &SchedulingRequest) -> Option<usize> {
+        let workers = self.workers_with_configs.borrow();
+        let ctx = SchedulingContext::new(request, &workers);
+        let cache_miss_tokens = ctx.best_effective_prefill_tokens();
+        // Scale against the total registered worker count instead of projecting
+        // the existing global queue onto only this request's eligible workers.
+        // For narrowed requests (for example pinned or allow-listed routing),
+        // shrinking the cap to the eligible subset would make the global queue
+        // look like it must all be drained by that subset, which overstates the
+        // backlog pressure on those workers.
+        let worker_count = workers.len();
+        self.queue_depth_tiers
+            .cap_for(cache_miss_tokens, worker_count)
+    }
+
     /// Check if all eligible workers are prefill-busy based on threshold.
     /// When `pinned_worker` is `Some`, only that exact worker/rank is considered.
     /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
@@ -439,7 +497,8 @@ mod tests {
     use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::protocols::{WorkerSelectionResult, WorkerWithDpRank};
+    use crate::config::RouterQueueDepthByMissingIslTier;
+    use crate::protocols::{RouterBackpressureReason, WorkerSelectionResult, WorkerWithDpRank};
     use crate::scheduling::types::KvSchedulerError;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -543,8 +602,14 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let (queue, slots, _tx) =
-            make_queue_with_sender(num_workers, block_size, isl, threshold_frac, None);
+        let (queue, slots, _tx) = make_queue_with_sender_with_tiers(
+            num_workers,
+            block_size,
+            isl,
+            threshold_frac,
+            RouterQueueDepthTiers::unbounded_cap(),
+            None,
+        );
         (queue, slots)
     }
 
@@ -586,6 +651,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
+            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
             FcfsPolicy,
@@ -601,6 +667,29 @@ mod tests {
         block_size: u32,
         isl: usize,
         threshold_frac: Option<f64>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
+    ) {
+        make_queue_with_sender_with_tiers(
+            num_workers,
+            block_size,
+            isl,
+            threshold_frac,
+            RouterQueueDepthTiers::unbounded_cap(),
+            prefill_load_estimator,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_sender_with_tiers(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        queue_depth_tiers: RouterQueueDepthTiers,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
@@ -635,6 +724,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
+            queue_depth_tiers,
             block_size,
             selector,
             FcfsPolicy,
@@ -681,6 +771,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             None,
+            RouterQueueDepthTiers::unbounded_cap(),
             block_size,
             selector,
             FcfsPolicy,
@@ -897,6 +988,100 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_backpressure_when_missing_isl_tier_cap_reached() {
+        let block_size = 16;
+        let isl = 512;
+
+        // Single tier at floor=0 with cap=512 ISL tokens — every request matches,
+        // queue capped at 512 ISL tokens (1 request worth).
+        let tiers = RouterQueueDepthTiers::try_from(vec![RouterQueueDepthByMissingIslTier {
+            missing_cache_tokens_floor: 0,
+            max_queue_depth: isl,
+        }])
+        .unwrap();
+        let (queue, _slots, _cfg_tx) =
+            make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _resp1 = rx1.await.unwrap().unwrap();
+
+        let (req2, _rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
+
+        let (req3, rx3) = make_request("req-3", isl);
+        queue.enqueue(req3).await;
+
+        let resp3 = rx3.await.expect("oneshot dropped");
+        assert!(
+            matches!(
+                resp3,
+                Err(KvSchedulerError::Backpressure {
+                    reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
+                    queued_isl_tokens: 512,
+                    max_queued_isl_tokens: Some(512),
+                })
+            ),
+            "expected backpressure when queue is full, got {resp3:?}"
+        );
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_missing_isl_tiers_shed_expensive_first() {
+        let block_size = 16;
+        let isl = 512; // every test request has 512 cache-miss tokens (no cache).
+
+        // Two tiers:
+        //   (floor=0,   cap=2048)  applies to cheap requests (4 requests worth)
+        //   (floor=256, cap=512)   applies to expensive (>=256 cache-miss) requests (1 request worth)
+        // All test requests are 512 cache-miss → they match the expensive tier
+        // and should backpressure once pending ISL tokens reaches 512.
+        let tiers = RouterQueueDepthTiers::try_from(vec![
+            RouterQueueDepthByMissingIslTier {
+                missing_cache_tokens_floor: 0,
+                max_queue_depth: 4 * isl,
+            },
+            RouterQueueDepthByMissingIslTier {
+                missing_cache_tokens_floor: 256,
+                max_queue_depth: isl,
+            },
+        ])
+        .unwrap();
+        let (queue, _slots, _cfg_tx) =
+            make_queue_with_sender_with_tiers(1, block_size, isl, Some(0.0), tiers, None);
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        // Second request fills the lone pending slot under the expensive tier.
+        let (req2, _rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
+
+        let (req3, rx3) = make_request("req-3", isl);
+        queue.enqueue(req3).await;
+
+        let resp3 = rx3.await.expect("oneshot dropped");
+        assert!(
+            matches!(
+                resp3,
+                Err(KvSchedulerError::Backpressure {
+                    reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
+                    queued_isl_tokens: 512,
+                    max_queued_isl_tokens: Some(512),
+                })
+            ),
+            "expensive-tier request should backpressure at depth 1, got {resp3:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

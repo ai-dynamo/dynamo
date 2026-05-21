@@ -220,9 +220,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
-    let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
-    prometheus_metrics::add_to_module(&prometheus_metrics)?;
-    m.add_submodule(&prometheus_metrics)?;
 
     Ok(())
 }
