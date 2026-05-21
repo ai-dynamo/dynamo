@@ -406,6 +406,13 @@ impl Default for RouterRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterBackpressureReason {
+    /// The configured cap on total queued ISL tokens has been reached.
+    MaxQueuedIslTokensExceeded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterResponse {
     New {
@@ -413,6 +420,12 @@ pub enum RouterResponse {
         #[serde(default)]
         dp_rank: DpRank,
         overlap_blocks: u32,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_queued_isl_tokens: Option<usize>,
     },
     PrefillMarked {
         success: bool,

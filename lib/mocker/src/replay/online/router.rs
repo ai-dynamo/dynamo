@@ -155,22 +155,21 @@ impl KvReplayRouter {
         let selector = replay_selector(&config);
         let policy = replay_policy(&config);
         let scheduler_cancel = CancellationToken::new();
-        let scheduler = Arc::new(
-            dynamo_kv_router::LocalScheduler::new_without_overlap_refresh(
-                slots,
-                worker_config_rx,
-                config.router_queue_threshold,
-                args.block_size as u32,
-                selector,
-                policy,
-                prefill_load_estimator,
-                config.router_queue_recheck_interval(),
-                config.router_track_prefill_tokens,
-                scheduler_cancel.clone(),
-                "replay",
-                false,
-            ),
-        );
+        let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
+            slots,
+            worker_config_rx,
+            config.router_queue_threshold,
+            config.router_queue_by_incoming_missing_isl.clone(),
+            args.block_size as u32,
+            selector,
+            policy,
+            prefill_load_estimator,
+            config.router_queue_recheck_interval(),
+            config.router_track_prefill_tokens,
+            scheduler_cancel.clone(),
+            "replay",
+            false,
+        ));
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
         let event_task = tokio::spawn(async move {

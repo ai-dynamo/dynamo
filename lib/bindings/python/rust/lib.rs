@@ -201,6 +201,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
     m.add_class::<context::ContextMetadata>()?;
+    m.add_class::<context::SpanProxy>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<WorkerType>()?;
@@ -219,9 +220,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
-    let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
-    prometheus_metrics::add_to_module(&prometheus_metrics)?;
-    m.add_submodule(&prometheus_metrics)?;
 
     Ok(())
 }

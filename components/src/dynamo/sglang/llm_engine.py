@@ -15,8 +15,8 @@ import logging
 import os
 import random
 import sys
-from collections.abc import AsyncGenerator, Callable
-from typing import Any, Optional
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any, Optional
 
 import sglang as sgl
 import zmq
@@ -25,6 +25,7 @@ from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
+from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
@@ -32,12 +33,7 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
-from dynamo.common.backend.publisher import (
-    KvEventSource,
-    Metrics,
-    SnapshotSource,
-    ZmqSource,
-)
+from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
@@ -51,6 +47,9 @@ from dynamo.sglang._disagg import (
 )
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.publisher import format_zmq_endpoint
+
+if TYPE_CHECKING:
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +96,7 @@ class SglangLLMEngine(LLMEngine):
         self.dynamo_args = dynamo_args
         # SGLang's local name for disaggregation_mode. Same enum.
         self.serving_mode = serving_mode
+        self.enable_trace = getattr(server_args, "enable_trace", False)
         self.engine: Any = None
         self._bootstrap_host: str | None = None
         self._bootstrap_port: int | None = None
@@ -106,8 +106,10 @@ class SglangLLMEngine(LLMEngine):
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
-        # Populated by `_metrics_pull_loop`; read by `metrics_sources()`.
-        self._latest_metrics: dict[int, Metrics] = {}
+        # Set by attach_snapshot_publisher when component_metrics_dp_ranks
+        # is non-empty. `_metrics_pull_loop` pushes ComponentSnapshots into
+        # it on every ZMQ message — event-driven, no framework polling.
+        self._snapshot_publisher: Optional[Any] = None
         self._metrics_task: Optional[asyncio.Task[None]] = None
         self._metrics_zmq_ctx: Optional[zmq.asyncio.Context] = None
         self._metrics_zmq_sock = None
@@ -141,6 +143,7 @@ class SglangLLMEngine(LLMEngine):
 
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id  # SGLang bootstrap uses host/port/room triples
+
         self.engine = sgl.Engine(server_args=self.server_args)
 
         tokenizer = (
@@ -149,6 +152,11 @@ class SglangLLMEngine(LLMEngine):
             else None
         )
         self._input_param_manager = InputParamManager(tokenizer)
+
+        logger.info(
+            "Trace header forwarding: %s",
+            "enabled" if self.enable_trace else "disabled (--enable-trace=False)",
+        )
 
         if self.serving_mode == DisaggregationMode.PREFILL:
             self._bootstrap_host, self._bootstrap_port = compute_bootstrap_address(
@@ -213,7 +221,8 @@ class SglangLLMEngine(LLMEngine):
 
     def _start_metrics_task(self) -> None:
         assert self.engine is not None, "Engine not initialized"
-        if not (self._kv_routing_enabled() and self._is_metrics_leader()):
+        # Match legacy: gate only on node_rank, not router state.
+        if not self._is_metrics_leader():
             return
         self._metrics_zmq_ctx = zmq.asyncio.Context()
         self._metrics_zmq_sock = get_zmq_socket(
@@ -243,9 +252,20 @@ class SglangLLMEngine(LLMEngine):
                 if kv_metrics.data_parallel_rank is not None
                 else 0
             )
-            self._latest_metrics[dp_rank] = Metrics(
-                kv_used_blocks=kv_metrics.kv_active_blocks,
-            )
+            # SGLang's KvMetrics carries `cache_hit_rate_perc` on recent
+            # versions; older releases (pre-N-1) may omit it.
+            hit_rate = getattr(kv_metrics, "cache_hit_rate_perc", None)
+            if self._snapshot_publisher is not None:
+                self._snapshot_publisher.publish(
+                    dp_rank,
+                    ComponentSnapshot(
+                        kv_used_blocks=kv_metrics.kv_active_blocks,
+                        kv_total_blocks=kv_metrics.kv_total_blocks,
+                        gpu_cache_usage=kv_metrics.gpu_cache_usage_perc,
+                        kv_cache_hit_rate=hit_rate,
+                        dp_rank=dp_rank,
+                    ),
+                )
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -278,6 +298,11 @@ class SglangLLMEngine(LLMEngine):
             stream=True,
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
+            **telemetry.engine_trace_kwargs(
+                context,
+                kwarg_name="external_trace_header",
+                enabled=self.enable_trace,
+            ),
             **bootstrap_kwargs,
         )
 
@@ -572,18 +597,29 @@ class SglangLLMEngine(LLMEngine):
             )
         return sources
 
-    async def metrics_sources(self) -> list[SnapshotSource]:
-        if not (self._kv_routing_enabled() and self._is_metrics_leader()):
+    def component_metrics_dp_ranks(self) -> list[int]:
+        # Leader-only to avoid multi-node double-counting; not gated on
+        # router state since gauges are observability data.
+        if not self._is_metrics_leader():
             return []
-
-        def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
-            return lambda: self._latest_metrics.get(r)
-
         start, end = _local_dp_rank_range(self.server_args)
-        return [
-            SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
-            for rank in range(start, end)
-        ]
+        return list(range(start, end))
+
+    def attach_snapshot_publisher(self, publisher) -> None:
+        self._snapshot_publisher = publisher
+
+    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        # SGLang multiprocess registry — only when --enable-metrics is
+        # set (otherwise SGLang doesn't call set_prometheus_multiproc_dir
+        # and MultiProcessCollector would have no .db files to read).
+        if self.server_args.enable_metrics:
+            from prometheus_client import CollectorRegistry, multiprocess
+
+            from dynamo.common.backend.metrics import register_engine_registry
+
+            sgl_registry = CollectorRegistry()
+            multiprocess.MultiProcessCollector(sgl_registry)
+            register_engine_registry(metrics, sgl_registry, prefix_filters=["sglang:"])
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if not self._use_sglang_tokenizer:

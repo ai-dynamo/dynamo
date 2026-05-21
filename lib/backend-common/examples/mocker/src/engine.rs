@@ -24,9 +24,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, CommonArgs, DisaggregationMode, DynamoError, EngineConfig,
-    ErrorType, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    Metrics, MetricsSource, PreprocessedRequest, WorkerConfig, chunk, usage,
+    AsyncEngineContext, BackendError, CommonArgs, ComponentSnapshot, DisaggregationMode,
+    DynamoError, EngineConfig, ErrorType, GenerateContext, KvEventSource, LLMEngine,
+    LLMEngineOutput, LLMEngineOutputExt, MetricsBindings, MetricsCtx, PreprocessedRequest,
+    SnapshotPublisher, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -138,6 +139,35 @@ impl Drop for ActiveRequestGuard {
                 .fetch_sub(self.blocks_held, Ordering::Relaxed);
         }
     }
+}
+
+/// Background poll task that pushes the mocker's synthetic
+/// `kv_used_blocks` into the `SnapshotPublisher` every 100 ms. Real
+/// engines push from their natural stat-logger event surface; the
+/// mocker has none, so we approximate with a poll loop spawned during
+/// `setup_metrics::on_publisher_ready`.
+fn spawn_mocker_snapshot_loop(
+    publisher: Arc<SnapshotPublisher>,
+    kv_used_blocks: Arc<AtomicU64>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = ticker.tick() => {
+                    publisher.publish(DP_RANK, ComponentSnapshot {
+                        kv_used_blocks: kv_used_blocks.load(Ordering::Relaxed),
+                        kv_total_blocks: 0,
+                        gpu_cache_usage: 0.0,
+                        kv_cache_hit_rate: None,
+                        dp_rank: DP_RANK,
+                    });
+                }
+            }
+        }
+    });
 }
 
 pub struct MockerBackend {
@@ -482,16 +512,16 @@ impl LLMEngine for MockerBackend {
         }])
     }
 
-    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
-        let used = self.kv_used_blocks.clone();
-        Ok(vec![MetricsSource {
-            snapshot: Arc::new(move || {
-                Some(Metrics {
-                    kv_used_blocks: Some(used.load(Ordering::Relaxed)),
-                })
-            }),
-            dp_rank: DP_RANK,
-        }])
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        let kv_used_blocks = self.kv_used_blocks.clone();
+        let cancel = self.cancel.clone();
+        Ok(MetricsBindings {
+            dp_ranks: vec![DP_RANK],
+            on_publisher_ready: Some(Box::new(move |publisher| {
+                spawn_mocker_snapshot_loop(publisher, kv_used_blocks, cancel);
+                Ok(())
+            })),
+        })
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
