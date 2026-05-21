@@ -61,9 +61,10 @@ print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL_PATH" "$H
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 
-# Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which both
-# workers would otherwise share. Use DYN_SYSTEM_PORT{1,2} to assign distinct
-# system-status-server ports per worker (matches disagg_same_gpu.sh pattern).
+# Prevent port collisions: prefill and decode each run their own
+# system-status-server, so DYN_SYSTEM_PORT (which would be shared) is dropped
+# in favor of DYN_SYSTEM_PORT1/DYN_SYSTEM_PORT2 below. This also drops any
+# user-set DYN_SYSTEM_PORT; override DYN_SYSTEM_PORT1/2 instead.
 unset DYN_SYSTEM_PORT
 
 # run prefill worker

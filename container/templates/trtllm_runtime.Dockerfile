@@ -21,11 +21,12 @@ ENV DYNAMO_HOME=/workspace
 ENV HOME=/home/dynamo
 ENV PATH=/usr/local/bin/etcd:${PATH}
 
-# Workaround: nixl-cu13's bundled UCX 1.20.0 hangs in `uct_md_query_tl_resources`
-# (md_resources realloc loop, >1 GiB) when two NIXL agents init on the same host —
-# blocks every TRT-LLM native-disagg multi-process test. Force-load TRT-LLM's
-# bundled libnixl 0.9.0 (uses system UCX, no bug). LD_PRELOAD is the only lever:
-# nixl-cu13's _bindings.so has DT_RPATH which beats LD_LIBRARY_PATH.
+# Workaround for ai-dynamo/nixl#1668: nixl-cu13's bundled UCX 1.20.0 hangs in
+# `uct_md_query_tl_resources` (md_resources realloc loop, >1 GiB) when two NIXL
+# agents init on the same host — blocks every TRT-LLM native-disagg multi-process
+# test. Force-load TRT-LLM's bundled libnixl 0.9.0 (uses system UCX, no bug).
+# LD_PRELOAD is the only lever: nixl-cu13's _bindings.so has DT_RPATH which beats
+# LD_LIBRARY_PATH. Drop this block when the upstream issue is fixed.
 ENV LD_PRELOAD=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
 # Fail the build loudly if upstream moves these paths — otherwise LD_PRELOAD

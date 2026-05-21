@@ -110,9 +110,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         libfontconfig-dev && \
     # Use system python explicitly: some runtime bases put a framework venv first on PATH.
-    # PIP_BREAK_SYSTEM_PACKAGES env var works across pip versions (>=23 honours it,
-    # older silently ignore). pip >=26 made the --break-system-packages flag
-    # require a boolean argument, so the env-var form is the only portable spelling.
+    # PIP_BREAK_SYSTEM_PACKAGES env var works across pip versions: pip >=23 honours
+    # it; older pip silently ignores it but predates the PEP 668 EXTERNALLY-MANAGED
+    # marker (Ubuntu <23.04), so no override is needed there in the first place.
+    # pip >=26 made the --break-system-packages flag require a boolean argument,
+    # so the env-var form is the only portable spelling.
     PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
