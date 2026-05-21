@@ -474,26 +474,37 @@ class TestVideoHandlerConcurrency:
 class TestImageHandlerResponseFormats:
     """Tests for ImageGenerationHandler generate() response format branching."""
 
-    def _make_handler(self):
-        """Create a handler with mocked engine and fs."""
+    def _make_handler(self, engine_output_batch: int = 1, **config_overrides):
+        """Create a handler with mocked engine and fs.
+
+        Args:
+            engine_output_batch: First dim of the synthetic image tensor the mock
+                engine returns. Lets tests exercise the handler's batch-iteration
+                and clamping behavior without needing the real engine.
+            **config_overrides: Extra DiffusionConfig kwargs (e.g.,
+                ``default_num_images_per_prompt=2``) merged on top of the
+                default test config.
+        """
         from dynamo.trtllm.request_handlers.diffusion.image_handler import (
             ImageGenerationHandler,
         )
 
         mock_output = SimpleNamespace(
             video=None,
-            image=torch.zeros((1, 64, 64, 3), dtype=torch.uint8),
+            image=torch.zeros((engine_output_batch, 64, 64, 3), dtype=torch.uint8),
             audio=None,
         )
         mock_engine = MagicMock()
         mock_engine.generate = MagicMock(return_value=mock_output)
 
-        config = DiffusionConfig(
+        config_kwargs = dict(
             media_output_fs_url="file:///tmp/test_media",
             media_output_http_url="https://cdn.example.com/media",
             default_fps=24,
             default_seconds=4,
         )
+        config_kwargs.update(config_overrides)
+        config = DiffusionConfig(**config_kwargs)
 
         with patch(
             "dynamo.trtllm.request_handlers.diffusion.image_handler.get_fs",
@@ -615,6 +626,194 @@ class TestImageHandlerResponseFormats:
                 pass
 
         assert "GPU OOM" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_url_response_format_batch_n(self):
+        """Engine returns batch=2 with default_num_images_per_prompt=2 and no
+        request-level n -> response carries two ImageData entries, each from a
+        separate upload with a distinct storage path."""
+        handler = self._make_handler(
+            engine_output_batch=2,
+            default_num_images_per_prompt=2,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "response_format": "url",
+        }
+
+        upload_urls = [
+            "https://cdn.example.com/media/images/test_0.png",
+            "https://cdn.example.com/media/images/test_1.png",
+        ]
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ), patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            side_effect=upload_urls,
+        ) as mock_upload:
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 2
+        assert mock_upload.call_count == 2
+
+        storage_paths = [call.args[1] for call in mock_upload.call_args_list]
+        assert (
+            len(set(storage_paths)) == 2
+        ), f"Expected distinct storage paths per image, got {storage_paths}"
+
+    @pytest.mark.asyncio
+    async def test_b64_response_format_batch_n(self):
+        """Engine returns batch=2 with default_num_images_per_prompt=2 -> two
+        b64_json entries in response.data."""
+        handler = self._make_handler(
+            engine_output_batch=2,
+            default_num_images_per_prompt=2,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "response_format": "b64_json",
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ):
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 2
+        for entry in results[0]["data"]:
+            assert entry["b64_json"] is not None
+            assert entry.get("url") is None
+
+    @pytest.mark.asyncio
+    async def test_request_n_overrides_default(self):
+        """Per-request n takes precedence over config default. Default=1,
+        request n=2, engine returns batch=2 -> two entries."""
+        handler = self._make_handler(
+            engine_output_batch=2,
+            default_num_images_per_prompt=1,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "b64_json",
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ):
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_n_gt_1_no_longer_rejected(self):
+        """Pre-fix handler raised ValueError for n>1; the fix removes that
+        rejection so n=2 requests reach the engine and produce a response."""
+        handler = self._make_handler(
+            engine_output_batch=2,
+            default_num_images_per_prompt=1,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "b64_json",
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ):
+            # The pre-fix handler raised ValueError("Requested 2 images, ...").
+            async for _ in handler.generate(request, MagicMock()):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_handler_emits_fewer_when_engine_shortchanges(self):
+        """Engine returns batch=1 when request asks for n=2 -> response has 1
+        entry. The handler does not synthesize, pad, or error; it faithfully
+        reports what the engine produced."""
+        handler = self._make_handler(
+            engine_output_batch=1,
+            default_num_images_per_prompt=1,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "url",
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ), patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            return_value="https://cdn.example.com/media/images/test_0.png",
+        ) as mock_upload:
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 1
+        assert mock_upload.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_handler_clamps_when_engine_overproduces(self):
+        """Engine returns batch=3 when request asks for n=2 -> response is
+        truncated to 2 entries. Defensive: bounds the handler's iteration by
+        what the caller asked for, even if the pipeline ever over-produces."""
+        handler = self._make_handler(
+            engine_output_batch=3,
+            default_num_images_per_prompt=1,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "url",
+        }
+
+        upload_urls = [
+            "https://cdn.example.com/media/images/test_0.png",
+            "https://cdn.example.com/media/images/test_1.png",
+        ]
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ), patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            side_effect=upload_urls,
+        ) as mock_upload:
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 2
+        assert mock_upload.call_count == 2
 
 
 # =============================================================================
