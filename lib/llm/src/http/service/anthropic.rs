@@ -46,7 +46,7 @@ use crate::protocols::openai::chat_completions::{
     aggregator::ChatCompletionAggregator,
 };
 use crate::protocols::unified::UnifiedRequest;
-use crate::request_template::RequestTemplate;
+use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
@@ -149,8 +149,9 @@ async fn handler_anthropic_messages(
     // Create request context
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.stream;
+    let resolved_model = resolve_request_model(&request.model, template.as_ref());
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(&request.model).to_string(),
+        model: state.manager().metric_model_for(resolved_model).to_string(),
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };

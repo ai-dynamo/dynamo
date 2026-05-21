@@ -58,7 +58,7 @@ use crate::protocols::openai::{
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
-use crate::request_template::RequestTemplate;
+use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
@@ -945,11 +945,9 @@ async fn handler_chat_completions(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     let cancellation_labels = CancellationLabels {
-        model: state
-            .manager()
-            .metric_model_for(&request.inner.model)
-            .to_string(),
+        model: state.manager().metric_model_for(resolved_model).to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -1614,9 +1612,10 @@ async fn handler_responses(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
-    let raw_model = request.inner.model.clone().unwrap_or_default();
+    let raw_model = request.inner.model.as_deref().unwrap_or("");
+    let resolved_model = resolve_request_model(raw_model, template.as_ref());
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(&raw_model).to_string(),
+        model: state.manager().metric_model_for(resolved_model).to_string(),
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
