@@ -436,16 +436,31 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build ai-dynamo (pure Python) wheel. ai-dynamo-runtime (maturin) is built in
-# the `wheel_builder` stage below after NIXL is installed — otherwise nixl-sys
-# links against stubs and runtime paths that go through NixlAgent::new() bail
-# with "NIXL is not supported in stub mode" (e.g. --frontend-decoding).
+# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+ARG ENABLE_MEDIA_FFMPEG
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
     export UV_CACHE_DIR=/root/.cache/uv && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
+    mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
-    uv build --wheel --out-dir /opt/dynamo/dist
+    uv build --wheel --out-dir /opt/dynamo/dist && \
+    cd /opt/dynamo/lib/bindings/python && \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+    else \
+        maturin build --release --features "kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+    fi && \
+    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
@@ -572,48 +587,6 @@ COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
-
-# Build ai-dynamo-runtime (maturin) here, after NIXL is installed and on
-# ld.so.conf, so nixl-sys links against the real NIXL rather than stubs.
-# Otherwise NixlAgent::new() returns "NIXL is not supported in stub mode"
-# at runtime (e.g. --frontend-decoding in dynamo.frontend).
-# Build with --auditwheel skip then run auditwheel repair manually so we can
-# --exclude the NIXL libs (runtime images already ship them at
-# $NIXL_LIB_DIR); otherwise auditwheel bundles them and breaks
-# tests/basic/test_wheel_contents.py::test_no_bundled_shared_libraries.
-ARG ENABLE_MEDIA_FFMPEG
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env cmake); \
-    fi && \
-    mkdir -p ${CARGO_TARGET_DIR} && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    cd /opt/dynamo/lib/bindings/python && \
-    rm -rf target/wheels && \
-    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        MATURIN_FEATURES="media-ffmpeg,kv-indexer,lightseek-mm"; \
-    else \
-        MATURIN_FEATURES="kv-indexer,lightseek-mm"; \
-    fi && \
-    maturin build --release --features "$MATURIN_FEATURES" --auditwheel skip --out target/wheels && \
-    auditwheel repair \
-        --exclude libnixl.so \
-        --exclude libnixl_build.so \
-        --exclude libnixl_common.so \
-        --exclude libserdes.so \
-        --exclude libstream.so \
-        --plat manylinux_2_28_${ARCH_ALT} \
-        --wheel-dir /opt/dynamo/dist \
-        target/wheels/*.whl && \
-    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
 ARG ENABLE_KVBM
