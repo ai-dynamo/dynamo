@@ -329,6 +329,37 @@ Level standards:
 - `tracing::warn!` for recoverable problems.
 - `tracing::error!` only for unrecoverable failures.
 
+## Tracing / OpenTelemetry
+
+Rust engines use the `tracing` crate directly for static-name spans —
+spans opened inside `generate()` nest under the framework's `handle_payload`
+parent automatically (set up by the runtime at
+`lib/runtime/src/pipeline/network/ingress/push_endpoint.rs`). When
+`OTEL_EXPORT_ENABLED=1` (see `lib/runtime/src/logging.rs`), these spans export
+as OTLP via the `tracing-opentelemetry` layer; otherwise they remain local.
+
+For **dynamic** span names — names computed at runtime, which `tracing::info_span!`
+can't handle — use `dynamo_backend_common::telemetry::start_span(name)`. It
+goes through OTel directly while still inheriting the bridged parent context;
+the returned `SpanGuard` closes on drop. Both paths land in the same trace
+tree.
+
+Two patterns worth knowing:
+
+- Prefer `.instrument(span)` on futures / streams over
+  `let _g = span.entered();`. The `Entered` guard pins the span to the
+  current thread; holding it across an `.await` either fails to compile
+  or — under `tokio`'s single-threaded scheduler — leaves the span entered
+  on whatever task polls you next.
+- `tokio::spawn(fut.in_current_span())` — bare `tokio::spawn` does NOT inherit
+  the current span, so logs and events from the spawned task lose the
+  trace_id.
+
+For outbound calls that need to carry trace context (HTTP / TCP / custom
+transports), use `dynamo_runtime::logging::inject_trace_headers_into_map(...)`
+or `get_distributed_tracing_context()`. NATS egress is auto-injected by the
+runtime; engines do nothing.
+
 ## Testing
 
 Enable the `testing` cargo feature to pull in the conformance kit:

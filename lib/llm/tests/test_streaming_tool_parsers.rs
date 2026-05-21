@@ -1232,8 +1232,8 @@ mod tests {
         );
     }
 
-    /// Single tool call, thinking mode (direct V4 analog of the V3 tool fixture).
-    /// `PARSER.1` + `PARSER.8` + `PARSER.9` — single tool call, streaming assembly, paired with reasoning. Also validates `PARSER.12` finish_reason=tool_calls.
+    /// `PARSER.stream.1` — single tool call over the streaming pipeline,
+    /// paired with reasoning. Also validates finish_reason=tool_calls passthrough.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_with_tools_vllm() {
         let file_path = format!(
@@ -1243,8 +1243,8 @@ mod tests {
         run_deepseek_v4_tool_call_fixture(&file_path).await;
     }
 
-    /// No tool call — thinking + plain body; finish_reason=stop.
-    /// `PARSER.3` + `PARSER.10` — no tool call + reasoning only. Also validates `PARSER.12` finish_reason=stop.
+    /// `PARSER.batch.3` over the streaming pipeline — no tool call,
+    /// reasoning plus plain body, and finish_reason=stop passthrough.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_with_no_tools_vllm() {
         let file_path = format!(
@@ -1283,8 +1283,7 @@ mod tests {
         );
     }
 
-    /// Two parallel tool calls inside one DSML block.
-    /// `PARSER.2` — parallel tool calls in one DSML block.
+    /// `PARSER.stream.2` — two parallel tool calls inside one DSML block.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_multi_tool_vllm() {
         let file_path = format!(
@@ -1296,7 +1295,8 @@ mod tests {
 
     /// string="true" vs string="false" — numbers, booleans, arrays, objects must
     /// round-trip as their proper JSON types inside arguments.
-    /// `PARSER.7` — complex args (mixed string="true|false" → strings / numbers / bools / arrays / objects round-trip).
+    /// `PARSER.batch.7.a` over the streaming pipeline — complex args
+    /// (mixed string="true|false" to strings / numbers / bools / arrays / objects).
     #[tokio::test]
     async fn test_deepseek_v4_e2e_mixed_param_types_vllm() {
         let file_path = format!(
@@ -1308,7 +1308,8 @@ mod tests {
 
     /// Body text emitted before the DSML block — parser must populate both
     /// normal_content and tool_calls.
-    /// `PARSER.13` — normal text interleaved before the DSML block.
+    /// `PARSER.batch.8.a` over the streaming pipeline — normal text
+    /// interleaved before the DSML block.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_content_before_tool_vllm() {
         let file_path = format!(
@@ -1321,7 +1322,8 @@ mod tests {
     /// Parameter value containing unicode, emoji, embedded quotes/newlines/tabs,
     /// and fragments that look like sentinels but aren't — must not confuse the
     /// parser, which anchors only on the exact </｜DSML｜parameter> token.
-    /// `PARSER.7` — Unicode / special characters inside argument values. (`PARSER.xml1` is N/A for DSML — no entity decoding.)
+    /// `PARSER.batch.7.b` over the streaming pipeline — Unicode / special
+    /// characters inside argument values. (`PARSER.xml.1` is N/A for DSML.)
     #[tokio::test]
     async fn test_deepseek_v4_e2e_special_chars_vllm() {
         let file_path = format!(
@@ -1333,7 +1335,8 @@ mod tests {
 
     /// Adversarial streaming: every DSML character is its own delta (~200 chunks).
     /// Exercises buffer accumulation across chunk boundaries.
-    /// `PARSER.8` — streaming chunk-boundary splits (tokens straddle chunks).
+    /// `PARSER.stream.3` — streaming chunk-boundary splits
+    /// (grammar tokens straddle chunks).
     #[tokio::test]
     async fn test_deepseek_v4_e2e_fragmented_tokens_vllm() {
         let file_path = format!(
@@ -1389,8 +1392,8 @@ mod tests {
         }
     }
 
-    /// Repro: complete Kimi K2 tool call stream, section_end present → should work.
-    /// This is the baseline / control test.
+    /// `PARSER.stream.1.b` — complete Kimi K2 tool call stream split
+    /// across parser-significant boundaries; section_end present.
     #[tokio::test]
     async fn test_kimi_k2_streaming_complete_section() {
         let chunks = vec![
@@ -1420,7 +1423,7 @@ mod tests {
         );
     }
 
-    /// Repro for DIS-1765: model hits max_tokens BEFORE emitting section_end.
+    /// `PARSER.stream.4.a` — model hits max_tokens before emitting section_end.
     /// Individual tool call is complete (call_begin + args + call_end), but
     /// section_end is missing. The jail should still extract the tool call at
     /// finalize time instead of emitting raw marker text.
@@ -1459,7 +1462,8 @@ mod tests {
         );
     }
 
-    /// Repro: multiple complete tool calls, no section_end (max_tokens).
+    /// `PARSER.stream.4.a` plus `PARSER.stream.2` — multiple complete tool
+    /// calls, no section_end (max_tokens).
     #[tokio::test]
     async fn test_kimi_k2_streaming_multiple_calls_missing_section_end() {
         let chunks = vec![
@@ -1493,9 +1497,9 @@ mod tests {
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
 
-    /// `PARSER.5` + `PARSER.8` (PR #8208) — kimi-k2 truncated mid-argument
-    /// (no `<|tool_call_end|>`), streaming, customer regression. Also
-    /// validates `PARSER.12` finish_reason=stop passthrough.
+    /// `PARSER.stream.4.b` — Kimi K2 truncated mid-argument (no
+    /// `<|tool_call_end|>`), customer regression. Also validates
+    /// finish_reason=stop passthrough.
     ///
     /// Repro for the production leak observed against kimi-k2-6: the
     /// model stops mid-argument with
