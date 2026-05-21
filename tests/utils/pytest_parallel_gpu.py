@@ -530,6 +530,13 @@ def run_parallel(
             )
 
         safe_name = test.name.replace("/", "_").replace("::", "__")
+        # Give each child a unique COVERAGE_FILE so its session-end combine
+        # (pytest-cov collapses data_suffix=True shards into the unsuffixed
+        # path) doesn't clobber siblings. Harmless when pytest-cov is not
+        # active — the env var is just unread.
+        parent_cov_file = env.get("COVERAGE_FILE")
+        if parent_cov_file:
+            env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}.{safe_name}"
         junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
         has_tb = extra_pytest_args and any(
             a.startswith("--tb") for a in extra_pytest_args
