@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate the parity chart (matrix of cell markers) from the YAML fixtures.
+"""Generate the parity table (matrix of cell markers) from the YAML fixtures.
 
 ================================================================================
 EXAMPLE OUTPUT (truncated; illustrative, NOT a snapshot of current fixtures
-— run the script for the real chart):
+— run the script for the real table):
 
     | model          | parser     | 1 | 2.a | 2.b | 2.c | ... | 9 | 10 |
     |---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
@@ -18,8 +18,8 @@ EXAMPLE OUTPUT (truncated; illustrative, NOT a snapshot of current fixtures
 
 ================================================================================
 
-Reads every `tests/parity/parser/fixtures/<family>/PARSER.*.yaml` and emits
-the chart referenced in `tests/parity/README.md`.
+Reads every `tests/parity/parser/fixtures/<family>/PARSER.batch*.yaml` and emits
+the table referenced in `tests/parity/README.md`.
 
 Cell markers (per peer, vllm + sglang):
   =     peer block is `*d_<case>` anchor ref to dynamo (matches)
@@ -36,14 +36,16 @@ Footnote markers `†` (no vLLM peer) and `§` (no SGLang peer) are auto-derived
 from `expected.<impl>.unavailable` across each family's cases.
 
 Run:
-    # Markdown chart to stdout
-    python3 tests/parity/parser/generate_parity_chart.py \
+    # Markdown table to stdout
+    python3 tests/parity/generate_parity_table.py parser \
         > tests/parity/parser/PARITY.md
+    python3 tests/parity/generate_parity_table.py parser --mode stream \
+        > tests/parity/parser/PARITY.stream.md
 
-    # HTML chart with clickable YAML links + hover tooltips. Write next
+    # HTML table with tabs, clickable YAML links, and hover tooltips. Write next
     # to this script so `<a href="fixtures/<family>/PARSER.batch.N.yaml">`
     # resolves when opened in a browser.
-    python3 tests/parity/parser/generate_parity_chart.py --html \
+    python3 tests/parity/generate_parity_table.py parser --html \
         > tests/parity/parser/PARITY.html
 
 PARITY.{md,html} are for local viewing only; don't check them in.
@@ -67,14 +69,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = REPO_ROOT / "tests/parity/parser/fixtures"
 PARSER_CASES_MD = REPO_ROOT / "lib/parsers/PARSER_CASES.md"
 PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
-SCRIPT_DIR = Path(__file__).resolve().parent
+TEMPLATE_DIR = REPO_ROOT / "tests/parity"
 
 RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
 
 
 def _make_jinja_env() -> Environment:
     return Environment(
-        loader=FileSystemLoader(SCRIPT_DIR),
+        loader=FileSystemLoader(TEMPLATE_DIR),
         trim_blocks=False,
         lstrip_blocks=True,
         undefined=StrictUndefined,
@@ -82,7 +84,7 @@ def _make_jinja_env() -> Environment:
 
 
 def _commit_sha() -> str | None:
-    """HEAD SHA at chart-generation time, or None if not in a git tree."""
+    """HEAD SHA at table-generation time, or None if not in a git tree."""
     try:
         out = (
             subprocess.check_output(
@@ -284,7 +286,7 @@ def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
 
 
 # Curated featured-model order. The only hand-maintained list left in the
-# script: it picks WHICH families lead the chart and IN WHAT ORDER. The
+# script: it picks WHICH families lead the table and IN WHAT ORDER. The
 # human-readable label for each (e.g. "DeepSeek V4") is sourced from the
 # fixture YAML's `model_label:` field, so the label travels with the
 # family definition, not with this script.
@@ -293,7 +295,7 @@ def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
 # planning notes. When that list changes, this list and the corresponding
 # `model_label:` fields under `fixtures/<family>/PARSER.batch.yaml` must
 # be updated together.
-# Alphabetical-by-family-id within the list (matches the chart row order).
+# Alphabetical-by-family-id within the list (matches the table row order).
 TOP_N_FAMILIES = [
     "deepseek_v4",
     "gemma4",
@@ -304,7 +306,7 @@ TOP_N_FAMILIES = [
     "qwen3_coder",
 ]
 
-SUB_CASE_GROUPS = [
+BATCH_SUB_CASE_GROUPS = [
     ("Core", ("1", "3", "9", "9.a", "9.b")),
     ("Multi-call", ("2.a", "2.b", "2.c", "2.d", "10")),
     (
@@ -342,30 +344,54 @@ SPLIT_PARENT_SUBCASES = {
     "13": ("13.a",),
 }
 
-_SUB_CASE_GROUP_KEY_BY_LABEL = {
-    label: re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
-    for label, _subs in SUB_CASE_GROUPS
+STREAM_SUB_CASE_GROUPS = [
+    ("Single-call", ("1.a", "1.b")),
+    ("Multi-call", ("2",)),
+    ("Partial-token", ("3",)),
+    ("Termination", ("4.a", "4.b")),
+]
+
+SUB_CASE_GROUPS_BY_MODE = {
+    "batch": BATCH_SUB_CASE_GROUPS,
+    "stream": STREAM_SUB_CASE_GROUPS,
 }
 
-_SUB_CASE_DISPLAY_ORDER = {
-    sub: (group_idx, sub_idx)
-    for group_idx, (_label, subs) in enumerate(SUB_CASE_GROUPS)
-    for sub_idx, sub in enumerate(subs)
+_SUB_CASE_GROUP_KEY_BY_LABEL_BY_MODE = {
+    mode: {
+        label: re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        for label, _subs in groups
+    }
+    for mode, groups in SUB_CASE_GROUPS_BY_MODE.items()
 }
 
-_SUB_CASE_GROUP_INDEX_BY_SUB = {
-    sub: group_idx
-    for group_idx, (_label, subs) in enumerate(SUB_CASE_GROUPS)
-    for sub in subs
+_SUB_CASE_GROUP_KEY_BY_SUB_BY_MODE = {
+    mode: {
+        sub: _SUB_CASE_GROUP_KEY_BY_LABEL_BY_MODE[mode][label]
+        for label, subs in groups
+        for sub in subs
+    }
+    for mode, groups in SUB_CASE_GROUPS_BY_MODE.items()
 }
 
-_SUB_CASE_GROUP_BY_SUB = {sub: label for label, subs in SUB_CASE_GROUPS for sub in subs}
 
-_SUB_CASE_GROUP_KEY_BY_SUB = {
-    sub: _SUB_CASE_GROUP_KEY_BY_LABEL[label]
-    for label, subs in SUB_CASE_GROUPS
-    for sub in subs
-}
+def _display_order(mode: str) -> dict[str, tuple[int, int]]:
+    return {
+        sub: (group_idx, sub_idx)
+        for group_idx, (_label, subs) in enumerate(SUB_CASE_GROUPS_BY_MODE[mode])
+        for sub_idx, sub in enumerate(subs)
+    }
+
+
+def _group_index_by_sub(mode: str) -> dict[str, int]:
+    return {
+        sub: group_idx
+        for group_idx, (_label, subs) in enumerate(SUB_CASE_GROUPS_BY_MODE[mode])
+        for sub in subs
+    }
+
+
+def _group_by_sub(mode: str) -> dict[str, str]:
+    return {sub: label for label, subs in SUB_CASE_GROUPS_BY_MODE[mode] for sub in subs}
 
 
 def _natural_sub_sort_key(sub: str) -> tuple[int, str]:
@@ -374,9 +400,9 @@ def _natural_sub_sort_key(sub: str) -> tuple[int, str]:
     return (int(parts[0]), parts[1] if len(parts) > 1 else "")
 
 
-def _sub_sort_key(sub: str) -> tuple[int, int, int, str]:
+def _sub_sort_key(mode: str, sub: str) -> tuple[int, int, int, str]:
     """Sort known cases by semantic display group, future cases naturally last."""
-    display_order = _SUB_CASE_DISPLAY_ORDER.get(sub)
+    display_order = _display_order(mode).get(sub)
     if display_order is not None:
         group_idx, sub_idx = display_order
         return (0, group_idx, sub_idx, "")
@@ -384,18 +410,20 @@ def _sub_sort_key(sub: str) -> tuple[int, int, int, str]:
     return (1, num, 0, suffix)
 
 
-def _subcase_band_class(sub: str) -> str:
-    group_idx = _SUB_CASE_GROUP_INDEX_BY_SUB.get(sub, len(SUB_CASE_GROUPS))
+def _subcase_band_class(mode: str, sub: str) -> str:
+    group_idx = _group_index_by_sub(mode).get(sub, len(SUB_CASE_GROUPS_BY_MODE[mode]))
     return f"case-band-{group_idx % 2}"
 
 
-def _subcase_group_key(sub: str) -> str:
-    return _SUB_CASE_GROUP_KEY_BY_SUB.get(sub, "other")
+def _subcase_group_key(mode: str, sub: str) -> str:
+    return _SUB_CASE_GROUP_KEY_BY_SUB_BY_MODE[mode].get(sub, "other")
 
 
-def _discover_sub_cases(cases: dict) -> list[str]:
+def _discover_sub_cases(mode: str, cases: dict) -> list[str]:
     """Union of sub-case IDs across all loaded fixtures, in stable order."""
-    return sorted({sub for _fam, sub in cases.keys()}, key=_sub_sort_key)
+    return sorted(
+        {sub for _fam, sub in cases.keys()}, key=lambda s: _sub_sort_key(mode, s)
+    )
 
 
 def _normalize_split_parent_cases(cases: dict) -> dict:
@@ -404,7 +432,7 @@ def _normalize_split_parent_cases(cases: dict) -> dict:
     Some older fixture files still define parent buckets such as
     `PARSER.batch.30`, while newer files define leaf buckets such as
     `PARSER.batch.30.a`. For display, parent+leaf duplication is confusing:
-    once any leaf exists for a parent bucket, the chart should show only the
+    once any leaf exists for a parent bucket, the table should show only the
     leaf columns. Parent entries are copied into missing leaf cells so their
     existing expectations or n/a reasons remain visible until the YAML itself
     is migrated.
@@ -475,8 +503,8 @@ def family_suffix(fam: str, no_vllm: set[str], no_sglang: set[str]) -> str:
     return suff
 
 
-def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
-    """Load every fixture YAML.
+def load_all_cases(mode: str) -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
+    """Load every fixture YAML for one parser mode.
 
     Returns `(cases, labels)`:
       cases  — `{(family, sub_case_id): case_data}`; each case dict gets
@@ -489,15 +517,17 @@ def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
     cases: dict[tuple[str, str], dict] = {}
     labels: dict[str, str] = {}
     script_dir = Path(__file__).resolve().parent
-    for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
+    for fp in sorted(FIXTURES.glob(f"*/PARSER.{mode}*.yaml")):
         doc = yaml.safe_load(fp.read_text())
+        if doc.get("mode") != mode:
+            continue
         family = doc["family"]
         rel = str(fp.relative_to(script_dir))
         if "model_label" in doc:
             labels.setdefault(family, doc["model_label"])
         for cid, case in doc["cases"].items():
-            sub = cid.replace("PARSER.batch.", "")
             case["__family"] = family
+            sub = cid.replace(f"PARSER.{mode}.", "")
             case["__fixture_path"] = rel
             case["__case_id"] = cid
             cases[(family, sub)] = case
@@ -931,6 +961,22 @@ def _build_tooltip_html(case: dict, dyn) -> str:
         parts.append(
             f"<pre class=\"ttip-pre\">input_text='{_colorize_markup(model_text, family)}'</pre>"
         )
+    chunks = case.get("chunks")
+    if isinstance(chunks, list) and chunks:
+        parts.append('<div class="ttip-section">Input chunks:</div>')
+        chunk_lines = []
+        for i, chunk in enumerate(chunks):
+            if not isinstance(chunk, dict):
+                continue
+            delta = chunk.get("delta_text") or ""
+            suffix = ""
+            if chunk.get("finish_reason"):
+                suffix = " finish_reason=" + html_lib.escape(
+                    str(chunk["finish_reason"])
+                )
+            chunk_lines.append(f"{i}: delta_text='{_colorize_xml(delta)}'{suffix}")
+        chunk_text = "\n".join(chunk_lines)
+        parts.append(f'<pre class="ttip-pre">{chunk_text}</pre>')
 
     expected = case.get("expected") or {}
 
@@ -1053,14 +1099,14 @@ def _build_na_tooltip_html(case: dict) -> str:
     return "".join(parts)
 
 
-def _build_missing_tooltip_html(family: str, sub: str) -> str:
+def _build_missing_tooltip_html(mode: str, family: str, sub: str) -> str:
     """Tooltip for an absent fixture entry.
 
     This is intentionally distinct from an explicit n/a stub. Missing means
-    the chart has no fixture data for this family/case; explicit n/a means a
+    the table has no fixture data for this family/case; explicit n/a means a
     fixture author recorded why the case does not apply.
     """
-    case_id = f"PARSER.batch.{sub}"
+    case_id = f"PARSER.{mode}.{sub}"
     parts = ['<div class="ttip">']
     parts.append(
         f'<div class="ttip-head">{html_lib.escape(case_id)} — '
@@ -1070,20 +1116,20 @@ def _build_missing_tooltip_html(family: str, sub: str) -> str:
     parts.append(
         '<pre class="ttip-pre">No fixture entry exists for this family/case. '
         "If the case is intentionally not applicable, add an explicit n/a "
-        "stub with description: and reason: so the chart can explain it.</pre>"
+        "stub with description: and reason: so the table can explain it.</pre>"
     )
     parts.append("</div>")
     return "".join(parts)
 
 
-def render_cell_html(case: dict | None, family: str, sub: str) -> str:
+def render_cell_html(case: dict | None, mode: str, family: str, sub: str) -> str:
     text = cell_for(case)
     cls = _cell_class(text)
-    band_cls = _subcase_band_class(sub)
-    col_group = html_lib.escape(_subcase_group_key(sub))
+    band_cls = _subcase_band_class(mode, sub)
+    col_group = html_lib.escape(_subcase_group_key(mode, sub))
     td_open = f'<td class="cell {cls} {band_cls}" data-col-hide-group="{col_group}">'
     if case is None:
-        ttip = _build_missing_tooltip_html(family, sub)
+        ttip = _build_missing_tooltip_html(mode, family, sub)
         return f"{td_open}{text}{ttip}</td>"
 
     dyn = case.get("expected", {}).get("dynamo")
@@ -1156,7 +1202,7 @@ def _parser_inheritance_tooltip_html(
             fm = re.search(r'\("([^"]+)"\)', info["factory"])
             if fm:
                 suffix = f'  block="{fm.group(1)}"'
-        # ← THIS goes on the target family's line only when the chart cell
+        # ← THIS goes on the target family's line only when the table cell
         # IS the target (not an alias).
         marker_html = (
             "  <strong>← THIS</strong>" if (fam == family and not alias_of) else ""
@@ -1182,7 +1228,7 @@ def _parser_inheritance_tooltip_html(
                 )
 
     # Peer-availability footnote (†/§) — embedded here so symbols don't need
-    # their own native tooltip. Anchored on the chart-cell family, so an
+    # their own native tooltip. Anchored on the table-cell family, so an
     # alias inherits its target's peer markers (they share the same fixture
     # YAMLs and the same `expected.<impl>.unavailable` flags).
     peer_notes: list[str] = []
@@ -1276,6 +1322,7 @@ def _parser_cell_html(
 def render_row_html(
     model: str,
     family: str,
+    mode: str,
     cases: dict,
     sub_cases: list[str],
     refs: dict[str, tuple[str, int]],
@@ -1289,28 +1336,30 @@ def render_row_html(
         _parser_cell_html(family, refs, no_vllm, no_sglang, inheritance),
         _column_placeholder_html("parser"),
     ]
-    for run in _subcase_runs(sub_cases):
+    for run in _subcase_runs(mode, sub_cases):
         cells.extend(
-            render_cell_html(cases.get((family, sub)), family, sub) for sub in run
+            render_cell_html(cases.get((family, sub)), mode, family, sub) for sub in run
         )
-        cells.append(_column_placeholder_html(_subcase_group_key(run[0])))
+        cells.append(_column_placeholder_html(_subcase_group_key(mode, run[0])))
     cells.append("</tr>")
     return "".join(cells)
 
 
-def _parse_subcase_descriptions() -> dict[str, str]:
+def _parse_subcase_descriptions(mode: str) -> dict[str, str]:
     """Parse `lib/parsers/PARSER_CASES.md` for per-case descriptions.
 
     The Quick-reference section has one-liner bullets for top-level cases
-    (`PARSER.batch.1` … `PARSER.batch.10`); the deeper per-case sections
+    (`PARSER.<mode>.1` …); the deeper per-case sections
     contain multi-line bullets for sub-cases (`2.a`, `4.c`, etc.). Both
-    look like `- **`PARSER.batch.X`** <desc>`, where the bullet body may
+    look like `- **`PARSER.<mode>.X`** <desc>`, where the bullet body may
     wrap across indented continuation lines. Returns
     `{"1": "...", "2.a": "...", ...}`.
     """
     if not PARSER_CASES_MD.exists():
         return {}
-    pat = re.compile(r"\*\*`PARSER\.batch\.([0-9]+(?:\.[a-z])?)`\*\*\s+(.+)")
+    pat = re.compile(
+        rf"\*\*`PARSER\.{re.escape(mode)}\.([0-9]+(?:\.[a-z])?)`\*\*\s+(.+)"
+    )
     out: dict[str, str] = {}
     lines = PARSER_CASES_MD.read_text(encoding="utf-8").splitlines()
     i = 0
@@ -1339,29 +1388,31 @@ def _parse_subcase_descriptions() -> dict[str, str]:
     return out
 
 
-def _subcase_header_html(sub: str, descriptions: dict[str, str]) -> str:
+def _subcase_header_html(mode: str, sub: str, descriptions: dict[str, str]) -> str:
     desc = descriptions.get(sub) or descriptions.get(sub.split(".")[0]) or ""
     href = "../../../lib/parsers/PARSER_CASES.md"
     title = html_lib.escape(desc) if desc else ""
-    band_cls = _subcase_band_class(sub)
-    col_group = html_lib.escape(_subcase_group_key(sub))
+    band_cls = _subcase_band_class(mode, sub)
+    col_group = html_lib.escape(_subcase_group_key(mode, sub))
     return (
         f'<th class="case-sub {band_cls}" data-col-hide-group="{col_group}">'
         f'<a href="{href}" title="{title}">{html_lib.escape(sub)}</a></th>'
     )
 
 
-def _subcase_group_label(sub: str) -> str:
-    return _SUB_CASE_GROUP_BY_SUB.get(sub, "Other")
+def _subcase_group_label(mode: str, sub: str) -> str:
+    return _group_by_sub(mode).get(sub, "Other")
 
 
-def _subcase_runs(sub_cases: list[str]) -> list[list[str]]:
+def _subcase_runs(mode: str, sub_cases: list[str]) -> list[list[str]]:
     runs: list[list[str]] = []
     start = 0
     while start < len(sub_cases):
-        label = _subcase_group_label(sub_cases[start])
+        label = _subcase_group_label(mode, sub_cases[start])
         end = start + 1
-        while end < len(sub_cases) and _subcase_group_label(sub_cases[end]) == label:
+        while (
+            end < len(sub_cases) and _subcase_group_label(mode, sub_cases[end]) == label
+        ):
             end += 1
         runs.append(sub_cases[start:end])
         start = end
@@ -1406,16 +1457,16 @@ def _column_control_header_html(
     )
 
 
-def _subcase_group_headers_html(sub_cases: list[str]) -> str:
+def _subcase_group_headers_html(mode: str, sub_cases: list[str]) -> str:
     """Build semantic group headers spanning the displayed sub-case columns."""
     spans: list[str] = [
         _column_control_header_html("model", "Model", default_visible=False),
         _column_control_header_html("parser", "Parser", default_visible=True),
     ]
-    for run in _subcase_runs(sub_cases):
-        label = _subcase_group_label(run[0])
-        band_cls = _subcase_band_class(run[0])
-        col_group = html_lib.escape(_subcase_group_key(run[0]))
+    for run in _subcase_runs(mode, sub_cases):
+        label = _subcase_group_label(mode, run[0])
+        band_cls = _subcase_band_class(mode, run[0])
+        col_group = html_lib.escape(_subcase_group_key(mode, run[0]))
         spans.append(
             _column_control_header_html(
                 col_group,
@@ -1428,22 +1479,26 @@ def _subcase_group_headers_html(sub_cases: list[str]) -> str:
     return "".join(spans)
 
 
-def _subcase_headers_html(sub_cases: list[str], descriptions: dict[str, str]) -> str:
+def _subcase_headers_html(
+    mode: str, sub_cases: list[str], descriptions: dict[str, str]
+) -> str:
     headers: list[str] = []
-    for run in _subcase_runs(sub_cases):
-        headers.extend(_subcase_header_html(sub, descriptions) for sub in run)
-        headers.append(_column_placeholder_html(_subcase_group_key(run[0]), tag="th"))
+    for run in _subcase_runs(mode, sub_cases):
+        headers.extend(_subcase_header_html(mode, sub, descriptions) for sub in run)
+        headers.append(
+            _column_placeholder_html(_subcase_group_key(mode, run[0]), tag="th")
+        )
     return "".join(headers)
 
 
 def _glossary_groups(
-    descriptions: dict[str, str], sub_cases: list[str]
+    mode: str, descriptions: dict[str, str], sub_cases: list[str]
 ) -> list[dict[str, object]]:
     if not descriptions:
         return []
     return [
         {
-            "label": _subcase_group_label(run[0]),
+            "label": _subcase_group_label(mode, run[0]),
             "rows": [
                 (
                     sub,
@@ -1452,7 +1507,7 @@ def _glossary_groups(
                 for sub in run
             ],
         }
-        for run in _subcase_runs(sub_cases)
+        for run in _subcase_runs(mode, sub_cases)
     ]
 
 
@@ -1500,21 +1555,31 @@ def _compute_stats(
     return s
 
 
-def render_html(
+def _mode_label(mode: str) -> str:
+    if mode == "batch":
+        return "PARSER.batch.*"
+    if mode == "stream":
+        return "PARSER.stream.*"
+    return mode
+
+
+def render_html_panel(
+    mode: str,
     cases: dict,
     sub_cases: list[str],
     no_vllm: set[str],
     no_sglang: set[str],
     top_n: list[tuple[str, str]],
     others: list[tuple[str, str]],
-    family_filter: str | None = None,
-) -> str:
-    descriptions = _parse_subcase_descriptions()
+    active: bool = False,
+) -> dict[str, object]:
+    """Render one tab panel for one parser fixture mode."""
+    descriptions = _parse_subcase_descriptions(mode)
     refs = _build_family_to_rust_ref()
     inheritance = _build_family_inheritance(refs)
 
-    group_headers = _subcase_group_headers_html(sub_cases)
-    sub_headers = _subcase_headers_html(sub_cases, descriptions)
+    group_headers = _subcase_group_headers_html(mode, sub_cases)
+    sub_headers = _subcase_headers_html(mode, sub_cases, descriptions)
     n_cols = 2 + len(sub_cases)
 
     body_rows: list[str] = []
@@ -1526,7 +1591,15 @@ def render_html(
     for model, fam in top_n:
         body_rows.append(
             render_row_html(
-                model, fam, cases, sub_cases, refs, no_vllm, no_sglang, inheritance
+                model,
+                fam,
+                mode,
+                cases,
+                sub_cases,
+                refs,
+                no_vllm,
+                no_sglang,
+                inheritance,
             )
         )
     if others:
@@ -1537,21 +1610,84 @@ def render_html(
     for model, fam in others:
         body_rows.append(
             render_row_html(
-                model, fam, cases, sub_cases, refs, no_vllm, no_sglang, inheritance
+                model,
+                fam,
+                mode,
+                cases,
+                sub_cases,
+                refs,
+                no_vllm,
+                no_sglang,
+                inheritance,
             )
         )
 
     all_families = [fam for _, fam in top_n] + [fam for _, fam in others]
     stats = _compute_stats(cases, sub_cases, all_families)
 
+    panel_id = f"tab-{mode}"
+    return {
+        "id": panel_id,
+        "mode": mode,
+        "label": _mode_label(mode),
+        "active": active,
+        "group_headers": group_headers,
+        "sub_headers": sub_headers,
+        "body_rows": body_rows,
+        "stats": stats,
+        "glossary_groups": _glossary_groups(mode, descriptions, sub_cases),
+    }
+
+
+def _filter_family(
+    cases: dict[tuple[str, str], dict],
+    labels: dict[str, str],
+    family_filter: str | None,
+) -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
+    if family_filter is None:
+        return cases, labels
+    return (
+        {k: v for k, v in cases.items() if k[0] == family_filter},
+        {k: v for k, v in labels.items() if k == family_filter},
+    )
+
+
+def _load_html_panel(
+    mode: str,
+    active: bool = False,
+    family_filter: str | None = None,
+) -> tuple[str, dict[str, object], bool]:
+    cases, labels = load_all_cases(mode)
+    cases, labels = _filter_family(cases, labels, family_filter)
+    has_cases = bool(cases)
+    sub_cases = _discover_sub_cases(mode, cases)
+    no_vllm, no_sglang = _derive_no_peer_sets(cases)
+    top_n, others = _build_display_groups(cases, labels)
+    return (
+        mode,
+        render_html_panel(
+            mode, cases, sub_cases, no_vllm, no_sglang, top_n, others, active
+        ),
+        has_cases,
+    )
+
+
+def render_html(modes: list[str], family_filter: str | None = None) -> str:
+    panels = [
+        _load_html_panel(mode, active=(i == 0), family_filter=family_filter)
+        for i, mode in enumerate(modes)
+    ]
+    if family_filter and not any(has_cases for _mode, _panel, has_cases in panels):
+        raise SystemExit(f"no parser fixtures found for family={family_filter!r}")
+
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
     title = (
-        f"Dynamo {family_filter} parser parity chart"
+        f"Dynamo {family_filter} Tool Call Parser - Parity Table"
         if family_filter
-        else "Dynamo parser parity chart"
+        else "Dynamo Tool Call Parser - Parity Table"
     )
-    command = "python3 tests/parity/parser/generate_parity_chart.py --html"
+    command = "python3 tests/parity/generate_parity_table.py parser --html"
     output = "tests/parity/parser/PARITY.html"
     if family_filter:
         command += f" --family {family_filter}"
@@ -1559,9 +1695,26 @@ def render_html(
 
     sha = _commit_sha()
 
+    if len(modes) == 1:
+        command += f" --mode {modes[0]}"
+        output = f"tests/parity/parser/PARITY.{modes[0]}.html"
+        if family_filter:
+            output = f"tests/parity/parser/PARITY.{family_filter}.{modes[0]}.html"
+
+    tabs = []
+    for i, (mode, _panel, _has_cases) in enumerate(panels):
+        panel_id = f"tab-{mode}"
+        active = " active" if i == 0 else ""
+        selected = "true" if i == 0 else "false"
+        tabs.append(
+            f'<button class="tab-button{active}" id="{panel_id}-button" '
+            f'type="button" role="tab" aria-selected="{selected}" '
+            f'data-tab-target="{panel_id}">{html_lib.escape(_mode_label(mode))}</button>'
+        )
+
     return (
         _make_jinja_env()
-        .get_template("parity_chart.html.j2")
+        .get_template("parity_table.html.j2")
         .render(
             title=title,
             stamp=stamp,
@@ -1569,17 +1722,14 @@ def render_html(
             short_sha=sha[:12] if sha else "",
             command=command,
             output=output,
-            group_headers=group_headers,
-            sub_headers=sub_headers,
-            body_rows=body_rows,
+            tabs=tabs,
+            panels=[panel for _mode, panel, _has_cases in panels],
             peer_versions=_peer_version_items(_peer_versions()),
-            stats=stats,
-            glossary_groups=_glossary_groups(descriptions, sub_cases),
         )
     )
 
 
-def main():
+def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument(
         "--html",
@@ -1590,31 +1740,33 @@ def main():
         "--family",
         help="Render only one parser family, e.g. harmony.",
     )
-    args = p.parse_args()
+    p.add_argument(
+        "--mode",
+        choices=("all", "batch", "stream"),
+        help=(
+            "Fixture mode to render. For HTML, default is all parser modes as "
+            "tabs. For Markdown, default is batch."
+        ),
+    )
+    args = p.parse_args(argv)
 
-    cases, labels = load_all_cases()
-    if args.family:
-        cases = {k: v for k, v in cases.items() if k[0] == args.family}
-        labels = {k: v for k, v in labels.items() if k == args.family}
-        if not cases:
-            raise SystemExit(f"no parser fixtures found for family={args.family!r}")
-    sub_cases = _discover_sub_cases(cases)
+    if args.html:
+        modes = ["batch", "stream"] if args.mode in (None, "all") else [args.mode]
+        print(render_html(modes, family_filter=args.family))
+        return
+
+    if args.mode == "all":
+        p.error("--mode all is only supported with --html")
+    mode = args.mode or "batch"
+
+    cases, labels = load_all_cases(mode)
+    cases, labels = _filter_family(cases, labels, args.family)
+    if args.family and not cases:
+        raise SystemExit(f"no parser fixtures found for family={args.family!r}")
+    sub_cases = _discover_sub_cases(mode, cases)
     no_vllm, no_sglang = _derive_no_peer_sets(cases)
     top_n, others = _build_display_groups(cases, labels)
-    if args.html:
-        print(
-            render_html(
-                cases,
-                sub_cases,
-                no_vllm,
-                no_sglang,
-                top_n,
-                others,
-                family_filter=args.family,
-            )
-        )
-    else:
-        print(render_markdown(cases, sub_cases, no_vllm, no_sglang, top_n, others))
+    print(render_markdown(cases, sub_cases, no_vllm, no_sglang, top_n, others))
 
 
 if __name__ == "__main__":

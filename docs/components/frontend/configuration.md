@@ -76,7 +76,7 @@ For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_
 | `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` | KV cache utilization fraction (0.0–1.0) for busy detection. Pass `None` to disable |
 | `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` | Absolute token count for prefill busy detection. Pass `None` to disable |
 | `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `64.0` | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold. Pass `None` to disable |
-| `--no-admission-control` | `DYN_NO_ADMISSION_CONTROL` | `false` | Disable busy-worker admission checks by clearing the busy thresholds. Router queueing remains controlled by `--router-queue-threshold` |
+| `--admission-control` | `DYN_ADMISSION_CONTROL` | `none` | Admission control mode. `token-capacity` applies the busy thresholds above; `none` clears them. Router queueing remains controlled by `--router-queue-threshold` |
 
 ## Model Discovery
 

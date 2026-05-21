@@ -36,6 +36,11 @@ tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .stats span { font-family: ui-monospace, monospace; font-weight: bold; }
 .generated { color: #888; font-size: 12px; margin-top: -0.5em; }
 .versions { color: #555; font-size: 12px; margin-top: 0.2em; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid #ccc; margin: 1em 0; }
+.tab-button { appearance: none; border: 1px solid #ccc; border-bottom: 0; background: #f5f5f5; color: #222; padding: 6px 10px; font: inherit; cursor: pointer; border-radius: 4px 4px 0 0; }
+.tab-button.active { background: #fff; font-weight: 600; position: relative; top: 1px; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
 .column-control { padding: 2px; }
 .column-control.col-collapsed { background: #eef2f7; min-width: 20px; width: 20px; }
 .col-toggle { border: 1px solid transparent; background: transparent; color: inherit; padding: 2px 5px; border-radius: 4px; font: inherit; cursor: pointer; }
@@ -117,13 +122,22 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   Auto-generated on {{ stamp|e }}{% if sha %} on commit <a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha|e }}"><code>{{ short_sha|e }}</code></a>{% endif %}:
   <code>{{ command|e }} &gt; {{ output|e }}</code>
 </p>
-<table>
+{% if tabs|length > 1 %}
+<div class="tabs" role="tablist">
+{% for tab in tabs %}
+{{ tab|safe }}
+{% endfor %}
+</div>
+{% endif %}
+{% for panel in panels %}
+<section id="{{ panel.id|e }}" class="tab-panel{% if panel.active %} active{% endif %}" role="tabpanel"{% if tabs|length > 1 %} aria-labelledby="{{ panel.id|e }}-button"{% endif %}>
+<table data-parity-table>
 <thead>
-<tr>{{ group_headers|safe }}</tr>
-<tr>{{ sub_headers|safe }}</tr>
+<tr>{{ panel.group_headers|safe }}</tr>
+<tr>{{ panel.sub_headers|safe }}</tr>
 </thead>
 <tbody>
-{% for row in body_rows %}
+{% for row in panel.body_rows %}
 {{ row|safe }}
 {% endfor %}
 </tbody>
@@ -156,43 +170,45 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   <strong>Peer parser versions</strong> pinned in
   <a href="../../../pyproject.toml">pyproject.toml</a>:
   {% for name, version in peer_versions %}{% if not loop.first %} · {% endif %}{{ name|e }} <code>{{ version|e }}</code>{% endfor %}.
-  {% endif %}
+{% endif %}
 </p>
 <p class="stats">
-  Stats: {{ stats.families }} families × {{ stats.sub_cases }} sub-cases
-  = {{ stats.slots }} grid slots ({{ stats.na }} n/a, {{ stats.missing }} missing).
-  <strong>{{ stats.real }}</strong> real cases:
-  <span style="color:#0a7d2c">{{ stats.parity }} full parity</span> ·
-  <span style="color:#555">{{ stats.documented }} documented divergences</span>
+  Stats: {{ panel.stats.families }} families × {{ panel.stats.sub_cases }} sub-cases
+  = {{ panel.stats.slots }} grid slots ({{ panel.stats.na }} n/a, {{ panel.stats.missing }} missing).
+  <strong>{{ panel.stats.real }}</strong> real cases:
+  <span style="color:#0a7d2c">{{ panel.stats.parity }} full parity</span> ·
+  <span style="color:#555">{{ panel.stats.documented }} documented divergences</span>
   (have <code>reason:</code>) ·
-  <span style="color:#c63">{{ stats.research }} research-needed</span>
+  <span style="color:#c63">{{ panel.stats.research }} research-needed</span>
   (no <code>reason:</code> yet) ·
-  <span style="color:#b00">{{ stats.errors }} expected-errors</span>.
+  <span style="color:#b00">{{ panel.stats.errors }} expected-errors</span>.
 </p>
-{% if glossary_groups %}
-<h2 id="case-descriptions">Case descriptions</h2>
+{% if panel.glossary_groups %}
+<h2 id="case-descriptions-{{ panel.mode|e }}">Case descriptions</h2>
 <p>Full case definitions:
 <a href="../../../lib/parsers/PARSER_CASES.md">lib/parsers/PARSER_CASES.md</a>.</p>
 <table class="glossary">
 <tbody>
-{% for group in glossary_groups %}
+{% for group in panel.glossary_groups %}
 <tr class="category"><td colspan="2">{{ group.label|e }}</td></tr>
 {% for sub, desc in group.rows %}
-<tr><td class="sub">PARSER.batch.{{ sub|e }}</td><td>{{ desc|e }}</td></tr>
+<tr><td class="sub">PARSER.{{ panel.mode|e }}.{{ sub|e }}</td><td>{{ desc|e }}</td></tr>
 {% endfor %}
 {% endfor %}
 </tbody>
 </table>
 {% endif %}
+</section>
+{% endfor %}
 <script>
 (function () {
   const margin = 8;
   const showDelayMs = 750;
   const hideDelayMs = 750;
   const columnButtons = Array.from(document.querySelectorAll('[data-col-toggle]'));
-  const columnKeys = columnButtons.map(function (button) {
+  const columnKeys = Array.from(new Set(columnButtons.map(function (button) {
     return button.dataset.colToggle;
-  });
+  })));
 
   function defaultVisibleColumns() {
     const visible = new Set();
@@ -278,14 +294,16 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
         el.classList.toggle('col-hidden', isVisible);
       });
     });
-    let visibleColumnCount = 0;
-    columnButtons.forEach(function (button) {
-      const key = button.dataset.colToggle;
-      const span = Number(button.dataset.colSpan || '1');
-      visibleColumnCount += visible.has(key) ? span : 1;
-    });
-    document.querySelectorAll('[data-section-span]').forEach(function (el) {
-      el.colSpan = visibleColumnCount;
+    document.querySelectorAll('table[data-parity-table]').forEach(function (table) {
+      let visibleColumnCount = 0;
+      table.querySelectorAll('[data-col-toggle]').forEach(function (button) {
+        const key = button.dataset.colToggle;
+        const span = Number(button.dataset.colSpan || '1');
+        visibleColumnCount += visible.has(key) ? span : 1;
+      });
+      table.querySelectorAll('[data-section-span]').forEach(function (el) {
+        el.colSpan = visibleColumnCount;
+      });
     });
     if (shouldUpdateUrl) {
       updateUrl(visible);
@@ -307,6 +325,24 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
         visibleColumns.add(key);
       }
       applyColumnState(visibleColumns, true);
+    });
+  });
+
+  const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
+  const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
+  function activateTab(id) {
+    tabButtons.forEach(function (button) {
+      const selected = button.dataset.tabTarget === id;
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-selected', selected ? 'true' : 'false');
+    });
+    tabPanels.forEach(function (panel) {
+      panel.classList.toggle('active', panel.id === id);
+    });
+  }
+  tabButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      activateTab(button.dataset.tabTarget);
     });
   });
 
