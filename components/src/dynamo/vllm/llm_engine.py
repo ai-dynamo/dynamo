@@ -33,6 +33,10 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.health_check import (
+    bos_token_id_or,
+    build_health_check_payload,
+)
 from dynamo.common.backend.metrics import (
     ensure_prometheus_multiproc_dir,
     register_global_registry,
@@ -411,6 +415,17 @@ class VllmLLMEngine(LLMEngine):
         if self.engine_client is not None and request_id is not None:
             await self.engine_client.abort(request_id)
             logger.debug("Aborted request %s", request_id)
+
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            logger.warning(
+                "DECODE worker: health-check canary disabled — "
+                "NixlConnector has no verified local-only bypass. "
+                "Endpoint readiness will rely on real request traffic."
+            )
+            return None
+        bos = bos_token_id_or(getattr(self.engine_client, "tokenizer", None))
+        return build_health_check_payload(bos_token_id=bos)
 
     async def cleanup(self) -> None:
         try:

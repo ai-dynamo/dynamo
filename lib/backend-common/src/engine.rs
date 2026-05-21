@@ -313,7 +313,23 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         Ok(MetricsBindings::default())
     }
+
+    /// Canary payload registered with the runtime's `HealthCheckManager`.
+    /// `Worker` calls this once after [`start`](LLMEngine::start). Returning
+    /// `Ok(None)` (default) disables active probing — the endpoint then
+    /// relies on the activity-driven notifier. Operator overrides
+    /// (`DYN_HEALTH_CHECK_PAYLOAD` env / `WorkerConfig`) take precedence
+    /// and fully replace this value when set.
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(None)
+    }
 }
+
+/// Marker key stamped on canary payloads. Handlers may inspect it to branch
+/// probe-specific behavior (e.g. skip a synthetic first-yield that would
+/// mask a hung engine rank). Re-exported to Python via
+/// `lib/bindings/python/src/dynamo/health_check.py`.
+pub const HEALTH_CHECK_KEY: &str = "_HEALTH_CHECK";
 
 /// Invoked once with a freshly-built publisher; engine drives `publish`
 /// from its own thread thereafter.
