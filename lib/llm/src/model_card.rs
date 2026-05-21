@@ -846,17 +846,20 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(gen_config.checksum().as_bytes());
                 }
 
-                // extra_files: hash sorted checksums so two workers with
-                // identical siblings produce the same mdcsum regardless
-                // of `read_dir` order. Without this, the frontend cache
-                // could serve stale metadata.
-                let mut extra_hashes: Vec<&str> = self
+                // extra_files: hash sorted (basename, checksum) pairs so
+                // (a) workers with identical siblings produce the same
+                // mdcsum regardless of `read_dir` order, and (b) the same
+                // bytes under different filenames don't collide — otherwise
+                // the frontend cache could serve a slug_dir missing siblings.
+                let mut extras: Vec<(&str, &str)> = self
                     .extra_files
                     .iter()
-                    .map(|cf| cf.checksum().hash())
+                    .map(|cf| (cf.basename().unwrap_or(""), cf.checksum().hash()))
                     .collect();
-                extra_hashes.sort_unstable();
-                for h in &extra_hashes {
+                extras.sort_unstable();
+                for (name, h) in &extras {
+                    bytes_to_hash.extend(name.as_bytes());
+                    bytes_to_hash.push(0);
                     bytes_to_hash.extend(h.as_bytes());
                 }
 
@@ -2020,6 +2023,36 @@ mod tests {
             "size": 1u64,
         }))
         .unwrap()
+    }
+
+    /// Two MDCs with `extra_files` that share bytes but differ in basename
+    /// must produce distinct mdcsums — otherwise the frontend cache would
+    /// alias them and a slug_dir built from one worker's harvest would be
+    /// reused for another worker that needs a differently-named sibling.
+    #[test]
+    fn mdcsum_extras_distinguish_basename_at_equal_checksum() {
+        let src =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let mut a = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
+        let mut b = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
+        a.extra_files.push(cf_for("/m/preprocessor_config.json"));
+        b.extra_files.push(cf_for("/m/image_processor_config.json"));
+        assert_ne!(a.mdcsum(), b.mdcsum());
+    }
+
+    /// Read-order independence: extras pushed in different order must
+    /// hash the same (sort_unstable on (basename, checksum) pairs).
+    #[test]
+    fn mdcsum_extras_stable_across_read_order() {
+        let src =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let mut a = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
+        let mut b = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
+        let cf1 = cf_for("/m/a.json");
+        let cf2 = cf_for("/m/b.json");
+        a.extra_files.extend([cf1.clone(), cf2.clone()]);
+        b.extra_files.extend([cf2, cf1]);
+        assert_eq!(a.mdcsum(), b.mdcsum());
     }
 
     #[test]
