@@ -117,6 +117,44 @@ def _make_release_handler(req_wrapper: _ZmqReqWrapper):
     return handler
 
 
+def _make_metadata_handler(req_wrapper: _ZmqReqWrapper):
+    """Build the async-generator handler for the remote-g2-metadata endpoint.
+
+    Unary RPC. Returns the source NIXL agent's identity (remote_name,
+    agent_desc bytes, connection_info, source_generation) so target
+    workers can call load_remote_agent_by_connection before issuing
+    READs.
+
+    When the caller's request includes ``peer_name`` +
+    ``peer_connection_info``, those are forwarded to the engine
+    subprocess's REP loop, which calls
+    ``source_agent.load_remote_agent_by_connection(peer_name, peer_conn)``
+    before returning. This implements the bidirectional NIXL handshake.
+    """
+
+    async def handler(request: dict, context: Any = None) -> AsyncIterator[dict]:
+        req = request or {}
+        payload: dict = {}
+        peer_name = req.get("peer_name")
+        peer_conn = req.get("peer_connection_info")
+        if peer_name:
+            payload["peer_name"] = peer_name
+        if peer_conn:
+            payload["peer_connection_info"] = peer_conn
+        loop = asyncio.get_running_loop()
+        try:
+            response = await loop.run_in_executor(
+                None, req_wrapper.request, "get_metadata", payload
+            )
+        except Exception as exc:
+            logging.exception("remote_g2: get_metadata RPC raised")
+            yield {"ok": False, "error": repr(exc)}
+            return
+        yield response
+
+    return handler
+
+
 def _ipc_socket_path() -> str:
     """The Unix-domain-socket path the engine subprocess's REP service
     binds to. Keyed by the dynamo parent's PID so multiple workers on
@@ -162,6 +200,7 @@ async def setup_source_rpc_endpoints(
 
     resolve_ep = runtime.endpoint(f"{namespace}.{component}.remote-g2-resolve")
     release_ep = runtime.endpoint(f"{namespace}.{component}.remote-g2-release")
+    metadata_ep = runtime.endpoint(f"{namespace}.{component}.remote-g2-metadata")
 
     # serve_endpoint may return either a coroutine or a Future depending on
     # the dynamo runtime version. asyncio.ensure_future accepts both and
@@ -172,10 +211,16 @@ async def setup_source_rpc_endpoints(
     _release_task = asyncio.ensure_future(
         release_ep.serve_endpoint(_make_release_handler(req_wrapper))
     )
+    _metadata_task = asyncio.ensure_future(
+        metadata_ep.serve_endpoint(_make_metadata_handler(req_wrapper))
+    )
 
     logging.warning(
         "remote_g2: source RPC endpoints registered "
-        "(resolve=%s.%s.remote-g2-resolve release=%s.%s.remote-g2-release ipc=%s)",
+        "(resolve=%s.%s.remote-g2-resolve release=%s.%s.remote-g2-release "
+        "metadata=%s.%s.remote-g2-metadata ipc=%s)",
+        namespace,
+        component,
         namespace,
         component,
         namespace,
