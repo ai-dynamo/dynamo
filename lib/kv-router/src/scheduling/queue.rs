@@ -1504,54 +1504,6 @@ mod tests {
         }
     }
 
-    fn refresh_test_queue<RF: super::super::overlap_refresh::OverlapScoresRefresh + 'static>(
-        refresh: Option<Arc<RF>>,
-        refresh_after: Option<Duration>,
-    ) -> Arc<
-        SchedulerQueue<
-            NoopSequencePublisher,
-            SimpleWorkerConfig,
-            FcfsPolicy,
-            DefaultWorkerSelector,
-            RF,
-        >,
-    > {
-        let block_size = 16u32;
-        let dp_range: HashMap<u64, (u32, u32)> = HashMap::from([(0, (0, 1))]);
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            block_size as usize,
-            dp_range,
-            false,
-            0,
-            "test",
-        ));
-        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
-        configs.insert(
-            0,
-            SimpleWorkerConfig {
-                max_num_batched_tokens: Some(64),
-                ..Default::default()
-            },
-        );
-        let (_cfg_tx, cfg_rx) = watch::channel(configs);
-        let mut queue = SchedulerQueue::new_with_overload_provider(
-            slots,
-            cfg_rx,
-            None,
-            block_size,
-            DefaultWorkerSelector::new(None, "test"),
-            FcfsPolicy,
-            None,
-            refresh,
-            None,
-        );
-        // The constructor reads the env var; override here so tests are deterministic and
-        // don't depend on global env state.
-        queue.overlap_refresh_after = refresh_after;
-        Arc::new(queue)
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn maybe_refresh_overwrites_overlap_fields_after_threshold() {
         let refresher = Arc::new(CountingRefresher {
