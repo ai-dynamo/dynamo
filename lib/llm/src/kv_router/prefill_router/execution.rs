@@ -102,6 +102,8 @@ impl PrefillRouter {
             .await?;
         let worker = details.worker;
         let overlap_blocks = details.cache_hit.rounded_overlap_blocks();
+        let decode_chosen_tier_overlap_credit_blocks =
+            Some(details.cache_hit.effective_overlap_blocks);
 
         let block_size = decode_router.block_size() as usize;
         let prompt_tokens = routing_token_ids.len();
@@ -117,11 +119,12 @@ impl PrefillRouter {
         // distribution is roughly stable, and both LHS and RHS share the same
         // snapshot bias, so the relative comparison stays meaningful.
         let (
-            prefill_chosen_overlap_blocks,
+            prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks,
             decode_pool_min_load_blocks,
+            decode_min_overlap_blocks,
         ) = if self.conditional_prefill_policy.needs_cost_terms() {
-            let (overlap, load) = self
+            let (credit, load) = self
                 .query_prefill_chosen_components(
                     routing_token_ids,
                     block_mm_infos,
@@ -132,7 +135,7 @@ impl PrefillRouter {
                     routing_constraints.clone(),
                 )
                 .await;
-            let decode_pool_min = self
+            let (decode_pool_min_load, decode_pool_min_overlap) = self
                 .query_decode_pool_min_load_blocks(
                     decode_router,
                     routing_token_ids,
@@ -145,19 +148,21 @@ impl PrefillRouter {
                     routing_constraints.clone(),
                 )
                 .await;
-            (overlap, load, decode_pool_min)
+            (credit, load, decode_pool_min_load, decode_pool_min_overlap)
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
 
         let input = ConditionalPrefillDecisionInput {
             prompt_tokens,
             block_size,
             decode_chosen_overlap_blocks: overlap_blocks,
+            decode_chosen_tier_overlap_credit_blocks,
             decode_chosen_load_blocks: details.chosen_worker_decode_blocks,
-            prefill_chosen_overlap_blocks,
+            prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks,
             decode_pool_min_load_blocks,
+            decode_min_overlap_blocks,
         };
         let net_new_tokens = input.net_new_tokens();
         let overlap_tokens = (overlap_blocks as usize) * block_size;
@@ -180,19 +185,22 @@ impl PrefillRouter {
             net_new_tokens,
             overlap_tokens,
             decode_chosen_load_blocks = ?details.chosen_worker_decode_blocks,
-            prefill_chosen_overlap_blocks = ?prefill_chosen_overlap_blocks,
+            decode_chosen_tier_overlap_credit_blocks = ?decode_chosen_tier_overlap_credit_blocks,
+            prefill_chosen_tier_overlap_credit_blocks = ?prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks = ?prefill_chosen_load_blocks,
             decode_pool_min_load_blocks = ?decode_pool_min_load_blocks,
+            decode_min_overlap_blocks = ?decode_min_overlap_blocks,
             "Conditional prefill policy declined to bypass"
         );
         Ok(None)
     }
 
     /// Peek-query the prefill router for the cost-equation-chosen prefill
-    /// worker and return the raw `(overlap_blocks, load_blocks)` components.
-    /// Returns `(None, None)` if the prefill router isn't KV-mode, isn't
-    /// activated, or the call fails. Policies that need the combined logit
-    /// can derive it via `ConditionalPrefillDecisionInput::prefill_min_logit_full()`.
+    /// worker `p` and return its `(tier_overlap_credit_blocks, decode_blocks)`
+    /// components. The tier credit is the selector's `effective_overlap_blocks`
+    /// (already tier-weighted: device + host*0.75 + disk*0.25 + ...). Returns
+    /// `(None, None)` if the prefill router isn't KV-mode, isn't activated,
+    /// or the call fails.
     #[allow(clippy::too_many_arguments)]
     async fn query_prefill_chosen_components(
         &self,
@@ -203,7 +211,7 @@ impl PrefillRouter {
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> (Option<u32>, Option<usize>) {
+    ) -> (Option<f64>, Option<usize>) {
         let Some(inner) = self.prefill_router.get() else {
             return (None, None);
         };
@@ -230,15 +238,16 @@ impl PrefillRouter {
         else {
             return (None, None);
         };
-        let overlap = Some(details.cache_hit.rounded_overlap_blocks());
+        let tier_credit = Some(details.cache_hit.effective_overlap_blocks);
         let load = details.chosen_worker_decode_blocks;
-        (overlap, load)
+        (tier_credit, load)
     }
 
     /// Peek-query the decode router with `overlap_score_credit = 0` to find
     /// the least-loaded decode worker — the worker the standard disagg path
     /// would re-pick after remote prefill — and return its projected
-    /// `decode_block`.
+    /// `(decode_block, device_overlap_blocks)`. The device overlap is needed
+    /// by the refined CostEquation's delta-aware transfer term.
     #[allow(clippy::too_many_arguments)]
     async fn query_decode_pool_min_load_blocks(
         &self,
@@ -251,12 +260,12 @@ impl PrefillRouter {
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> Option<usize> {
+    ) -> (Option<usize>, Option<u32>) {
         let load_only_override = RouterConfigOverride {
             overlap_score_credit: Some(0.0),
             ..existing_override.cloned().unwrap_or_default()
         };
-        let details = decode_router
+        let Ok(details) = decode_router
             .find_best_match_details(
                 None,
                 token_ids,
@@ -271,8 +280,12 @@ impl PrefillRouter {
                 routing_constraints,
             )
             .await
-            .ok()?;
-        details.chosen_worker_decode_blocks
+        else {
+            return (None, None);
+        };
+        let load = details.chosen_worker_decode_blocks;
+        let overlap = Some(details.cache_hit.rounded_overlap_blocks());
+        (load, overlap)
     }
 
     /// Select a prefill worker and resolve its bootstrap connection info.

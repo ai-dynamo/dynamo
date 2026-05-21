@@ -315,7 +315,8 @@ struct KvRouterConfigSerde {
     conditional_prefill_enabled: bool,
     conditional_prefill_max_new_tokens: usize,
     conditional_prefill_policy: ConditionalPrefillPolicyKind,
-    conditional_prefill_transfer_cost_blocks: usize,
+    conditional_prefill_transfer_cost_scale: f64,
+    conditional_prefill_agg_thrash_factor: f64,
     conditional_prefill_joint_sigmoid_load_threshold: f64,
     conditional_prefill_joint_sigmoid_load_scale: f64,
     conditional_prefill_joint_sigmoid_isl_threshold: f64,
@@ -356,8 +357,8 @@ impl Default for KvRouterConfigSerde {
             conditional_prefill_enabled: config.conditional_prefill_enabled,
             conditional_prefill_max_new_tokens: config.conditional_prefill_max_new_tokens,
             conditional_prefill_policy: config.conditional_prefill_policy,
-            conditional_prefill_transfer_cost_blocks: config
-                .conditional_prefill_transfer_cost_blocks,
+            conditional_prefill_transfer_cost_scale: config.conditional_prefill_transfer_cost_scale,
+            conditional_prefill_agg_thrash_factor: config.conditional_prefill_agg_thrash_factor,
             conditional_prefill_joint_sigmoid_load_threshold: config
                 .conditional_prefill_joint_sigmoid_load_threshold,
             conditional_prefill_joint_sigmoid_load_scale: config
@@ -495,11 +496,29 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub conditional_prefill_policy: ConditionalPrefillPolicyKind,
 
-    /// Per-request KV transfer cost in block units, added to the cost-equation RHS.
-    /// Stubbed at 0 in v1; TODO: model as `transfer_constant * num_transferred_blocks`
-    /// once per-backend bandwidth calibration lands.
+    /// Per-block cost of an actual KV transfer in disagg, in block-equivalent units.
+    /// Used by the refined CostEquation policy's delta-aware transfer term as
+    /// `transfer_cost_scale * (prompt_blocks − decode_min_overlap_blocks)`.
+    /// Default `0.0` disables the transfer term (treats transfer as free). For
+    /// GB200 NVLink5 + Kimi-K2.5 fp8 + block_size=512, a physically-anchored
+    /// rough default is ≈ 0.005 (transfer ~200× cheaper than prefill per block).
     #[serde(default)]
-    pub conditional_prefill_transfer_cost_blocks: usize,
+    pub conditional_prefill_transfer_cost_scale: f64,
+
+    /// CostEquation policy: multiplicative penalty on the AGG-side worker's
+    /// projected load, capturing the dual-role contention (the cache-hot
+    /// decode worker serves both prefill compute and decode iterations for
+    /// the bypassed request).
+    ///
+    /// Default `2.0` says "agg worker's load counts twice — once for prefill,
+    /// once for decode." Values < 2.0 weaken the penalty, making bypass more
+    /// favorable; values > 2.0 strengthen it. Empirical IFB-inflation in
+    /// published benchmarks lands in 1.3–2.0×, so the principled-default 2.0
+    /// is on the conservative end of the realistic range. Sweep this knob
+    /// when investigating whether the policy is over-favoring disagg.
+    #[serde(default = "default_agg_thrash_factor")]
+    #[validate(range(min = 0.0))]
+    pub conditional_prefill_agg_thrash_factor: f64,
 
     /// JointSigmoid policy: center of the prefill-load sigmoid (in blocks).
     /// Higher → harder to activate the load axis (favors disagg by default).
@@ -555,6 +574,10 @@ fn default_joint_sigmoid_isl_scale() -> f64 {
 
 fn default_joint_sigmoid_bypass_threshold() -> f64 {
     0.5
+}
+
+fn default_agg_thrash_factor() -> f64 {
+    2.0
 }
 
 /// Identifies which `ConditionalPrefillPolicy` to instantiate.
@@ -625,7 +648,8 @@ impl Default for KvRouterConfig {
             conditional_prefill_enabled: false,
             conditional_prefill_max_new_tokens: DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS,
             conditional_prefill_policy: ConditionalPrefillPolicyKind::default(),
-            conditional_prefill_transfer_cost_blocks: 0,
+            conditional_prefill_transfer_cost_scale: 0.0,
+            conditional_prefill_agg_thrash_factor: default_agg_thrash_factor(),
             conditional_prefill_joint_sigmoid_load_threshold: default_joint_sigmoid_load_threshold(
             ),
             conditional_prefill_joint_sigmoid_load_scale: default_joint_sigmoid_load_scale(),
@@ -681,8 +705,8 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             conditional_prefill_enabled: compat.conditional_prefill_enabled,
             conditional_prefill_max_new_tokens: compat.conditional_prefill_max_new_tokens,
             conditional_prefill_policy: compat.conditional_prefill_policy,
-            conditional_prefill_transfer_cost_blocks: compat
-                .conditional_prefill_transfer_cost_blocks,
+            conditional_prefill_transfer_cost_scale: compat.conditional_prefill_transfer_cost_scale,
+            conditional_prefill_agg_thrash_factor: compat.conditional_prefill_agg_thrash_factor,
             conditional_prefill_joint_sigmoid_load_threshold: compat
                 .conditional_prefill_joint_sigmoid_load_threshold,
             conditional_prefill_joint_sigmoid_load_scale: compat

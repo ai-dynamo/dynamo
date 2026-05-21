@@ -49,9 +49,13 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
             )
         if self.conditional_prefill_max_new_tokens < 0:
             raise ValueError("--router-conditional-prefill-max-new-tokens must be >= 0")
-        if self.conditional_prefill_transfer_cost_blocks < 0:
+        if self.conditional_prefill_transfer_cost_scale < 0.0:
             raise ValueError(
-                "--router-conditional-prefill-transfer-cost-blocks must be >= 0"
+                "--router-conditional-prefill-transfer-cost-scale must be >= 0.0"
+            )
+        if self.conditional_prefill_agg_thrash_factor < 0.0:
+            raise ValueError(
+                "--router-conditional-prefill-agg-thrash-factor must be >= 0.0"
             )
         if self.conditional_prefill_policy not in (
             "token_cap",

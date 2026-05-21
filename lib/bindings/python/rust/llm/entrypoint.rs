@@ -176,7 +176,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", conditional_prefill_enabled=false, conditional_prefill_max_new_tokens=5000, conditional_prefill_policy="token_cap", conditional_prefill_transfer_cost_blocks=0, conditional_prefill_joint_sigmoid_load_threshold=100.0, conditional_prefill_joint_sigmoid_load_scale=50.0, conditional_prefill_joint_sigmoid_isl_threshold=1000.0, conditional_prefill_joint_sigmoid_isl_scale=500.0, conditional_prefill_joint_sigmoid_bypass_threshold=0.5, router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", conditional_prefill_enabled=false, conditional_prefill_max_new_tokens=5000, conditional_prefill_policy="token_cap", conditional_prefill_transfer_cost_scale=0.0, conditional_prefill_agg_thrash_factor=2.0, conditional_prefill_joint_sigmoid_load_threshold=100.0, conditional_prefill_joint_sigmoid_load_scale=50.0, conditional_prefill_joint_sigmoid_isl_threshold=1000.0, conditional_prefill_joint_sigmoid_isl_scale=500.0, conditional_prefill_joint_sigmoid_bypass_threshold=0.5, router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -204,7 +204,8 @@ impl KvRouterConfig {
         conditional_prefill_enabled: bool,
         conditional_prefill_max_new_tokens: usize,
         conditional_prefill_policy: &str,
-        conditional_prefill_transfer_cost_blocks: usize,
+        conditional_prefill_transfer_cost_scale: f64,
+        conditional_prefill_agg_thrash_factor: f64,
         conditional_prefill_joint_sigmoid_load_threshold: f64,
         conditional_prefill_joint_sigmoid_load_scale: f64,
         conditional_prefill_joint_sigmoid_isl_threshold: f64,
@@ -259,7 +260,8 @@ impl KvRouterConfig {
                     "invalid conditional_prefill_policy: {conditional_prefill_policy:?}"
                 ))
             })?,
-            conditional_prefill_transfer_cost_blocks,
+            conditional_prefill_transfer_cost_scale,
+            conditional_prefill_agg_thrash_factor,
             conditional_prefill_joint_sigmoid_load_threshold,
             conditional_prefill_joint_sigmoid_load_scale,
             conditional_prefill_joint_sigmoid_isl_threshold,

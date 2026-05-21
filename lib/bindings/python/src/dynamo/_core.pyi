@@ -1377,7 +1377,8 @@ class KvRouterConfig:
         conditional_prefill_enabled: bool = False,
         conditional_prefill_max_new_tokens: int = 5000,
         conditional_prefill_policy: str = "token_cap",
-        conditional_prefill_transfer_cost_blocks: int = 0,
+        conditional_prefill_transfer_cost_scale: float = 0.0,
+        conditional_prefill_agg_thrash_factor: float = 2.0,
         conditional_prefill_joint_sigmoid_load_threshold: float = 100.0,
         conditional_prefill_joint_sigmoid_load_scale: float = 50.0,
         conditional_prefill_joint_sigmoid_isl_threshold: float = 1000.0,
@@ -1440,8 +1441,15 @@ class KvRouterConfig:
                     remote prefill + standard decode re-pick. Uses observed prefill/decode pool load.
                 "joint_sigmoid": bypass when sigmoid(prefill_load - T_L) * sigmoid(T_isl - net_new) > T_bypass.
                     Smooth, multiplicative AND-gate over prefill loadness and effective ISL smallness.
-            conditional_prefill_transfer_cost_blocks: KV transfer cost in block units, added to the cost-equation
-                RHS (default: 0). Stubbed at 0 in v1; will be modeled as transfer_constant * num_transferred_blocks.
+            conditional_prefill_transfer_cost_scale: Per-block cost of an actual KV transfer in disagg,
+                block-equivalent units (default: 0.0 = treat transfer as free). Used by the refined CostEquation
+                policy's delta-aware transfer term as `transfer_cost_scale * (prompt_blocks - decode_min_overlap_blocks)`.
+                Physically-anchored rough default for GB200 NVLink5 + Kimi-K2.5 fp8 + block_size=512 is ~0.005.
+            conditional_prefill_agg_thrash_factor: CostEquation policy. Multiplicative penalty on the AGG-side
+                worker's projected load (default: 2.0). Captures dual-role contention — the cache-hot decode
+                worker serves both prefill compute and decode iterations for the bypassed request. Values < 2.0
+                weaken the penalty (favor bypass more); values > 2.0 strengthen it. Empirical IFB-inflation in
+                published benchmarks lands in 1.3-2.0×; default 2.0 is on the conservative end.
             conditional_prefill_joint_sigmoid_load_threshold: Center of the prefill-load sigmoid in blocks
                 (default: 100.0). joint_sigmoid policy only.
             conditional_prefill_joint_sigmoid_load_scale: Transition width of the prefill-load sigmoid in blocks

@@ -447,7 +447,7 @@ impl DisaggRuntime {
         if self.conditional_prefill_policy.is_enabled()
             && self.decode_router.is_some()
             && let Some(bypass_worker_idx) =
-                self.try_conditional_prefill_bypass(&queued_request, &replay_hashes)?
+                self.try_conditional_prefill_bypass(uuid, &queued_request, &replay_hashes)?
         {
             self.handle_conditional_prefill_bypass(
                 uuid,
@@ -487,6 +487,7 @@ impl DisaggRuntime {
     /// default.
     fn try_conditional_prefill_bypass(
         &mut self,
+        uuid: Uuid,
         request: &DirectRequest,
         replay_hashes: &Option<ReplayRequestHashes>,
     ) -> Result<Option<usize>> {
@@ -519,26 +520,49 @@ impl DisaggRuntime {
 
         let needs_cost_terms = self.conditional_prefill_policy.needs_cost_terms();
         let (
-            prefill_chosen_overlap_blocks,
+            prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks,
             decode_pool_min_load_blocks,
+            decode_min_overlap_blocks,
         ) = if needs_cost_terms {
-            let (overlap, load) = self.peek_prefill_chosen_components(request, replay_hashes)?;
-            let decode_pool_min = self.peek_decode_pool_min_load_blocks(request, replay_hashes)?;
-            (overlap, load, decode_pool_min)
+            let (tier_credit, load) =
+                self.peek_prefill_chosen_components(request, replay_hashes)?;
+            let (decode_pool_min_load, decode_pool_min_overlap) =
+                self.peek_decode_pool_min_load_blocks(request, replay_hashes)?;
+            (
+                tier_credit,
+                load,
+                decode_pool_min_load,
+                decode_pool_min_overlap,
+            )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
 
+        // Offline router only models the device tier (no host-pinned / disk
+        // overlap), so the tier-weighted credit collapses to device overlap.
+        // The live router computes `device + host*0.75 + disk*0.25 + shared`
+        // (see `cache_hit_estimates_from_tiered_matches` in kv_router.rs).
         let input = ConditionalPrefillDecisionInput {
             prompt_tokens,
             block_size,
             decode_chosen_overlap_blocks: lhs.overlap_blocks,
+            decode_chosen_tier_overlap_credit_blocks: Some(lhs.overlap_blocks as f64),
             decode_chosen_load_blocks: lhs.chosen_decode_blocks,
-            prefill_chosen_overlap_blocks,
+            prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks,
             decode_pool_min_load_blocks,
+            decode_min_overlap_blocks,
         };
+
+        // Record the policy's computed costs (if any) before making the
+        // bypass decision, so downstream analysis tools can inspect the cost
+        // distribution regardless of which way the threshold tipped.
+        if let Some((agg_cost, disagg_cost)) = self.conditional_prefill_policy.evaluate_costs(input)
+        {
+            self.collector
+                .on_conditional_prefill_costs(uuid, agg_cost, disagg_cost);
+        }
 
         if self
             .conditional_prefill_policy
@@ -550,38 +574,41 @@ impl DisaggRuntime {
         }
     }
 
-    /// Peek the prefill router and return the raw chosen-worker
-    /// `(overlap_blocks, load_blocks)` components. Returns `(None, None)` if
-    /// the prefill router is absent or doesn't surface the load. Policies that
-    /// want the combined logit can derive it via
-    /// `ConditionalPrefillDecisionInput::prefill_min_logit_full()`.
+    /// Peek the prefill router and return the chosen-worker
+    /// `(tier_overlap_credit_blocks, decode_blocks)` components. Returns
+    /// `(None, None)` if the prefill router is absent.
+    ///
+    /// Offline only models the device tier, so the tier credit collapses to
+    /// `device_overlap_blocks` as `f64`.
     fn peek_prefill_chosen_components(
         &mut self,
         request: &DirectRequest,
         replay_hashes: &Option<ReplayRequestHashes>,
-    ) -> Result<(Option<u32>, Option<usize>)> {
+    ) -> Result<(Option<f64>, Option<usize>)> {
         let Some(prefill_router) = self.prefill_router.as_mut() else {
             return Ok((None, None));
         };
         let peek =
             prefill_router.peek_request(request, replay_hashes.clone(), None, self.now_ms)?;
-        Ok((Some(peek.overlap_blocks), peek.chosen_decode_blocks))
+        Ok((Some(peek.overlap_blocks as f64), peek.chosen_decode_blocks))
     }
 
     /// Peek the decode router with the load-only formulation (the same shape
-    /// the post-prefill decode hop uses) and return the load on the least-
-    /// loaded decode worker. Offline decode baseline is already
-    /// `overlap_score_credit=0.0`, so no override is needed.
+    /// the post-prefill decode hop uses) and return the chosen min-load
+    /// worker's `(decode_blocks, device_overlap_blocks)`. Offline decode
+    /// baseline is already `overlap_score_credit=0.0`, so no override is
+    /// needed. The device overlap is surfaced for the refined CostEquation's
+    /// delta-aware transfer term.
     fn peek_decode_pool_min_load_blocks(
         &mut self,
         request: &DirectRequest,
         replay_hashes: &Option<ReplayRequestHashes>,
-    ) -> Result<Option<usize>> {
+    ) -> Result<(Option<usize>, Option<u32>)> {
         let Some(decode_router) = self.decode_router.as_mut() else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let peek = decode_router.peek_request(request, replay_hashes.clone(), None, self.now_ms)?;
-        Ok(peek.chosen_decode_blocks)
+        Ok((peek.chosen_decode_blocks, Some(peek.overlap_blocks)))
     }
 
     /// Bypass remote prefill: pin the request to the probe-chosen decode
