@@ -36,7 +36,7 @@ use super::{
     AvailabilityDelta, AvailabilityStream, CommitDelta, CommitStream, CommittedBlock, Frame,
     LifecycleEvent, LifecycleStream, PeerResolver, Session, SessionFactory, SessionId,
 };
-use crate::disagg::SessionEndpoint;
+use crate::p2p::SessionEndpoint;
 use crate::leader::InstanceLeader;
 use crate::leader::dispatch::{PullRef, WirePullOptions};
 use crate::{BlockId, G2, InstanceId, SequenceHash};

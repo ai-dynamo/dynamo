@@ -35,7 +35,7 @@ use kvbm_protocols::control::modules::transfer::{
 };
 use kvbm_protocols::control::{ControlError, ControlReply, ModuleId};
 
-use crate::disagg::session::{AvailabilityDelta, CommitDelta, Session};
+use crate::p2p::session::{AvailabilityDelta, CommitDelta, Session};
 use crate::leader::InstanceLeader;
 use crate::leader::control::ControlModule;
 use crate::{G2, SequenceHash};

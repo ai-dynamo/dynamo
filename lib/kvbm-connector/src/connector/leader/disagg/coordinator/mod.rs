@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use kvbm_engine::disagg::session::Session;
+use kvbm_engine::p2p::session::Session;
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_protocols::disagg::SessionId;
 use parking_lot::Mutex;

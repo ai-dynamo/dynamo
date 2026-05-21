@@ -30,7 +30,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use futures::StreamExt;
-use kvbm_engine::disagg::session::{LifecycleEvent, Session};
+use kvbm_engine::p2p::session::{LifecycleEvent, Session};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 

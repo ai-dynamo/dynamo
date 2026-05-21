@@ -12,7 +12,7 @@
 //! coordinator caches successful resolves locally so repeat requests for the
 //! same peer don't re-pay the round-trip.
 //!
-//! The trait itself lives in `kvbm_engine::disagg::session` because
+//! The trait itself lives in `kvbm_engine::p2p::session` because
 //! `VeloSessionFactory` also needs the hook (both the puller-side `attach`
 //! and the holder-side `Frame::Attach` receive path call `attach_anchor`,
 //! which fails if the peer isn't already in velo's streaming registry).
@@ -28,7 +28,7 @@ use velo::{Velo, discovery::PeerDiscovery};
 
 use crate::InstanceId;
 
-pub use kvbm_engine::disagg::session::PeerResolver;
+pub use kvbm_engine::p2p::session::PeerResolver;
 
 /// Production resolver: looks up `PeerInfo` via the kvbm-hub and registers
 /// it on the local Velo instance. Velo::register_peer populates BOTH the

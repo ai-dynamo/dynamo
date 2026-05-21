@@ -6,7 +6,7 @@
 //! `DecodeDisaggLeader` wraps a base [`super::ConnectorLeaderApi`]
 //! and intercepts the scheduler-facing API to drive the
 //! disagg dataflow on the decode side, against the
-//! symmetric [`Session`](kvbm_engine::disagg::session::Session)
+//! symmetric [`Session`](kvbm_engine::p2p::session::Session)
 //! API.
 //!
 //! ### Pipelines
@@ -36,7 +36,7 @@ use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use futures::StreamExt;
 use kvbm_config::{DisaggConfig, DisaggregationRole};
-use kvbm_engine::disagg::session::{AvailabilityDelta, CommitDelta, Session};
+use kvbm_engine::p2p::session::{AvailabilityDelta, CommitDelta, Session};
 use kvbm_hub::{ConditionalDisaggClient, HubClient};
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
 use parking_lot::Mutex;

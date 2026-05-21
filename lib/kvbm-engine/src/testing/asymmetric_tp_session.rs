@@ -52,7 +52,7 @@ use kvbm_physical::transfer::{NixlAgent, StorageKind};
 use velo::Transport;
 use velo::transports::tcp::TcpTransportBuilder;
 
-use crate::disagg::session::VeloSessionFactory;
+use crate::p2p::session::VeloSessionFactory;
 use crate::leader::InstanceLeader;
 use crate::leader::parallelism::ParallelismTemplate;
 use crate::worker::{DirectWorker, Worker};
@@ -337,7 +337,7 @@ pub async fn create_asymmetric_leader_pair_with_workers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disagg::session::{
+    use crate::p2p::session::{
         AvailabilityDelta, CommittedBlock, LifecycleEvent, LifecycleStream, SessionFactory,
     };
     use crate::testing::token_blocks;
@@ -422,7 +422,7 @@ mod tests {
 
     async fn next_available(
         label: &str,
-        stream: &mut crate::disagg::session::AvailabilityStream,
+        stream: &mut crate::p2p::session::AvailabilityStream,
     ) -> Result<Vec<CommittedBlock>> {
         let delta = tokio::time::timeout(timeout_short(), stream.next())
             .await

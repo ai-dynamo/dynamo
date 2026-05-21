@@ -15,7 +15,7 @@
 //!   (call register_peer first)
 //! ```
 //!
-//! That error originates in `kvbm_engine::disagg::session::velo`'s
+//! That error originates in `kvbm_engine::p2p::session::velo`'s
 //! `dispatch_frame` handler for `Frame::Attach` (holder side), which
 //! calls `velo.attach_anchor` without first ensuring the puller's
 //! `PeerInfo` is in the local streaming registry. The fix wires a
@@ -43,7 +43,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use kvbm_engine::G2;
-use kvbm_engine::disagg::session::{
+use kvbm_engine::p2p::session::{
     LifecycleEvent, PeerResolver, SessionFactory, VeloSessionFactory,
 };
 use kvbm_engine::leader::InstanceLeader;

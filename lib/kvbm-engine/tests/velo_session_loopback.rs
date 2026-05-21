@@ -27,7 +27,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::StreamExt;
 use kvbm_engine::G2;
-use kvbm_engine::disagg::session::{
+use kvbm_engine::p2p::session::{
     AvailabilityDelta, CommitDelta, Frame, LifecycleEvent, Session, SessionFactory,
     VeloSessionFactory,
 };

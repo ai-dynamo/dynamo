@@ -5,7 +5,7 @@
 //! inner-leader-shim / queue traits.
 //!
 //! Session-side mocks (`MockSession` + `MockSessionFactory`) live in the
-//! engine crate at `kvbm_engine::disagg::session::testing`.
+//! engine crate at `kvbm_engine::p2p::session::testing`.
 
 use std::sync::Arc;
 

@@ -20,8 +20,7 @@ use kvbm_protocols::control::{
 
 use crate::{
     BlockId, G2, G3, InstanceId, SequenceHash,
-    disagg::RemoteBlockSet,
-    disagg::session::{SessionFactory, SessionManager},
+    p2p::{RemoteBlockSet, session::{SessionFactory, SessionManager}},
     object::ObjectBlockOps,
     worker::RemoteDescriptor,
 };

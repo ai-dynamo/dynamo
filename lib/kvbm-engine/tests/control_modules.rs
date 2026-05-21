@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kvbm_common::SequenceHash;
-use kvbm_engine::disagg::session::testing::wait_until;
-use kvbm_engine::disagg::session::{
+use kvbm_engine::p2p::session::testing::wait_until;
+use kvbm_engine::p2p::session::{
     LifecycleEvent, MockSessionFactory, SessionFactory, SessionManager,
 };
 use kvbm_engine::leader::ControlPlane;

@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use kvbm_engine::disagg::session::{PeerResolver as EnginePeerResolver, SessionFactory};
+use kvbm_engine::p2p::session::{PeerResolver as EnginePeerResolver, SessionFactory};
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_hub::protocol::LayoutCompatPayload;
 use kvbm_hub::{Feature, HubClient, IndexerFeatureConfig, P2pConfig};
@@ -93,7 +93,7 @@ pub(crate) async fn wire_p2p(
     // the coordinator) so its de-dup cache works across both paths.
     let peer_resolver = HubPeerResolver::new(Arc::clone(&hub), Arc::clone(&velo_runtime));
     let session_factory: Arc<dyn SessionFactory> =
-        kvbm_engine::disagg::session::VeloSessionFactory::with_peer_resolver(
+        kvbm_engine::p2p::session::VeloSessionFactory::with_peer_resolver(
             Arc::clone(&velo_runtime),
             Arc::clone(engine_leader),
             tokio_handle.clone(),

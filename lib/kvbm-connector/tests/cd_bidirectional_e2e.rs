@@ -64,7 +64,7 @@ use kvbm_connector::connector::leader::disagg::{
     AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, CoordinatorParts,
     DecodeDisaggLeader, HubWiring, PrefillDisaggLeader,
 };
-use kvbm_engine::disagg::session::MockSessionFactory;
+use kvbm_engine::p2p::session::MockSessionFactory;
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::manager::BlockManager;
