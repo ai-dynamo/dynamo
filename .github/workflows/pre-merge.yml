@@ -139,6 +139,14 @@ jobs:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
         lfs: true
+    # Clone Mooncake Store for kvbm-engine's optional mooncake dependency.
+    # kvbm-engine's Cargo.toml references ../../../Mooncake/mooncake-store/rust
+    # relative to lib/kvbm-engine/, which resolves to ../Mooncake from the
+    # workspace root. Required for cargo metadata even when the feature is off.
+    - name: Clone Mooncake Store
+      run: |
+        git clone --depth 1 https://github.com/kvcache-ai/Mooncake.git \
+          "${{ github.workspace }}/../Mooncake"
     - name: Verify Cargo lock file is in sync
       working-directory: ${{ matrix.dir }}
       run: cargo metadata --locked --format-version 1
