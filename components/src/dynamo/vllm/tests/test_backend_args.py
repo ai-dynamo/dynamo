@@ -37,6 +37,9 @@ def create_config() -> DynamoVllmConfig:
     config.multimodal_worker = False
     config.multimodal_encode_worker = False
     config.multimodal_decode_worker = False
+    config.enable_multimodal = False
+    config.embedding_worker = False
+    config.benchmark_mode = None
     return config
 
 
@@ -119,3 +122,58 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
             else:
                 with pytest.raises(ValueError):
                     config._resolve_disaggregation_model_from_legacy_multimodal_flags()
+
+
+class TestEmbeddingWorkerExclusivity:
+    """--embedding-worker rejects combinations that don't make sense for a
+    pooling engine (non-aggregated disagg, multimodal, benchmark-mode).
+    """
+
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        # Must not raise.
+        config._validate_embedding_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_disagg_rejected(self, mode):
+        config = create_config()
+        config.embedding_worker = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_embedding_worker_exclusivity()
+
+    def test_multimodal_combination_rejected(self):
+        config = create_config()
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.enable_multimodal = True
+        with pytest.raises(ValueError, match="multimodal"):
+            config._validate_embedding_worker_exclusivity()
+
+    def test_benchmark_mode_rejected(self):
+        # The bug surfaced by review: --embedding-worker + --benchmark-mode
+        # silently injected InstrumentedScheduler (a generation scheduler) on
+        # the pooling engine. Validation must reject the combination upfront.
+        config = create_config()
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.benchmark_mode = "agg"
+        with pytest.raises(ValueError, match="benchmark-mode"):
+            config._validate_embedding_worker_exclusivity()
+
+    def test_no_op_when_embedding_worker_disabled(self):
+        # Validator must not punish callers that have benchmark_mode set
+        # but are not running an embedding worker.
+        config = create_config()
+        config.embedding_worker = False
+        config.benchmark_mode = "agg"
+        config._validate_embedding_worker_exclusivity()
