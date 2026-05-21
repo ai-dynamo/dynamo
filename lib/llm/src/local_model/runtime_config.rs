@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
@@ -102,10 +105,12 @@ pub struct ModelRuntimeConfig {
     /// Workers publish these as metadata and as additive canonical taints with the
     /// `dynamo.topology/<domain>=<value>` format.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[validate(custom(function = "validate_topology_domains"))]
     pub topology_domains: HashMap<String, String>,
 
     /// Topology domain used for KV-cache transfer routing (e.g. "zone").
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_kv_transfer_domain"))]
     pub kv_transfer_domain: Option<String>,
 
     /// KV transfer topology enforcement mode selected by DGD (`required` or `preferred`).
@@ -209,70 +214,67 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
     }
 }
 
-fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
-    for (domain, value) in &config.topology_domains {
-        let trimmed_domain = domain.trim();
-        if trimmed_domain.is_empty() {
-            return Err(ValidationError::new(
-                "topology_domains keys must be non-empty",
-            ));
-        }
-        if trimmed_domain != domain {
-            return Err(ValidationError::new(
-                "topology_domains key must not contain leading or trailing whitespace",
-            ));
-        }
-        if domain.contains('=') {
-            return Err(ValidationError::new(
-                "topology_domains key must not contain '='",
-            ));
-        }
+fn validation_error(code: &'static str, message: impl Into<Cow<'static, str>>) -> ValidationError {
+    let mut error = ValidationError::new(code);
+    error.message = Some(message.into());
+    error
+}
 
-        let trimmed_value = value.trim();
-        if trimmed_value.is_empty() {
-            return Err(ValidationError::new(
-                "topology_domains values must be non-empty",
-            ));
-        }
-        if trimmed_value != value {
-            return Err(ValidationError::new(
-                "topology_domains value must not contain leading or trailing whitespace",
-            ));
-        }
-        if value.contains('=') {
-            return Err(ValidationError::new(
-                "topology_domains value must not contain '='",
-            ));
-        }
+fn validate_taint_component(
+    component: &str,
+    code_prefix: &'static str,
+    name: &'static str,
+) -> Result<(), ValidationError> {
+    if component.trim().is_empty() {
+        return Err(validation_error(
+            code_prefix,
+            format!("{name} must be non-empty"),
+        ));
+    }
+    if component.trim() != component {
+        return Err(validation_error(
+            code_prefix,
+            format!("{name} must not contain leading or trailing whitespace"),
+        ));
+    }
+    if component.contains('=') {
+        return Err(validation_error(
+            code_prefix,
+            format!("{name} must not contain '='"),
+        ));
     }
 
-    if let Some(domain) = &config.kv_transfer_domain {
-        let trimmed_domain = domain.trim();
-        if trimmed_domain.is_empty() {
-            return Err(ValidationError::new(
-                "kv_transfer_domain must be non-empty when set",
-            ));
-        }
-        if trimmed_domain != domain {
-            return Err(ValidationError::new(
-                "kv_transfer_domain must not contain leading or trailing whitespace",
-            ));
-        }
-        if domain.contains('=') {
-            return Err(ValidationError::new(
-                "kv_transfer_domain must not contain '='",
-            ));
-        }
+    Ok(())
+}
 
-        if !config.topology_domains.contains_key(domain) {
-            return Err(ValidationError::new(
-                "kv_transfer_domain must reference a key in topology_domains",
-            ));
-        }
+fn validate_topology_domains(
+    topology_domains: &HashMap<String, String>,
+) -> Result<(), ValidationError> {
+    for (domain, value) in topology_domains {
+        validate_taint_component(domain, "invalid_topology_domain", "topology_domains key")?;
+        validate_taint_component(value, "invalid_topology_value", "topology_domains value")?;
+    }
+
+    Ok(())
+}
+
+fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
+    validate_taint_component(domain, "invalid_kv_transfer_domain", "kv_transfer_domain")
+}
+
+fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    if let Some(domain) = &config.kv_transfer_domain
+        && !config.topology_domains.contains_key(domain)
+    {
+        return Err(validation_error(
+            "missing_kv_transfer_domain",
+            "kv_transfer_domain must reference a key in topology_domains",
+        ));
     }
 
     if config.kv_transfer_enforcement.is_some() && config.kv_transfer_domain.is_none() {
-        return Err(ValidationError::new(
+        return Err(validation_error(
+            "missing_kv_transfer_domain",
             "kv_transfer_enforcement requires kv_transfer_domain",
         ));
     }
@@ -282,7 +284,8 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
         Some(KvTransferEnforcement::Preferred)
     ) && config.kv_transfer_preferred_weight.is_none()
     {
-        return Err(ValidationError::new(
+        return Err(validation_error(
+            "missing_kv_transfer_preferred_weight",
             "kv_transfer_preferred_weight is required when kv_transfer_enforcement is preferred",
         ));
     }
@@ -293,7 +296,8 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
             Some(KvTransferEnforcement::Preferred)
         )
     {
-        return Err(ValidationError::new(
+        return Err(validation_error(
+            "invalid_kv_transfer_preferred_weight",
             "kv_transfer_preferred_weight can only be set when kv_transfer_enforcement is preferred",
         ));
     }
@@ -614,7 +618,7 @@ mod tests {
         };
 
         let error = config.validate_config().unwrap_err();
-        assert!(error.contains("kv_transfer_domain must be non-empty when set"));
+        assert!(error.contains("kv_transfer_domain must be non-empty"));
     }
 
     #[test]
