@@ -299,3 +299,15 @@ runs:
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore
+
+    - name: Verify Allure Results
+      if: always() && inputs.dry_run != 'true'
+      shell: bash
+      run: |
+        ALLURE_DIR="test-results/allure-results"
+        if [[ ! -d "${ALLURE_DIR}" ]] || [[ -z "$(ls -A "${ALLURE_DIR}" 2>/dev/null)" ]]; then
+          echo "❌ Allure results not found at ${ALLURE_DIR} — pytest jobs must produce an allure report"
+          exit 1
+        fi
+        FILE_COUNT=$(find "${ALLURE_DIR}" -type f | wc -l)
+        echo "✅ Allure results present (${FILE_COUNT} files in ${ALLURE_DIR})"
