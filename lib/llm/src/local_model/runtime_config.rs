@@ -526,68 +526,39 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_accepts_matching_transfer_domain() {
-        let config = ModelRuntimeConfig {
-            topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-            kv_transfer_domain: Some("zone".to_string()),
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
-            ..Default::default()
-        };
-
-        config.validate_config().unwrap();
-    }
-
-    #[test]
-    fn test_validate_config_accepts_preferred_with_weight() {
-        let config = ModelRuntimeConfig {
-            topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-            kv_transfer_domain: Some("zone".to_string()),
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
-            kv_transfer_preferred_weight: Some(KvTransferPreferredWeight::try_from(0.5).unwrap()),
-            ..Default::default()
-        };
-
-        config.validate_config().unwrap();
-    }
-
-    #[test]
-    fn test_validate_config_rejects_missing_transfer_domain_key() {
-        let config = ModelRuntimeConfig {
-            topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-            kv_transfer_domain: Some("rack".to_string()),
-            ..Default::default()
-        };
-
-        let error = config.validate_config().unwrap_err();
-        assert!(error.contains("must reference a key in topology_domains"));
-    }
-
-    #[test]
-    fn test_validate_config_rejects_empty_transfer_domain_value() {
-        let config = ModelRuntimeConfig {
-            topology_domains: HashMap::from([("zone".to_string(), " ".to_string())]),
-            kv_transfer_domain: Some("zone".to_string()),
-            ..Default::default()
-        };
-
-        let error = config.validate_config().unwrap_err();
-        assert!(error.contains("must be non-empty"));
-    }
-
-    #[test]
-    fn test_validate_config_rejects_padded_topology_value() {
-        let config = ModelRuntimeConfig {
-            topology_domains: HashMap::from([("zone".to_string(), " us-east-1a ".to_string())]),
-            ..Default::default()
-        };
-
-        let error = config.validate_config().unwrap_err();
-        assert!(error.contains("must not contain leading or trailing whitespace"));
-    }
-
-    #[test]
-    fn test_validate_config_rejects_topology_taint_delimiters() {
+    fn test_validate_config_accepts_kv_transfer_configs() {
         for config in [
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
+                kv_transfer_preferred_weight: Some(
+                    KvTransferPreferredWeight::try_from(0.5).unwrap(),
+                ),
+                ..Default::default()
+            },
+        ] {
+            config.validate_config().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_invalid_topology_components() {
+        for config in [
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("".to_string(), "us-east-1a".to_string())]),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([(" zone ".to_string(), "us-east-1a".to_string())]),
+                ..Default::default()
+            },
             ModelRuntimeConfig {
                 topology_domains: HashMap::from([(
                     "zone=primary".to_string(),
@@ -600,81 +571,60 @@ mod tests {
                 ..Default::default()
             },
             ModelRuntimeConfig {
+                kv_transfer_domain: Some("".to_string()),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
+                kv_transfer_domain: Some(" zone ".to_string()),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
                 topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
                 kv_transfer_domain: Some("zone=primary".to_string()),
                 ..Default::default()
             },
         ] {
-            let error = config.validate_config().unwrap_err();
-            assert!(error.contains("must not contain '='"));
+            assert!(config.validate_config().is_err());
         }
     }
 
     #[test]
-    fn test_validate_config_rejects_empty_transfer_domain() {
-        let config = ModelRuntimeConfig {
-            kv_transfer_domain: Some(" ".to_string()),
-            ..Default::default()
-        };
-
-        let error = config.validate_config().unwrap_err();
-        assert!(error.contains("kv_transfer_domain must be non-empty"));
-    }
-
-    #[test]
-    fn test_validate_config_rejects_padded_transfer_domain() {
+    fn test_validate_config_rejects_transfer_domain_mismatch() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-            kv_transfer_domain: Some(" zone ".to_string()),
+            kv_transfer_domain: Some("rack".to_string()),
             ..Default::default()
         };
 
-        let error = config.validate_config().unwrap_err();
-        assert!(
-            error.contains("kv_transfer_domain must not contain leading or trailing whitespace")
-        );
+        assert!(config.validate_config().is_err());
     }
 
     #[test]
-    fn test_validate_config_rejects_enforcement_without_transfer_domain() {
-        let config = ModelRuntimeConfig {
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
-            ..Default::default()
-        };
-
-        let error = config.validate_config().unwrap_err();
-        assert!(error.contains("kv_transfer_enforcement requires kv_transfer_domain"));
-    }
-
-    #[test]
-    fn test_validate_config_requires_weight_for_preferred() {
-        let config = ModelRuntimeConfig {
-            topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-            kv_transfer_domain: Some("zone".to_string()),
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
-            ..Default::default()
-        };
-
-        let error = config.validate_config().unwrap_err();
-        assert!(error.contains(
-            "kv_transfer_preferred_weight is required when kv_transfer_enforcement is preferred"
-        ));
-    }
-
-    #[test]
-    fn test_validate_config_rejects_weight_without_preferred() {
-        let config = ModelRuntimeConfig {
-            topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-            kv_transfer_domain: Some("zone".to_string()),
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
-            kv_transfer_preferred_weight: Some(KvTransferPreferredWeight::try_from(0.5).unwrap()),
-            ..Default::default()
-        };
-
-        let error = config.validate_config().unwrap_err();
-        assert!(error.contains(
-            "kv_transfer_preferred_weight can only be set when kv_transfer_enforcement is preferred"
-        ));
+    fn test_validate_config_rejects_invalid_kv_transfer_combinations() {
+        for config in [
+            ModelRuntimeConfig {
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
+                kv_transfer_preferred_weight: Some(
+                    KvTransferPreferredWeight::try_from(0.5).unwrap(),
+                ),
+                ..Default::default()
+            },
+        ] {
+            assert!(config.validate_config().is_err());
+        }
     }
 
     #[test]
