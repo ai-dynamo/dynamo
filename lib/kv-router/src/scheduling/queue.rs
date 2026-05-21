@@ -1,18 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use parking_lot::Mutex as SyncMutex;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use tokio::sync::Mutex;
-use tokio::sync::watch;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio::time::Instant;
 
 use super::config::RouterQueueDepthTiers;
 use super::overlap_refresh::{
-    NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
-    should_refresh_overlap,
+    NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, read_overlap_refresh_after,
+    refresh_overlap, should_refresh_overlap,
 };
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
@@ -82,7 +82,16 @@ struct PendingState<K: Ord + Eq> {
     heap: BinaryHeap<QueueEntry<K>>,
     count: usize,
     isl_tokens: usize,
+    /// The heap head can be physically removed while an async refresh is in flight, but it
+    /// remains logically queued until the reservation commits. This keeps queue depth/caps
+    /// conservative and prevents later entries from skipping the refreshing head.
+    reserved_head: Option<ReservedHead>,
     next_entry_id: u64,
+}
+
+struct ReservedHead {
+    id: u64,
+    isl_tokens: usize,
 }
 
 impl<K: Ord + Eq> Default for PendingState<K> {
@@ -91,6 +100,7 @@ impl<K: Ord + Eq> Default for PendingState<K> {
             heap: BinaryHeap::new(),
             count: 0,
             isl_tokens: 0,
+            reserved_head: None,
             next_entry_id: 0,
         }
     }
@@ -122,19 +132,129 @@ impl<K: Ord + Eq> PendingState<K> {
         self.heap.peek()
     }
 
-    fn pop_front(&mut self) -> Option<QueueEntry<K>> {
+    fn has_reserved_head(&self) -> bool {
+        self.reserved_head.is_some()
+    }
+
+    fn reserve_front(&mut self) -> Option<QueueEntry<K>> {
+        // Invariant: only one head entry may be reserved off-heap at a time.
+        if self.reserved_head.is_some() {
+            return None;
+        }
         let entry = self.heap.pop()?;
+        self.reserved_head = Some(ReservedHead {
+            id: entry.id,
+            isl_tokens: entry.request.isl_tokens,
+        });
+        Some(entry)
+    }
+
+    fn complete_reserved_head(&mut self, entry: &QueueEntry<K>) {
+        let reserved = self
+            .reserved_head
+            .take()
+            .expect("reserved head missing during commit");
+        debug_assert_eq!(reserved.id, entry.id);
+        debug_assert_eq!(reserved.isl_tokens, entry.request.isl_tokens);
         self.count = checked_or_saturating_sub(self.count, 1, "pending count underflow");
         self.isl_tokens = checked_or_saturating_sub(
             self.isl_tokens,
             entry.request.isl_tokens,
             "pending isl_tokens underflow",
         );
-        Some(entry)
+    }
+
+    fn requeue_reserved_head(&mut self, entry: QueueEntry<K>) {
+        let reserved = self
+            .reserved_head
+            .take()
+            .expect("reserved head missing during requeue");
+        debug_assert_eq!(reserved.id, entry.id);
+        debug_assert_eq!(reserved.isl_tokens, entry.request.isl_tokens);
+        self.heap.push(entry);
     }
 
     fn queued_isl_tokens(&self) -> usize {
         self.isl_tokens
+    }
+}
+
+struct PendingReservation<'a, K: Ord + Eq> {
+    pending: &'a SyncMutex<PendingState<K>>,
+    pending_count: &'a AtomicUsize,
+    pending_isl_tokens: &'a AtomicUsize,
+    /// Owns the reserved heap entry across await points. If the task is cancelled before
+    /// `commit`, `Drop` requeues this entry and clears `reserved_head`.
+    entry: Option<QueueEntry<K>>,
+}
+
+impl<'a, K: Ord + Eq> PendingReservation<'a, K> {
+    fn new(
+        pending: &'a SyncMutex<PendingState<K>>,
+        pending_count: &'a AtomicUsize,
+        pending_isl_tokens: &'a AtomicUsize,
+        entry: QueueEntry<K>,
+    ) -> Self {
+        Self {
+            pending,
+            pending_count,
+            pending_isl_tokens,
+            entry: Some(entry),
+        }
+    }
+
+    fn entry(&self) -> &QueueEntry<K> {
+        self.entry.as_ref().expect("pending reservation consumed")
+    }
+
+    fn request(&self) -> &SchedulingRequest {
+        &self.entry().request
+    }
+
+    fn enqueue_at(&self) -> Instant {
+        self.entry().enqueue_at
+    }
+
+    fn block_hashes(&self) -> Option<&[LocalBlockHash]> {
+        self.entry().block_hashes.as_deref()
+    }
+
+    fn apply_refreshed_overlap(&mut self, refreshed: RefreshedOverlap) {
+        let request = &mut self
+            .entry
+            .as_mut()
+            .expect("pending reservation consumed")
+            .request;
+        request.tier_overlap_blocks = refreshed.tier_overlap_blocks;
+        request.effective_overlap_blocks = refreshed.effective_overlap_blocks;
+        request.effective_cached_tokens = refreshed.effective_cached_tokens;
+    }
+
+    fn commit(mut self) -> QueueEntry<K> {
+        let entry = self.entry.take().expect("pending reservation consumed");
+        let mut pending = self.pending.lock();
+        // This is the only point where a reserved entry leaves the logical queue.
+        // Invariant: pending counters only change on enqueue or commit.
+        pending.complete_reserved_head(&entry);
+        self.pending_count
+            .store(pending.count, AtomicOrdering::Relaxed);
+        self.pending_isl_tokens
+            .store(pending.isl_tokens, AtomicOrdering::Relaxed);
+        entry
+    }
+
+    fn requeue(self) {
+        drop(self);
+    }
+}
+
+impl<K: Ord + Eq> Drop for PendingReservation<'_, K> {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            let mut pending = self.pending.lock();
+            // Invariant: if `commit` did not run, `Drop` must restore the reserved head.
+            pending.requeue_reserved_head(entry);
+        }
     }
 }
 
@@ -149,9 +269,12 @@ pub struct SchedulerQueue<
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
     RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
-    pending: Mutex<PendingState<S::Key>>,
+    // Intentionally synchronous: pending mutations are short, CPU-only critical sections
+    // and are never held across `.await`. This lets `PendingReservation::drop` repair state
+    // on task cancellation without needing async cleanup.
+    pending: SyncMutex<PendingState<S::Key>>,
     /// Serializes admission so worker selection always sees prior bookings.
-    admission_gate: Mutex<()>,
+    admission_gate: AsyncMutex<()>,
     /// Cached pending count for lock-free metrics reads. The authoritative state lives in
     /// `pending`; this atomic is updated from that locked state after each mutation.
     pending_count: AtomicUsize,
@@ -220,8 +343,8 @@ impl<
             None
         };
         Self {
-            pending: Mutex::new(PendingState::default()),
-            admission_gate: Mutex::new(()),
+            pending: SyncMutex::new(PendingState::default()),
+            admission_gate: AsyncMutex::new(()),
             pending_count: AtomicUsize::new(0),
             pending_isl_tokens: AtomicUsize::new(0),
             slots,
@@ -371,18 +494,21 @@ impl<
         let Some(threshold) = self.threshold_frac else {
             // Queueing disabled — the request dispatches immediately and never sits in the
             // pending heap, so `block_hashes` would never be consulted. Drop them on the floor.
-            self.admit_one(request, decay_now).await;
+            self.admit_one(request, decay_now);
             return;
         };
 
         if eligibility.bypasses_capacity_check() {
             // Bypasses the capacity check (external routing) — admitted without ever queueing,
             // so `block_hashes` are intentionally discarded.
-            self.admit_one(request, decay_now).await;
+            self.admit_one(request, decay_now);
             return;
         }
 
-        if self.all_workers_prefill_busy(threshold, request.eligibility(), decay_now) {
+        let reserved_head_inflight = self.pending.lock().has_reserved_head();
+        if reserved_head_inflight
+            || self.all_workers_prefill_busy(threshold, request.eligibility(), decay_now)
+        {
             tracing::debug!("all workers prefill-busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = {
@@ -395,7 +521,7 @@ impl<
             } else {
                 self.tier_cap_for_request(&request)
             };
-            let mut pending = self.pending.lock().await;
+            let mut pending = self.pending.lock();
             if let Some(max_isl_tokens) = max_isl_tokens {
                 let pending_isl_tokens = pending.queued_isl_tokens();
                 // This is a rejection threshold on current queued ISL, not a hard
@@ -415,7 +541,7 @@ impl<
         } else {
             // Workers have capacity — admit without queueing. `block_hashes` are intentionally
             // discarded; refresh is only meaningful for requests that actually wait.
-            self.admit_one(request, decay_now).await;
+            self.admit_one(request, decay_now);
         }
     }
 
@@ -430,7 +556,10 @@ impl<
         if S::DYNAMIC {
             let _admission = self.admission_gate.lock().await;
             let now = self.start_time.elapsed();
-            let mut pending = self.pending.lock().await;
+            let mut pending = self.pending.lock();
+            if pending.has_reserved_head() {
+                return;
+            }
             let workers = self.workers_with_configs.borrow();
             let rekeyed: Vec<_> = std::mem::take(&mut pending.heap)
                 .into_vec()
@@ -451,88 +580,103 @@ impl<
         }
 
         loop {
-            let _admission = self.admission_gate.lock().await;
-            let decay_now = Instant::now();
-            let mut pending = self.pending.lock().await;
-            let Some(front) = pending.peek_front() else {
-                break;
+            let mut reservation = {
+                let _admission = self.admission_gate.lock().await;
+                let decay_now = Instant::now();
+                let mut pending = self.pending.lock();
+                if pending.has_reserved_head() {
+                    break;
+                }
+                let Some(front) = pending.peek_front() else {
+                    break;
+                };
+                // TODO: This preserves head-of-line blocking for now to keep queue
+                // drain overhead bounded to the heap front. A blocked pinned or
+                // otherwise constrained request can temporarily stall later
+                // schedulable entries until we adopt a cheaper non-HOL strategy.
+                if self.all_workers_prefill_busy(threshold, front.request.eligibility(), decay_now)
+                {
+                    break;
+                }
+                let should_refresh = should_refresh_overlap(
+                    self.overlap_scores_refresh.is_some(),
+                    self.overlap_refresh_after,
+                    front.block_hashes.as_deref(),
+                    front.enqueue_at,
+                    decay_now,
+                );
+                let Some(entry) = pending.reserve_front() else {
+                    break;
+                };
+                drop(pending);
+                // The reservation owns the physical entry. `reserved_head` keeps it logically
+                // queued until commit, so queue caps and ordering remain conservative while
+                // refresh runs without holding the pending lock or admission gate.
+                let reservation = PendingReservation::new(
+                    &self.pending,
+                    &self.pending_count,
+                    &self.pending_isl_tokens,
+                    entry,
+                );
+                if !should_refresh {
+                    let entry = reservation.commit();
+                    let request = entry.request;
+                    tracing::debug!("scheduling request from pending queue");
+                    self.admit_one(request, decay_now);
+                    continue;
+                }
+                reservation
             };
-            // TODO: This preserves head-of-line blocking for now to keep queue
-            // drain overhead bounded to the heap front. A blocked pinned or
-            // otherwise constrained request can temporarily stall later
-            // schedulable entries until we adopt a cheaper non-HOL strategy.
-            if self.all_workers_prefill_busy(threshold, front.request.eligibility(), decay_now) {
-                break;
-            }
-            let front_id = front.id;
-            let front_hashes = front.block_hashes.as_deref();
-            let enqueue_at = front.enqueue_at;
-            let request_id = front
-                .request
+
+            let enqueue_at = reservation.enqueue_at();
+            let request_id = reservation
+                .request()
                 .maybe_request_id
                 .as_deref()
                 .unwrap_or("unknown")
                 .to_string();
-            let refreshed = if should_refresh_overlap(
-                self.overlap_scores_refresh.is_some(),
+            let refresh_inputs = reservation.block_hashes().map(|hashes| hashes.to_vec());
+            let refreshed = refresh_overlap(
+                self.overlap_scores_refresh.as_deref(),
                 self.overlap_refresh_after,
-                front_hashes,
+                refresh_inputs.as_deref(),
                 enqueue_at,
-                decay_now,
-            ) {
-                let refresh_inputs = front_hashes.map(|hashes| hashes.to_vec());
-                drop(pending);
-                let refreshed = refresh_overlap(
-                    self.overlap_scores_refresh.as_deref(),
-                    self.overlap_refresh_after,
-                    refresh_inputs.as_deref(),
-                    enqueue_at,
-                    decay_now,
-                )
-                .await;
-                let wait_ms = enqueue_at.elapsed().as_millis() as u64;
-                if refreshed.is_some() {
-                    tracing::info!(
-                        request_id,
-                        wait_ms,
-                        "refreshed overlap scores after long queue wait"
-                    );
-                } else {
-                    tracing::debug!(
-                        request_id,
-                        wait_ms,
-                        "overlap refresh returned None; dispatching with stale scores"
-                    );
-                }
-                pending = self.pending.lock().await;
-                refreshed
+                Instant::now(),
+            )
+            .await;
+            let wait_ms = enqueue_at.elapsed().as_millis() as u64;
+            if refreshed.is_some() {
+                tracing::info!(
+                    request_id,
+                    wait_ms,
+                    "refreshed overlap scores after long queue wait"
+                );
             } else {
-                drop(pending);
-                pending = self.pending.lock().await;
-                None
-            };
+                tracing::debug!(
+                    request_id,
+                    wait_ms,
+                    "overlap refresh returned None; dispatching with stale scores"
+                );
+            }
 
-            let Some(front) = pending.peek_front() else {
-                break;
-            };
-            if front.id != front_id {
-                continue;
-            }
-            let admit_now = Instant::now();
-            if self.all_workers_prefill_busy(threshold, front.request.eligibility(), admit_now) {
-                break;
-            }
-            let entry = pending.pop_front().expect("heap front vanished before pop");
-            self.publish_pending_snapshot(&pending);
-            drop(pending);
-            let mut request = entry.request;
             if let Some(refreshed) = refreshed {
-                request.tier_overlap_blocks = refreshed.tier_overlap_blocks;
-                request.effective_overlap_blocks = refreshed.effective_overlap_blocks;
-                request.effective_cached_tokens = refreshed.effective_cached_tokens;
+                reservation.apply_refreshed_overlap(refreshed);
             }
+
+            let _admission = self.admission_gate.lock().await;
+            let admit_now = Instant::now();
+            if self.all_workers_prefill_busy(
+                threshold,
+                reservation.request().eligibility(),
+                admit_now,
+            ) {
+                reservation.requeue();
+                break;
+            }
+            let entry = reservation.commit();
+            let request = entry.request;
             tracing::debug!("scheduling request from pending queue");
-            self.admit_one(request, admit_now).await;
+            self.admit_one(request, admit_now);
         }
     }
 
@@ -546,7 +690,7 @@ impl<
 
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
-    async fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
+    fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
             request.token_seq.as_deref(),
             &request.prefill_token_deltas(),
@@ -1751,6 +1895,98 @@ mod tests {
         }
     }
 
+    struct BlockingRefresher {
+        calls: std::sync::atomic::AtomicUsize,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        response: super::super::overlap_refresh::RefreshedOverlap,
+    }
+
+    impl BlockingRefresher {
+        fn new(response: super::super::overlap_refresh::RefreshedOverlap) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                response,
+            }
+        }
+
+        async fn wait_for_calls(&self, target: usize) {
+            while self.calls.load(std::sync::atomic::Ordering::Relaxed) < target {
+                self.started.notified().await;
+            }
+        }
+
+        fn release_one(&self) {
+            self.release.notify_one();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::overlap_refresh::OverlapScoresRefresh for BlockingRefresher {
+        async fn refresh(
+            &self,
+            _block_hashes: &[crate::protocols::LocalBlockHash],
+        ) -> Option<super::super::overlap_refresh::RefreshedOverlap> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.started.notify_one();
+            self.release.notified().await;
+            Some(self.response.clone())
+        }
+    }
+
+    fn make_queue_with_blocking_refresher(
+        refresher: Arc<BlockingRefresher>,
+        queue_depth_tiers: RouterQueueDepthTiers,
+    ) -> (
+        Arc<
+            SchedulerQueue<
+                NoopSequencePublisher,
+                SimpleWorkerConfig,
+                FcfsPolicy,
+                DefaultWorkerSelector,
+                BlockingRefresher,
+            >,
+        >,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let block_size = 16u32;
+        let isl = 512usize;
+        let dp_range = HashMap::from([(0_u64, (0_u32, 1_u32))]);
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+        let configs = HashMap::from([(
+            0_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        )]);
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+        let mut queue = SchedulerQueue::new_with_overlap_refresh(
+            Arc::clone(&slots),
+            cfg_rx,
+            Some(0.0),
+            queue_depth_tiers,
+            block_size,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+            Some(refresher),
+            None,
+        );
+        queue.overlap_refresh_after = Some(Duration::ZERO);
+        (Arc::new(queue), slots)
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn maybe_refresh_overwrites_overlap_fields_after_threshold() {
         let refresher = Arc::new(CountingRefresher {
@@ -2031,6 +2267,144 @@ mod tests {
         assert_eq!(resp3.effective_overlap_blocks, 9.0);
         assert_eq!(resp3.cached_tokens, 144);
         assert_eq!(queue.pending_count(), 0, "heap must drain");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_cancellation_during_refresh_requeues_reserved_head() {
+        let isl = 512usize;
+        let refresher = Arc::new(BlockingRefresher::new(
+            super::super::overlap_refresh::RefreshedOverlap::default(),
+        ));
+        let (queue, slots) = make_queue_with_blocking_refresher(
+            refresher.clone(),
+            RouterQueueDepthTiers::unbounded_cap(),
+        );
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        let (req2, mut rx2) = make_request("req-2", isl);
+        queue
+            .enqueue_with_block_hashes(req2, Some(vec![LocalBlockHash(42)]))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
+
+        slots.free(&"req-1".to_string(), decay_now()).unwrap();
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue.update().await;
+            })
+        };
+        refresher.wait_for_calls(1).await;
+        update.abort();
+        assert!(update.await.unwrap_err().is_cancelled());
+
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
+        assert!(
+            rx2.try_recv().is_err(),
+            "cancelled refresh must not drop or respond to the queued request"
+        );
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue.update().await;
+            })
+        };
+        refresher.wait_for_calls(2).await;
+        refresher.release_one();
+        update.await.unwrap();
+
+        let resp2 = rx2.await.unwrap().unwrap();
+        assert_eq!(resp2.best_worker, WorkerWithDpRank::new(0, 0));
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.pending_isl_tokens(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queue_cap_counts_reserved_refresh_head() {
+        let isl = 512usize;
+        let tiers = RouterQueueDepthTiers::try_from(vec![RouterQueueDepthByMissingIslTier {
+            missing_cache_tokens_floor: 0,
+            max_queue_depth: isl,
+        }])
+        .unwrap();
+        let refresher = Arc::new(BlockingRefresher::new(
+            super::super::overlap_refresh::RefreshedOverlap::default(),
+        ));
+        let (queue, slots) = make_queue_with_blocking_refresher(refresher.clone(), tiers);
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        let (req2, mut rx2) = make_request("req-2", isl);
+        queue
+            .enqueue_with_block_hashes(req2, Some(vec![LocalBlockHash(42)]))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
+
+        slots.free(&"req-1".to_string(), decay_now()).unwrap();
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue.update().await;
+            })
+        };
+        refresher.wait_for_calls(1).await;
+        assert_eq!(
+            queue.pending_isl_tokens(),
+            isl,
+            "reserved refresh head must still count toward queue depth"
+        );
+
+        let (req3, rx3) = make_request("req-3", isl);
+        let enqueue3 = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue.enqueue(req3).await;
+            })
+        };
+        match tokio::time::timeout(Duration::from_secs(1), enqueue3).await {
+            Ok(join_result) => join_result.unwrap(),
+            Err(_) => {
+                refresher.release_one();
+                update.await.unwrap();
+                panic!("enqueue blocked behind overlap refresh admission gate");
+            }
+        }
+
+        let resp3 = rx3.await.expect("oneshot dropped");
+        assert!(
+            matches!(
+                resp3,
+                Err(KvSchedulerError::Backpressure {
+                    reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
+                    queued_isl_tokens: 512,
+                    max_queued_isl_tokens: Some(512),
+                })
+            ),
+            "reserved head should fill the queue cap, got {resp3:?}"
+        );
+        assert!(
+            rx2.try_recv().is_err(),
+            "reserved request must not respond until refresh is released"
+        );
+
+        refresher.release_one();
+        update.await.unwrap();
+
+        let resp2 = rx2.await.unwrap().unwrap();
+        assert_eq!(resp2.best_worker, WorkerWithDpRank::new(0, 0));
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.pending_isl_tokens(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
