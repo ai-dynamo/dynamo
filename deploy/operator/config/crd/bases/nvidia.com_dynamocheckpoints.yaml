@@ -79,9 +79,46 @@ spec:
                       type: string
                     enabled:
                       description: |-
-                        Enabled activates the GMS sidecar. GPU resources on the main container
-                        are replaced with a DRA ResourceClaim for shared GPU access.
+                        Enabled activates GMS wiring. GPU resources on client containers are
+                        replaced with a DRA ResourceClaim for shared GPU access.
                       type: boolean
+                    extraClientContainers:
+                      description: |-
+                        ExtraClientContainers lists additional user-declared containers that should
+                        be wired as GMS clients in intrapod pods/jobs. In each rendered pod, only
+                        matching container names are wired; absent names are ignored.
+                      items:
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    extraClientPods:
+                      description: |-
+                        ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+                        reserved for future use and is rejected until inter-pod client orchestration is wired.
+                      items:
+                        description: GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+                        properties:
+                          name:
+                            description: Name identifies this client pod.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          podTemplate:
+                            description: PodTemplate configures the pod to run as a GMS client.
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                        required:
+                          - name
+                          - podTemplate
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
                     mode:
                       default: intraPod
                       description: Mode selects the GMS deployment topology.
@@ -92,6 +129,13 @@ spec:
                   required:
                     - enabled
                   type: object
+                  x-kubernetes-validations:
+                    - message: extraClientContainers is only supported with mode=intraPod
+                      rule: '!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == ''intraPod'''
+                    - message: extraClientPods is only supported with mode=interPod
+                      rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''interPod'''
+                    - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
+                      rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                 identity:
                   description: Identity defines the inputs that determine checkpoint equivalence
                   properties:
@@ -8236,6 +8280,13 @@ spec:
                       x-kubernetes-validations:
                         - message: size is required when disabled is false
                           rule: (has(self.disabled) && self.disabled) || (has(self.size) && quantity(self.size).isGreaterThan(quantity('0')))
+                    targetContainerName:
+                      default: main
+                      description: TargetContainerName is the container in PodTemplateSpec to snapshot.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
                     ttlSecondsAfterFinished:
                       description: |-
                         Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
