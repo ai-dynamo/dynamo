@@ -87,6 +87,15 @@ jobs:
         rm "${PROTOC_ZIP}"
         export PATH="$PATH:$HOME/.local/bin"
         protoc --version
+    # Clone Mooncake Store for kvbm-engine's optional mooncake dependency.
+    # kvbm-engine's Cargo.toml references ../../../Mooncake/mooncake-store/rust
+    # relative to lib/kvbm-engine/, which resolves to ../Mooncake from the
+    # workspace root. Required for cargo metadata even when the feature is off.
+    - name: Clone Mooncake Store
+      if: matrix.dir == '.'
+      run: |
+        git clone --depth 1 https://github.com/kvcache-ai/Mooncake.git \
+          "${{ github.workspace }}/../Mooncake"
     - name: Cache cargo artifacts
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
       with:
