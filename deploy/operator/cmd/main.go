@@ -476,7 +476,7 @@ func main() {
 		"istio", runtimeConfig.IstioAvailable,
 	)
 
-	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader())
+	dockerSecretRetriever := secrets.NewNamespacedDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
 	// refresh whenever a secret is created/deleted/updated
 	// Set up informer
 	var factory informers.SharedInformerFactory
