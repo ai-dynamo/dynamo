@@ -5,6 +5,8 @@
 issues/
 plans/
 *rendered.Dockerfile
+rendered.*.Dockerfile
+.metrics_parity_*/
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
