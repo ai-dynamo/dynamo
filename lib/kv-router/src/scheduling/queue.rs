@@ -26,6 +26,20 @@ use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRe
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
+#[inline(always)]
+fn checked_or_saturating_sub(value: usize, amount: usize, invariant: &'static str) -> usize {
+    #[cfg(debug_assertions)]
+    {
+        value.checked_sub(amount).expect(invariant)
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = invariant;
+        value.saturating_sub(amount)
+    }
+}
+
 /// Entry in the priority queue, ordered by key (higher key = higher priority).
 struct QueueEntry<K: Ord + Eq> {
     key: K,
@@ -52,6 +66,63 @@ impl<K: Ord + Eq> PartialOrd for QueueEntry<K> {
     }
 }
 
+struct PendingState<K: Ord + Eq> {
+    heap: BinaryHeap<QueueEntry<K>>,
+    count: usize,
+    isl_tokens: usize,
+}
+
+impl<K: Ord + Eq> Default for PendingState<K> {
+    fn default() -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            count: 0,
+            isl_tokens: 0,
+        }
+    }
+}
+
+impl<K: Ord + Eq> PendingState<K> {
+    fn push(&mut self, key: K, request: SchedulingRequest) {
+        let isl_tokens = request.isl_tokens;
+        self.heap.push(QueueEntry { key, request });
+        self.count += 1;
+        self.isl_tokens += isl_tokens;
+    }
+
+    fn peek_front(&self) -> Option<&QueueEntry<K>> {
+        self.heap.peek()
+    }
+
+    fn pop_front(&mut self) -> Option<QueueEntry<K>> {
+        let entry = self.heap.pop()?;
+        self.count = checked_or_saturating_sub(self.count, 1, "pending count underflow");
+        self.isl_tokens = checked_or_saturating_sub(
+            self.isl_tokens,
+            entry.request.isl_tokens,
+            "pending isl_tokens underflow",
+        );
+        Some(entry)
+    }
+
+    fn rekey<F>(&mut self, mut rekey: F)
+    where
+        F: FnMut(QueueEntry<K>) -> QueueEntry<K>,
+    {
+        let rekeyed: Vec<_> = std::mem::take(&mut self.heap)
+            .into_vec()
+            .into_iter()
+            .map(&mut rekey)
+            .collect();
+        self.heap = BinaryHeap::from(rekeyed);
+        debug_assert_eq!(self.count, self.heap.len());
+    }
+
+    fn queued_isl_tokens(&self) -> usize {
+        self.isl_tokens
+    }
+}
+
 /// Queue that gates scheduling requests behind a capacity check.
 /// When all workers exceed `threshold_frac` utilisation the request is parked in `pending`.
 /// When capacity frees up (`update()`), pending requests are scheduled in priority order.
@@ -62,14 +133,14 @@ pub struct SchedulerQueue<
     S: SchedulingPolicy = FcfsPolicy,
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
 > {
-    pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
+    pending: Mutex<PendingState<S::Key>>,
     /// Serializes admission so worker selection always sees prior bookings.
     admission_gate: Mutex<()>,
-    /// Number of requests currently parked in the pending queue.
-    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
+    /// Cached pending count for lock-free metrics reads. The authoritative state lives in
+    /// `pending`; this atomic is updated from that locked state after each mutation.
     pending_count: AtomicUsize,
-    /// Sum of `isl_tokens` for requests currently parked in the pending queue.
-    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
+    /// Cached pending ISL-token sum for lock-free metrics reads. The authoritative state
+    /// lives in `pending`; this atomic is updated from that locked state after each mutation.
     pending_isl_tokens: AtomicUsize,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
@@ -136,7 +207,7 @@ impl<
             tracing::info!("Router queue tiered by cache-miss: pending ISL token caps configured");
         }
         Self {
-            pending: Mutex::new(BinaryHeap::new()),
+            pending: Mutex::new(PendingState::default()),
             admission_gate: Mutex::new(()),
             pending_count: AtomicUsize::new(0),
             pending_isl_tokens: AtomicUsize::new(0),
@@ -151,6 +222,13 @@ impl<
             prefill_load_estimator,
             overloaded_worker_provider,
         }
+    }
+
+    fn publish_pending_snapshot(&self, pending: &PendingState<S::Key>) {
+        self.pending_count
+            .store(pending.count, AtomicOrdering::Relaxed);
+        self.pending_isl_tokens
+            .store(pending.isl_tokens, AtomicOrdering::Relaxed);
     }
 
     /// Register externally-provided workers in the slot tracker.
@@ -205,13 +283,25 @@ impl<
         }
 
         if self.all_workers_prefill_busy(threshold, request.eligibility(), decay_now) {
-            if !self.queue_depth_tiers.is_unbounded() {
-                let pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
+            tracing::debug!("all workers prefill-busy, queueing request");
+            let arrival_offset = self.start_time.elapsed();
+            let key = {
+                let workers = self.workers_with_configs.borrow();
+                self.policy
+                    .enqueue_key(arrival_offset, SchedulingContext::new(&request, &workers))
+            };
+            let max_isl_tokens = if self.queue_depth_tiers.is_unbounded() {
+                None
+            } else {
+                self.tier_cap_for_request(&request)
+            };
+            let mut pending = self.pending.lock().await;
+            if let Some(max_isl_tokens) = max_isl_tokens {
+                let pending_isl_tokens = pending.queued_isl_tokens();
                 // This is a rejection threshold on current queued ISL, not a hard
                 // post-admission bound on `pending + incoming`.
-                if let Some(max_isl_tokens) = self.tier_cap_for_request(&request)
-                    && pending_isl_tokens >= max_isl_tokens
-                {
+                if pending_isl_tokens >= max_isl_tokens {
+                    drop(pending);
                     request.respond(Err(KvSchedulerError::Backpressure {
                         reason: RouterBackpressureReason::MaxQueuedIslTokensExceeded,
                         queued_isl_tokens: pending_isl_tokens,
@@ -220,18 +310,8 @@ impl<
                     return;
                 }
             }
-            tracing::debug!("all workers prefill-busy, queueing request");
-            let arrival_offset = self.start_time.elapsed();
-            let key = {
-                let workers = self.workers_with_configs.borrow();
-                self.policy
-                    .enqueue_key(arrival_offset, SchedulingContext::new(&request, &workers))
-            };
-            let isl_tokens = request.isl_tokens;
-            self.pending.lock().await.push(QueueEntry { key, request });
-            self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
-            self.pending_isl_tokens
-                .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
+            pending.push(key, request);
+            self.publish_pending_snapshot(&pending);
         } else {
             self.admit_one(request, decay_now).await;
         }
@@ -247,28 +327,21 @@ impl<
 
         if S::DYNAMIC {
             let now = self.start_time.elapsed();
-            let mut heap = self.pending.lock().await;
+            let mut pending = self.pending.lock().await;
             let workers = self.workers_with_configs.borrow();
-            let rekeyed: Vec<_> = std::mem::take(&mut *heap)
-                .into_vec()
-                .into_iter()
-                .map(|e| QueueEntry {
-                    key: self.policy.rekey(
-                        now,
-                        &e.key,
-                        SchedulingContext::new(&e.request, &workers),
-                    ),
-                    request: e.request,
-                })
-                .collect();
-            *heap = BinaryHeap::from(rekeyed);
+            pending.rekey(|e| QueueEntry {
+                key: self
+                    .policy
+                    .rekey(now, &e.key, SchedulingContext::new(&e.request, &workers)),
+                request: e.request,
+            });
         }
 
         loop {
             let _admission = self.admission_gate.lock().await;
             let decay_now = Instant::now();
-            let mut heap = self.pending.lock().await;
-            let Some(front) = heap.peek() else {
+            let mut pending = self.pending.lock().await;
+            let Some(front) = pending.peek_front() else {
                 break;
             };
             // TODO: This preserves head-of-line blocking for now to keep queue
@@ -278,23 +351,9 @@ impl<
             if self.all_workers_prefill_busy(threshold, front.request.eligibility(), decay_now) {
                 break;
             }
-            let entry = heap.pop().expect("heap front vanished before pop");
-            drop(heap);
-            let current_pending_count = self.pending_count.load(AtomicOrdering::Relaxed);
-            debug_assert!(
-                current_pending_count > 0,
-                "pending_count underflow on queue drain"
-            );
-            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
-            let current_pending_isl_tokens = self.pending_isl_tokens.load(AtomicOrdering::Relaxed);
-            debug_assert!(
-                current_pending_isl_tokens >= entry.request.isl_tokens,
-                "pending_isl_tokens underflow: pending={} request_isl_tokens={}",
-                current_pending_isl_tokens,
-                entry.request.isl_tokens
-            );
-            self.pending_isl_tokens
-                .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
+            let entry = pending.pop_front().expect("heap front vanished before pop");
+            self.publish_pending_snapshot(&pending);
+            drop(pending);
             tracing::debug!("scheduling request from pending queue");
             self.admit_one(entry.request, decay_now).await;
         }
@@ -949,6 +1008,7 @@ mod tests {
         // threshold_frac=0.0 means any active tokens trigger queueing
         let (queue, slots) = make_queue(num_workers, block_size, isl, Some(0.0));
         assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.pending_isl_tokens(), 0);
 
         // First request goes through (worker is idle)
         let (req1, rx1) = make_request("req-1", isl);
@@ -960,10 +1020,12 @@ mod tests {
         let (req2, _rx2) = make_request("req-2", isl);
         queue.enqueue(req2).await;
         assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
 
         let (req3, _rx3) = make_request("req-3", isl);
         queue.enqueue(req3).await;
         assert_eq!(queue.pending_count(), 2);
+        assert_eq!(queue.pending_isl_tokens(), 2 * isl);
 
         // Free the first request and update — should drain one from pending
         slots
@@ -988,6 +1050,7 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
+        assert_eq!(queue.pending_isl_tokens(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
