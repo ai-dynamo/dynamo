@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Experimental WebSocket endpoint at `/v1/realtime` for the OpenAI Realtime API.
+//! WebSocket endpoint at `/v1/realtime` for the OpenAI Realtime API.
 //!
 //! Wire shape: client sends a sequence of `Message::Text` frames each containing a
 //! JSON-encoded [`RealtimeClientEvent`]; server forwards each frame onto an
@@ -10,19 +10,22 @@
 //! inside the JSON envelope (`input_audio_buffer.append`); binary WebSocket frames
 //! are rejected.
 //!
-//! On connect the handler synthesizes a `session.created` server event before any
-//! engine event flows — the spec requires it to be the first server event on the
-//! wire. The handler then loops over inbound client frames in
-//! [`select_engine`] until a `session.update` arrives with a usable
-//! `session.model` and [`ModelManager::get_realtime_engine`] returns Ok.
-//! Non-conforming frames (wrong event type, missing model, unknown / unavailable
-//! model, malformed JSON, binary frames) emit a spec-shaped
-//! `RealtimeServerEvent::Error` and the loop continues so a well-behaved client
-//! can recover. Terminal states are engine selected (success) or client
-//! disconnect (no error event to send). The first qualifying `session.update`
-//! is forwarded onto the engine's input stream verbatim — the handler used it
-//! only to pick the engine; the rest of the carried session config is the
-//! engine's to apply.
+//! Workflow:
+//!
+//! On connect:
+//! - The handler sends a `session.created` server event before any
+//!   engine events flow.
+//! - The handler loops over inbound client frames in
+//!   [`select_engine`] until a `session.update` arrives with a usable
+//!   `session.model` and [`ModelManager::get_realtime_engine`] returns Ok.
+//! - Non-conforming frames (wrong event type, missing model, unknown / unavailable
+//!   model, malformed JSON, binary frames) emit a spec-shaped
+//!   `RealtimeServerEvent::Error` while the loop continues so a well-behaved client
+//!   can recover.
+//! On selected engine:
+//! - The handler forwards all frames including `session.update` onto the engine's input stream.
+//! - The handler drains the engine's response stream onto the WebSocket.
+//! - WebSocket stream close procedure is encapsulated in the `ScopedWsWriter` wrapper.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -355,6 +358,7 @@ where
     T: futures::Sink<Message, Error = axum::Error> + Unpin,
 {
     while let Some(msg) = ws_rx.next().await {
+        // Parse socket messages.
         let msg = match msg {
             Ok(m) => m,
             Err(err) => {
@@ -407,6 +411,8 @@ where
                 continue;
             }
         };
+
+        // Extract model name from session update.
         let model_name = match &session_update.session {
             Session::RealtimeSession(s) => s.model.as_deref().filter(|m| !m.is_empty()),
             Session::RealtimeTranscriptionSession(_) => {

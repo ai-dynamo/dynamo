@@ -1068,16 +1068,8 @@ impl ModelWatcher {
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
         } else if card.model_input == ModelInput::Text && card.model_type.supports_realtime() {
-            // Mirrors the Images / Videos / Audios shape: a single PushRouter
-            // typed end-to-end on the realtime event pair, no Backend /
-            // Migration composition. The `model_input == Text` guard matches
-            // the multimodal arm above — realtime carries JSON `Message::Text`
-            // frames over `/v1/realtime`. Note that PushRouter's bidirectional
-            // generate currently bails after sticky-instance selection
-            // pending #9361 (remote dispatch over AddressedPushRouter), so
-            // the engine slot is populated but unusable for discovered
-            // workers until that work lands. The local-engine path via
-            // ModelManager.add_realtime_model is unaffected.
+            // Case 7: Text + Realtime
+            // 'Text' is being overloaded here, it simply means the I/O will be passed through
             let realtime_router = PushRouter::<
                 RealtimeClientEvent,
                 Annotated<RealtimeServerEvent>,
