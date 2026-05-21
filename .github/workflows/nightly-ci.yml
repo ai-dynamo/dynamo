@@ -169,7 +169,6 @@ jobs:
       contents: read
     outputs:
       thread_ts:  ${{ steps.post.outputs.thread_ts }}
-      channel_id: ${{ steps.post.outputs.channel_id }}
     steps:
       - name: Post start message
         id: post
@@ -221,14 +220,13 @@ jobs:
             exit 1
           fi
           TS=$(echo "${RESPONSE}" | jq -r '.ts')
-          CH=$(echo "${RESPONSE}" | jq -r '.channel')
-          # Register both as masks BEFORE they touch GITHUB_OUTPUT or stdout, so
-          # they render as *** in this job's logs and in the job outputs UI.
-          # Masks don't cross job boundaries — downstream jobs re-register.
-          echo "::add-mask::${TS}"
-          echo "::add-mask::${CH}"
-          echo "thread_ts=${TS}"   >> "${GITHUB_OUTPUT}"
-          echo "channel_id=${CH}"  >> "${GITHUB_OUTPUT}"
+          # ts is a runtime per-message identifier (not a secret) and is the only
+          # value other jobs need; channel ID is read by every downstream Slack
+          # step directly from secrets.SLACK_RELEASE_CHANNEL_ID so it stays
+          # auto-masked. Do NOT ::add-mask:: the ts — masking it before writing
+          # GITHUB_OUTPUT caused the value to arrive empty across the
+          # workflow_call boundary, silently skipping downstream reply steps.
+          echo "thread_ts=${TS}" >> "${GITHUB_OUTPUT}"
           echo "Posted nightly start message"
 
   # ============================================================================
@@ -537,7 +535,6 @@ jobs:
       nightly: true
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
       slack_thread_ts:  ${{ needs.notify-slack-start.outputs.thread_ts }}
-      slack_channel_id: ${{ needs.notify-slack-start.outputs.channel_id }}
     secrets: inherit
 
   # ============================================================================

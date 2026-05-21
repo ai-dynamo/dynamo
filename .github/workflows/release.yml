@@ -25,12 +25,7 @@ on:
         type: boolean
         default: false
       slack_thread_ts:
-        description: 'Slack thread ts to reply into. Empty skips thread replies.'
-        required: false
-        type: string
-        default: ''
-      slack_channel_id:
-        description: 'Slack channel ID. Required when slack_thread_ts is set.'
+        description: 'Slack thread ts to reply into. Empty skips thread replies. Channel ID is read from secrets.SLACK_RELEASE_CHANNEL_ID.'
         required: false
         type: string
         default: ''
@@ -51,10 +46,6 @@ on:
         type: boolean
         default: false
       slack_thread_ts:
-        required: false
-        type: string
-        default: ''
-      slack_channel_id:
         required: false
         type: string
         default: ''
@@ -646,7 +637,7 @@ jobs:
     name: Notify Slack — staging complete
     runs-on: prod-default-small-v2
     needs: [prepare-release, release-publish, stage-wheels-artifactory]
-    if: ${{ always() && inputs.slack_thread_ts != '' && inputs.slack_channel_id != '' }}
+    if: ${{ always() && inputs.slack_thread_ts != '' }}
     permissions:
       contents: read
     steps:
@@ -654,7 +645,7 @@ jobs:
         continue-on-error: true
         env:
           SLACK_BOT_TOKEN:  ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
           SLACK_THREAD_TS:  ${{ inputs.slack_thread_ts }}
           NGC_RESULT:       ${{ needs.release-publish.result }}
           ART_RESULT:       ${{ needs.stage-wheels-artifactory.result }}
@@ -664,10 +655,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # workflow_call inputs aren't auto-masked even when the caller sourced
-          # them from a secret — re-register here so values render as *** in logs.
-          echo "::add-mask::${SLACK_THREAD_TS}"
-          echo "::add-mask::${SLACK_CHANNEL_ID}"
 
           emoji_for() {
             case "$1" in
@@ -765,17 +752,9 @@ jobs:
           RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
           # Forwarded so the GitLab pipeline can reply on the same thread.
           SLACK_THREAD_TS:      ${{ inputs.slack_thread_ts }}
-          SLACK_CHANNEL_ID:     ${{ inputs.slack_channel_id }}
+          SLACK_CHANNEL_ID:     ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
         run: |
           set -euo pipefail
-          # Slack thread/channel IDs flow in as workflow_call inputs and are not
-          # auto-masked; register them before any --form value could surface them.
-          if [ -n "${SLACK_THREAD_TS}" ]; then
-            echo "::add-mask::${SLACK_THREAD_TS}"
-          fi
-          if [ -n "${SLACK_CHANNEL_ID}" ]; then
-            echo "::add-mask::${SLACK_CHANNEL_ID}"
-          fi
 
           # PIPELINE_TYPE / RELEASE_TYPE drive every rule in dynamo.yml.
           # ARTIFACTS gates per-artifact scans and promotions.
@@ -860,11 +839,11 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Post GitLab trigger reply on Slack thread
-        if: ${{ inputs.slack_thread_ts != '' && inputs.slack_channel_id != '' }}
+        if: ${{ inputs.slack_thread_ts != '' }}
         continue-on-error: true
         env:
           SLACK_BOT_TOKEN:  ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
           SLACK_THREAD_TS:  ${{ inputs.slack_thread_ts }}
           PIPELINE_ID:      ${{ steps.trigger.outputs.pipeline_id }}
           PIPELINE_URL:     ${{ steps.trigger.outputs.pipeline_url }}
@@ -872,8 +851,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "::add-mask::${SLACK_THREAD_TS}"
-          echo "::add-mask::${SLACK_CHANNEL_ID}"
 
           PAYLOAD=$(jq -n \
             --arg channel   "${SLACK_CHANNEL_ID}" \
