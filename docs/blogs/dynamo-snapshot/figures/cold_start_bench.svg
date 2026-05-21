@@ -14,20 +14,20 @@
 <text x="220" y="118" class="subtitle">Single-GPU (1xB200); excludes base container startup</text>
 <rect x="220" y="144" width="23" height="23" rx="3" fill="#F28E2B"/>
 <text x="253" y="165" class="legend">Python/Dynamo boot</text>
-<rect x="476.4" y="144" width="23" height="23" rx="3" fill="#B07AA1"/>
-<text x="509.4" y="165" class="legend">vLLM config + inspect</text>
-<rect x="765.2" y="144" width="23" height="23" rx="3" fill="#D4A6C8"/>
-<text x="798.2" y="165" class="legend">EngineCore setup</text>
-<rect x="1000" y="144" width="23" height="23" rx="3" fill="#9C755F"/>
-<text x="1033" y="165" class="legend">Model load</text>
-<rect x="1170" y="144" width="23" height="23" rx="3" fill="#CC3311"/>
-<text x="1203" y="165" class="legend">torch.compile</text>
-<rect x="1372.4" y="144" width="23" height="23" rx="3" fill="#A0CBE8"/>
-<text x="1405.4" y="165" class="legend">Profile/KV sizing</text>
-<rect x="1618" y="144" width="23" height="23" rx="3" fill="#7F3C8D"/>
-<text x="1651" y="165" class="legend">Kernel warmup</text>
-<rect x="220" y="186" width="23" height="23" rx="3" fill="#0072B2"/>
-<text x="253" y="207" class="legend">CUDA graph capture</text>
+<rect x="635.5" y="144" width="23" height="23" rx="3" fill="#B07AA1"/>
+<text x="668.5" y="165" class="legend">vLLM config + inspect</text>
+<rect x="1051" y="144" width="23" height="23" rx="3" fill="#D4A6C8"/>
+<text x="1084" y="165" class="legend">EngineCore setup</text>
+<rect x="1466.5" y="144" width="23" height="23" rx="3" fill="#9C755F"/>
+<text x="1499.5" y="165" class="legend">Model load</text>
+<rect x="220" y="186" width="23" height="23" rx="3" fill="#CC3311"/>
+<text x="253" y="207" class="legend">torch.compile</text>
+<rect x="635.5" y="186" width="23" height="23" rx="3" fill="#A0CBE8"/>
+<text x="668.5" y="207" class="legend">Profile/KV sizing</text>
+<rect x="1051" y="186" width="23" height="23" rx="3" fill="#7F3C8D"/>
+<text x="1084" y="207" class="legend">Kernel warmup</text>
+<rect x="1466.5" y="186" width="23" height="23" rx="3" fill="#0072B2"/>
+<text x="1499.5" y="207" class="legend">CUDA graph capture</text>
 <line x1="220.0" y1="247" x2="220.0" y2="525" stroke="#E2E8F0" stroke-width="1"/>
 <text x="220.0" y="237" class="axis" text-anchor="middle">0.0s</text>
 <text x="220.0" y="549" class="axis" text-anchor="middle">0.0s</text>

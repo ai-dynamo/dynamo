@@ -156,16 +156,21 @@ function renderCold(def, rows) {
 function renderRestore(def, rows) {
   const width = 1900;
   const left = 240;
-  const right = 18;
-  const top = def.type === "gms" ? 302 : 262;
+  const right = 90;
+  const top = 190;
   const rowHeight = 50;
   const laneGap = 14;
   const groupGap = 42;
   const models = groupByModel(rows);
   const modelHeight = def.laneOrder.length * (rowHeight + laneGap) + groupGap;
   const laneAreaHeight = models.length * modelHeight - groupGap + 34;
-  const legendTop = top + laneAreaHeight + 62;
-  const legendRows = Math.ceil(def.phaseOrder.length / 4);
+  const legendTop = top + laneAreaHeight + 58;
+  const legendColors = colorsByPhase(rows);
+  const visibleLegendPhases = def.phaseOrder.filter((phase) => legendColors.has(phase));
+  const legendColumns = def.type === "restore"
+    ? visibleLegendPhases.length
+    : Math.min(4, visibleLegendPhases.length);
+  const legendRows = Math.ceil(visibleLegendPhases.length / legendColumns);
   const height = legendTop + legendRows * 34 + 50;
   const maxEnd = Math.max(...rows.map((row) => row.end_s));
   const maxScale = Math.ceil(maxEnd / 5) * 5 || 5;
@@ -211,7 +216,7 @@ function renderRestore(def, rows) {
     yCursor += groupGap;
   }
 
-  renderRestoreLegend(svg, def.phaseOrder, rows, left, legendTop, width - right);
+  renderRestoreLegend(svg, def.phaseOrder, rows, left, legendTop, width - right, legendColumns);
   svg.push(`</svg>`);
   return `${svg.join("\n")}\n`;
 }
@@ -257,39 +262,34 @@ function styleBlock() {
 
 function renderLegend(svg, phaseOrder, rows, left, y, maxX) {
   const colors = colorsByPhase(rows);
-  let legendX = left;
-  let legendY = y;
+  const columns = 4;
+  const columnWidth = (maxX - left) / columns;
+  let visibleIndex = 0;
   for (const phase of phaseOrder) {
     if (!colors.has(phase)) {
       continue;
     }
-    const labelWidth = phase.length * 10.8 + 50;
-    if (legendX + labelWidth > maxX) {
-      legendX = left;
-      legendY += 42;
-    }
+    const legendX = left + (visibleIndex % columns) * columnWidth;
+    const legendY = y + Math.floor(visibleIndex / columns) * 42;
     svg.push(`<rect x="${legendX}" y="${legendY - 20}" width="23" height="23" rx="3" fill="${colors.get(phase)}"/>`);
     svg.push(`<text x="${legendX + 33}" y="${legendY + 1}" class="legend">${esc(phase)}</text>`);
-    legendX += labelWidth + 12;
+    visibleIndex += 1;
   }
 }
 
-function renderRestoreLegend(svg, phaseOrder, rows, left, y, maxX) {
+function renderRestoreLegend(svg, phaseOrder, rows, left, y, maxX, columns) {
   const colors = colorsByPhase(rows);
-  let legendX = left;
-  let legendY = y;
+  const columnWidth = (maxX - left) / columns;
+  let visibleIndex = 0;
   for (const phase of phaseOrder) {
     if (!colors.has(phase)) {
       continue;
     }
-    const labelWidth = Math.max(phase.length * 12 + 60, 150);
-    if (legendX + labelWidth > maxX) {
-      legendX = left;
-      legendY += 34;
-    }
+    const legendX = left + (visibleIndex % columns) * columnWidth;
+    const legendY = y + Math.floor(visibleIndex / columns) * 34;
     svg.push(`<rect x="${legendX}" y="${legendY - 17}" width="22" height="22" rx="3" fill="${colors.get(phase)}" stroke="#0f172a" stroke-opacity="0.20"/>`);
     svg.push(`<text class="legend-label" x="${legendX + 32}" y="${legendY + 1}">${esc(phase)}</text>`);
-    legendX += labelWidth;
+    visibleIndex += 1;
   }
 }
 
