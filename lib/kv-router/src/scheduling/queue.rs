@@ -1650,13 +1650,13 @@ mod tests {
     }
 
     /// End-to-end coverage of the production refresh path: enqueue with `block_hashes`,
-    /// wait past the threshold, trigger `update()`, and verify the refresher was invoked
-    /// via the queue rather than via `maybe_refresh_overlap` directly. This is the path
-    /// that actually matters in production (admission gate drop+reacquire, capacity
-    /// recheck, fresh `Instant` for admit_one); the other refresh tests exercise the
-    /// inner function in isolation.
+    /// wait past the threshold, trigger `update()`, and verify the refreshed overlap data
+    /// changes the selected worker. This is the path that matters in production: a request
+    /// can sit in the queue long enough that its enqueue-time best worker becomes stale.
+    /// Note: this is actually the full justification for this refresh. When things became queued is because something went south in cluster.
+    /// as result, we want to keep making the best decision, to not make things worse, leading to more queueing and more staleness, in a vicious cycle.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn update_drains_via_full_refresh_path() {
+    async fn update_refresh_can_change_selected_worker_after_queue_wait() {
         use std::sync::atomic::Ordering as AtomicOrd;
 
         let block_size = 16u32;
@@ -1665,12 +1665,18 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
             response: super::super::overlap_refresh::RefreshedOverlap {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::from([(WorkerWithDpRank::new(0, 0), 9.0)]),
-                effective_cached_tokens: HashMap::from([(WorkerWithDpRank::new(0, 0), 80)]),
+                effective_overlap_blocks: HashMap::from([
+                    (WorkerWithDpRank::new(0, 0), 1.0),
+                    (WorkerWithDpRank::new(1, 0), 9.0),
+                ]),
+                effective_cached_tokens: HashMap::from([
+                    (WorkerWithDpRank::new(0, 0), 16),
+                    (WorkerWithDpRank::new(1, 0), 144),
+                ]),
             },
         });
 
-        let dp_range: HashMap<u64, (u32, u32)> = HashMap::from([(0, (0, 1))]);
+        let dp_range: HashMap<u64, (u32, u32)> = HashMap::from([(0, (0, 1)), (1, (0, 1))]);
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             block_size as usize,
@@ -1680,13 +1686,15 @@ mod tests {
             "test",
         ));
         let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
-        configs.insert(
-            0,
-            SimpleWorkerConfig {
-                max_num_batched_tokens: Some(isl as u64),
-                ..Default::default()
-            },
-        );
+        for worker_id in [0_u64, 1_u64] {
+            configs.insert(
+                worker_id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
         let (_cfg_tx, cfg_rx) = watch::channel(configs);
         let mut queue = SchedulerQueue::new_with_overload_provider(
             Arc::clone(&slots),
@@ -1703,19 +1711,45 @@ mod tests {
         queue.overlap_refresh_after = Some(Duration::from_millis(20));
         let queue = Arc::new(queue);
 
-        // First request admits immediately (no active tokens yet) and saturates the worker.
-        let (req1, rx1) = make_request("req-1", isl);
+        // First two requests admit immediately and saturate both workers.
+        let (mut req1, rx1) = make_request("req-1", isl);
+        req1.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(0, 0), 3.0);
+        req1.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(0, 0), 48);
         queue.enqueue(req1).await;
-        let _ = rx1
+        let resp1 = rx1
             .await
             .expect("rx1 dropped")
             .expect("req-1 scheduling failed");
+        assert_eq!(resp1.best_worker, WorkerWithDpRank::new(0, 0));
 
-        // Second request: with threshold=0 and req-1 holding tokens, this parks in the heap.
-        let (req2, rx2) = make_request("req-2", isl);
+        let (mut req2, rx2) = make_request("req-2", isl);
+        req2.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(1, 0), 3.0);
+        req2.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(1, 0), 48);
+        queue.enqueue(req2).await;
+        let resp2 = rx2
+            .await
+            .expect("rx2 dropped")
+            .expect("req-2 scheduling failed");
+        assert_eq!(resp2.best_worker, WorkerWithDpRank::new(1, 0));
+
+        // Third request: enqueue-time overlaps prefer worker 0, but the refresher will flip
+        // that preference to worker 1 before dispatch.
+        let (mut req3, rx3) = make_request("req-3", isl);
+        req3.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(0, 0), 8.0);
+        req3.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(1, 0), 2.0);
+        req3.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(0, 0), 128);
+        req3.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(1, 0), 32);
         let hashes = vec![LocalBlockHash(42)];
-        queue.enqueue_with_block_hashes(req2, Some(hashes)).await;
-        assert_eq!(queue.pending_count(), 1, "req-2 must queue, not admit");
+        queue.enqueue_with_block_hashes(req3, Some(hashes)).await;
+        assert_eq!(queue.pending_count(), 1, "req-3 must queue, not admit");
         assert_eq!(
             refresher.calls.load(AtomicOrd::Relaxed),
             0,
@@ -1726,19 +1760,28 @@ mod tests {
         // examines the front entry.
         tokio::time::advance(Duration::from_millis(50)).await;
 
-        // Free req-1 so the worker is no longer busy, then drive update().
+        // Free both workers so the queued request is dispatchable and refresh decides which
+        // one wins.
         slots.free(&"req-1".to_string(), decay_now()).unwrap();
+        slots.free(&"req-2".to_string(), decay_now()).unwrap();
         queue.update().await;
 
-        let _ = rx2
+        let resp3 = rx3
             .await
-            .expect("rx2 dropped")
-            .expect("req-2 scheduling failed");
+            .expect("rx3 dropped")
+            .expect("req-3 scheduling failed");
         assert_eq!(
             refresher.calls.load(AtomicOrd::Relaxed),
             1,
             "refresh must fire exactly once via the update() path"
         );
+        assert_eq!(
+            resp3.best_worker,
+            WorkerWithDpRank::new(1, 0),
+            "dequeue-time refresh should flip selection from stale worker 0 to worker 1"
+        );
+        assert_eq!(resp3.effective_overlap_blocks, 9.0);
+        assert_eq!(resp3.cached_tokens, 144);
         assert_eq!(queue.pending_count(), 0, "heap must drain");
     }
 
