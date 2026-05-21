@@ -61,6 +61,8 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
+use dynamo_protocols::types::Choice;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -72,7 +74,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
 const ADMISSION_CONTROL_REJECTION_HINT: &str =
-    "If this rejection is not intended, consider passing --no-admission-control to the frontend.";
+    "If this rejection is not intended, consider passing --admission-control none to the frontend.";
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -603,6 +605,14 @@ async fn completions_single(
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream
+            .filter(|r| {
+                // Drop empty chunks from multi-byte token assembly
+                futures::future::ready(
+                    !r.data
+                        .as_ref()
+                        .is_some_and(is_empty_completion_stream_response),
+                )
+            })
             .map(move |response| {
                 // Calls observe_response() on each token
                 process_response_using_event_converter_and_observe_metrics(
@@ -787,6 +797,14 @@ async fn completions_batch(
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = merged_stream
+            .filter(|r| {
+                // Drop empty chunks from multi-byte token assembly
+                futures::future::ready(
+                    !r.data
+                        .as_ref()
+                        .is_some_and(is_empty_completion_stream_response),
+                )
+            })
             .map(move |response| {
                 // Calls observe_response() on each token
                 process_response_using_event_converter_and_observe_metrics(
@@ -1118,6 +1136,48 @@ fn make_dispatch_event(
     }
 }
 
+/// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
+/// `role` is excluded — backends set it on every delta.
+fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
+    if resp.nvext.is_some() {
+        return false;
+    }
+    resp.inner.usage.is_none()
+        && resp.inner.choices.iter().all(|c| {
+            let ChatCompletionStreamResponseDelta {
+                content,
+                function_call,
+                tool_calls,
+                role: _,
+                refusal,
+                reasoning_content,
+            } = &c.delta;
+            c.finish_reason.is_none()
+                && content.is_none()
+                && function_call.is_none()
+                && tool_calls.is_none()
+                && refusal.is_none()
+                && reasoning_content.is_none()
+        })
+}
+
+/// Completions variant of [`is_empty_stream_response`].
+fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
+    if resp.nvext.is_some() {
+        return false;
+    }
+    resp.inner.usage.is_none()
+        && resp.inner.choices.iter().all(|c| {
+            let Choice {
+                text,
+                index: _,
+                logprobs,
+                finish_reason,
+            } = c;
+            text.is_empty() && finish_reason.is_none() && logprobs.is_none()
+        })
+}
+
 /// Emits early `event: tool_call_dispatch` SSE events for any complete tool calls found in a
 /// streaming response chunk, when `DYN_ENABLE_STREAMING_TOOL_DISPATCH` is enabled.
 ///
@@ -1354,6 +1414,10 @@ async fn chat_completions(
         let stream = stream.flat_map(move |response| {
             // Extract side-channel events before the response is consumed by EventConverter.
             let mut events: Vec<Result<Event, axum::Error>> = vec![];
+            // Drop empty chunks from multi-byte token assembly.
+            if response.data.as_ref().is_some_and(is_empty_stream_response) {
+                return stream::iter(events);
+            }
             if tool_dispatch_enabled {
                 events.extend(streaming_tool_dispatch_events(
                     &response,
@@ -3652,7 +3716,8 @@ mod tests {
 
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
-        CreateChatCompletionStreamResponse, FinishReason, FunctionCallStream, FunctionType,
+        ChatCompletionStreamResponseDeltaFunctionCall, CreateChatCompletionStreamResponse,
+        FinishReason, FunctionCallStream, FunctionType, Role,
     };
     use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -4338,5 +4403,263 @@ mod tests {
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["reasoning_content"], "让我想想 🤔 分析完成 ✅");
+    }
+
+    /// Build a single-choice `NvCreateChatCompletionStreamResponse`.
+    #[allow(clippy::too_many_arguments)]
+    fn make_delta(
+        content: Option<&str>,
+        reasoning: Option<&str>,
+        tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
+        finish: Option<FinishReason>,
+        usage: Option<dynamo_protocols::types::CompletionUsage>,
+        role: Option<Role>,
+        refusal: Option<&str>,
+        function_call: Option<ChatCompletionStreamResponseDeltaFunctionCall>,
+    ) -> NvCreateChatCompletionStreamResponse {
+        use dynamo_protocols::types::ChatCompletionMessageContent;
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: content.map(|s| ChatCompletionMessageContent::Text(s.to_string())),
+                function_call,
+                tool_calls,
+                role,
+                refusal: refusal.map(|s| s.to_string()),
+                reasoning_content: reasoning.map(|s| s.to_string()),
+            },
+            finish_reason: finish,
+            logprobs: None,
+        };
+        NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: "m".to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage,
+                service_tier: None,
+            },
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn test_is_empty_stream_response() {
+        // Empty: all-None, no finish, no usage
+        assert!(
+            is_empty_stream_response(&make_delta(None, None, None, None, None, None, None, None)),
+            "all-None delta → empty",
+        );
+
+        // Not empty: has content
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "content present → not empty",
+        );
+
+        // Not empty: has reasoning
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                Some("thinking"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "reasoning present → not empty",
+        );
+
+        // Not empty: has finish_reason
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                Some(FinishReason::Stop),
+                None,
+                None,
+                None,
+                None,
+            )),
+            "finish_reason → not empty",
+        );
+
+        // Not empty: has tool_calls
+        let tc = vec![ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("call_1".to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("f".to_string()),
+                arguments: Some("{}".to_string()),
+            }),
+        }];
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                Some(tc),
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "tool_calls present → not empty",
+        );
+
+        // Not empty: usage present
+        let usage = dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                Some(usage),
+                None,
+                None,
+                None
+            )),
+            "usage present → not empty",
+        );
+
+        // Role-only: still empty (backends repeat role on every chunk)
+        assert!(
+            is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(Role::Assistant),
+                None,
+                None,
+            )),
+            "role-only → empty",
+        );
+
+        // Not empty: has refusal
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("I can't help with that"),
+                None,
+            )),
+            "refusal present → not empty",
+        );
+
+        // Not empty: has function_call (deprecated but still in the struct)
+        assert!(
+            !is_empty_stream_response(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(ChatCompletionStreamResponseDeltaFunctionCall {
+                    name: Some("my_fn".to_string()),
+                    arguments: Some("{}".to_string()),
+                }),
+            )),
+            "function_call present → not empty",
+        );
+    }
+
+    // ── completions empty-stream-response tests ──────────────────────
+
+    use dynamo_protocols::types::{Choice, CompletionFinishReason, CreateCompletionResponse};
+
+    /// Build a single-choice `NvCreateCompletionResponse`.
+    fn make_completion_chunk(
+        text: &str,
+        finish: Option<CompletionFinishReason>,
+        usage: Option<dynamo_protocols::types::CompletionUsage>,
+    ) -> NvCreateCompletionResponse {
+        let choice = Choice {
+            text: text.to_string(),
+            index: 0,
+            logprobs: None,
+            finish_reason: finish,
+        };
+        NvCreateCompletionResponse {
+            inner: CreateCompletionResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: "m".to_string(),
+                system_fingerprint: None,
+                object: "text_completion".to_string(),
+                usage,
+            },
+            nvext: None,
+        }
+    }
+
+    #[test]
+    fn test_is_empty_completion_stream_response() {
+        // Empty: no text, no finish, no usage
+        assert!(
+            is_empty_completion_stream_response(&make_completion_chunk("", None, None)),
+            "empty text, no finish → empty",
+        );
+
+        // Not empty: has text
+        assert!(
+            !is_empty_completion_stream_response(&make_completion_chunk("hi", None, None)),
+            "text present → not empty",
+        );
+
+        // Not empty: has finish_reason
+        assert!(
+            !is_empty_completion_stream_response(&make_completion_chunk(
+                "",
+                Some(CompletionFinishReason::Stop),
+                None,
+            )),
+            "finish_reason → not empty",
+        );
+
+        // Not empty: usage present
+        let usage = dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        assert!(
+            !is_empty_completion_stream_response(&make_completion_chunk("", None, Some(usage))),
+            "usage present → not empty",
+        );
     }
 }

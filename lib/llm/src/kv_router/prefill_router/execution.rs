@@ -14,8 +14,18 @@ use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
-    preprocessor::{BootstrapInfo, PrefillResult},
+    preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
 };
+
+pub(super) struct PrefillCompletion {
+    pub result: PrefillResult,
+    /// (worker_id, dp_rank) parsed out of the engine's `disaggregated_params`.
+    /// Computed but unused today; kept here so adding a caller is a struct
+    /// field read rather than a return-type widening.
+    #[allow(dead_code)]
+    pub worker_info: Option<(u64, Option<u32>)>,
+    pub worker_link: Option<TraceLink>,
+}
 
 impl PrefillRouter {
     /// Select a prefill worker and resolve its bootstrap connection info.
@@ -129,14 +139,12 @@ impl PrefillRouter {
     /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
     /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
     /// the prefill route must finish worker recording before the phase can change to Decode.
-    ///
-    /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
         router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<(u64, Option<u32>)>), PrefillError> {
+    ) -> Result<PrefillCompletion, PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         // Clone tracker before request is consumed by generate_to_worker.
         // Used to record prefill_complete_time for KV transfer latency metric.
@@ -204,27 +212,29 @@ impl PrefillRouter {
             ));
         };
 
+        let worker_link = output.worker_trace_link.clone();
+
         // Extract prefill worker ID and dp_rank from disaggregated_params
-        let prefill_worker_info =
-            disaggregated_params
-                .get("worker_id")
-                .and_then(|worker_id_json| {
-                    let worker_id = worker_id_json
-                        .get("prefill_worker_id")
-                        .and_then(|v| v.as_u64())?;
-                    let dp_rank = worker_id_json
-                        .get("prefill_dp_rank")
-                        .and_then(|v| v.as_u64())
-                        .map(|r| r as u32);
-                    Some((worker_id, dp_rank))
-                });
-        Ok((
-            PrefillResult {
+        let worker_info = disaggregated_params
+            .get("worker_id")
+            .and_then(|worker_id_json| {
+                let worker_id = worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64())?;
+                let dp_rank = worker_id_json
+                    .get("prefill_dp_rank")
+                    .and_then(|v| v.as_u64())
+                    .map(|r| r as u32);
+                Some((worker_id, dp_rank))
+            });
+        Ok(PrefillCompletion {
+            result: PrefillResult {
                 disaggregated_params,
                 prompt_tokens_details,
             },
-            prefill_worker_info,
-        ))
+            worker_info,
+            worker_link,
+        })
     }
 
     /// Spawn prefill as a background task.

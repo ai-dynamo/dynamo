@@ -10,6 +10,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Environment variables with defaults
@@ -30,6 +31,13 @@ EXTRA_PD_ARGS=("$@")
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
 # child processes would inherit. Unset it so only workers that need it set their own.
 unset DYN_SYSTEM_PORT
+
+# Profiler/test-harness override applied to the KV-cache-bearing PD worker.
+TRTLLM_OVERRIDE_ARGS=()
+OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
+if [[ -n "$OVERRIDE_JSON" ]]; then
+    TRTLLM_OVERRIDE_ARGS=(--override-engine-args "$OVERRIDE_JSON")
+fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Multimodal E/PD" "$MODEL_PATH" "$HTTP_PORT"
@@ -57,6 +65,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
   --extra-engine-args "$PD_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --encode-endpoint "$ENCODE_ENDPOINT" \
+  "${TRTLLM_OVERRIDE_ARGS[@]}" \
   --disaggregation-mode prefill_and_decode \
   "${EXTRA_PD_ARGS[@]}" &
 
