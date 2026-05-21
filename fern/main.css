@@ -924,7 +924,9 @@ svg.card-icon{
 #kimi-technique-agg-kv:checked ~ .dynamo-recipe-browser label[for="kimi-technique-agg-kv"],
 #kimi-technique-agg-rr-eagle:checked ~ .dynamo-recipe-browser label[for="kimi-technique-agg-rr-eagle"],
 #kimi-technique-agg-rr:checked ~ .dynamo-recipe-browser label[for="kimi-technique-agg-rr"],
-#kimi-technique-tokenspeed:checked ~ .dynamo-recipe-browser label[for="kimi-technique-tokenspeed"] {
+#kimi-technique-tokenspeed:checked ~ .dynamo-recipe-browser label[for="kimi-technique-tokenspeed"],
+#gptoss-technique-agg:checked ~ .dynamo-recipe-browser label[for="gptoss-technique-agg"],
+#gptoss-technique-disagg:checked ~ .dynamo-recipe-browser label[for="gptoss-technique-disagg"] {
     border-color: var(--nv-color-green);
     box-shadow: 0 0 0 1px var(--nv-color-green);
     font-weight: 700;
@@ -1488,7 +1490,9 @@ svg.card-icon{
 #kimi-technique-agg-kv:checked ~ .kimi-technique-agg-kv,
 #kimi-technique-agg-rr-eagle:checked ~ .kimi-technique-agg-rr-eagle,
 #kimi-technique-agg-rr:checked ~ .kimi-technique-agg-rr,
-#kimi-technique-tokenspeed:checked ~ .kimi-technique-tokenspeed {
+#kimi-technique-tokenspeed:checked ~ .kimi-technique-tokenspeed,
+#gptoss-technique-agg:checked ~ .gptoss-technique-agg,
+#gptoss-technique-disagg:checked ~ .gptoss-technique-disagg {
     display: grid;
 }
 
