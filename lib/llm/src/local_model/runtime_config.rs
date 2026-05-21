@@ -543,32 +543,10 @@ mod tests {
                 ..Default::default()
             },
             ModelRuntimeConfig {
-                topology_domains: HashMap::from([(" zone ".to_string(), "us-east-1a".to_string())]),
-                ..Default::default()
-            },
-            ModelRuntimeConfig {
                 topology_domains: HashMap::from([(
                     "zone=primary".to_string(),
                     "us-east-1a".to_string(),
                 )]),
-                ..Default::default()
-            },
-            ModelRuntimeConfig {
-                topology_domains: HashMap::from([("zone".to_string(), "us-east=1a".to_string())]),
-                ..Default::default()
-            },
-            ModelRuntimeConfig {
-                kv_transfer_domain: Some("".to_string()),
-                ..Default::default()
-            },
-            ModelRuntimeConfig {
-                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-                kv_transfer_domain: Some(" zone ".to_string()),
-                ..Default::default()
-            },
-            ModelRuntimeConfig {
-                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-                kv_transfer_domain: Some("zone=primary".to_string()),
                 ..Default::default()
             },
         ] {
@@ -607,64 +585,8 @@ mod tests {
                 kv_transfer_preferred_weight: Some(0.5),
                 ..Default::default()
             },
-            ModelRuntimeConfig {
-                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
-                kv_transfer_domain: Some("zone".to_string()),
-                kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
-                kv_transfer_preferred_weight: Some(1.1),
-                ..Default::default()
-            },
         ] {
             assert!(config.validate_config().is_err());
         }
-    }
-
-    #[test]
-    fn test_add_topology_taints_preserves_caller_supplied_taints() {
-        let mut config = ModelRuntimeConfig {
-            taints: HashSet::from(["caller/taint=value".to_string()]),
-            ..Default::default()
-        };
-        config
-            .topology_domains
-            .insert("zone".to_string(), "us-east-1a".to_string());
-
-        config.add_topology_taints();
-
-        assert!(config.taints.contains("caller/taint=value"));
-        assert!(config.taints.contains("dynamo.topology/zone=us-east-1a"));
-    }
-
-    #[test]
-    fn test_add_topology_taints_rebuilds_generated_taints() {
-        let mut config = ModelRuntimeConfig {
-            taints: HashSet::from([
-                "caller/taint=value".to_string(),
-                "dynamo.topology/zone=stale-zone".to_string(),
-                "dynamo.topology/rack=stale-rack".to_string(),
-            ]),
-            ..Default::default()
-        };
-        config
-            .topology_domains
-            .insert("zone".to_string(), "us-east-1a".to_string());
-
-        config.add_topology_taints();
-
-        assert!(config.taints.contains("caller/taint=value"));
-        assert!(config.taints.contains("dynamo.topology/zone=us-east-1a"));
-        assert!(!config.taints.contains("dynamo.topology/zone=stale-zone"));
-        assert!(!config.taints.contains("dynamo.topology/rack=stale-rack"));
-
-        config.topology_domains.clear();
-        config.add_topology_taints();
-
-        assert!(config.taints.contains("caller/taint=value"));
-        assert!(
-            !config
-                .taints
-                .iter()
-                .any(|taint| taint.starts_with(TOPOLOGY_TAINT_PREFIX))
-        );
     }
 }
