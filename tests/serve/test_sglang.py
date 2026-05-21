@@ -628,9 +628,7 @@ sglang_configs = {
             # max_total_tokens (bisected ~1040 for these payloads). Matches
             # the "aggregated" config above.
             pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
-            # TODO: revert to pytest.mark.post_merge after pre_merge validation
-            # on this PR (see .ai/ci-guidelines.md).
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
