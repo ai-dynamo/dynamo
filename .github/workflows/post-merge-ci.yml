@@ -8,6 +8,9 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+      # TEMP: verify cuda13-default tagging end-to-end on this dev branch.
+      # Remove before merging.
+      - 'pvijayakrish/nightly-image-suffix'
   workflow_dispatch:
     inputs:
       framework:

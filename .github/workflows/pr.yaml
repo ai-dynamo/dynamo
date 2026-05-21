@@ -7,6 +7,9 @@ on:
   push:
     branches:
       - "pull-request/[0-9]+"
+      # TEMP: verify cuda13-default tagging end-to-end on this dev branch.
+      # Remove before merging.
+      - "pvijayakrish/nightly-image-suffix"
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.

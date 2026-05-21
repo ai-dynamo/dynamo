@@ -6,6 +6,13 @@ name: Nightly CI Pipeline
 on:
   schedule:
     - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  # TEMP: verify cuda13-default tagging end-to-end on this dev branch.
+  # Push events fall to the `*)` arm of `compute-release-mode` (release=false),
+  # so this exercises build/test only — NGC publishing stays gated to
+  # schedule + workflow_dispatch + approval. Remove before merging.
+  push:
+    branches:
+      - 'pvijayakrish/nightly-image-suffix'
   workflow_dispatch:  # Allow manual triggering for testing
     inputs:
       release:

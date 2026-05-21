@@ -311,11 +311,21 @@ jobs:
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
             copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
 
+            # Explicit `-cuda13` alias on the same digest so consumers can
+            # pin to cuda13 specifically. The bare tag above stays as the
+            # implicit default and will move to cuda14+ when that flips.
+            EXPLICIT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+            copy_image "${SOURCE}" "${EXPLICIT_TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+
             # Mutable `:nightly` floating tag on the stable repo (e.g.
             # vllm-runtime:nightly). cuda13 is the default so no cuda suffix.
             if [[ "${NIGHTLY}" == "true" ]]; then
               MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${STABLE_NAME}:nightly"
               copy_image "${SOURCE}" "${MUTABLE_TARGET}" "${STABLE_NAME}:nightly"
+
+              # Explicit `:nightly-cuda13` floating alias.
+              EXPLICIT_MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${STABLE_NAME}:nightly-cuda13"
+              copy_image "${SOURCE}" "${EXPLICIT_MUTABLE_TARGET}" "${STABLE_NAME}:nightly-cuda13"
             fi
           done
 
@@ -493,10 +503,10 @@ jobs:
           fi
           echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 13 - default):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 13 - default, bare tag + explicit -cuda13 alias):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Runtime images (CUDA 12 - explicit):" >> $GITHUB_STEP_SUMMARY
           echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda12\`" >> $GITHUB_STEP_SUMMARY
@@ -504,9 +514,9 @@ jobs:
           if [[ "${NIGHTLY}" == "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Mutable floating tags (repushed every nightly):" >> $GITHUB_STEP_SUMMARY
-            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda12\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda12\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`tensorrtllm-runtime:nightly\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\` / \`vllm-runtime:nightly-cuda12\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\` / \`sglang-runtime:nightly-cuda12\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`tensorrtllm-runtime:nightly\` / \`tensorrtllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
           fi
           if [[ "${NIGHTLY}" != "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY

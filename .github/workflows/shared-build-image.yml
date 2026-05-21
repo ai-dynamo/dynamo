@@ -188,10 +188,25 @@ jobs:
             MUTABLE_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
           fi
 
+          # cuda13 is the implicit default, so the tags above carry no cuda
+          # suffix. Also publish explicit `-cuda13` aliases so consumers can
+          # pin to cuda13 specifically (and won't get silently upgraded when
+          # the default flips later). Same digest, additional tags.
+          EXPLICIT_CUDA_IMAGE_URI=""
+          EXPLICIT_CUDA_MUTABLE_IMAGE_URI=""
+          if [ "${CUDA_MAJOR:-}" = "13" ]; then
+            EXPLICIT_CUDA_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${SOURCE_SHA}-${TAG_BUILDER}-cuda13${IMAGE_TAG_SUFFIX}"
+            if [ -n "${IMAGE_TAG_SUFFIX}" ]; then
+              EXPLICIT_CUDA_MUTABLE_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TAG_BUILDER}-cuda13${IMAGE_TAG_SUFFIX}"
+            fi
+          fi
+
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "mutable_image_uri=${MUTABLE_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "explicit_cuda_image_uri=${EXPLICIT_CUDA_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "explicit_cuda_mutable_image_uri=${EXPLICIT_CUDA_MUTABLE_IMAGE_URI}" >> $GITHUB_OUTPUT
       - name: Calculate Builder Flavor
         id: calculate-builder-flavor
         shell: bash
@@ -215,6 +230,8 @@ jobs:
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
           MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.mutable_image_uri }}
+          EXPLICIT_CUDA_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_image_uri }}
+          EXPLICIT_CUDA_MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_mutable_image_uri }}
         run: |
           ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
           RESULT=""
@@ -229,6 +246,14 @@ jobs:
           # (e.g. vllm-runtime-cuda12-nightly). Empty for non-nightly builds.
           if [ -n "${MUTABLE_IMAGE_URI}" ]; then
             RESULT+="${MUTABLE_IMAGE_URI}"$'\n'
+          fi
+          # Append explicit -cuda13 aliases for cuda13 builds. Empty for
+          # cuda12 / cpu builds.
+          if [ -n "${EXPLICIT_CUDA_IMAGE_URI}" ]; then
+            RESULT+="${EXPLICIT_CUDA_IMAGE_URI}"$'\n'
+          fi
+          if [ -n "${EXPLICIT_CUDA_MUTABLE_IMAGE_URI}" ]; then
+            RESULT+="${EXPLICIT_CUDA_MUTABLE_IMAGE_URI}"$'\n'
           fi
           if [ -n "$RESULT" ]; then
             echo "tags<<EOF" >> $GITHUB_OUTPUT
