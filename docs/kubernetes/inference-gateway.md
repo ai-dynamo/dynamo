@@ -321,6 +321,43 @@ spec:
 
 If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually for each EPP service. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
 
+**Inference-gateway Istio sidecar exclusion**
+
+When namespace-level Istio sidecar injection is enabled (`istio-injection=enabled`), the kgateway-proxy pod also receives an Istio sidecar. This sidecar intercepts the ext_proc gRPC connection from kgateway-proxy to EPP (port 9002) and routes it through `PassthroughCluster`, which breaks the connection and causes all inference requests to return HTTP 500 with an empty body.
+
+The `install_gaie_crd_kgateway.sh` script handles this automatically by creating a kgateway `GatewayParameters` resource in the same namespace as the `inference-gateway` Gateway. The resource sets `sidecar.istio.io/inject: "false"` on the kgateway-proxy pod template:
+
+```yaml
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: GatewayParameters
+metadata:
+  name: inference-gateway-params
+  # Must be in the same namespace as the inference-gateway Gateway
+  # because Gateway API's infrastructure.parametersRef is a
+  # LocalParametersReference (no namespace field).
+spec:
+  kube:
+    podTemplate:
+      extraAnnotations:
+        sidecar.istio.io/inject: "false"
+```
+
+The `inference-gateway` Gateway references this `GatewayParameters` via `spec.infrastructure.parametersRef`, so kgateway applies the annotation to every kgateway-proxy pod it creates for this gateway. The annotation is a no-op on clusters where Istio is not installed.
+
+If you set up the inference-gateway manually (without the install script), apply the `GatewayParameters` above to the Gateway's namespace and reference it from your Gateway:
+
+```yaml
+spec:
+  infrastructure:
+    parametersRef:
+      group: gateway.kgateway.dev
+      kind: GatewayParameters
+      name: inference-gateway-params
+```
+
+> [!NOTE]
+> With both the `DestinationRule` (for EPP) and the `GatewayParameters` sidecar exclusion (for kgateway-proxy) in place, end-to-end GAIE inference works correctly under Istio namespace-level injection.
+
 ### 6. Verify Installation ###
 
 Check that all resources are properly deployed:

@@ -42,7 +42,43 @@ helm upgrade -i --namespace kgateway-system --version $KGTW_VERSION kgateway \
   oci://cr.kgateway.dev/kgateway-dev/charts/kgateway \
   --set inferenceExtension.enabled=true
 
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${IGW_LATEST_RELEASE}/config/manifests/gateway/agentgateway/gateway.yaml -n "$NAMESPACE"
+# Create a GatewayParameters resource that excludes Istio sidecar injection from the
+# kgateway-proxy pods. When the deployment namespace has istio-injection=enabled, the
+# Istio sidecar intercepts the ext_proc gRPC connection from kgateway-proxy to EPP
+# (port 9002), causing all inference requests to return HTTP 500. Setting
+# sidecar.istio.io/inject: "false" prevents sidecar injection on the proxy pod so
+# that ext_proc traffic reaches EPP directly. This annotation is a no-op on clusters
+# where Istio is not installed.
+#
+# GatewayParameters must live in the same namespace as the Gateway because
+# Gateway API's infrastructure.parametersRef is a LocalParametersReference
+# (no namespace field).
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: GatewayParameters
+metadata:
+  name: inference-gateway-params
+spec:
+  kube:
+    podTemplate:
+      extraAnnotations:
+        sidecar.istio.io/inject: "false"
+EOF
 
-kubectl patch gateway inference-gateway -n "$NAMESPACE" --type='json' \
-  -p='[{"op": "replace", "path": "/spec/gatewayClassName", "value": "kgateway"}]'
+kubectl apply -n "$NAMESPACE" -f - <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: inference-gateway
+spec:
+  gatewayClassName: kgateway
+  infrastructure:
+    parametersRef:
+      group: gateway.kgateway.dev
+      kind: GatewayParameters
+      name: inference-gateway-params
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+EOF
