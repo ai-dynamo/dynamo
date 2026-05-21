@@ -108,6 +108,10 @@ class frontend_service:
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
     INTER_TOKEN_LATENCY_SECONDS = "inter_token_latency_seconds"
+    # End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    # pooling-model latencies (sub-second) without sacrificing resolution.
+    EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model
