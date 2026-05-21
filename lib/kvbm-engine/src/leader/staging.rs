@@ -3,9 +3,10 @@
 
 //! Shared G3→G2 staging logic.
 //!
-//! Extracts the common staging kernel used by InitiatorSession, ResponderSession,
-//! and ServerSession. Each caller handles its own post-staging bookkeeping
-//! (updating holders, sending messages, etc.).
+//! Core staging kernel: allocate G2 destinations, transfer G3→G2, register the
+//! new G2 blocks. Used by the control-plane `transfer` module and the parked
+//! G4/async-search machinery. Each caller handles its own post-staging
+//! bookkeeping (updating holders, sending notifications, etc.).
 
 use std::sync::Arc;
 

@@ -24,8 +24,8 @@ use velo::{Handler, Messenger};
 use kvbm_logical::blocks::{CompleteBlock, ImmutableBlock};
 
 use crate::G3;
-use crate::leader::session::BlockHolder;
-use crate::leader::session::staging::stage_g3_to_g2;
+use crate::leader::blocks::BlockHolder;
+use crate::leader::staging::stage_g3_to_g2;
 use kvbm_protocols::control::modules::transfer::{
     CLOSE_SESSION_HANDLER, CloseTransferSessionRequest, CloseTransferSessionResponse, FindMode,
     MatchBreakdown, OPEN_SESSION_HANDLER, OpenTransferSessionRequest, OpenTransferSessionResponse,
@@ -35,9 +35,9 @@ use kvbm_protocols::control::modules::transfer::{
 };
 use kvbm_protocols::control::{ControlError, ControlReply, ModuleId};
 
-use crate::p2p::session::{AvailabilityDelta, CommitDelta, Session};
 use crate::leader::InstanceLeader;
 use crate::leader::control::ControlModule;
+use crate::p2p::session::{AvailabilityDelta, CommitDelta, Session};
 use crate::{G2, SequenceHash};
 
 // ---------------------------------------------------------------------------

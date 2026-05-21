@@ -586,7 +586,6 @@ mod cleanup_tests {
             status_rx,
             Arc::new(TokioMutex::new(Some(Vec::new()))),
             Arc::new(TokioMutex::new(MatchBreakdown::default())),
-            None,
         ))
     }
 
@@ -601,7 +600,6 @@ mod cleanup_tests {
             status_rx,
             Arc::new(TokioMutex::new(None)),
             Arc::new(TokioMutex::new(MatchBreakdown::default())),
-            None,
         );
         (FindMatchesResult::AsyncSession(session), status_tx)
     }

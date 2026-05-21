@@ -13,7 +13,6 @@ pub mod physical;
 pub mod token_blocks;
 
 // Re-export commonly used testing utilities
-pub use distributed::TestSession;
 pub use events::{EventsPipelineConfig, EventsPipelineConfigBuilder, EventsPipelineFixture};
 pub use managers::{
     InstancePopulationResult, InstancePopulationSpec, MultiInstancePopulator,

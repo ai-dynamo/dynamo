@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use ::velo::Messenger;
 use anyhow::Result;
 use dashmap::DashMap;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use std::sync::{Arc, OnceLock};
@@ -20,8 +20,11 @@ use kvbm_protocols::control::{
 
 use crate::{
     BlockId, G2, G3, InstanceId, SequenceHash,
-    p2p::{RemoteBlockSet, session::{SessionFactory, SessionManager}},
     object::ObjectBlockOps,
+    p2p::{
+        RemoteBlockSet,
+        session::{SessionFactory, SessionManager},
+    },
     worker::RemoteDescriptor,
 };
 use kvbm_common::LogicalLayoutHandle;
@@ -32,32 +35,18 @@ use kvbm_logical::{
 use kvbm_observability::SharedKvbmObservability;
 use kvbm_physical::transfer::{TransferCompleteNotification, TransferOptions};
 
-use kvbm_physical::manager::{LayoutHandle, SerializedLayout};
+use kvbm_physical::manager::SerializedLayout;
 
 use super::{
     super::worker::Worker,
     super::worker::group::{ParallelWorkers, SpmdParallelWorkers},
-    AsyncSessionResult,
-    FindMatchesOptions,
-    FindMatchesResult,
-    Leader,
-    OnboardingStatus,
-    ReadyResult,
-    // Legacy SessionHandle for deferred operations
-    SessionHandle as LegacySessionHandle,
-    SessionId,
-    StagingMode,
+    AsyncSessionResult, BlockHolder, FindMatchesOptions, FindMatchesResult, Leader,
+    MetadataTransport, OnboardingStatus, ReadyResult, SessionId,
     accessor::{BlockAccessor, PolicyContext},
     consolidator::{ConsolidatorCell, ConsolidatorParams, new_cell, spawn_into_cell},
     dispatch::{PullRef, WirePullOptions, plan_pull},
     parallelism::{ParallelismTemplate, stamp_parallelism_descriptors},
-    session::{
-        BlockHolder, ControlRole, ControllableSessionOptions, ControllableSessionResult,
-        InitiatorSession, MessageTransport, OnboardMessage, OnboardSessionTx, ResponderSession,
-        ServerSession, ServerSessionHandle, ServerSessionOptions, SessionHandle, SessionMessage,
-        SessionMessageTx, SessionPhase, create_server_session, session_handle_state_channel,
-        session_message_channel,
-    },
+    stage_g3_to_g2,
     velo::{ExportMetadataCallback, VeloLeaderService},
 };
 
@@ -71,8 +60,8 @@ use super::{
 /// Key responsibilities:
 /// - **Block matching**: finding which requested sequence hashes are already
 ///   cached locally (via `BlockAccessor` policies).
-/// - **Session management**: creating, attaching, and driving onboard sessions
-///   between endpoint (source) and controller (destination) roles.
+/// - **Block matching**: resolving which requested sequence hashes are cached
+///   locally across the G2/G3 tiers via `find_matches`.
 /// - **Remote connectivity**: exchanging serialized layout metadata with peer
 ///   instances so workers can perform RDMA transfers.
 /// - **Velo RPC**: registering handlers via `VeloLeaderService` so remote
@@ -111,27 +100,21 @@ pub struct InstanceLeader {
     /// Used for RDMA transfers with proper handle mapping storage.
     parallel_worker: Option<Arc<dyn ParallelWorkers>>,
 
-    /// Map of active sessions (session_id -> message channel).
-    sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
-
     /// Cached worker metadata (avoids querying workers repeatedly).
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
 
     /// Map of session states for holding blocks alive (RAII).
+    ///
+    /// Populated by the local-staging `AsyncSession` path in `find_matches`
+    /// and cleared via [`InstanceLeader::release_session`].
     session_states: Arc<DashMap<SessionId, SessionState>>,
 
     /// List of remote leader instance IDs (mutable for post-construction configuration).
     remote_leaders: Arc<std::sync::RwLock<Vec<InstanceId>>>,
 
-    /// Message transport for session communication.
-    transport: Arc<MessageTransport>,
-
-    // ========================================================================
-    // Unified Session Protocol
-    // ========================================================================
-    /// Map of session message receivers.
-    /// Used by SessionHandle/SessionEndpoint/ControllableSession.
-    session_sessions: Arc<DashMap<SessionId, SessionMessageTx>>,
+    /// Client for the `kvbm.leader.export_metadata` RPC, used to import a peer
+    /// leader's worker layout metadata before an RDMA pull.
+    transport: Arc<MetadataTransport>,
 
     // ========================================================================
     // G4/Object Storage
@@ -239,7 +222,6 @@ pub struct InstanceLeaderBuilder {
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
     workers: Vec<Arc<dyn Worker>>,
-    sessions: Option<Arc<DashMap<SessionId, OnboardSessionTx>>>,
     remote_leaders: Option<Vec<InstanceId>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
@@ -397,7 +379,7 @@ impl InstanceLeaderBuilder {
         let messenger = self
             .messenger
             .ok_or_else(|| anyhow::anyhow!("Velo instance required"))?;
-        let transport = Arc::new(MessageTransport::velo(messenger.clone()));
+        let transport = Arc::new(MetadataTransport::new(messenger.clone()));
 
         // Create event system for notification aggregation
         let events = Arc::new(messenger.event_manager());
@@ -448,13 +430,11 @@ impl InstanceLeaderBuilder {
             workers: self.workers,
             parallel_worker,
             cached_worker_metadata: self.cached_worker_metadata,
-            sessions: self.sessions.unwrap_or_else(|| Arc::new(DashMap::new())),
             session_states: Arc::new(DashMap::new()),
             remote_leaders: Arc::new(std::sync::RwLock::new(
                 self.remote_leaders.unwrap_or_default(),
             )),
             transport,
-            session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
             parallelism_template: self.parallelism_template,
             block_layout_mode: self.block_layout_mode,
@@ -556,17 +536,18 @@ impl InstanceLeader {
     /// Get the object storage client for G4 operations.
     ///
     /// Returns `Some` if object storage is configured, `None` otherwise.
-    /// The client is used by InitiatorSession for G4 parallel search.
+    /// Reserved for the parked G4 search machinery in [`crate::leader::search`].
     pub fn object_client(&self) -> Option<Arc<dyn ObjectBlockOps>> {
         self.object_client.clone()
     }
 
     /// Add a remote leader to the search list.
     ///
-    /// Remote leaders are queried during `find_matches_with_options` when
-    /// `search_remote == true`. This method allows adding remote leaders
-    /// after construction (e.g., when instance IDs are only known after
-    /// cluster setup).
+    /// Tracks peer leader instance IDs for the upcoming async remote-search
+    /// path. (Peer-leader search is not currently wired into
+    /// `find_matches_with_options`.) Allows adding remote leaders after
+    /// construction (e.g., when instance IDs are only known after cluster
+    /// setup).
     pub fn add_remote_leader(&self, instance_id: InstanceId) {
         let mut remote_leaders = self.remote_leaders.write().unwrap();
         if !remote_leaders.contains(&instance_id) {
@@ -1059,45 +1040,6 @@ impl InstanceLeader {
     ///
     /// This must be called after construction to enable distributed onboarding.
     pub fn register_handlers(&self) -> Result<()> {
-        let instance_id = self.messenger.instance_id();
-        let g2_manager = self.g2_manager.clone();
-        let g3_manager = self.g3_manager.clone();
-        let parallel_worker = self.parallel_worker.clone();
-        let transport = self.transport.clone();
-        let sessions = self.sessions.clone();
-
-        let spawn_responder = move |msg: OnboardMessage| -> Result<()> {
-            if let OnboardMessage::CreateSession {
-                requester,
-                session_id,
-                sequence_hashes,
-            } = msg
-            {
-                let (tx, rx) = mpsc::channel(100);
-                sessions.insert(session_id, tx);
-
-                let session = ResponderSession::new(
-                    session_id,
-                    instance_id,
-                    requester,
-                    g2_manager.clone(),
-                    g3_manager.clone(),
-                    parallel_worker.clone(),
-                    transport.clone(),
-                );
-
-                tokio::spawn(async move {
-                    if let Err(e) = session.run(rx, sequence_hashes).await {
-                        tracing::warn!(error = %e, "ResponderSession error");
-                    }
-                });
-
-                Ok(())
-            } else {
-                anyhow::bail!("spawn_responder called with non-CreateSession message")
-            }
-        };
-
         // Create export_metadata callback if we have workers or cached metadata.
         // Delegates to assemble_export_metadata so the stamping logic is
         // testable without Velo plumbing.
@@ -1112,9 +1054,7 @@ impl InstanceLeader {
                 None
             };
 
-        let mut service = VeloLeaderService::new(self.messenger.clone(), self.sessions.clone())
-            .with_spawn_responder(spawn_responder)
-            .with_session_sessions(self.session_sessions.clone());
+        let mut service = VeloLeaderService::new(self.messenger.clone());
 
         if let Some(callback) = export_metadata_callback {
             service = service.with_export_metadata(callback);
@@ -1189,374 +1129,30 @@ impl InstanceLeader {
     /// is dropped. Call this explicitly if you need to release blocks earlier.
     pub fn release_session(&self, session_id: SessionId) {
         self.session_states.remove(&session_id);
-        self.sessions.remove(&session_id);
-        self.session_sessions.remove(&session_id);
     }
 
-    /// Test-only: is `session_id` registered in any of the three session maps?
+    /// Test-only: is `session_id` registered in the session-state map?
     #[cfg(any(test, feature = "testing"))]
     pub fn has_session(&self, session_id: SessionId) -> bool {
-        self.sessions.contains_key(&session_id)
-            || self.session_states.contains_key(&session_id)
-            || self.session_sessions.contains_key(&session_id)
+        self.session_states.contains_key(&session_id)
     }
 
-    /// Test-only: insert a sentinel entry into `sessions` so a test can verify
-    /// that `release_session` removes it. The channel has capacity 1 and its
-    /// receiver is dropped immediately; the map entry alone is what the test
-    /// observes.
+    /// Test-only: insert a sentinel session state so a test can verify that
+    /// `release_session` removes it. The held block vectors are empty; the map
+    /// entry alone is what the test observes.
     #[cfg(any(test, feature = "testing"))]
     pub fn insert_test_session_marker(&self, session_id: SessionId) {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        self.sessions.insert(session_id, tx);
-    }
-
-    // ========================================================================
-    // Inverted Control Pattern (Prefill-Decode) Methods
-    // ========================================================================
-
-    /// Create a controllable session for local blocks.
-    ///
-    /// This is the "Decode side" of the inverted control pattern:
-    /// 1. Search local G2 and G3 for matches
-    /// 2. Create a ControllableSession that holds the blocks
-    /// 3. Return session_id to be sent to Prefill out-of-band
-    ///
-    /// By default, G3→G2 staging starts immediately (auto_stage=true).
-    pub fn create_controllable_session(
-        &self,
-        sequence_hashes: &[SequenceHash],
-    ) -> Result<ControllableSessionResult> {
-        self.create_controllable_session_with_options(
-            sequence_hashes,
-            ControllableSessionOptions::default(),
-        )
-    }
-
-    /// Create a controllable session with custom options.
-    ///
-    /// Use this when you need to control auto-staging behavior.
-    pub fn create_controllable_session_with_options(
-        &self,
-        sequence_hashes: &[SequenceHash],
-        options: ControllableSessionOptions,
-    ) -> Result<ControllableSessionResult> {
-        let session_id = SessionId::from(Uuid::new_v4());
-
-        // Local search only
-        let matched_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
-
-        // Find remaining hashes not in G2
-        let remaining_hashes: Vec<_> = sequence_hashes
-            .iter()
-            .filter(|h| !matched_g2_blocks.iter().any(|b| b.sequence_hash() == **h))
-            .copied()
-            .collect();
-
-        // Search G3 for remaining hashes
-        let matched_g3_blocks = if let Some(ref g3_manager) = self.g3_manager {
-            g3_manager.match_blocks(&remaining_hashes)
-        } else {
-            Vec::new()
-        };
-
-        let local_g2_count = matched_g2_blocks.len();
-        let local_g3_count = matched_g3_blocks.len();
-
-        // Create session channel using unified SessionMessage protocol
-        let (tx, rx) = session_message_channel(100);
-        self.session_sessions.insert(session_id, tx);
-
-        // Collect G2 layout handles from workers for round-robin block allocation
-        let worker_g2_handles: Vec<LayoutHandle> = self
-            .parallel_worker
-            .as_ref()
-            .map(|pw| pw.workers().iter().filter_map(|w| w.g2_handle()).collect())
-            .unwrap_or_default();
-
-        let endpoint = super::session::SessionEndpoint::new(
+        let (status_tx, _rx) = watch::channel(OnboardingStatus::Searching);
+        self.session_states.insert(
             session_id,
-            self.messenger.instance_id(),
-            self.transport.clone(),
-            rx,
-        );
-
-        let (cmd_tx, cmd_rx) = mpsc::channel(16);
-
-        let session = ServerSession::new_with_staging(
-            endpoint,
-            BlockHolder::new(matched_g2_blocks),
-            BlockHolder::new(matched_g3_blocks),
-            worker_g2_handles,
-            self.g2_manager.clone(),
-            self.parallel_worker.clone(),
-            cmd_rx,
-            ServerSessionOptions {
-                auto_stage: options.auto_stage,
+            SessionState {
+                session_id,
+                matched_g2_blocks: Vec::new(),
+                matched_g3_blocks: Vec::new(),
+                status_tx,
             },
         );
-
-        // Keep handle alive to prevent cmd channel from closing
-        let _handle = ServerSessionHandle::new(session_id, self.messenger.instance_id(), cmd_tx);
-
-        // Spawn session task
-        let session_sessions = self.session_sessions.clone();
-        tokio::spawn(async move {
-            let _handle = _handle; // move handle into task to keep cmd channel open
-            if let Err(e) = session.run().await {
-                tracing::warn!(error = %e, "ServerSession error");
-            }
-            // Clean up when session completes
-            session_sessions.remove(&session_id);
-        });
-
-        Ok(ControllableSessionResult {
-            session_id,
-            local_g2_count,
-            local_g3_count,
-        })
     }
-
-    // ========================================================================
-    // Unified Session Protocol
-    // ========================================================================
-
-    /// Attach to a remote session.
-    /// Returns a `SessionHandle` that uses `SessionMessage` for communication.
-    ///
-    /// # Arguments
-    /// * `remote_instance` - The instance hosting the session
-    /// * `session_id` - The session to attach to
-    ///
-    /// # Example
-    /// ```ignore
-    /// let handle = leader.attach_session(remote_id, session_id).await?;
-    /// let state = handle.wait_for_ready().await?;
-    /// handle.trigger_staging().await?;
-    /// ```
-    pub async fn attach_session(
-        &self,
-        remote_instance: InstanceId,
-        session_id: SessionId,
-    ) -> Result<SessionHandle> {
-        // Create local channel for receiving state updates
-        let (state_tx, state_rx) = session_handle_state_channel();
-
-        // Register handler for this session's messages
-        let (msg_tx, msg_rx) = session_message_channel(100);
-        self.session_sessions.insert(session_id, msg_tx);
-
-        // Spawn receiver task to update state
-        tokio::spawn(Self::run_session_receiver(msg_rx, state_tx));
-
-        // Send attach message using new protocol
-        let msg = SessionMessage::Attach {
-            peer: self.messenger.instance_id(),
-            session_id,
-            as_role: ControlRole::Controller,
-        };
-        self.transport.send_session(remote_instance, msg).await?;
-
-        let mut handle = SessionHandle::new(
-            session_id,
-            remote_instance,
-            self.messenger.instance_id(),
-            self.transport.clone(),
-            state_rx,
-        );
-
-        // Add RDMA support if parallel worker is configured
-        if let Some(parallel_worker) = &self.parallel_worker {
-            handle = handle.with_rdma_support(parallel_worker.clone());
-        }
-
-        Ok(handle)
-    }
-
-    // ========================================================================
-    // Endpoint Session Creation (Server-Side)
-    // ========================================================================
-
-    /// Create an endpoint session that a remote peer can attach to.
-    ///
-    /// This searches local G2/G3 for blocks matching the given sequence hashes
-    /// and creates a session that exposes them for remote RDMA pull.
-    ///
-    /// Returns `(session_id, handle)` where:
-    /// - `session_id` - Send to remote peer for attachment
-    /// - `handle` - Use to control the session (send layer notifications, close)
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Create session for sequence hashes
-    /// let (session_id, handle) = leader.create_endpoint_session(&hashes)?;
-    ///
-    /// // Send session_id to remote peer out-of-band
-    /// // Remote attaches via: remote_leader.attach_session(local_id, session_id)
-    ///
-    /// // For layerwise transfer, notify when layers are ready
-    /// handle.notify_layers_ready(0..1).await?;
-    /// ```
-    pub fn create_endpoint_session(
-        &self,
-        sequence_hashes: &[SequenceHash],
-    ) -> Result<(SessionId, ServerSessionHandle)> {
-        let session_id = SessionId::from(uuid::Uuid::new_v4());
-
-        // Local search
-        let matched_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
-
-        // Collect layout handles from workers
-        // Note: For single-worker setups, all blocks use the same handle
-        // For multi-worker (SPMD), each block gets the handle from its assigned worker
-        let worker_g2_handles: Vec<LayoutHandle> = self
-            .parallel_worker
-            .as_ref()
-            .map(|pw| pw.workers().iter().filter_map(|w| w.g2_handle()).collect())
-            .unwrap_or_default();
-
-        // Assign layout handle to each matched block
-        // For now, use the first worker's handle for all blocks (single-worker assumption)
-        // TODO: For SPMD, map blocks to worker handles based on block assignment
-        let layout_handle = worker_g2_handles
-            .first()
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("No G2 layout handle available from workers"))?;
-        let layout_handles: Vec<LayoutHandle> = vec![layout_handle; matched_g2_blocks.len()];
-
-        // Get sequence hashes from matched blocks
-        let matched_hashes: Vec<SequenceHash> = matched_g2_blocks
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect();
-
-        // Create the session channel
-        let (msg_tx, msg_rx) = session_message_channel(100);
-        self.session_sessions.insert(session_id, msg_tx);
-
-        // Create BlockHolder from matched blocks
-        let block_holder = BlockHolder::new(matched_g2_blocks);
-
-        // Create the session and handle
-        let (session, handle) = create_server_session(
-            session_id,
-            self.messenger.instance_id(),
-            block_holder,
-            layout_handles,
-            matched_hashes,
-            self.transport.clone(),
-            msg_rx,
-        );
-
-        // Spawn the session task
-        let session_sessions = self.session_sessions.clone();
-        tokio::spawn(async move {
-            if let Err(e) = session.run().await {
-                tracing::warn!(error = %e, "ServerSession error");
-            }
-            // Clean up when session completes
-            session_sessions.remove(&session_id);
-        });
-
-        Ok((session_id, handle))
-    }
-
-    /// Create an endpoint session for specific pre-allocated blocks.
-    ///
-    /// Unlike `create_endpoint_session`, this doesn't search - it uses the
-    /// provided blocks directly. Useful when the caller already has blocks
-    /// to expose (e.g., after prefill computation).
-    ///
-    /// # Arguments
-    /// * `blocks` - Blocks to expose for RDMA pull
-    /// * `sequence_hashes` - Sequence hashes for the blocks (must match block count)
-    /// * `layout_handles` - Layout handles for the blocks (must match block count)
-    ///
-    /// # Example
-    /// ```ignore
-    /// // After prefill computation, expose blocks for Decode to pull
-    /// let (session_id, handle) = leader.create_endpoint_session_for_blocks(
-    ///     prefill_blocks,
-    ///     &hashes,
-    ///     &layout_handles,
-    /// )?;
-    /// ```
-    pub fn create_endpoint_session_for_blocks(
-        &self,
-        blocks: BlockHolder<G2>,
-        sequence_hashes: &[SequenceHash],
-        layout_handles: &[LayoutHandle],
-    ) -> Result<(SessionId, ServerSessionHandle)> {
-        let session_id = SessionId::from(uuid::Uuid::new_v4());
-
-        // Create the session channel
-        let (msg_tx, msg_rx) = session_message_channel(100);
-        self.session_sessions.insert(session_id, msg_tx);
-
-        // Create the session and handle
-        let (session, handle) = create_server_session(
-            session_id,
-            self.messenger.instance_id(),
-            blocks,
-            layout_handles.to_vec(),
-            sequence_hashes.to_vec(),
-            self.transport.clone(),
-            msg_rx,
-        );
-
-        // Spawn the session task
-        let session_sessions = self.session_sessions.clone();
-        tokio::spawn(async move {
-            if let Err(e) = session.run().await {
-                tracing::warn!(error = %e, "ServerSession error");
-            }
-            // Clean up when session completes
-            session_sessions.remove(&session_id);
-        });
-
-        Ok((session_id, handle))
-    }
-
-    /// Internal: Process incoming SessionMessage for a session.
-    async fn run_session_receiver(
-        mut rx: mpsc::Receiver<SessionMessage>,
-        state_tx: super::session::SessionHandleStateTx,
-    ) {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                SessionMessage::StateResponse { state, .. } => {
-                    state_tx.update(state);
-                }
-                SessionMessage::BlocksStaged {
-                    staged_blocks,
-                    remaining,
-                    layer_range,
-                    ..
-                } => {
-                    state_tx.add_staged_blocks(staged_blocks, remaining, layer_range);
-                }
-                SessionMessage::Error { message, .. } => {
-                    tracing::warn!(%message, "Session error");
-                    state_tx.set_failed();
-                    break;
-                }
-                SessionMessage::Close { .. } => {
-                    state_tx.set_phase(SessionPhase::Complete);
-                    break;
-                }
-                _ => {
-                    // Ignore control commands (sent by controller, not received)
-                }
-            }
-        }
-    }
-
-    /// Get the session sessions map (for Velo handler registration).
-    #[expect(dead_code)]
-    pub(crate) fn session_sessions(&self) -> Arc<DashMap<SessionId, SessionMessageTx>> {
-        self.session_sessions.clone()
-    }
-
     // ========================================================================
     // RDMA Metadata Management
     // These methods handle layout metadata export/import for remote RDMA transfers.
@@ -2147,13 +1743,14 @@ impl Leader for InstanceLeader {
     fn find_matches_with_options(
         &self,
         sequence_hashes: &[SequenceHash],
-        options: FindMatchesOptions,
+        // `FindMatchesOptions` (search_remote, staging_mode) are presently
+        // no-ops: peer/G4 remote search is parked for the async-search refactor,
+        // so matching always degrades to local-only (G2 ready + local-G3 staging).
+        _options: FindMatchesOptions,
     ) -> Result<FindMatchesResult> {
         // Search G2 (host memory) for matches
         // Uses match_blocks which stops at first miss (implements "first hole" policy).
         // This ensures we only find contiguous blocks from the start of the sequence.
-        // For distributed search, remote instances use scan_matches for broad coverage,
-        // then first-hole filtering is applied in InitiatorSession after aggregation.
 
         // todo: add explicit timing tracing here
         // let start_time = Instant::now();
@@ -2175,33 +1772,21 @@ impl Leader for InstanceLeader {
             Vec::new()
         };
 
-        // Determine if we can return immediately (Ready) or need async session
-        // Ready if:
-        //   - g3 blocks is empty
-        //   - AND NOT (search_remote AND has_remote_leaders)
-        //   - AND NOT (search_remote AND has_object_client)
-        //
-        // AsyncSession (is_ready=false) if:
-        //   - g3 is not empty, or
-        //   - search_remote is true AND (has_remote_leaders OR has_object_client)
-        let has_remote_leaders = !self.remote_leaders.read().unwrap().is_empty();
-        let has_object_client = self.object_client.is_some();
-        let needs_remote_search =
-            options.search_remote && (has_remote_leaders || has_object_client);
         let local_g2_count = matched_g2_blocks.len();
         let local_g3_count = matched_g3_blocks.len();
+
+        // Peer-leader remote search has been removed pending the async-search
+        // refactor. `search_remote` now silently degrades to local-only: we
+        // return local G2 (Ready), or — when local G3 (disk) blocks are also
+        // matched — an AsyncSession that stages G3→G2 before reporting Complete.
+        // The G4/object-storage search machinery is parked in `leader::search`
+        // and is not wired into this path yet.
 
         // Host-bypass short-circuit: when G2 is intentionally unconfigured we
         // never want to take the AsyncSession + stage_g3_to_g2 path. Return
         // immediately with both G2 (typically empty) and G3 blocks attached
         // so the caller can issue G3→G1 directly via GDS.
-        //
-        // Bypass mode does not currently support remote search — the staging
-        // protocol owns that path and assumes G2 destinations. If a caller
-        // requests remote search under bypass, fall through to the normal
-        // AsyncSession path which will surface the missing-G2-destination
-        // error loudly rather than silently dropping disk traffic.
-        if self.bypass_host && !needs_remote_search {
+        if self.bypass_host {
             return Ok(FindMatchesResult::Ready(ReadyResult::new_with_g3(
                 matched_g2_blocks,
                 matched_g3_blocks,
@@ -2213,9 +1798,7 @@ impl Leader for InstanceLeader {
             )));
         }
 
-        let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
-
-        if is_ready {
+        if matched_g3_blocks.is_empty() {
             // No session needed - blocks owned directly by ReadyResult (RAII)
             return Ok(FindMatchesResult::Ready(ReadyResult::new(
                 matched_g2_blocks,
@@ -2227,10 +1810,9 @@ impl Leader for InstanceLeader {
             )));
         }
 
-        // AsyncSession path: G3 blocks found or remote search enabled
+        // AsyncSession path: local G3 blocks found — stage G3→G2, then deliver.
         let session_id = SessionId::from(Uuid::new_v4());
 
-        // AsyncSession: staging locally and/or remote searching
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
         let all_g2_blocks = Arc::new(Mutex::new(None));
         let match_breakdown = Arc::new(Mutex::new(super::MatchBreakdown {
@@ -2239,7 +1821,9 @@ impl Leader for InstanceLeader {
             object_blocks: 0,
         }));
 
-        // Store session state to keep blocks alive
+        // Store session state to keep the matched blocks alive (RAII) until the
+        // caller releases the session. The staging task below re-matches the
+        // registry-backed handles independently.
         let state = SessionState {
             session_id,
             matched_g2_blocks,
@@ -2248,73 +1832,64 @@ impl Leader for InstanceLeader {
         };
         self.store_session_state(state);
 
-        // If no remote search, handle local-only staging
-        if !options.search_remote {
-            // Local-only staging (Prepare or Full mode)
-            // TODO: Implement local G3→G2 staging
-            let total_matched = local_g2_count + local_g3_count;
-            status_tx
-                .send(OnboardingStatus::Complete {
-                    matched_blocks: total_matched,
-                })
-                .ok();
-
-            return Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
-                session_id,
-                status_rx,
-                all_g2_blocks,
-                match_breakdown,
-                None, // No session handle for local-only staging (yet)
-            )));
-        }
-
-        // Remote search path
-        let (tx, rx) = mpsc::channel(100);
-        self.sessions.insert(session_id, tx);
-
-        // Create control channel for Hold/Prepare modes
-        let (session_handle, control_rx) = if matches!(
-            options.staging_mode,
-            StagingMode::Hold | StagingMode::Prepare
-        ) {
-            let (control_tx, control_rx) = mpsc::channel(10);
-            let handle = LegacySessionHandle::new(session_id, options.staging_mode, control_tx);
-            (Some(handle), Some(control_rx))
-        } else {
-            (None, None)
-        };
-
-        let session = InitiatorSession::new(
-            session_id,
-            self.messenger.instance_id(),
-            options.staging_mode,
-            self.g2_manager.clone(),
-            self.g3_manager.clone(),
-            self.parallel_worker.clone(),
-            self.transport.clone(),
-            status_tx.clone(),
-            all_g2_blocks.clone(),
-            match_breakdown.clone(),
-            control_rx.unwrap_or_else(|| {
-                let (_, rx) = mpsc::channel(1);
-                rx
-            }),
-            self.object_client.clone(),
-        );
-
-        let remote_leaders = self.remote_leaders.read().unwrap().clone();
+        // Stage local G3→G2 off-thread, then publish the deliverable G2 blocks.
+        // We only report blocks that are actually available in G2: the G2 prefix
+        // plus any G3 successfully staged into G2. If staging fails (or there is
+        // no parallel worker), we deliver just the G2 prefix rather than claiming
+        // undelivered G3 matches.
+        let g2_manager = self.g2_manager.clone();
+        let g3_manager = self.g3_manager.clone();
+        let parallel_worker = self.parallel_worker.clone();
         let sequence_hashes = sequence_hashes.to_vec();
+        let all_g2_blocks_task = all_g2_blocks.clone();
+        let match_breakdown_task = match_breakdown.clone();
+        let status_tx_task = status_tx.clone();
 
-        let handle = self.messenger.runtime();
+        self.messenger.runtime().spawn(async move {
+            // Re-match the local tiers (registry-backed handles, cheap to re-resolve).
+            let mut g2 = g2_manager.match_blocks(&sequence_hashes);
+            let remaining: Vec<_> = sequence_hashes
+                .iter()
+                .filter(|h| !g2.iter().any(|b| b.sequence_hash() == **h))
+                .copied()
+                .collect();
 
-        handle.spawn(async move {
-            if let Err(e) = session.run(rx, remote_leaders, sequence_hashes).await {
-                tracing::warn!(error = %e, "InitiatorSession error");
-                // Try to update status to indicate error
-                status_tx
-                    .send(OnboardingStatus::Complete { matched_blocks: 0 })
-                    .ok();
+            if let Some(g3_manager) = g3_manager.as_ref() {
+                let g3 = g3_manager.match_blocks(&remaining);
+                if !g3.is_empty() {
+                    match parallel_worker.as_ref() {
+                        Some(pw) => {
+                            let holder = BlockHolder::new(g3);
+                            match stage_g3_to_g2(&holder, &g2_manager, &**pw).await {
+                                Ok(staged) => g2.extend(staged.new_g2_blocks),
+                                Err(e) => tracing::warn!(
+                                    %session_id,
+                                    error = %e,
+                                    "local G3→G2 staging failed; delivering G2 prefix only"
+                                ),
+                            }
+                        }
+                        None => tracing::warn!(
+                            %session_id,
+                            "no parallel worker configured; cannot stage G3, delivering G2 prefix only"
+                        ),
+                    }
+                }
             }
+
+            // Sort by position so the consumer sees a contiguous run from the start.
+            g2.sort_by_key(|b| b.sequence_hash().position());
+            let matched_blocks = g2.len();
+
+            if let Ok(mut breakdown) = match_breakdown_task.try_lock() {
+                breakdown.host_blocks = matched_blocks;
+                breakdown.disk_blocks = 0;
+            }
+            *all_g2_blocks_task.lock().await = Some(g2);
+
+            status_tx_task
+                .send(OnboardingStatus::Complete { matched_blocks })
+                .ok();
         });
 
         Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
@@ -2322,7 +1897,6 @@ impl Leader for InstanceLeader {
             status_rx,
             all_g2_blocks,
             match_breakdown,
-            session_handle,
         )))
     }
 }
@@ -2382,6 +1956,70 @@ mod tests {
             num_layers: 12,
             dtype_width_bytes: 2,
         }
+    }
+
+    /// Regression: `find_matches` must never report more matched blocks than it
+    /// can actually deliver in G2. When local G3 blocks match but cannot be
+    /// staged to G2 (here: no parallel worker), only the deliverable G2 prefix
+    /// is reported — not `g2 + g3`. (Pre-fix this path reported `g2 + g3` while
+    /// leaving the block payload empty.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_matches_local_g3_does_not_overreport_without_staging() -> Result<()> {
+        use crate::G3;
+        use crate::leader::Leader;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        let messenger = create_messenger_tcp().await?;
+        let registry = BlockRegistry::builder().build();
+        let g2 = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(8)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+        let g3 = Arc::new(
+            TestManagerBuilder::<G3>::new()
+                .block_count(8)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+        // No workers → no parallel worker → G3 cannot be staged into G2.
+        let leader = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry(registry)
+            .g2_manager(g2.clone())
+            .g3_manager(g3.clone())
+            .build()?;
+
+        // 4-block sequence: first 2 blocks live in G2 (the deliverable prefix),
+        // the next 2 in G3 (matched but unstageable here).
+        let seq = create_token_sequence(4, 4, 0);
+        crate::testing::managers::populate_manager_with_blocks(&g2, &seq.blocks()[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &seq.blocks()[2..])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        let result = leader.find_matches(&hashes)?;
+        let async_session = result
+            .as_async()
+            .expect("local G3 present (non-bypass) must yield an AsyncSession");
+        async_session.wait_for_completion().await?;
+
+        let reported = match async_session.status() {
+            OnboardingStatus::Complete { matched_blocks } => matched_blocks,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+
+        // The invariant: never claim more than is deliverable in G2.
+        assert_eq!(
+            reported, delivered,
+            "reported matched_blocks ({reported}) must equal delivered G2 blocks ({delivered})"
+        );
+        // Only the G2 prefix (2) is deliverable; the 2 unstageable G3 blocks are dropped.
+        assert_eq!(delivered, 2, "expected only the G2 prefix to be delivered");
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
