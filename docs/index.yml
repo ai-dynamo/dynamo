@@ -44,6 +44,11 @@ navigation:
         path: reference/release-artifacts.md
       - page: Examples
         path: getting-started/examples.md
+      - section: Recipes
+        path: recipes/README.mdx
+        contents:
+          - page: Qwen3-32B
+            path: recipes/qwen3-32b.mdx
       - page: Glossary
         path: reference/glossary.md
 

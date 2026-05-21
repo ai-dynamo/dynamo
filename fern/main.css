@@ -808,6 +808,849 @@ svg.card-icon{
     text-decoration-style: underline !important;
 }
 
+/* Recipe catalog */
+.dynamo-recipe-selector {
+    margin: 24px 0;
+    padding: 20px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 12px;
+    background: var(--pst-color-surface);
+}
+
+.dynamo-recipe-selector-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 16px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynamo-recipe-selector-header h3 {
+    margin: 0 0 6px;
+}
+
+.dynamo-recipe-selector-header p {
+    margin: 0;
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-recipe-selector-header a,
+.dynamo-recipe-actions a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid var(--nv-color-green);
+    border-radius: var(--rounded);
+    color: var(--pst-color-text-base);
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.dynamo-recipe-eyebrow {
+    margin-bottom: 8px !important;
+    color: var(--nv-color-green);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-recipe-row {
+    display: grid;
+    grid-template-columns: 112px 1fr;
+    align-items: center;
+    gap: 10px 14px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynamo-recipe-row:last-of-type {
+    border-bottom: 0;
+}
+
+.dynamo-recipe-label {
+    color: var(--pst-color-text-muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-recipe-options {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.dynamo-recipe-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 7px 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: var(--rounded);
+    background: var(--nv-color-bg-default);
+    color: var(--pst-color-text-base);
+    cursor: pointer;
+    font: inherit;
+    line-height: 1;
+}
+
+.dark .dynamo-recipe-chip {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-recipe-chip.active {
+    border-color: var(--nv-color-green);
+    box-shadow: 0 0 0 1px var(--nv-color-green);
+    font-weight: 700;
+}
+
+#provider-all:checked ~ .dynamo-recipe-browser label[for="provider-all"],
+#provider-nvidia:checked ~ .dynamo-recipe-browser label[for="provider-nvidia"],
+#provider-qwen:checked ~ .dynamo-recipe-browser label[for="provider-qwen"],
+#provider-deepseek:checked ~ .dynamo-recipe-browser label[for="provider-deepseek"],
+#provider-moonshot:checked ~ .dynamo-recipe-browser label[for="provider-moonshot"],
+#provider-meta:checked ~ .dynamo-recipe-browser label[for="provider-meta"],
+#provider-openai:checked ~ .dynamo-recipe-browser label[for="provider-openai"],
+#runtime-all:checked ~ .dynamo-recipe-browser label[for="runtime-all"],
+#runtime-vllm:checked ~ .dynamo-recipe-browser label[for="runtime-vllm"],
+#runtime-trtllm:checked ~ .dynamo-recipe-browser label[for="runtime-trtllm"],
+#runtime-sglang:checked ~ .dynamo-recipe-browser label[for="runtime-sglang"],
+#hardware-all:checked ~ .dynamo-recipe-browser label[for="hardware-all"],
+#hardware-h100:checked ~ .dynamo-recipe-browser label[for="hardware-h100"],
+#hardware-h200:checked ~ .dynamo-recipe-browser label[for="hardware-h200"],
+#hardware-gb200:checked ~ .dynamo-recipe-browser label[for="hardware-gb200"],
+#hardware-b200:checked ~ .dynamo-recipe-browser label[for="hardware-b200"],
+#technique-all:checked ~ .dynamo-recipe-browser label[for="technique-all"],
+#technique-aggregated:checked ~ .dynamo-recipe-browser label[for="technique-aggregated"],
+#technique-disaggregated:checked ~ .dynamo-recipe-browser label[for="technique-disaggregated"],
+#technique-kv-routing:checked ~ .dynamo-recipe-browser label[for="technique-kv-routing"],
+#technique-expert-parallel:checked ~ .dynamo-recipe-browser label[for="technique-expert-parallel"],
+#technique-spec-decoding:checked ~ .dynamo-recipe-browser label[for="technique-spec-decoding"],
+#technique-embedding-cache:checked ~ .dynamo-recipe-browser label[for="technique-embedding-cache"],
+#workload-all:checked ~ .dynamo-recipe-browser label[for="workload-all"],
+#workload-agentic-coding:checked ~ .dynamo-recipe-browser label[for="workload-agentic-coding"],
+#workload-long-context-reuse:checked ~ .dynamo-recipe-browser label[for="workload-long-context-reuse"],
+#workload-multimodal-reuse:checked ~ .dynamo-recipe-browser label[for="workload-multimodal-reuse"],
+#workload-static-generation:checked ~ .dynamo-recipe-browser label[for="workload-static-generation"],
+#workload-long-output:checked ~ .dynamo-recipe-browser label[for="workload-long-output"],
+#workload-deployment-only:checked ~ .dynamo-recipe-browser label[for="workload-deployment-only"] {
+    border-color: var(--nv-color-green);
+    box-shadow: 0 0 0 1px var(--nv-color-green);
+    font-weight: 700;
+}
+
+.dynamo-recipe-chip.disabled {
+    opacity: 0.45;
+    text-decoration: line-through;
+}
+
+.dynamo-recipe-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.dynamo-recipe-matrix {
+    display: grid;
+    margin: 24px 0;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.dynamo-recipe-matrix-row {
+    display: grid;
+    grid-template-columns: 1.2fr 1.1fr 0.95fr 0.8fr 1.8fr;
+    gap: 16px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynamo-recipe-matrix-row:last-child {
+    border-bottom: 0;
+}
+
+.dynamo-recipe-matrix-row.header {
+    background: var(--pst-color-surface);
+    font-weight: 700;
+}
+
+.dynamo-recipe-matrix-row span,
+.dynamo-recipe-matrix-row a {
+    min-width: 0;
+}
+
+.dynamo-recipe-browser {
+    margin: 24px 0;
+    padding: 18px 20px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 12px;
+    background: var(--pst-color-surface);
+}
+
+.dynamo-recipe-browser-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+    gap: 20px;
+    align-items: center;
+    padding-bottom: 16px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynamo-recipe-browser-header h3 {
+    margin: 0 0 6px;
+}
+
+.dynamo-recipe-browser-header p {
+    margin: 0;
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-filter-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.dynamo-search-box {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    min-height: 42px;
+    padding: 0 14px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: var(--rounded);
+    background: var(--nv-color-bg-default);
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-search-box span {
+    margin-right: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-search-box input {
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--pst-color-text-base);
+    font: inherit;
+}
+
+.dynamo-search-box input::placeholder {
+    color: var(--pst-color-text-muted);
+}
+
+.dark .dynamo-search-box {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-catalog-facts {
+    display: grid;
+    justify-items: end;
+    gap: 4px;
+    min-width: 160px;
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-catalog-facts strong {
+    color: var(--pst-color-text-base);
+    font-size: 28px;
+    line-height: 1;
+}
+
+.dynamo-catalog-facts span {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-filter-reset {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 5px 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: var(--rounded);
+    background: var(--pst-color-surface);
+    color: var(--pst-color-text-muted);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.dynamo-filter-reset:hover {
+    border-color: var(--nv-color-green);
+    color: var(--pst-color-text-base);
+}
+
+.dynamo-filter-row {
+    display: grid;
+    grid-template-columns: 96px 1fr;
+    gap: 10px 12px;
+    align-items: center;
+    padding: 8px 0;
+}
+
+.dynamo-filter-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.dynamo-traffic-facts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.dynamo-traffic-facts div {
+    min-height: 84px;
+    padding: 10px 12px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--nv-color-bg-default);
+}
+
+.dark .dynamo-traffic-facts div {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-traffic-facts span {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--pst-color-text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1.2;
+    text-transform: uppercase;
+}
+
+.dynamo-traffic-facts strong {
+    display: block;
+    color: var(--pst-color-text-base);
+    font-size: 15px;
+    line-height: 1.25;
+}
+
+.dynamo-traffic-facts p {
+    margin: 6px 0 0;
+    color: var(--pst-color-text-muted);
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.dynamo-model-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(184px, 1fr));
+    gap: 10px;
+    margin: 18px 0 28px;
+}
+
+.dynamo-model-card {
+    display: flex;
+    flex-direction: column;
+    min-height: 138px;
+    padding: 10px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    color: var(--pst-color-text-base);
+    text-decoration: none;
+}
+
+.dynamo-model-card:hover {
+    border-color: var(--nv-color-green);
+    text-decoration: none;
+}
+
+.dynamo-model-card-link {
+    display: contents;
+    color: inherit;
+    text-decoration: none;
+}
+
+.dynamo-model-card.active {
+    border-color: var(--nv-color-green);
+    box-shadow: 0 0 0 1px var(--nv-color-green);
+}
+
+.dynamo-model-card > svg {
+    display: none;
+}
+
+.dynamo-model-card-top {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+}
+
+.dynamo-model-card-top > div:nth-child(2) {
+    min-width: 0;
+}
+
+.dynamo-model-card-top h3 {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.25;
+    overflow-wrap: break-word;
+}
+
+.dynamo-model-card-top p {
+    margin: 2px 0 0;
+    color: var(--pst-color-text-muted);
+    font-size: 12px;
+    line-height: 1.25;
+}
+
+.dynamo-model-logo,
+.dynamo-model-mark {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+}
+
+.dynamo-model-logo {
+    display: block;
+    object-fit: cover;
+    margin: 0 !important;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    background: #fff;
+}
+
+.dynamo-model-logo.large {
+    width: 56px;
+    height: 56px;
+    border-radius: 12px;
+}
+
+.dynamo-model-mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--nv-color-green);
+    color: var(--nv-color-black);
+    font-weight: 800;
+}
+
+.dynamo-recipe-status {
+    display: inline-flex;
+    grid-column: 2;
+    justify-self: start;
+    align-items: center;
+    min-height: 20px;
+    padding: 3px 6px;
+    border-radius: var(--rounded);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.dynamo-recipe-status.verified {
+    background: rgba(118, 185, 0, 0.16);
+    color: var(--nv-color-green-2);
+}
+
+.dark .dynamo-recipe-status.verified {
+    color: var(--nv-color-green);
+}
+
+.dynamo-recipe-status.preview {
+    background: rgba(255, 184, 77, 0.2);
+    color: #8a5200;
+}
+
+.dark .dynamo-recipe-status.preview {
+    color: #ffbd5a;
+}
+
+.dynamo-recipe-status.deployment {
+    background: rgba(127, 127, 127, 0.16);
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-model-summary {
+    display: -webkit-box;
+    margin: 8px 0;
+    color: var(--pst-color-text-muted);
+    font-size: 12px;
+    line-height: 1.4;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+}
+
+.dynamo-model-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: auto;
+}
+
+.dynamo-model-tags span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 3px 6px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: var(--rounded);
+    color: var(--pst-color-text-muted);
+    font-size: 10.5px;
+    line-height: 1;
+}
+
+.dynamo-model-card[hidden],
+.dynamo-recipe-empty[hidden] {
+    display: none !important;
+}
+
+#provider-nvidia:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="nvidia"]),
+#provider-qwen:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="qwen"]),
+#provider-deepseek:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="deepseek"]),
+#provider-moonshot:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="moonshot"]),
+#provider-meta:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="meta"]),
+#provider-openai:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="openai"]),
+#runtime-vllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="vllm"]),
+#runtime-trtllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="trtllm"]),
+#runtime-sglang:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="sglang"]),
+#hardware-h100:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="h100"]),
+#hardware-h200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="h200"]),
+#hardware-gb200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="gb200"]),
+#hardware-b200:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-hardware~="b200"]),
+#technique-aggregated:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="aggregated"]),
+#technique-disaggregated:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="disaggregated"]),
+#technique-kv-routing:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="kv-routing"]),
+#technique-expert-parallel:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="expert-parallel"]),
+#technique-spec-decoding:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="spec-decoding"]),
+#technique-embedding-cache:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-technique~="embedding-cache"]),
+#workload-agentic-coding:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-workload~="agentic-coding"]),
+#workload-long-context-reuse:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-workload~="long-context-reuse"]),
+#workload-multimodal-reuse:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-workload~="multimodal-reuse"]),
+#workload-static-generation:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-workload~="static-generation"]),
+#workload-long-output:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-workload~="long-output"]),
+#workload-deployment-only:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-workload~="deployment-only"]) {
+    display: none;
+}
+
+.dynamo-recipe-empty {
+    margin: 20px 0 32px;
+    padding: 18px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    color: var(--pst-color-text-muted);
+    text-align: center;
+}
+
+.dynamo-selected-model {
+    margin: 20px 0 28px;
+    padding: 20px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 12px;
+    background: var(--pst-color-surface);
+}
+
+.dynamo-selected-model-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynamo-selected-model-header h3 {
+    margin: 0 0 6px;
+}
+
+.dynamo-selected-model-header p {
+    margin: 0;
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-selected-model-header a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid var(--nv-color-green);
+    border-radius: var(--rounded);
+    color: var(--pst-color-text-base);
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.dynamo-selected-facts {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.dynamo-selected-facts div {
+    padding: 12px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--nv-color-bg-default);
+}
+
+.dark .dynamo-selected-facts div {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-selected-facts span,
+.dynamo-evidence-grid span {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--pst-color-text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-selected-facts strong,
+.dynamo-evidence-grid strong {
+    display: block;
+}
+
+.dynamo-variant-list {
+    display: grid;
+    gap: 10px;
+}
+
+.dynamo-variant-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: start;
+    padding: 14px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--nv-color-bg-default);
+}
+
+.dark .dynamo-variant-row {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-variant-row.active {
+    border-color: var(--nv-color-green);
+}
+
+.dynamo-variant-row h4 {
+    margin: 0 0 4px;
+    font-size: 16px;
+}
+
+.dynamo-variant-row p {
+    margin: 0;
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-variant-row > span {
+    color: var(--nv-color-green-2);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.dark .dynamo-variant-row > span {
+    color: var(--nv-color-green);
+}
+
+.dynamo-evidence-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+}
+
+.dynamo-evidence-grid div {
+    padding: 14px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+}
+
+.dynamo-evidence-grid p {
+    margin: 8px 0 0;
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-model-detail-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 20px;
+    align-items: start;
+    margin: 24px 0 32px;
+    padding: 0;
+}
+
+.dynamo-model-detail-hero h2 {
+    margin: 0 0 10px;
+}
+
+.dynamo-model-detail-hero p {
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-model-hero-copy,
+.dynamo-recommendation-card {
+    padding: 22px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 12px;
+    background: var(--pst-color-surface);
+}
+
+.dynamo-model-hero-copy {
+    display: flex;
+    flex-direction: column;
+}
+
+.dynamo-model-title-lockup {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 12px;
+}
+
+.dynamo-model-title-lockup .dynamo-recipe-eyebrow {
+    margin: 0 0 4px !important;
+}
+
+.dynamo-model-title-lockup h2 {
+    margin-bottom: 0;
+}
+
+.dynamo-hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.dynamo-hero-actions a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid var(--nv-color-green);
+    border-radius: var(--rounded);
+    color: var(--pst-color-text-base);
+    font-weight: 600;
+    line-height: 1;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.dynamo-recommendation-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.dark .dynamo-model-hero-copy,
+.dark .dynamo-recommendation-card {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-recommendation-card > span,
+.dynamo-prereq-grid span {
+    color: var(--pst-color-text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-recommendation-card > strong {
+    font-size: 22px;
+}
+
+.dynamo-recommendation-card p {
+    margin: 0;
+}
+
+.dynamo-recommendation-facts {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border, var(--grayscale-a5));
+}
+
+.dynamo-recommendation-facts div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.dark .dynamo-recommendation-facts div {
+    background: transparent;
+}
+
+.dynamo-recommendation-facts span {
+    display: block;
+    color: var(--pst-color-text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-recommendation-facts strong {
+    text-align: right;
+}
+
+.dynamo-unvalidated-note {
+    margin: 6px 0 0;
+    color: var(--pst-color-text-muted);
+    font-size: 13px;
+}
+
+.dynamo-prereq-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin: 20px 0;
+}
+
+.dynamo-prereq-grid div {
+    padding: 14px;
+    border: 1px solid var(--nv-color-green);
+    border-radius: 8px;
+}
+
+.dynamo-prereq-grid strong {
+    display: block;
+}
+
 /* Mobile Styles */
 @media (max-width: 768px) {
     .hero-section {
@@ -870,5 +1713,102 @@ svg.card-icon{
 
     .fern-selection-item-icon.use-icon {
         display: none !important;
+    }
+
+    .dynamo-recipe-selector {
+        padding: 16px;
+    }
+
+    .dynamo-recipe-selector-header {
+        flex-direction: column;
+    }
+
+    .dynamo-recipe-row {
+        grid-template-columns: 1fr;
+    }
+
+    .dynamo-recipe-matrix {
+        border: 0;
+        gap: 12px;
+        overflow: visible;
+    }
+
+    .dynamo-recipe-matrix-row,
+    .dynamo-recipe-matrix-row.header {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+        padding: 16px;
+        border: 1px solid var(--border, var(--grayscale-a5));
+        border-radius: 8px;
+        background: transparent;
+    }
+
+    .dynamo-recipe-matrix-row.header {
+        display: none;
+    }
+
+    .dynamo-recipe-matrix-row span::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 2px;
+        color: var(--pst-color-text-muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .dynamo-recipe-browser {
+        padding: 16px;
+    }
+
+    .dynamo-catalog-facts {
+        justify-items: start;
+    }
+
+    .dynamo-recipe-browser-header,
+    .dynamo-filter-row,
+    .dynamo-traffic-facts,
+    .dynamo-model-grid,
+    .dynamo-selected-facts,
+    .dynamo-evidence-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .dynamo-model-card {
+        min-height: 0;
+    }
+
+    .dynamo-model-card-top {
+        grid-template-columns: 40px minmax(0, 1fr);
+    }
+
+    .dynamo-recipe-status {
+        grid-column: 2;
+        justify-self: start;
+    }
+
+    .dynamo-selected-model {
+        padding: 16px;
+    }
+
+    .dynamo-selected-model-header,
+    .dynamo-variant-row {
+        grid-template-columns: 1fr;
+        flex-direction: column;
+    }
+
+    .dynamo-model-detail-hero {
+        grid-template-columns: 1fr;
+    }
+
+    .dynamo-model-hero-copy,
+    .dynamo-recommendation-card {
+        padding: 16px;
+    }
+
+    .dynamo-prereq-grid {
+        grid-template-columns: 1fr;
     }
 }

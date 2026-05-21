@@ -1,0 +1,300 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Qwen3-32B
+subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H200.
+---
+
+<div className="dynamo-model-detail-hero">
+  <div className="dynamo-model-hero-copy">
+    <div className="dynamo-model-title-lockup">
+      <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div>
+        <p className="dynamo-recipe-eyebrow">Qwen / vLLM / H200</p>
+        <h2>Serve Qwen3-32B with Dynamo</h2>
+      </div>
+    </div>
+    <p>
+      The recommended path uses prefill/decode disaggregation with KV-aware routing on 16x H200.
+      The benchmark replays the Mooncake conversation trace so you can compare latency against an
+      aggregated round-robin baseline under a fixed request schedule.
+    </p>
+    <div className="dynamo-hero-actions">
+      <a href="#deploy">Deploy</a>
+      <a href="#benchmark-evidence">Benchmark</a>
+      <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b">Source</a>
+    </div>
+  </div>
+
+  <div className="dynamo-recommendation-card">
+    <span>Recommended recipe</span>
+    <strong>Disagg + KV router</strong>
+    <p>6 prefill workers, 2 decode workers, TP2 per worker.</p>
+    <div className="dynamo-recommendation-facts">
+      <div>
+        <span>Runtime</span>
+        <strong>vLLM</strong>
+      </div>
+      <div>
+        <span>Hardware</span>
+        <strong>16x H200</strong>
+      </div>
+      <div>
+        <span>Evidence</span>
+        <strong>Trace replay</strong>
+      </div>
+    </div>
+  </div>
+</div>
+
+## Configure
+
+<div className="dynamo-recipe-browser" aria-label="Qwen3-32B recipe selectors">
+  <div className="dynamo-filter-row">
+    <span className="dynamo-recipe-label">Hardware</span>
+    <div>
+      <div className="dynamo-filter-options">
+        <button className="dynamo-recipe-chip active">H200 16 GPU</button>
+      </div>
+      <p className="dynamo-unvalidated-note">Not yet validated for this model: H100, B200, GB200.</p>
+    </div>
+  </div>
+
+  <div className="dynamo-filter-row">
+    <span className="dynamo-recipe-label">Runtime</span>
+    <div>
+      <div className="dynamo-filter-options">
+        <button className="dynamo-recipe-chip active">vLLM</button>
+      </div>
+      <p className="dynamo-unvalidated-note">TensorRT-LLM and SGLang do not have verified Qwen3-32B recipes yet.</p>
+    </div>
+  </div>
+
+  <div className="dynamo-filter-row">
+    <span className="dynamo-recipe-label">Technique</span>
+    <div className="dynamo-filter-options">
+      <button className="dynamo-recipe-chip active">Disaggregated + KV router</button>
+      <button className="dynamo-recipe-chip">Aggregated round-robin</button>
+      <button className="dynamo-recipe-chip">Aggregated + KVBM deployment</button>
+    </div>
+  </div>
+
+  <div className="dynamo-filter-row">
+    <span className="dynamo-recipe-label">Traffic</span>
+    <div className="dynamo-traffic-facts">
+      <div>
+        <span>Input length</span>
+        <strong>12K avg ISL</strong>
+        <p>Long prompt and session-history replay.</p>
+      </div>
+      <div>
+        <span>Output length</span>
+        <strong>343 avg OSL</strong>
+        <p>Shorter generated turns after prefill.</p>
+      </div>
+      <div>
+        <span>Prefix reuse</span>
+        <strong>36.64% cache efficiency</strong>
+        <p>Trace has enough reuse for KV-aware routing.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div className="dynamo-selected-facts">
+  <div>
+    <span>Selected recipe</span>
+    <strong>Disagg + KV router</strong>
+  </div>
+  <div>
+    <span>Topology</span>
+    <strong>6P + 2D, TP2</strong>
+  </div>
+  <div>
+    <span>Workload</span>
+    <strong>Multi-turn prefix reuse</strong>
+  </div>
+  <div>
+    <span>Benchmark</span>
+    <strong>12,031 trace requests</strong>
+  </div>
+</div>
+
+## When to Use
+
+Use this recipe when requests have long prompts, repeated prefixes or session history, and shorter
+generated outputs. The KV router targets TTFT by routing compatible requests to workers with useful
+cached blocks; the prefill/decode split targets ITL by reducing decode interruption from long
+prefill work. Keep the aggregated round-robin variant as the control run for your own cluster.
+
+## Variants
+
+<div className="dynamo-variant-list">
+  <div className="dynamo-variant-row active">
+    <div>
+      <h4>Disaggregated + KV router</h4>
+      <p>Recommended for prefix-reuse traffic where TTFT and decode smoothness matter.</p>
+    </div>
+    <span>Recommended</span>
+  </div>
+  <div className="dynamo-variant-row">
+    <div>
+      <h4>Aggregated round-robin</h4>
+      <p>Baseline deployment for measuring the impact of disaggregation and KV-aware routing.</p>
+    </div>
+    <span>Baseline</span>
+  </div>
+  <div className="dynamo-variant-row">
+    <div>
+      <h4>Aggregated + KVBM</h4>
+      <p>Deployment-only path when you want to test KVBM without a matching benchmark manifest yet.</p>
+    </div>
+    <span>No perf.yaml</span>
+  </div>
+</div>
+
+## Before You Run
+
+<div className="dynamo-prereq-grid">
+  <div>
+    <span>Cluster</span>
+    <strong>16x H200 across 2 nodes</strong>
+  </div>
+  <div>
+    <span>Platform</span>
+    <strong>Dynamo Kubernetes deployment</strong>
+  </div>
+  <div>
+    <span>Access</span>
+    <strong>Hugging Face token secret</strong>
+  </div>
+  <div>
+    <span>Storage</span>
+    <strong>Model cache PVC</strong>
+  </div>
+</div>
+
+<Warning>
+Edit the recipe storage class, image tags, namespace, and secrets before applying these manifests.
+The benchmark pod downloads the Mooncake trace on first run and writes artifacts to the perf-cache PVC.
+</Warning>
+
+## Deploy
+
+<Tabs>
+  <Tab title="Disagg + KV router" language="disagg-kv-router">
+    ```bash
+    export NAMESPACE=your-namespace
+
+    kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
+    kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
+    kubectl wait --for=condition=Complete job/model-download \
+      -n ${NAMESPACE} \
+      --timeout=600s
+
+    kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml \
+      -n ${NAMESPACE}
+    kubectl wait --for=condition=ready pod \
+      -l nvidia.com/dynamo-graph-deployment-name=disagg-router-6p-2d \
+      -n ${NAMESPACE} \
+      --timeout=1200s
+    ```
+  </Tab>
+  <Tab title="Aggregated baseline" language="agg-round-robin">
+    ```bash
+    export NAMESPACE=your-namespace
+
+    kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
+    kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
+    kubectl wait --for=condition=Complete job/model-download \
+      -n ${NAMESPACE} \
+      --timeout=600s
+
+    kubectl apply -f recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml \
+      -n ${NAMESPACE}
+    kubectl wait --for=condition=ready pod \
+      -l nvidia.com/dynamo-graph-deployment-name=agg-8xtp2 \
+      -n ${NAMESPACE} \
+      --timeout=1200s
+    ```
+  </Tab>
+  <Tab title="Aggregated + KVBM" language="agg-kvbm">
+    ```bash
+    export NAMESPACE=your-namespace
+
+    kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
+    kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
+    kubectl wait --for=condition=Complete job/model-download \
+      -n ${NAMESPACE} \
+      --timeout=600s
+
+    kubectl apply -f recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml \
+      -n ${NAMESPACE}
+    ```
+  </Tab>
+</Tabs>
+
+## Benchmark Evidence
+
+<div className="dynamo-evidence-grid">
+  <div>
+    <span>Dataset</span>
+    <strong>Mooncake conversation trace</strong>
+    <p>12,031 requests replayed over about 59 minutes.</p>
+  </div>
+  <div>
+    <span>Traffic shape</span>
+    <strong>12,035 ISL / 343 OSL average</strong>
+    <p>Long inputs, shorter outputs, significant prefix sharing.</p>
+  </div>
+  <div>
+    <span>Cache reuse</span>
+    <strong>36.64% cache efficiency</strong>
+    <p>Useful prefix sharing for KV-aware routing.</p>
+  </div>
+  <div>
+    <span>Benchmark mode</span>
+    <strong>Fixed-schedule replay</strong>
+    <p>Throughput is fixed by the trace; compare TTFT, ITL, and request latency.</p>
+  </div>
+</div>
+
+<CodeBlocks>
+```bash title="Run recommended benchmark"
+kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
+kubectl get pods -n ${NAMESPACE} -l app=benchmark
+kubectl logs -f pod/disagg-router-6p-2d-benchmark -n ${NAMESPACE}
+```
+
+```bash title="Run baseline benchmark"
+kubectl apply -f recipes/qwen3-32b/vllm/agg-round-robin/perf.yaml -n ${NAMESPACE}
+kubectl get pods -n ${NAMESPACE} -l app=benchmark
+kubectl logs -f pod/agg-8xtp2-benchmark -n ${NAMESPACE}
+```
+
+```text title="What to compare"
+Aggregated baseline: 8x TP2 workers with round-robin routing
+Recommended recipe: 6x prefill + 2x decode workers with KV-aware routing
+Primary metrics: TTFT, ITL, total request latency
+Throughput: fixed by trace replay schedule
+```
+</CodeBlocks>
+
+## Why This Recipe
+
+This workload has long input sequences, shorter outputs, and meaningful prefix reuse. KV-aware
+routing can send requests to workers that already hold matching KV blocks, reducing redundant
+prefill. Disaggregated serving separates prefill and decode workers, which helps avoid decode
+interruption from long prefill requests.
+
+## Recipe Contract
+
+| Field | Value |
+| --- | --- |
+| Model | `Qwen/Qwen3-32B` |
+| Runtime | vLLM |
+| Hardware | 16x H200 across 2 nodes |
+| Recommended technique | Disaggregated prefill/decode with KV-aware routing |
+| Baseline technique | Aggregated round-robin |
+| Dataset | Mooncake conversation trace |
+| Evidence | `deploy.yaml`, `perf.yaml`, and recipe README |
