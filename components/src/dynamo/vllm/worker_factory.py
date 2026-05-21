@@ -284,6 +284,11 @@ class WorkerFactory:
                     config,
                     engine_client,
                     vllm_config,
+                    # Embedding workers have no prefill/decode split — they
+                    # always serve a single pooling pass, so they advertise
+                    # as Aggregated with no peer dependencies.
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
                 ),
             )
         except Exception as e:
