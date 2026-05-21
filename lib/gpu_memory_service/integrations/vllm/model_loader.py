@@ -28,6 +28,9 @@ from gpu_memory_service.integrations.common.utils import (
     setup_meta_tensor_workaround,
     strip_gms_model_loader_config,
 )
+from gpu_memory_service.integrations.vllm.patches import (
+    fused_moe_cpu_routing_buffers_during_meta_init,
+)
 
 if os.environ.get("MX_ENABLED", "0") == "1":
     try:
@@ -252,13 +255,16 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     setup_meta_tensor_workaround()
     meta_device = torch.device("meta")
 
-    with set_default_torch_dtype(model_config.dtype):
-        with meta_device:
-            model = initialize_model(vllm_config=vllm_config, model_config=model_config)
+    with fused_moe_cpu_routing_buffers_during_meta_init():
+        with set_default_torch_dtype(model_config.dtype):
+            with meta_device:
+                model = initialize_model(
+                    vllm_config=vllm_config, model_config=model_config
+                )
 
-    try:
-        process_weights_after_loading(model, model_config, meta_device)
-    except Exception as e:
-        logger.debug("[GMS] Post-processing on meta tensors: %s", e)
+        try:
+            process_weights_after_loading(model, model_config, meta_device)
+        except Exception as e:
+            logger.debug("[GMS] Post-processing on meta tensors: %s", e)
 
     return model
