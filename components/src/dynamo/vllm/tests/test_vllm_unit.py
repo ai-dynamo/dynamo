@@ -820,3 +820,70 @@ class TestRunnerPreservation:
         update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert not hasattr(engine_cfg, "runner")
+
+
+class TestEmbeddingWorkerFlag:
+    """Parsing + validation for --embedding-worker."""
+
+    def test_default_false(self, mock_vllm_cli):
+        """Without --embedding-worker, the flag is False."""
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+        config = parse_args()
+        assert config.embedding_worker is False
+
+    def test_flag_sets_true(self, mock_vllm_cli):
+        """--embedding-worker on its own with default agg mode parses cleanly."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+        )
+        config = parse_args()
+        assert config.embedding_worker is True
+
+    def test_rejects_prefill_disagg(self, mock_vllm_cli):
+        """--embedding-worker combined with --disaggregation-mode prefill is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--disaggregation-mode",
+            "prefill",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        )
+        with pytest.raises(ValueError, match="--embedding-worker is only valid"):
+            parse_args()
+
+    def test_rejects_decode_disagg(self, mock_vllm_cli):
+        """--embedding-worker combined with --disaggregation-mode decode is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--disaggregation-mode",
+            "decode",
+        )
+        with pytest.raises(ValueError, match="--embedding-worker is only valid"):
+            parse_args()
+
+    def test_rejects_multimodal_combo(self, mock_vllm_cli):
+        """--embedding-worker combined with multimodal flags is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--enable-multimodal",
+        )
+        with pytest.raises(
+            ValueError, match="--embedding-worker cannot be combined with multimodal"
+        ):
+            parse_args()
