@@ -59,9 +59,8 @@ pub use indexer::{
 };
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
-    KvCacheEventError, KvTransferEnforcement, KvTransferPreferredWeight, LocalBlockHash,
-    OverlapScores, RouterEvent, RouterEventSink, SharedCacheHits, WorkerConfigLike, WorkerId,
-    compute_block_hash_for_seq,
+    KvCacheEventError, KvTransferEnforcement, LocalBlockHash, OverlapScores, RouterEvent,
+    RouterEventSink, SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
 };
 pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;

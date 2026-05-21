@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
 use crate::protocols::tensor;
-use dynamo_kv_router::protocols::{KvTransferEnforcement, KvTransferPreferredWeight};
+use dynamo_kv_router::protocols::KvTransferEnforcement;
 
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
@@ -119,7 +119,11 @@ pub struct ModelRuntimeConfig {
 
     /// Preferred-taint weight used when `kv_transfer_enforcement` is `preferred`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kv_transfer_preferred_weight: Option<KvTransferPreferredWeight>,
+    #[validate(
+        range(min = 0.0, max = 1.0),
+        custom(function = "validate_finite_kv_transfer_preferred_weight")
+    )]
+    pub kv_transfer_preferred_weight: Option<f32>,
 }
 
 const fn default_data_parallel_start_rank() -> u32 {
@@ -209,7 +213,7 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.kv_transfer_enforcement
     }
 
-    fn kv_transfer_preferred_weight(&self) -> Option<KvTransferPreferredWeight> {
+    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
         self.kv_transfer_preferred_weight
     }
 }
@@ -260,6 +264,17 @@ fn validate_topology_domains(
 
 fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
     validate_taint_component(domain, "invalid_kv_transfer_domain", "kv_transfer_domain")
+}
+
+fn validate_finite_kv_transfer_preferred_weight(weight: f32) -> Result<(), ValidationError> {
+    if weight.is_finite() {
+        return Ok(());
+    }
+
+    Err(validation_error(
+        "invalid_kv_transfer_preferred_weight",
+        "kv_transfer_preferred_weight must be finite",
+    ))
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
@@ -481,7 +496,7 @@ mod tests {
             ]),
             kv_transfer_domain: Some("zone".to_string()),
             kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
-            kv_transfer_preferred_weight: Some(KvTransferPreferredWeight::try_from(0.85).unwrap()),
+            kv_transfer_preferred_weight: Some(0.85),
             ..Default::default()
         };
         config.add_topology_taints();
@@ -497,12 +512,7 @@ mod tests {
             deserialized.kv_transfer_enforcement,
             Some(KvTransferEnforcement::Preferred)
         );
-        assert_eq!(
-            deserialized
-                .kv_transfer_preferred_weight
-                .map(KvTransferPreferredWeight::get),
-            Some(0.85)
-        );
+        assert_eq!(deserialized.kv_transfer_preferred_weight, Some(0.85));
         assert!(deserialized.taints.contains("caller/taint=value"));
         assert!(
             deserialized
@@ -513,16 +523,9 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_rejects_invalid_kv_transfer_fields() {
-        for json in [
-            r#"{"kv_transfer_enforcement":"fallback"}"#,
-            r#"{"kv_transfer_preferred_weight":1.1}"#,
-        ] {
-            assert!(
-                serde_json::from_str::<ModelRuntimeConfig>(json).is_err(),
-                "{json} should fail"
-            );
-        }
+    fn test_serde_rejects_invalid_kv_transfer_enforcement() {
+        let json = r#"{"kv_transfer_enforcement":"fallback"}"#;
+        assert!(serde_json::from_str::<ModelRuntimeConfig>(json).is_err());
     }
 
     #[test]
@@ -538,9 +541,7 @@ mod tests {
                 topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
                 kv_transfer_domain: Some("zone".to_string()),
                 kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
-                kv_transfer_preferred_weight: Some(
-                    KvTransferPreferredWeight::try_from(0.5).unwrap(),
-                ),
+                kv_transfer_preferred_weight: Some(0.5),
                 ..Default::default()
             },
         ] {
@@ -617,9 +618,21 @@ mod tests {
                 topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
                 kv_transfer_domain: Some("zone".to_string()),
                 kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
-                kv_transfer_preferred_weight: Some(
-                    KvTransferPreferredWeight::try_from(0.5).unwrap(),
-                ),
+                kv_transfer_preferred_weight: Some(0.5),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
+                kv_transfer_preferred_weight: Some(1.1),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
+                kv_transfer_preferred_weight: Some(f32::NAN),
                 ..Default::default()
             },
         ] {

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize, de};
+use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
 const fn default_track_prefill_tokens() -> bool {
@@ -203,7 +203,7 @@ pub trait WorkerConfigLike {
     }
 
     /// Returns the taint preference weight used when KV transfer topology enforcement is preferred.
-    fn kv_transfer_preferred_weight(&self) -> Option<KvTransferPreferredWeight> {
+    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
         None
     }
 }
@@ -215,49 +215,6 @@ pub enum KvTransferEnforcement {
     Required,
     /// Put the generated topology taint in `RoutingConstraints.preferred_taints`.
     Preferred,
-}
-
-/// Bounded preference strength for topology-aware KV transfer routing.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
-#[serde(transparent)]
-pub struct KvTransferPreferredWeight(f32);
-
-impl KvTransferPreferredWeight {
-    pub const MIN: f32 = 0.0;
-    pub const MAX: f32 = 1.0;
-
-    pub fn new(value: f32) -> Option<Self> {
-        if value.is_finite() && (Self::MIN..=Self::MAX).contains(&value) {
-            Some(Self(value))
-        } else {
-            None
-        }
-    }
-
-    pub fn get(self) -> f32 {
-        self.0
-    }
-}
-
-impl TryFrom<f32> for KvTransferPreferredWeight {
-    type Error = &'static str;
-
-    fn try_from(value: f32) -> Result<Self, Self::Error> {
-        Self::new(value)
-            .ok_or("kv_transfer_preferred_weight must be finite and between 0.0 and 1.0")
-    }
-}
-
-impl<'de> Deserialize<'de> for KvTransferPreferredWeight {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = f32::deserialize(deserializer)?;
-        Self::new(value).ok_or_else(|| {
-            de::Error::custom("kv_transfer_preferred_weight must be finite and between 0.0 and 1.0")
-        })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -1498,16 +1455,6 @@ mod tests {
             KvTransferEnforcement::Preferred
         );
         assert!(serde_json::from_str::<KvTransferEnforcement>(r#""fallback""#).is_err());
-    }
-
-    #[test]
-    fn test_kv_transfer_preferred_weight_bounds() {
-        assert_eq!(KvTransferPreferredWeight::try_from(0.0).unwrap().get(), 0.0);
-        assert_eq!(KvTransferPreferredWeight::try_from(1.0).unwrap().get(), 1.0);
-        assert!(KvTransferPreferredWeight::try_from(-0.1).is_err());
-        assert!(KvTransferPreferredWeight::try_from(1.1).is_err());
-        assert!(KvTransferPreferredWeight::try_from(f32::NAN).is_err());
-        assert!(serde_json::from_str::<KvTransferPreferredWeight>("1.1").is_err());
     }
 
     #[test]
