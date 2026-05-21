@@ -754,16 +754,3 @@ class TestDiffusionEngineMismatchWarning:
             f"Expected no WARNING when pipeline returns the requested batch size, "
             f"got {[r.getMessage() for r in warnings]}"
         )
-
-    def test_silent_for_num_images_per_prompt_1(self, caplog, stub_trtllm_modules):
-        """The common N=1 case stays silent (pipeline returns 1, request is 1)."""
-        engine = self._make_engine(self._make_pipeline(returned_batch=1))
-
-        with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
-            engine.generate(prompt="a test prompt", num_images_per_prompt=1)
-
-        warnings = self._warning_records(caplog)
-        assert warnings == [], (
-            f"Expected no WARNING in the N=1 common case, "
-            f"got {[r.getMessage() for r in warnings]}"
-        )
