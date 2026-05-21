@@ -26,6 +26,11 @@ limitations under the License.
 
 | **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/digest/index.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[How to Contribute](#community-and-contributing)** |
 
+<!-- GitHub does not support browser-language negotiation for repository README rendering; keep explicit alternate-language links in sync. -->
+<p align="right">
+  <strong>English</strong> | <a href="./README.zh-CN.md" hreflang="zh-CN">简体中文</a>
+</p>
+
 # Dynamo
 
 <!-- TEMPORARY BANNER: remove once V4 recipes mature. -->
