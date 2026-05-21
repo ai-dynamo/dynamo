@@ -156,7 +156,7 @@ patch`, no `kubectl apply`. Safe to run repeatedly.
 run:
 
 ```bash
-bash ~/dynamo-skills/ALL_Skills/dynamo-deploy/scripts/verify-platform.sh -n <ns>
+bash ../dynamo-deploy/scripts/verify-platform.sh -n <ns>
 ```
 
 That cross-skill call is the `dynamo-deploy` post-install verifier
