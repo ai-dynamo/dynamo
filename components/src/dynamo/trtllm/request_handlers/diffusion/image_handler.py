@@ -214,8 +214,8 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             # Engine warns on batch mismatch; here we clamp to the caller's
             # requested count without padding or synthesizing.
             emit_count = min(images.shape[0], num_images_per_prompt)
-            data_items: list[ImageData] = []
-            for i in range(emit_count):
+
+            async def _encode_one(i: int) -> ImageData:
                 image_np = images[i].cpu().numpy()
                 logger.debug(
                     f"Request {request_id}: encoding image {i + 1}/{emit_count} "
@@ -230,10 +230,13 @@ class ImageGenerationHandler(BaseGenerativeHandler):
                         image_bytes,
                         self.media_output_http_url,
                     )
-                    data_items.append(ImageData(url=image_url))
-                else:
-                    b64_image = base64.b64encode(image_bytes).decode("utf-8")
-                    data_items.append(ImageData(b64_json=b64_image))
+                    return ImageData(url=image_url)
+                b64_image = base64.b64encode(image_bytes).decode("utf-8")
+                return ImageData(b64_json=b64_image)
+
+            data_items: list[ImageData] = list(
+                await asyncio.gather(*(_encode_one(i) for i in range(emit_count)))
+            )
 
         elif output.video is not None:
             raise RuntimeError(
