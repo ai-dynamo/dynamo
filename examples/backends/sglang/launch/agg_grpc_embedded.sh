@@ -15,6 +15,16 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+TP="${TP:-1}"
+# dynamo.frontend's sglang-grpc engine requires a local model dir, not an HF id.
+# Resolve MODEL (which may be either) to a snapshot directory for the frontend
+# while keeping MODEL as the served name. If MODEL is already a directory, use
+# it as-is.
+if [ -d "$MODEL" ]; then
+    FRONTEND_MODEL_PATH="$MODEL"
+else
+    FRONTEND_MODEL_PATH="$(python3 -c 'import sys; from huggingface_hub import snapshot_download; print(snapshot_download(sys.argv[1], allow_patterns=["*.json","*.txt","tokenizer*"]))' "$MODEL")"
+fi
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SGLANG_HTTP_PORT="${SGLANG_HTTP_PORT:-30000}"
 SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-40000}"
@@ -29,8 +39,9 @@ python3 -m sglang.launch_server \
     --grpc-port "$SGLANG_GRPC_PORT" \
     --port "$SGLANG_HTTP_PORT" \
     --model-path "$MODEL" \
-    --tp 1 \
+    --tp "$TP" \
     --trust-remote-code \
+    --enable-metrics \
     --tokenizer-worker-num 1 &
 
 echo "Waiting for SGLang gRPC (:$SGLANG_GRPC_PORT)..."
@@ -44,6 +55,7 @@ SGLANG_GRPC_ENDPOINT="http://127.0.0.1:$SGLANG_GRPC_PORT" \
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
     --dyn-engine sglang-grpc \
-    --model-path "$MODEL" &
+    --model-name "$MODEL" \
+    --model-path "$FRONTEND_MODEL_PATH" &
 
 wait_any_exit
