@@ -22,6 +22,7 @@ from dynamo.vllm.args import (
     ensure_side_channel_host,
     get_host_ip,
     parse_args,
+    update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
@@ -738,3 +739,150 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     }
     sp = build_sampling_params(request, default_sampling_params={})
     assert sp.thinking_token_budget == 1024
+
+
+def _make_dynamo_config(**overrides):
+    """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
+    defaults = {
+        "disaggregation_mode": DisaggregationMode.AGGREGATED,
+        "use_kv_events": False,
+        "enable_local_indexer": True,
+        "benchmark_mode": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _make_engine_config_with_runner(runner="auto", **overrides):
+    """Build a fake engine config with runner and other fields used by defaults loop."""
+    defaults = {
+        "runner": runner,
+        "enable_prefix_caching": True,
+        "block_size": 16,
+        "skip_tokenizer_init": True,
+        "enable_log_requests": True,
+        "disable_log_stats": True,
+        "kv_events_config": None,
+        "kv_transfer_config": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestRunnerPreservation:
+    """update_engine_config_with_dynamo must not overwrite a user-set --runner."""
+
+    def test_runner_auto_is_preserved(self):
+        """When user passes --runner auto (also the vLLM default),
+        Dynamo must leave it alone so vLLM's own auto-detection runs."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="auto")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "auto"
+
+    def test_runner_pooling_preserved(self):
+        """When user passes --runner pooling (for embedding models),
+        Dynamo must NOT overwrite it."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="pooling")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "pooling"
+
+    def test_runner_generate_explicit_preserved(self):
+        """When user explicitly passes --runner generate, it should still be 'generate'."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="generate")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "generate"
+
+    def test_runner_draft_preserved(self):
+        """When user passes --runner draft, Dynamo must NOT overwrite it."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="draft")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "draft"
+
+    def test_no_runner_attr_skipped_gracefully(self):
+        """If engine_config lacks a 'runner' attr (older vLLM), no error is raised."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner()
+        del engine_cfg.runner  # simulate older vLLM without runner
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert not hasattr(engine_cfg, "runner")
+
+
+class TestEmbeddingWorkerFlag:
+    """Parsing + validation for --embedding-worker."""
+
+    def test_default_false(self, mock_vllm_cli):
+        """Without --embedding-worker, the flag is False."""
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+        config = parse_args()
+        assert config.embedding_worker is False
+
+    def test_flag_sets_true(self, mock_vllm_cli):
+        """--embedding-worker on its own with default agg mode parses cleanly."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+        )
+        config = parse_args()
+        assert config.embedding_worker is True
+
+    def test_rejects_prefill_disagg(self, mock_vllm_cli):
+        """--embedding-worker combined with --disaggregation-mode prefill is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--disaggregation-mode",
+            "prefill",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        )
+        with pytest.raises(ValueError, match="--embedding-worker is only valid"):
+            parse_args()
+
+    def test_rejects_decode_disagg(self, mock_vllm_cli):
+        """--embedding-worker combined with --disaggregation-mode decode is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--disaggregation-mode",
+            "decode",
+        )
+        with pytest.raises(ValueError, match="--embedding-worker is only valid"):
+            parse_args()
+
+    def test_rejects_multimodal_combo(self, mock_vllm_cli):
+        """--embedding-worker combined with multimodal flags is rejected."""
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--runner",
+            "pooling",
+            "--enable-multimodal",
+        )
+        with pytest.raises(
+            ValueError, match="--embedding-worker cannot be combined with multimodal"
+        ):
+            parse_args()

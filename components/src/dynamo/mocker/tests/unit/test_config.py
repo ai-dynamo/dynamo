@@ -119,6 +119,27 @@ def test_worker_overrides_drive_runtime_config_for_prefill_worker():
     assert runtime_config.bootstrap_host is not None
 
 
+def test_g3_args_allow_kv_bytes_per_token_worker_override():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            model_path="/models/mock",
+            kv_bytes_per_token=None,
+            num_g2_blocks=8192,
+            num_g3_blocks=16384,
+        )
+    )
+    assert engine_args.kv_bytes_per_token is None
+    assert engine_args.num_g2_blocks == 8192
+    assert engine_args.num_g3_blocks == 16384
+
+    worker_args = CONFIG.apply_worker_engine_args_overrides(
+        engine_args,
+        kv_bytes_per_token=131072,
+    )
+    assert worker_args.kv_bytes_per_token == 131072
+    assert worker_args.num_g3_blocks == 16384
+
+
 def test_runtime_config_disables_local_indexer_for_decode_worker():
     engine_args = CONFIG.build_mocker_engine_args(
         make_args(is_decode_worker=True, durable_kv_events=False)
@@ -170,7 +191,15 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         is_prefill_worker=True,
         is_decode_worker=False,
         durable_kv_events=False,
+        kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
+        num_g2_blocks=8192,
+        num_g3_blocks=16384,
+        offload_batch_size=32,
+        bandwidth_g1_to_g2_gbps=14.0,
+        bandwidth_g2_to_g1_gbps=14.0,
+        bandwidth_g2_to_g3_gbps=7.0,
+        bandwidth_g3_to_g2_gbps=7.0,
         reasoning=json.dumps(
             {
                 "start_thinking_token_id": 11,
@@ -202,11 +231,24 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     assert engine_args.enable_local_indexer is True
     assert engine_args.dp_size == 4
     assert engine_args.worker_type == "prefill"
+    assert engine_args.gpu_memory_utilization is None
+    assert engine_args.mem_fraction_static is None
     assert engine_args.aic_backend == "sglang"
     assert engine_args.aic_system == "h200_sxm"
     assert engine_args.aic_backend_version == "0.5.6.post2"
     assert engine_args.aic_tp_size == 8
     assert engine_args.aic_model_path == "/models/mock"
+    assert engine_args.aic_moe_tp_size is None
+    assert engine_args.aic_moe_ep_size is None
+    assert engine_args.aic_attention_dp_size is None
+    assert engine_args.bootstrap_port is None
+    assert engine_args.num_g2_blocks == 8192
+    assert engine_args.num_g3_blocks == 16384
+    assert engine_args.offload_batch_size == 32
+    assert engine_args.bandwidth_g1_to_g2_gbps == 14.0
+    assert engine_args.bandwidth_g2_to_g1_gbps == 14.0
+    assert engine_args.bandwidth_g2_to_g3_gbps == 7.0
+    assert engine_args.bandwidth_g3_to_g2_gbps == 7.0
 
 
 def test_aic_backend_override_decouples_from_engine_type():
@@ -222,6 +264,35 @@ def test_aic_backend_override_decouples_from_engine_type():
     engine_args = CONFIG.build_mocker_engine_args(args)
 
     assert engine_args.aic_backend == "trtllm"
+
+
+def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):
+    import dynamo.replay.main as replay_main
+
+    calls = []
+
+    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
+        calls.append((model_path, kv_cache_dtype))
+        return 131072
+
+    monkeypatch.setattr(
+        replay_main, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
+    )
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "num_g2_blocks": 8192,
+                "num_g3_blocks": 16384,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.num_g2_blocks == 8192
+    assert engine_args.num_g3_blocks == 16384
+    assert calls == [("/models/mock", "auto")]
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):

@@ -3,7 +3,6 @@
 
 [package]
 name = "dynamo-runtime"
-readme = "README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -58,7 +57,6 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
 mio = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }

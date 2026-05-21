@@ -222,6 +222,71 @@ spec:
                       - name
                     type: object
                   type: array
+                experimental:
+                  description: |-
+                    Experimental groups graph-level preview features whose API shape and
+                    behavior may change in breaking ways between releases.
+                  properties:
+                    kvTransferPolicy:
+                      description: |-
+                        KvTransferPolicy configures topology-aware routing for KV-cache
+                        transfers between prefill and decode workers.
+                      properties:
+                        domain:
+                          description: |-
+                            Domain is the logical name for the topology level to enforce
+                            (e.g. "zone", "rack"). The router uses this to match workers that
+                            share the same value for the label identified by `labelKey`.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        enforcement:
+                          default: required
+                          description: |-
+                            Enforcement controls how the selected prefill worker's topology is
+                            applied to decode routing. "required" only allows decode workers in the
+                            same topology domain as the selected prefill worker. "preferred" keeps
+                            all decode workers eligible, but biases selection toward workers in the
+                            same topology domain. Defaults to "required".
+                          enum:
+                            - required
+                            - preferred
+                          type: string
+                        labelKey:
+                          description: |-
+                            LabelKey is a Kubernetes node label key (e.g.
+                            "topology.kubernetes.io/zone") whose value identifies the topology
+                            domain for each worker. The operator copies the node label onto worker
+                            pods so the runtime can publish it as worker metadata. The label
+                            should correspond to the topology level named in `domain`.
+                          maxLength: 317
+                          minLength: 1
+                          pattern: ^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$
+                          type: string
+                          x-kubernetes-validations:
+                            - message: labelKey prefix must be 253 characters or less
+                              rule: '!self.contains(''/'') || self.split(''/'')[0].size() <= 253'
+                        preferredWeight:
+                          description: |-
+                            PreferredWeight is required and used only when enforcement is
+                            "preferred". Higher values create a stronger same-domain routing
+                            preference, but do not guarantee same-domain selection. The value is not
+                            a probability; worker selection still depends on load and other routing
+                            inputs. A value of 0 disables the topology preference; 1 is the strongest
+                            supported preference.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                      required:
+                        - domain
+                      type: object
+                      x-kubernetes-validations:
+                        - message: labelKey is required until alternate topology sources are supported
+                          rule: has(self.labelKey)
+                        - message: preferredWeight is required when enforcement is preferred
+                          rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
+                        - message: preferredWeight may only be set when enforcement is preferred
+                          rule: '!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == ''preferred'')'
+                  type: object
                 labels:
                   additionalProperties:
                     type: string
@@ -20559,6 +20624,71 @@ spec:
                       - name
                     type: object
                   type: array
+                experimental:
+                  description: |-
+                    experimental groups graph-level preview features whose API shape and
+                    behavior may change in breaking ways between v1beta1 releases.
+                  properties:
+                    kvTransferPolicy:
+                      description: |-
+                        kvTransferPolicy configures topology-aware routing for KV-cache
+                        transfers between prefill and decode workers.
+                      properties:
+                        domain:
+                          description: |-
+                            domain is the logical name for the topology level to enforce
+                            (e.g. "zone", "rack"). The router uses this to match workers that
+                            share the same value for the label identified by `labelKey`.
+                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                          type: string
+                        enforcement:
+                          default: required
+                          description: |-
+                            enforcement controls how the selected prefill worker's topology is
+                            applied to decode routing. "required" only allows decode workers in the
+                            same topology domain as the selected prefill worker. "preferred" keeps
+                            all decode workers eligible, but biases selection toward workers in the
+                            same topology domain. Defaults to "required".
+                          enum:
+                            - required
+                            - preferred
+                          type: string
+                        labelKey:
+                          description: |-
+                            labelKey is a Kubernetes node label key (e.g.
+                            "topology.kubernetes.io/zone") whose value identifies the topology
+                            domain for each worker. The operator copies the node label onto worker
+                            pods so the runtime can publish it as worker metadata. The label
+                            should correspond to the topology level named in `domain`.
+                          maxLength: 317
+                          minLength: 1
+                          pattern: ^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$
+                          type: string
+                          x-kubernetes-validations:
+                            - message: labelKey prefix must be 253 characters or less
+                              rule: '!self.contains(''/'') || self.split(''/'')[0].size() <= 253'
+                        preferredWeight:
+                          description: |-
+                            preferredWeight is required and used only when enforcement is
+                            "preferred". Higher values create a stronger same-domain routing
+                            preference, but do not guarantee same-domain selection. The value is not
+                            a probability; worker selection still depends on load and other routing
+                            inputs. A value of 0 disables the topology preference; 1 is the strongest
+                            supported preference.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                      required:
+                        - domain
+                      type: object
+                      x-kubernetes-validations:
+                        - message: labelKey is required until alternate topology sources are supported
+                          rule: has(self.labelKey)
+                        - message: preferredWeight is required when enforcement is preferred
+                          rule: '!has(self.enforcement) || self.enforcement != ''preferred'' || has(self.preferredWeight)'
+                        - message: preferredWeight may only be set when enforcement is preferred
+                          rule: '!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == ''preferred'')'
+                  type: object
                 labels:
                   additionalProperties:
                     type: string

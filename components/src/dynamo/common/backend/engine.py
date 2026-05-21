@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
 
-from .publisher import KvEventSource, SnapshotSource
+from .publisher import KvEventSource
 
 if TYPE_CHECKING:
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
+
     from .worker import WorkerConfig
 
 
@@ -166,6 +168,10 @@ class LLMEngine(ABC):
         Called by Worker when the client disconnects or
         the request is cancelled.  Override to release engine resources
         (KV cache, scheduler slots, etc.).
+
+        ``context.metadata`` in this callback reflects the original
+        propagated request metadata snapshot. Mutations made to
+        ``context.metadata`` during :meth:`generate` are not visible here.
         """
 
     async def drain(self) -> None:
@@ -212,8 +218,39 @@ class LLMEngine(ABC):
         of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
         return []
 
-    async def metrics_sources(self) -> list[SnapshotSource]:
-        """Metrics snapshot sources, one per data-parallel rank. Default
-        opts out of metrics publishing. ``Worker`` calls once after
-        :meth:`start`."""
+    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        """Bridge a vendor-prefixed Prometheus registry into the runtime's
+        ``/metrics`` output via :func:`metrics.add_expfmt_callback`. Default
+        no-op. See :mod:`dynamo.common.backend.metrics` for helpers. Do not
+        retain ``metrics`` past return.
+
+        Framework-owned lifecycle + per-rank gauges
+        (``dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds,total_blocks,gpu_cache_usage_percent,kv_cache_hit_rate}``)
+        are owned and registered by the framework Rust-side — they do NOT
+        require the engine to implement this method."""
+
+    def component_metrics_dp_ranks(self) -> list[int]:
+        """Declare the data-parallel ranks this engine publishes
+        per-rank snapshots for. Empty (default) opts out.
+
+        Stable for the engine's lifetime. ``Worker`` constructs a
+        :class:`SnapshotPublisher` sized to these ranks and hands it
+        back via :meth:`attach_snapshot_publisher`. The engine then
+        calls ``publisher.publish(rank, snap)`` from its stat-logger
+        thread — event-driven, no polling.
+
+        ``ComponentSnapshot.kv_cache_hit_rate`` is tri-state:
+        ``None`` means "no data yet" or "no prefix cache" (gauge
+        skipped), ``0.0`` is a legitimate measurement (zero hits)."""
         return []
+
+    def attach_snapshot_publisher(self, publisher: Any) -> None:
+        """Framework hands the engine the Rust-owned
+        :class:`SnapshotPublisher` once, after ``setup_metrics``
+        constructed it from :meth:`component_metrics_dp_ranks`. Stash
+        the reference; call ``publisher.publish(rank, snap)`` from your
+        stat-logger thereafter.
+
+        Only invoked when :meth:`component_metrics_dp_ranks` returns
+        non-empty. Default is no-op so engines that opt out don't need
+        to override."""

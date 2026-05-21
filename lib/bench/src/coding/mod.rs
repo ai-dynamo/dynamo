@@ -3,5 +3,4 @@
 
 pub mod claude;
 pub mod common;
-pub mod mooncake;
 pub mod tokenizer;

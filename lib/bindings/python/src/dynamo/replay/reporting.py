@@ -45,6 +45,15 @@ def format_report_table(report: dict[str, object]) -> str:
             f"Prefix Cache Reused Ratio: {_format_value(prefix_cache_reused_ratio)}"
         )
 
+    first_admission_prefix_cache_reused_ratio = report.get(
+        "first_admission_prefix_cache_reused_ratio"
+    )
+    if isinstance(first_admission_prefix_cache_reused_ratio, int | float):
+        lines.append(
+            "First Admission Prefix Cache Reused Ratio: "
+            f"{_format_value(first_admission_prefix_cache_reused_ratio)}"
+        )
+
     return "\n".join(lines)
 
 

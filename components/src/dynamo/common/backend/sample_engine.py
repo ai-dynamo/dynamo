@@ -11,15 +11,16 @@ import queue
 import threading
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import KvEventPublisher
 
+from . import telemetry
 from .disagg import enforce_prefill_max_tokens, require_prefill_result
 from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
-from .publisher import KvEventSource, Metrics, PushSource, SnapshotSource
+from .publisher import ComponentSnapshot, KvEventSource, PushSource
 from .worker import WorkerConfig
 
 logger = logging.getLogger(__name__)
@@ -56,10 +57,13 @@ class SampleLLMEngine(LLMEngine):
         self.max_tokens = max_tokens
         self.delay = delay
         self.disaggregation_mode = disaggregation_mode
-        self._metrics = Metrics(kv_used_blocks=0)
+        self._kv_used_blocks = 0
         self._publish_queue: queue.SimpleQueue[tuple[str, dict]] = queue.SimpleQueue()
         self._publish_stop = threading.Event()
         self._publish_thread: Optional[threading.Thread] = None
+        # Set by attach_snapshot_publisher when component_metrics_dp_ranks
+        # is non-empty. Driven from _publish_loop alongside KV events.
+        self._snapshot_publisher: Optional[Any] = None
         # itertools.count is thread-safe — concurrent generate() calls
         # won't race on hash issuance.
         self._block_hash_counter = itertools.count(1)
@@ -125,8 +129,15 @@ class SampleLLMEngine(LLMEngine):
     async def kv_event_sources(self) -> list[KvEventSource]:
         return [PushSource(on_ready=self._start_publisher_thread, dp_rank=0)]
 
-    async def metrics_sources(self) -> list[SnapshotSource]:
-        return [SnapshotSource(snapshot=lambda: self._metrics, dp_rank=0)]
+    def component_metrics_dp_ranks(self) -> list[int]:
+        return [0]
+
+    def attach_snapshot_publisher(self, publisher) -> None:
+        # Stash the Rust-owned publisher; the synthetic per-token loop in
+        # `generate()` increments `_kv_used_blocks`. We piggy-back on
+        # `_publish_loop` to push snapshots at ~50 ms cadence (it already
+        # runs to drive KV events).
+        self._snapshot_publisher = publisher
 
     def _start_publisher_thread(self, publisher: KvEventPublisher) -> None:
         self._publish_thread = threading.Thread(
@@ -142,6 +153,22 @@ class SampleLLMEngine(LLMEngine):
             try:
                 kind, payload = self._publish_queue.get(timeout=0.1)
             except queue.Empty:
+                # Push a snapshot on the idle tick (~10 Hz) so /metrics
+                # reflects current _kv_used_blocks without needing an
+                # event. Real engines push from their stat-logger event
+                # surface; the sample engine has no natural one, so we
+                # piggy-back on this loop.
+                if self._snapshot_publisher is not None:
+                    self._snapshot_publisher.publish(
+                        0,
+                        ComponentSnapshot(
+                            kv_used_blocks=self._kv_used_blocks,
+                            kv_total_blocks=1000,
+                            gpu_cache_usage=self._kv_used_blocks / 1000.0,
+                            kv_cache_hit_rate=None,  # sample engine doesn't track hits
+                            dp_rank=0,
+                        ),
+                    )
                 continue
             try:
                 if kind == "stored":
@@ -167,16 +194,12 @@ class SampleLLMEngine(LLMEngine):
                 },
             )
         )
-        self._metrics = Metrics(
-            kv_used_blocks=(self._metrics.kv_used_blocks or 0) + block_count
-        )
+        self._kv_used_blocks += block_count
         return hashes
 
     def _release_synthetic_blocks(self, hashes: list[int]) -> None:
         self._publish_queue.put(("removed", {"block_hashes": hashes}))
-        self._metrics = Metrics(
-            kv_used_blocks=max(0, (self._metrics.kv_used_blocks or 0) - len(hashes))
-        )
+        self._kv_used_blocks = max(0, self._kv_used_blocks - len(hashes))
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -193,8 +216,10 @@ class SampleLLMEngine(LLMEngine):
 
         block_hashes = self._emit_synthetic_events(prompt_len)
         try:
-            async for chunk in self._generate_tokens(prompt_len, max_new, context):
-                yield chunk
+            # Parent-chain pinned in test_unified_worker_otlp_export.
+            with telemetry.start_span(context, "sample.tokens", prompt_len=prompt_len):
+                async for chunk in self._generate_tokens(prompt_len, max_new, context):
+                    yield chunk
         finally:
             self._release_synthetic_blocks(block_hashes)
 

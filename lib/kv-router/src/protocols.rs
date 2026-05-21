@@ -169,6 +169,16 @@ pub trait WorkerConfigLike {
     fn taints(&self) -> &HashSet<String> {
         &EMPTY_WORKER_TAINTS
     }
+    /// Stable identifier for the worker, preserved across process restarts.
+    ///
+    /// In Kubernetes StatefulSet deployments this is the pod hostname (`worker-0`, `worker-1`,
+    /// …). Used by rendezvous-style routing (HRW hashing) so cache assignments survive worker
+    /// restarts and minimise cache movement when the set of live workers churns. Returns
+    /// `None` when the worker did not publish a stable id, in which case callers should fall
+    /// back to the (ephemeral) `worker_id`.
+    fn stable_routing_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -396,6 +406,13 @@ impl Default for RouterRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterBackpressureReason {
+    /// The configured cap on total queued ISL tokens has been reached.
+    MaxQueuedIslTokensExceeded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterResponse {
     New {
@@ -403,6 +420,12 @@ pub enum RouterResponse {
         #[serde(default)]
         dp_rank: DpRank,
         overlap_blocks: u32,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_queued_isl_tokens: Option<usize>,
     },
     PrefillMarked {
         success: bool,
@@ -428,7 +451,7 @@ pub struct WorkerSelectionResult {
     pub cached_tokens: usize,
 }
 
-/// Active load metrics for a worker, used for busy detection.
+/// Active load metrics for a worker, used for overload detection.
 ///
 /// Published by workers (with `kv_used_blocks`) and by the scheduler (with
 /// `active_decode_blocks` and `active_prefill_tokens`).
@@ -444,7 +467,7 @@ pub struct ActiveLoad {
     /// Total KV blocks currently in use on the worker.
     ///
     /// This is published by workers only and is the authoritative signal for
-    /// backend KV occupancy used by busy detection.
+    /// backend KV occupancy used by overload detection.
     #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }

@@ -21,7 +21,7 @@ For quick start instructions, see the [vLLM README](README.md). This document pr
 For local/bare-metal development, start etcd and optionally NATS using Docker Compose:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 <Note>
@@ -130,7 +130,7 @@ Start NATS/ETCD on the head node so all worker nodes can reach them:
 
 ```bash
 # On head node
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 
 # Set on ALL nodes
 export HEAD_NODE_IP="<your-head-node-ip>"

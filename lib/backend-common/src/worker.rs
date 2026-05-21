@@ -16,6 +16,7 @@ use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::local_model::LocalModelBuilder;
 use dynamo_llm::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
 use dynamo_llm::model_type::{ModelInput, ModelType};
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -48,8 +49,7 @@ pub struct RuntimeConfig {
     /// Discovery backend selector — e.g. `"etcd"`, `"kubernetes"`, `"file"`,
     /// `"mem"`. Maps to `DYN_DISCOVERY_BACKEND`.
     pub discovery_backend: Option<String>,
-    /// Request-plane transport — e.g. `"tcp"`, `"nats"`, `"http"`. Maps to
-    /// `DYN_REQUEST_PLANE`.
+    /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
     pub request_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
     /// derives a default from the discovery backend. Maps to `DYN_EVENT_PLANE`.
@@ -198,6 +198,11 @@ pub struct Worker {
     state: LifecycleState,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
+    /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
+    /// `engine.start()` succeeds; observed in `cleanup_once` and the drain
+    /// step. Always present once `start()` returns Ok, independent of
+    /// whether the engine returned a component publisher.
+    lifecycle: Option<crate::metrics::LifecycleGauges>,
 }
 
 impl Worker {
@@ -207,6 +212,7 @@ impl Worker {
             config,
             state: LifecycleState::Init,
             publishers: None,
+            lifecycle: None,
         }
     }
 
@@ -374,15 +380,36 @@ impl Worker {
         // unique-per-replica by construction; engines see only an opaque
         // `worker_id`.
         let worker_id = drt.connection_id();
+        let engine_start = std::time::Instant::now();
         let engine_config = self.start_engine(worker_id).await?;
+        let model_load_time_seconds = engine_start.elapsed().as_secs_f64();
         tracing::debug!(
             model = %engine_config.model,
             worker_id,
+            model_load_time_seconds,
             "engine.start() complete"
         );
 
-        self.setup_kv_aware_publishers(&component, &engine_config)
-            .await?;
+        // Engine builds its EngineMetrics once. `setup_metrics` is the
+        // single hook for both foreign-registry expfmt callbacks (side-
+        // effect on engine_metrics) and the structured component publisher
+        // (returned in MetricsBindings).
+        let engine_metrics =
+            crate::metrics::EngineMetrics::with_engine_config(endpoint.clone(), &engine_config);
+
+        // Framework-owned lifecycle gauges (cleanup_time, drain_time,
+        // model_load_time) — always emitted, regardless of engine opt-in.
+        let lifecycle =
+            crate::metrics::LifecycleGauges::new(&engine_metrics, model_load_time_seconds)?;
+
+        self.setup_publishing(
+            &component,
+            &engine_config,
+            &engine_metrics,
+            model_load_time_seconds,
+            lifecycle,
+        )
+        .await?;
 
         // Mid-start signal: engine.start() ran to completion but a signal
         // arrived during it. Skip the serve loop and run the orchestrator
@@ -398,43 +425,60 @@ impl Worker {
             .await
     }
 
-    /// Build KV-event and worker-metric publishers from the engine's source
-    /// declarations. No-op if `enable_kv_routing` is off, the engine declares
-    /// no sources, or `engine_config.kv_cache_block_size` is unset.
-    async fn setup_kv_aware_publishers(
+    /// Build KV-event publishers and the `SnapshotPublisher` from the
+    /// engine's declarations. KV events flow on the engine's own threads
+    /// (via Push or ZMQ); snapshot writes flow through the publisher
+    /// inline (no polling, no GIL on the framework side). No-op if
+    /// `enable_kv_routing` is off, the engine returned no sources +
+    /// no dp_ranks, or `engine_config.kv_cache_block_size` is unset for
+    /// KV events.
+    async fn setup_publishing(
         &mut self,
         component: &dynamo_runtime::component::Component,
         engine_config: &EngineConfig,
+        engine_metrics: &crate::metrics::EngineMetrics,
+        model_load_time_seconds: f64,
+        lifecycle: crate::metrics::LifecycleGauges,
     ) -> Result<(), DynamoError> {
+        let ctx = crate::engine::MetricsCtx {
+            model: &engine_config.model,
+            component: &self.config.component,
+            model_load_time_seconds,
+            metrics: engine_metrics,
+        };
+        let bindings = self.engine.setup_metrics(ctx).await?;
+
         if !self.config.enable_kv_routing {
-            tracing::debug!("enable_kv_routing=false; skipping kv_event_sources / metrics_sources");
+            tracing::debug!("enable_kv_routing=false; skipping kv/snapshot publishers");
+            self.lifecycle = Some(lifecycle);
             return Ok(());
         }
         let kv_sources = self.engine.kv_event_sources().await?;
-        let metrics_snapshots = self.engine.metrics_sources().await?;
-        if kv_sources.is_empty() && metrics_snapshots.is_empty() {
-            tracing::debug!(
-                "engine returned no KV/metrics sources; KV-aware routing disabled for this worker"
-            );
+        if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
+            tracing::debug!("engine returned no KV sources / dp_ranks; KV-aware routing disabled");
+            self.lifecycle = Some(lifecycle);
             return Ok(());
         }
         let enable_local_indexer = self.config.effective_enable_local_indexer();
         tracing::debug!(
             kv_sources = kv_sources.len(),
-            metrics_sources = metrics_snapshots.len(),
+            snapshot_dp_ranks = bindings.dp_ranks.len(),
             enable_local_indexer,
             kv_cache_block_size = ?engine_config.kv_cache_block_size,
             "Starting KV-aware-routing publishers"
         );
         let handles = setup_publishers(
             component,
+            engine_metrics,
             kv_sources,
-            metrics_snapshots,
+            bindings.dp_ranks,
+            bindings.on_publisher_ready,
             engine_config.kv_cache_block_size,
             enable_local_indexer,
         )
         .await?;
         self.publishers = Some(handles);
+        self.lifecycle = Some(lifecycle);
         Ok(())
     }
 
@@ -490,16 +534,23 @@ impl Worker {
             }
             LifecycleState::Running | LifecycleState::StartFailed => {}
         }
+        let cleanup_start = std::time::Instant::now();
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
         }
-        // Stop publisher metric loops AFTER engine.cleanup so the engine's
-        // last metric snapshots get published. Then drop the handles so the
-        // publishers' own tokio tasks drain while NATS is still alive.
-        if let Some(mut handles) = self.publishers.take() {
-            handles.shutdown().await;
+        let cleanup_elapsed = cleanup_start.elapsed().as_secs_f64();
+        // Record cleanup latency on dynamo_component_cleanup_time_seconds.
+        // The gauge is operator-useful when scraped in the brief window
+        // between cleanup-complete and pod-terminate.
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.observe_cleanup_time(cleanup_elapsed);
         }
+        // Drop publisher handles AFTER engine.cleanup so the engine's
+        // last snapshot writes complete. There is no background task to
+        // join — snapshot writes are event-driven (engine pushes
+        // synchronously); KV-event publishers own their own threads.
+        self.publishers = None;
         // Mark stopped even on failure so a follow-up call no-ops; engines
         // like vLLM/TRT-LLM tear down NCCL groups in cleanup() and a second
         // attempt can hang or raise.
@@ -515,11 +566,19 @@ impl Worker {
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         let model_type = resolve_model_type(&self.config)?;
+        let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
 
         let mut local_model = build_local_model(&self.config, engine_config).await?;
         tracing::debug!("local model built");
         local_model
-            .attach(&endpoint, model_type, self.config.model_input, None)
+            .attach(
+                &endpoint,
+                model_type,
+                self.config.model_input,
+                None,
+                Some(worker_type),
+                needs,
+            )
             .await
             .map_err(|e| {
                 err(
@@ -620,8 +679,13 @@ impl Worker {
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
         }
 
+        let drain_start = std::time::Instant::now();
         if let Err(e) = self.engine.drain().await {
             tracing::warn!(error = %e, "engine drain failed");
+        }
+        let drain_elapsed = drain_start.elapsed().as_secs_f64();
+        if let Some(lifecycle) = self.lifecycle.as_ref() {
+            lifecycle.observe_drain_time(drain_elapsed);
         }
 
         self.cleanup_once().await;
@@ -723,6 +787,17 @@ fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
         return Ok(ModelType::Prefill);
     }
     parse_endpoint_types(&config.endpoint_types)
+}
+
+/// Derive the topology-readiness fields (`worker_type`, `needs`) for the
+/// worker's disaggregation role. Prefill workers need a Decode peer, Decode
+/// workers need a Prefill peer, and Aggregated workers stand alone.
+fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<WorkerType>>) {
+    match config.disaggregation_mode {
+        DisaggregationMode::Prefill => (WorkerType::Prefill, vec![vec![WorkerType::Decode]]),
+        DisaggregationMode::Decode => (WorkerType::Decode, vec![vec![WorkerType::Prefill]]),
+        DisaggregationMode::Aggregated => (WorkerType::Aggregated, Vec::new()),
+    }
 }
 
 fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
