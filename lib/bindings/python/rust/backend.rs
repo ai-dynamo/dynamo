@@ -815,6 +815,31 @@ impl LLMEngine for PyLLMEngine {
         Ok(())
     }
 
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        let py_obj = self
+            .call_method0_async("health_check_payload")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| -> PyResult<Option<serde_json::Value>> {
+            let bound = py_obj.bind(py);
+            if bound.is_none() {
+                return Ok(None);
+            }
+            let value: serde_json::Value = depythonize(bound).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "health_check_payload must return a JSON-serializable dict or None: {e}"
+                ))
+            })?;
+            if !value.is_object() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "health_check_payload must return a JSON object (dict) or None",
+                ));
+            }
+            Ok(Some(value))
+        })
+        .map_err(py_err_to_dynamo)
+    }
+
     async fn kv_event_sources(&self) -> Result<Vec<RsKvEventSource>, DynamoError> {
         let py_list = self
             .call_method0_async("kv_event_sources")
@@ -964,30 +989,6 @@ impl PySnapshotPublisher {
         Ok(())
     }
 
-    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
-        let py_obj = self
-            .call_method0_async("health_check_payload")
-            .await
-            .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<Option<serde_json::Value>> {
-            let bound = py_obj.bind(py);
-            if bound.is_none() {
-                return Ok(None);
-            }
-            let value: serde_json::Value = depythonize(bound).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "health_check_payload must return a JSON-serializable dict or None: {e}"
-                ))
-            })?;
-            if !value.is_object() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "health_check_payload must return a JSON object (dict) or None",
-                ));
-            }
-            Ok(Some(value))
-        })
-        .map_err(py_err_to_dynamo)
-    }
 }
 
 // ---------------------------------------------------------------------------
