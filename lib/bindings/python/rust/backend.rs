@@ -19,11 +19,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, DisaggregationMode as RsDisaggregationMode, DynamoError,
-    EngineConfig as RsEngineConfig, ErrorType, KvEventSource as RsKvEventSource, LLMEngine,
-    LLMEngineOutput, Metrics as RsMetrics, MetricsSource as RsMetricsSource, OnPublisherReady,
-    PreprocessedRequest, RuntimeConfig as RsRuntimeConfig, SnapshotFn, Worker as RsWorker,
-    WorkerConfig as RsWorkerConfig,
+    AsyncEngineContext, BackendError, ComponentSnapshot,
+    DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
+    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings,
+    MetricsCtx, OnPublisherReady, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
+    SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
@@ -49,6 +49,8 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RuntimeConfig>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
+    m.add_class::<PySnapshotPublisher>()?;
+    m.add_class::<crate::prometheus_metrics::EngineMetrics>()?;
     m.add("HEALTH_CHECK_KEY", dynamo_backend_common::HEALTH_CHECK_KEY)?;
     parent.add_submodule(&m)?;
     py.import("sys")?
@@ -830,21 +832,136 @@ impl LLMEngine for PyLLMEngine {
         .map_err(py_err_to_dynamo)
     }
 
-    async fn metrics_sources(&self) -> Result<Vec<RsMetricsSource>, DynamoError> {
-        let py_list = self
-            .call_method0_async("metrics_sources")
-            .await
-            .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<Vec<RsMetricsSource>> {
-            let bound = py_list.bind(py);
-            let list = bound.downcast::<pyo3::types::PyList>()?;
-            let mut sources = Vec::with_capacity(list.len());
-            for item in list.iter() {
-                sources.push(depythonize_metrics_source(&item)?);
-            }
-            Ok(sources)
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        // Step 1: call Python's `register_prometheus` for vendor-registry
+        // bridging (side effect on ctx.metrics; nothing flows back). Engines
+        // that don't override the ABC default no-op return immediately.
+        self.call_python_register_prometheus(_ctx.metrics).await?;
+
+        // Step 2: read the engine's declared dp_ranks. Empty = opt out.
+        let dp_ranks = self.read_dp_ranks().await?;
+        if dp_ranks.is_empty() {
+            return Ok(MetricsBindings {
+                dp_ranks,
+                on_publisher_ready: None,
+            });
+        }
+
+        // Step 3: build the on_publisher_ready closure. Framework calls
+        // it with the constructed `Arc<SnapshotPublisher>`; we hand it
+        // back to Python via `attach_snapshot_publisher`. Engine stashes
+        // and calls `publisher.publish(rank, snap)` from its stat-logger
+        // thereafter.
+        let engine = self.engine.clone();
+        let on_publisher_ready: dynamo_backend_common::OnSnapshotPublisherReady =
+            Box::new(move |publisher: Arc<RsSnapshotPublisher>| {
+                Python::with_gil(|py| -> PyResult<()> {
+                    let py_pub = Py::new(py, PySnapshotPublisher { inner: publisher })?;
+                    engine
+                        .bind(py)
+                        .call_method1("attach_snapshot_publisher", (py_pub,))?;
+                    Ok(())
+                })
+                .map_err(py_err_to_dynamo)
+            });
+
+        Ok(MetricsBindings {
+            dp_ranks,
+            on_publisher_ready: Some(on_publisher_ready),
         })
-        .map_err(py_err_to_dynamo)
+    }
+}
+
+impl PyLLMEngine {
+    async fn call_python_register_prometheus(
+        &self,
+        metrics: &dynamo_backend_common::EngineMetrics,
+    ) -> Result<(), DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let py_metrics_state = crate::prometheus_metrics::EngineMetrics::from_rust(metrics);
+
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let bound = engine.bind(py);
+                let py_metrics = Py::new(py, py_metrics_state)?;
+                let coroutine = bound.call_method1("register_prometheus", (py_metrics,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("register_prometheus offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        py_future.await.map_err(py_err_to_dynamo)?;
+        Ok(())
+    }
+
+    /// Call Python `component_metrics_dp_ranks()` → `Vec<u32>`. Empty list
+    /// is the default (engine opts out of per-rank metrics).
+    async fn read_dp_ranks(&self) -> Result<Vec<u32>, DynamoError> {
+        let engine = self.engine.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<Vec<u32>> {
+                let result = engine.bind(py).call_method0("component_metrics_dp_ranks")?;
+                let list = result.downcast::<pyo3::types::PyList>()?;
+                list.iter().map(|item| item.extract::<u32>()).collect()
+            })
+        })
+        .await;
+        match join {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(py_err_to_dynamo(e)),
+            Err(join_err) => Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!(
+                    "component_metrics_dp_ranks spawn_blocking join failed: {join_err}"
+                ))
+                .build()),
+        }
+    }
+}
+
+/// PyO3 binding for [`SnapshotPublisher`]. Engines call `publish(rank, snap)`
+/// from their stat-logger thread; the call acquires no extra GIL (it's
+/// invoked from Python which already holds it), copies the snapshot
+/// fields out via attribute access, then releases the GIL while writing
+/// the Rust gauges + NATS signal.
+#[pyclass(module = "dynamo._core.backend", name = "SnapshotPublisher", frozen)]
+pub struct PySnapshotPublisher {
+    inner: Arc<RsSnapshotPublisher>,
+}
+
+#[pymethods]
+impl PySnapshotPublisher {
+    /// Push a snapshot for `dp_rank`. Fields are read from the
+    /// `ComponentSnapshot` Python dataclass via attribute access; the
+    /// Rust-side write is performed without holding the GIL.
+    fn publish(&self, py: Python<'_>, dp_rank: u32, snapshot: &Bound<'_, PyAny>) -> PyResult<()> {
+        let kv_used_blocks: u64 = snapshot.getattr("kv_used_blocks")?.extract()?;
+        let kv_total_blocks: u64 = snapshot.getattr("kv_total_blocks")?.extract()?;
+        let gpu_cache_usage: f32 = snapshot.getattr("gpu_cache_usage")?.extract()?;
+        let kv_cache_hit_rate: Option<f32> = match snapshot.getattr("kv_cache_hit_rate") {
+            Ok(v) if v.is_none() => None,
+            Ok(v) => v.extract().ok(),
+            Err(_) => None,
+        };
+        let snap = ComponentSnapshot {
+            kv_used_blocks,
+            kv_total_blocks,
+            gpu_cache_usage,
+            kv_cache_hit_rate,
+            dp_rank,
+        };
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.publish(dp_rank, snap));
+        Ok(())
     }
 
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
@@ -920,52 +1037,6 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
              expected ZmqSource or PushSource"
         ))),
     }
-}
-
-fn depythonize_metrics_source(item: &Bound<'_, PyAny>) -> PyResult<RsMetricsSource> {
-    let cls = class_name(item)?;
-    if cls != "SnapshotSource" {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-            "metrics_sources() returned unknown descriptor type {cls:?}; \
-             expected SnapshotSource"
-        )));
-    }
-    let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
-    let snapshot_obj: PyObject = item.getattr("snapshot")?.into();
-    // Worker invokes this on a fixed interval under the GIL — keep it cheap.
-    // Each failure mode warns once per source then drops subsequent ticks.
-    let warned_call_failed = AtomicBool::new(false);
-    let warned_missing_field = AtomicBool::new(false);
-    let snapshot: SnapshotFn = Arc::new(move || -> Option<RsMetrics> {
-        Python::with_gil(|py| -> Option<RsMetrics> {
-            let result = match snapshot_obj.call0(py) {
-                Ok(r) => r,
-                Err(e) => {
-                    if !warned_call_failed.swap(true, Ordering::Relaxed) {
-                        tracing::warn!(dp_rank, error = %e, "snapshot fn raised; \
-                            dropping metric ticks until the engine recovers");
-                    }
-                    return None;
-                }
-            };
-            let bound = result.bind(py);
-            if bound.is_none() {
-                return None;
-            }
-            let kv_used_blocks: Option<u64> = match bound.getattr("kv_used_blocks") {
-                Ok(v) => v.extract().ok(),
-                Err(e) => {
-                    if !warned_missing_field.swap(true, Ordering::Relaxed) {
-                        tracing::warn!(dp_rank, error = %e,
-                            "snapshot result missing kv_used_blocks field");
-                    }
-                    return None;
-                }
-            };
-            Some(RsMetrics { kv_used_blocks })
-        })
-    });
-    Ok(RsMetricsSource { snapshot, dp_rank })
 }
 
 // ---------------------------------------------------------------------------

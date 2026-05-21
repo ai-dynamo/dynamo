@@ -40,6 +40,7 @@ lightseek-mm = ["dynamo-llm/lightseek-mm"]
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
+dynamo-protocols = { path = "../../protocols" }
 dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }

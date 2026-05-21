@@ -33,7 +33,7 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
-async def parse_tool_call(
+async def parse_tool_calls_batch(
     parser_name: str,
     message: str,
     tools_json: Optional[str] = None,
@@ -55,6 +55,26 @@ async def parse_tool_call(
 
     Raises:
         ValueError on parser failure or malformed `tools_json`.
+    """
+    ...
+
+async def parse_tool_calls_stream(
+    parser_name: str,
+    chunks_json: str,
+    tools_json: Optional[str] = None,
+) -> str:
+    """Parse streamed tool-call chunks using the specified parser.
+
+    Args:
+        parser_name: Parser name (e.g. "kimi_k2"). Empty string falls back to default.
+        chunks_json: JSON-serialized list of chunks with `delta_text` and optional `finish_reason`.
+        tools_json: Optional JSON-serialized list of tool definitions.
+
+    Returns:
+        JSON-serialized string `{"calls": [{"name", "arguments"}], "normal_text": str}`.
+
+    Raises:
+        ValueError on parser failure or malformed JSON.
     """
     ...
 
@@ -1447,6 +1467,7 @@ class KvRouterConfig:
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
+        router_queue_by_incoming_missing_isl: Optional[list[tuple[int, int]]] = None,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1481,6 +1502,19 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
+            router_queue_by_incoming_missing_isl: Tiered per-worker pending ISL token caps
+                keyed on the request's incoming missing ISL
+                (ISL minus best cached tokens across eligible workers). Each
+                entry is a `(missing_isl_floor, max_isl_tokens)` tuple; the
+                tier with the highest matched floor wins. The cap is multiplied
+                by worker count to get the total ISL token limit. The list must:
+                  * be non-empty, start with `missing_isl_floor == 0`,
+                    be strictly ascending in floor, and have
+                    `max_isl_tokens > 0` for each tier.
+                The cap is compared against the sum of ISL tokens for all requests
+                currently parked in the pending queue.
+                `None` disables ISL-token capping entirely (unbounded queue cap).
+                Backpressure (ResourceExhausted) is returned when the cap is reached.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
