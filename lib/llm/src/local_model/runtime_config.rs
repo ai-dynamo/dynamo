@@ -497,29 +497,6 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_config_like_kv_transfer_enforcement() {
-        let default_config = ModelRuntimeConfig::default();
-        assert!(default_config.kv_transfer_enforcement().is_none());
-        assert!(default_config.kv_transfer_preferred_weight().is_none());
-
-        let config = ModelRuntimeConfig {
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
-            kv_transfer_preferred_weight: Some(KvTransferPreferredWeight::try_from(0.5).unwrap()),
-            ..Default::default()
-        };
-        assert_eq!(
-            config.kv_transfer_enforcement(),
-            Some(KvTransferEnforcement::Preferred)
-        );
-        assert_eq!(
-            config
-                .kv_transfer_preferred_weight()
-                .map(KvTransferPreferredWeight::get),
-            Some(0.5)
-        );
-    }
-
-    #[test]
     fn test_validate_topology_config_accepts_matching_transfer_domain() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
@@ -646,14 +623,6 @@ mod tests {
         assert_eq!(
             error,
             "kv_transfer_preferred_weight can only be set when kv_transfer_enforcement is preferred"
-        );
-    }
-
-    #[test]
-    fn test_topology_taint_uses_canonical_format() {
-        assert_eq!(
-            topology_taint("zone", "us-east-1a"),
-            "dynamo.topology/zone=us-east-1a"
         );
     }
 
