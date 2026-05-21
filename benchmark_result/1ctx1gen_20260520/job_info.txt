@@ -1,0 +1,5 @@
+exp_name: run_benchx_1ctx1gen_dynamo_kvrouter_hcoff_c1-2-3-6-8-10-16-32-48-64-80-96-112-128-144-160
+job_id: 141919
+timestamp: 20260520_170505
+container_image: /lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/dynamo-trtllm-rihuo-x86_64-1-2-0-989902-with-trace.sqsh
+concurrency: 1,2,3,6,8,10,16,32,48,64,80,96,112,128,144,160
