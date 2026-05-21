@@ -60,9 +60,8 @@ subtitle: Three candidate interaction models for recipe variants.
     <p className="dynamo-recipe-eyebrow">One chooser per page</p>
     <h3>Make the variant table the primary interaction</h3>
     <p>
-      The page opens with the recommended recipe, then uses a comparison table as the only place to
-      choose another variant. Rows are links to anchored sections; there is no second selector above
-      the table and no card list that looks selectable but is not.
+      The comparison table is the only place to choose a variant. Recommendation is metadata on the
+      row, not a separate component, so the user sees one list and one action model.
     </p>
   </div>
 
@@ -73,15 +72,6 @@ subtitle: Three candidate interaction models for recipe variants.
         <span>Kimi-K2.5 NVFP4</span>
         <strong>Agentic coding trace comparison</strong>
       </div>
-    </div>
-
-    <div className="dynamo-prototype-recommended">
-      <div>
-        <span>Recommended recipe</span>
-        <h4>Disagg + Eagle + KV router + offload</h4>
-        <p>Best benchmarked point for the Kimi agentic coding trace: P/D split, KV-aware routing, Eagle3, and host-memory KV offload.</p>
-      </div>
-      <a href="#option-1-kimi-disagg">Open recipe</a>
     </div>
 
     <div className="dynamo-prototype-table-wrap">
@@ -99,7 +89,7 @@ subtitle: Three candidate interaction models for recipe variants.
         </thead>
         <tbody>
           <tr className="recommended">
-            <td><strong>Disagg + Eagle + KV router</strong><span>3P + 3D, TP4/EP4</span></td>
+            <td><strong>Disagg + Eagle + KV router</strong><em>Recommended</em><span>3P + 3D, TP4/EP4</span></td>
             <td>TRT-LLM</td>
             <td>24x GB200</td>
             <td>Agentic trace</td>

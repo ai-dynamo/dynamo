@@ -1741,14 +1741,12 @@ svg.card-icon{
 }
 
 .dynamo-prototype-jump-row a,
-.dynamo-prototype-recommended a,
 .dynamo-prototype-table a,
 .dynamo-subpage-list a {
     text-decoration: none;
 }
 
-.dynamo-prototype-jump-row a,
-.dynamo-prototype-recommended a {
+.dynamo-prototype-jump-row a {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1783,7 +1781,6 @@ svg.card-icon{
 
 .dynamo-prototype-coverage span,
 .dynamo-prototype-stress-grid span,
-.dynamo-prototype-recommended span,
 .dynamo-prototype-command-card span,
 .dynamo-picker-row > span,
 .dynamo-picker-result > span,
@@ -1860,28 +1857,6 @@ svg.card-icon{
     line-height: 1.25;
 }
 
-.dynamo-prototype-recommended {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 16px;
-    align-items: center;
-    margin-bottom: 14px;
-    padding: 16px;
-    border: 1px solid var(--nv-color-green);
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--nv-color-green) 7%, transparent);
-}
-
-.dynamo-prototype-recommended h4 {
-    margin: 0;
-}
-
-.dynamo-prototype-recommended p {
-    margin: 6px 0 0;
-    color: var(--pst-color-text-muted);
-    font-size: 14px;
-}
-
 .dynamo-prototype-table-wrap {
     overflow-x: auto;
     border: 1px solid var(--border, var(--grayscale-a5));
@@ -1928,6 +1903,21 @@ svg.card-icon{
     display: block;
     margin-top: 4px;
     color: var(--pst-color-text-muted);
+}
+
+.dynamo-prototype-table td em {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    margin: 6px 0 0;
+    padding: 2px 7px;
+    border: 1px solid color-mix(in srgb, var(--nv-color-green) 65%, var(--border, var(--grayscale-a5)));
+    border-radius: var(--rounded);
+    color: var(--pst-color-text-base);
+    font-size: 11px;
+    font-style: normal;
+    font-weight: 700;
+    line-height: 1;
 }
 
 .dynamo-prototype-table tr.recommended {
