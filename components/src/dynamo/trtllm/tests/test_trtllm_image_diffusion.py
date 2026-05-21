@@ -390,7 +390,7 @@ class TestVideoHandlerConcurrency:
           one thread is ever inside generate() → ``max_concurrent == 1``.
     """
 
-    def _make_handler(self):
+    def _make_handler(self, tmp_path):
         """Create a ImageGenerationHandler with mock engine and config."""
         from dynamo.trtllm.request_handlers.diffusion.image_handler import (
             ImageGenerationHandler,
@@ -402,7 +402,7 @@ class TestVideoHandlerConcurrency:
         mock_engine.generate = tracker.generate
 
         config = DiffusionConfig(
-            media_output_fs_url="file:///tmp/test_media",
+            media_output_fs_url=(tmp_path / "test_media").as_uri(),
             default_fps=24,
             default_seconds=4,
         )
@@ -431,7 +431,7 @@ class TestVideoHandlerConcurrency:
             pass
 
     @pytest.mark.timeout(5)
-    def test_concurrent_requests_are_serialized(self):
+    def test_concurrent_requests_are_serialized(self, tmp_path):
         """Fires 3 concurrent requests and asserts only one thread enters
         engine.generate() at a time (max_concurrent == 1).
 
@@ -441,7 +441,7 @@ class TestVideoHandlerConcurrency:
         """
 
         async def run():
-            handler, tracker = self._make_handler()
+            handler, tracker = self._make_handler(tmp_path)
 
             requests = [self._make_request() for _ in range(3)]
 
@@ -474,10 +474,13 @@ class TestVideoHandlerConcurrency:
 class TestImageHandlerResponseFormats:
     """Tests for ImageGenerationHandler generate() response format branching."""
 
-    def _make_handler(self, engine_output_batch: int = 1, **config_overrides):
+    def _make_handler(self, tmp_path, engine_output_batch: int = 1, **config_overrides):
         """Create a handler with mocked engine and fs.
 
         Args:
+            tmp_path: pytest-provided per-test temporary directory used as the
+                handler's ``media_output_fs_url`` so tests stay hermetic and
+                parallel-safe.
             engine_output_batch: First dim of the synthetic image tensor the mock
                 engine returns. Lets tests exercise the handler's batch-iteration
                 and clamping behavior without needing the real engine.
@@ -498,7 +501,7 @@ class TestImageHandlerResponseFormats:
         mock_engine.generate = MagicMock(return_value=mock_output)
 
         config_kwargs = dict(
-            media_output_fs_url="file:///tmp/test_media",
+            media_output_fs_url=(tmp_path / "test_media").as_uri(),
             media_output_http_url="https://cdn.example.com/media",
             default_fps=24,
             default_seconds=4,
@@ -518,9 +521,9 @@ class TestImageHandlerResponseFormats:
         return handler
 
     @pytest.mark.asyncio
-    async def test_url_response_format(self):
+    async def test_url_response_format(self, tmp_path):
         """Test generate() with url response format calls upload_to_fs."""
-        handler = self._make_handler()
+        handler = self._make_handler(tmp_path)
 
         request = {
             "prompt": "a test image",
@@ -549,9 +552,9 @@ class TestImageHandlerResponseFormats:
         mock_upload.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_b64_response_format(self):
+    async def test_b64_response_format(self, tmp_path):
         """Test generate() with b64_json response format returns base64 encoded image."""
-        handler = self._make_handler()
+        handler = self._make_handler(tmp_path)
 
         request = {
             "prompt": "a test image",
@@ -580,9 +583,9 @@ class TestImageHandlerResponseFormats:
         assert decoded == b"fake_image_bytes"
 
     @pytest.mark.asyncio
-    async def test_default_response_format_is_url(self):
+    async def test_default_response_format_is_url(self, tmp_path):
         """Test that generate() defaults to url response format."""
-        handler = self._make_handler()
+        handler = self._make_handler(tmp_path)
 
         request = {
             "prompt": "a test image",
@@ -607,13 +610,13 @@ class TestImageHandlerResponseFormats:
         assert results[0]["data"][0]["url"] is not None
 
     @pytest.mark.asyncio
-    async def test_error_response_on_failure(self):
+    async def test_error_response_on_failure(self, tmp_path):
         """
         Test that generate() raises exception on engine failure. This is different from video generation.
         In video generation where the error is embedded in the response, but in image generation,
         the response doesn't contain the error, so the handler doesn't suppress it and let it propagate.
         """
-        handler = self._make_handler()
+        handler = self._make_handler(tmp_path)
         handler.engine.generate = MagicMock(side_effect=RuntimeError("GPU OOM"))
 
         request = {
@@ -628,11 +631,12 @@ class TestImageHandlerResponseFormats:
         assert "GPU OOM" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_url_response_format_batch_n(self):
+    async def test_url_response_format_batch_n(self, tmp_path):
         """Engine returns batch=2 with default_num_images_per_prompt=2 and no
         request-level n -> response carries two ImageData entries, each from a
         separate upload with a distinct storage path."""
         handler = self._make_handler(
+            tmp_path,
             engine_output_batch=2,
             default_num_images_per_prompt=2,
         )
@@ -668,10 +672,11 @@ class TestImageHandlerResponseFormats:
         ), f"Expected distinct storage paths per image, got {storage_paths}"
 
     @pytest.mark.asyncio
-    async def test_request_n_overrides_default(self):
+    async def test_request_n_overrides_default(self, tmp_path):
         """Per-request n takes precedence over config default. Default=1,
         request n=2, engine returns batch=2 -> two entries."""
         handler = self._make_handler(
+            tmp_path,
             engine_output_batch=2,
             default_num_images_per_prompt=1,
         )
@@ -695,9 +700,10 @@ class TestImageHandlerResponseFormats:
         assert len(results[0]["data"]) == 2
 
     @pytest.mark.asyncio
-    async def test_n_gt_1_is_accepted(self):
+    async def test_n_gt_1_is_accepted(self, tmp_path):
         """Requests with n > 1 are accepted and reach the engine."""
         handler = self._make_handler(
+            tmp_path,
             engine_output_batch=2,
             default_num_images_per_prompt=1,
         )
@@ -717,11 +723,12 @@ class TestImageHandlerResponseFormats:
                 pass
 
     @pytest.mark.asyncio
-    async def test_handler_emits_fewer_when_engine_shortchanges(self):
+    async def test_handler_emits_fewer_when_engine_shortchanges(self, tmp_path):
         """Engine returns batch=1 when request asks for n=2 -> response has 1
         entry. The handler does not synthesize, pad, or error; it faithfully
         reports what the engine produced."""
         handler = self._make_handler(
+            tmp_path,
             engine_output_batch=1,
             default_num_images_per_prompt=1,
         )
@@ -750,10 +757,10 @@ class TestImageHandlerResponseFormats:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("n", [0, -1, 11, 100])
-    async def test_n_out_of_range_is_rejected(self, n):
+    async def test_n_out_of_range_is_rejected(self, tmp_path, n):
         """Requests with n < 1 or n > 10 (OpenAI's documented range) raise
         ValueError before the engine is called."""
-        handler = self._make_handler(default_num_images_per_prompt=1)
+        handler = self._make_handler(tmp_path, default_num_images_per_prompt=1)
         handler.engine.generate = MagicMock()  # Should never be called.
 
         request = {
@@ -771,11 +778,12 @@ class TestImageHandlerResponseFormats:
         handler.engine.generate.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_handler_clamps_when_engine_overproduces(self):
+    async def test_handler_clamps_when_engine_overproduces(self, tmp_path):
         """Engine returns batch=3 when request asks for n=2 -> response is
         truncated to 2 entries. Defensive: bounds the handler's iteration by
         what the caller asked for, even if the pipeline ever over-produces."""
         handler = self._make_handler(
+            tmp_path,
             engine_output_batch=3,
             default_num_images_per_prompt=1,
         )
