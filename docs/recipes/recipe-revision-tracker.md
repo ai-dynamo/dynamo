@@ -97,7 +97,7 @@ explicit eviction decision before the revised Recipes section is real.
 | Status | Target Fern page | Source README(s) | Variants to cover | Must port | Likely evict | Open scrutiny |
 | --- | --- | --- | --- | --- | --- | --- |
 | todo | `deepseek-r1.mdx` | `recipes/deepseek-r1/README.md`, `recipes/deepseek-r1/sglang/README.md`, `recipes/deepseek-r1/vllm/disagg/README.md` | SGLang disagg 8 GPU, SGLang disagg 16 GPU, TRT-LLM GB200 WideEP, vLLM disagg | Backend/hardware matrix, huge-model prerequisites, backend-specific notes, TRT-LLM perf row | Repeated HF/storage setup | Whether all variants are production-ready and whether SGLang READMEs are too thin for detail page claims. |
-| todo | `deepseek-v3-2-nvfp4.mdx` | `recipes/deepseek-v32-fp4/README.md` | TRT-LLM agg round-robin, TRT-LLM disagg KV router | Results, Mooncake synthetic coding trace, dataset stats, WideEP topology, goodput SLA, cleanup/operate | Generic setup | Need decide if this should be first flagship page after Qwen because it has strongest benchmark story. |
+| draft | `deepseek-v3-2-nvfp4.mdx` | `recipes/deepseek-v32-fp4/README.md` | TRT-LLM agg round-robin, TRT-LLM disagg KV router | Mooncake synthetic coding trace, dataset stats, WideEP topology, goodput SLA, benchmark jobs, artifact path, cleanup/operate, ComputeDomain notes | Generic setup boilerplate | Needs visual check and reconciliation of README tmux wording vs Job-based `perf.yaml`. |
 | todo | `deepseek-v4-flash.mdx` | `recipes/deepseek-v4/deepseek-v4-flash/README.md` | vLLM B200, vLLM GB200, SGLang B200, SGLang GB200 | Deploy-only variants, reasoning/tool verification, startup caveats, model details | Benchmark evidence, because no `perf.yaml` exists | Needs explicit "deployment-only" treatment and no benchmark-backed claims. |
 | todo | `deepseek-v4-pro.mdx` | `recipes/deepseek-v4/deepseek-v4-pro/README.md`, SGLang disagg B200/GB200 READMEs | vLLM B200 agg, vLLM GB200 agg, vLLM GB200 disagg, SGLang agg, SGLang disagg B200, SGLang disagg GB200 | Variant table, Day-0 status, GB200 ComputeDomain, RDMA/GKE/AWS/IB notes, perf for vLLM GB200 disagg, reasoning/tool verification | Duplicated setup | Need reconcile top-level SGLang agg plus nested SGLang disagg pages without overwhelming customers. |
 | todo | `glm-5-nvfp4.mdx` | `recipes/glm-5-nvfp4/README.md` | SGLang disagg | Topology, published runtime image, EAGLE MTP, KV cache, NIXL/UCX, recovery/rollouts, 1K/8K benchmark result | Generic storage/HF setup | Need preserve performance number with caveat if not in artifact. |
@@ -107,7 +107,7 @@ explicit eviction decision before the revised Recipes section is real.
 | todo | `nemotron-3-nano-omni.mdx` | `recipes/nemotron-3-nano-omni/README.md` | vLLM agg | Custom container build, multimodal smoke tests, prefix-hash routing, tool/reasoning parsers, optional no-NATS | Benchmark section, because no `perf.yaml` | Since build is required, page needs an Image section or it will mislead. |
 | todo | `nemotron-3-super-fp8.mdx` | `recipes/nemotron-3-super-fp8/README.md` | vLLM agg, TRT-LLM disagg, SGLang agg, SGLang disagg | Parser config, routing, backend notes, Dynamo 0.9.1 compatibility if still needed | Old compatibility if no longer supported | Need verify whether compatibility notes belong in current docs. |
 | todo | `qwen3-235b-a22b-fp8.mdx` | `recipes/qwen3-235b-a22b-fp8/README.md` | TRT-LLM agg Hopper, agg Blackwell, disagg Hopper, disagg Blackwell | Hardware-specific MoE backend differences, static 4K/200 perf rows, hardware requirements | Boilerplate setup | Need explain Hopper vs Blackwell as customer choice, not implementation trivia. |
-| draft | `qwen3-32b.mdx` | `recipes/qwen3-32b/README.md`, `recipes/qwen3-32b/vllm/agg-kvbm/README.md` | vLLM agg round-robin, vLLM disagg KV router, vLLM agg KVBM | Mooncake trace, P/D vs agg comparison, KVBM deploy-only caveats, traffic facts, benchmark commands | Cleanup details currently omitted | Need add Operate and KVBM config details before calling done. |
+| draft | `qwen3-32b.mdx` | `recipes/qwen3-32b/README.md`, `recipes/qwen3-32b/vllm/agg-kvbm/README.md` | vLLM agg round-robin, vLLM disagg KV router, vLLM agg KVBM | Mooncake trace, P/D vs agg comparison, KVBM deploy-only caveats, traffic facts, benchmark commands, verify commands, operate/artifacts/cleanup, KVBM config notes | Generic setup boilerplate | Needs visual check and final decision on whether deploy commands should auto-follow the selector. |
 | todo | `qwen3-32b-fp8.mdx` | `recipes/qwen3-32b-fp8/README.md` | TRT-LLM agg, TRT-LLM disagg, vLLM disagg | FP8 variants, port-forward variants, static perf rows | Boilerplate setup | Needs stronger guidance on why choose FP8 page vs BF16 Qwen3-32B page. |
 | todo | `qwen3-vl-30b.mdx` | `recipes/qwen3-vl-30b/README.md` | vLLM agg embedding cache | Cache-on/off result, dataset generation, 80% image reuse, cache env vars, artifact path | Generic setup | Need include dataset generation as first-class section, not bury it. |
 | todo | `qwen3-6-35b.mdx` | `recipes/qwen3.6-35b/README.md` | vanilla vLLM serve, Dynamo frontend decoding, Dynamo FD plus embedding cache | 3-way comparison, run scripts, sliding-window dataset, hardware env files, shared-model-cache, aiperf pin | Maintainer layout rule unless needed | Page must explain why this uses scripts rather than direct manifest tabs. |
@@ -125,8 +125,8 @@ or moved to a separate operational/build guide.
 | todo | DeepSeek-R1 SGLang disagg 16 GPU | `recipes/deepseek-r1/sglang/disagg-16gpu/deploy.yaml` | No | Family only | Add as deployment variant; port WideEP/backend notes. |
 | todo | DeepSeek-R1 TRT-LLM WideEP GB200 | `recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200` | Yes | Family only | Add benchmark evidence from `perf.yaml`. |
 | todo | DeepSeek-R1 vLLM disagg | `recipes/deepseek-r1/vllm/disagg` | No | Family only | Add as deployment variant; preserve DEP setup notes. |
-| todo | DeepSeek V3.2 agg round-robin | `recipes/deepseek-v32-fp4/trtllm/agg-round-robin` | Yes | Yes | Create detail page variant and benchmark baseline. |
-| todo | DeepSeek V3.2 disagg KV router | `recipes/deepseek-v32-fp4/trtllm/disagg-kv-router` | Yes | Yes | Create detail page recommended variant. |
+| draft | DeepSeek V3.2 agg round-robin | `recipes/deepseek-v32-fp4/trtllm/agg-round-robin` | Yes | Yes | Represented with deploy, verify, benchmark, operate, and cleanup commands; needs visual review. |
+| draft | DeepSeek V3.2 disagg KV router | `recipes/deepseek-v32-fp4/trtllm/disagg-kv-router` | Yes | Yes | Represented with deploy, verify, benchmark, operate, cleanup, and WideEP configuration notes; needs visual review. |
 | todo | DeepSeek-V4-Flash vLLM B200 | `recipes/deepseek-v4/deepseek-v4-flash/vllm/agg_b200/deploy.yaml` | No | Family only | Add deploy-only variant. |
 | todo | DeepSeek-V4-Flash vLLM GB200 | `recipes/deepseek-v4/deepseek-v4-flash/vllm/agg_gb200/deploy.yaml` | No | Family only | Add deploy-only variant. |
 | todo | DeepSeek-V4-Flash SGLang B200 | `recipes/deepseek-v4/deepseek-v4-flash/sglang/agg/deploy.yaml` | No | Family only | Add deploy-only variant. |
@@ -159,9 +159,9 @@ or moved to a separate operational/build guide.
 | todo | Qwen3-235B-A22B TRT-LLM agg Hopper | `recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper` | Yes | Family only | Add benchmark-backed variant. |
 | todo | Qwen3-235B-A22B TRT-LLM disagg Blackwell | `recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell` | Yes | Family only | Add benchmark-backed variant. |
 | todo | Qwen3-235B-A22B TRT-LLM disagg Hopper | `recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper` | Yes | Family only | Add benchmark-backed variant. |
-| draft | Qwen3-32B vLLM agg round-robin | `recipes/qwen3-32b/vllm/agg-round-robin` | Yes | Yes | Already in Qwen detail selector; add Operate and artifact retrieval. |
-| draft | Qwen3-32B vLLM disagg KV router | `recipes/qwen3-32b/vllm/disagg-kv-router` | Yes | Yes | Already in Qwen detail selector; add complete benchmark result handling. |
-| draft | Qwen3-32B vLLM agg KVBM | `recipes/qwen3-32b/vllm/agg-kvbm` | No | Yes | Already in Qwen selector; port KVBM config and metrics notes. |
+| draft | Qwen3-32B vLLM agg round-robin | `recipes/qwen3-32b/vllm/agg-round-robin` | Yes | Yes | Represented with deploy, verify, benchmark, operate, and cleanup commands; needs visual review. |
+| draft | Qwen3-32B vLLM disagg KV router | `recipes/qwen3-32b/vllm/disagg-kv-router` | Yes | Yes | Represented with deploy, verify, benchmark, operate, cleanup, and configuration notes; needs visual review. |
+| draft | Qwen3-32B vLLM agg KVBM | `recipes/qwen3-32b/vllm/agg-kvbm` | No | Yes | Represented as deployment-only variant with KVBM memory, connector, metrics, verify, and cleanup notes; needs visual review. |
 | todo | Qwen3-32B FP8 TRT-LLM agg | `recipes/qwen3-32b-fp8/trtllm/agg` | Yes | Family only | Add benchmark-backed variant. |
 | todo | Qwen3-32B FP8 TRT-LLM disagg | `recipes/qwen3-32b-fp8/trtllm/disagg` | Yes | Family only | Add benchmark-backed variant. |
 | todo | Qwen3-32B FP8 vLLM disagg | `recipes/qwen3-32b-fp8/vllm/disagg` | Yes | Family only | Add benchmark-backed variant. |
@@ -173,11 +173,11 @@ or moved to a separate operational/build guide.
 ## Immediate Implementation Order
 
 1. Finish `qwen3-32b.mdx` because it is already the exemplar:
-   - Add Operate section.
-   - Port KVBM configuration and metrics notes.
-   - Add artifact retrieval and cleanup or explicitly link them out.
-   - Make Deploy tabs respond to the technique selector or clarify they are separate tabs.
-2. Add `deepseek-v3-2-nvfp4.mdx` as the second benchmark-heavy exemplar.
+   - Visual check the updated page.
+   - Decide whether Deploy tabs should auto-follow the technique selector or stay explicit.
+2. Finish `deepseek-v3-2-nvfp4.mdx` as the second benchmark-heavy exemplar:
+   - Visual check the updated page.
+   - Confirm README benchmark-monitoring wording should follow the Job-based `perf.yaml`.
 3. Add `qwen3-vl-30b.mdx` to prove the multimodal/reuse pattern.
 4. Add `kimi-k2-5.mdx` to prove agentic coding workload navigation.
 5. Fill deployment-only pages after benchmark-backed pages, with no implied perf claims.

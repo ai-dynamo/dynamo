@@ -59,9 +59,10 @@ subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H20
     <span className="dynamo-recipe-label">Hardware</span>
     <div>
       <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">H200 16 GPU</span>
+        <span className="dynamo-config-value">H200 16 GPU for benchmarked variants</span>
+        <span className="dynamo-config-value">H200/B200 1 GPU for KVBM</span>
       </div>
-      <p className="dynamo-unvalidated-note">Not yet validated for this model: H100, B200, GB200.</p>
+      <p className="dynamo-unvalidated-note">The aggregate and disaggregated benchmarks use 16x H200 across 2 nodes. The KVBM deployment uses one H200 or B200 with a large host-memory KV tier.</p>
     </div>
   </div>
 
@@ -85,7 +86,7 @@ subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H20
   </div>
 
   <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Traffic</span>
+    <span className="dynamo-recipe-label">Traffic facts</span>
     <div className="dynamo-traffic-facts">
       <div>
         <span>Input length</span>
@@ -201,8 +202,12 @@ prefill work. Keep the aggregated round-robin variant as the control run for you
 
 <div className="dynamo-prereq-grid">
   <div>
-    <span>Cluster</span>
+    <span>Benchmarked cluster</span>
     <strong>16x H200 across 2 nodes</strong>
+  </div>
+  <div>
+    <span>KVBM node</span>
+    <strong>1x H200/B200 plus host memory</strong>
   </div>
   <div>
     <span>Platform</span>
@@ -214,13 +219,19 @@ prefill work. Keep the aggregated round-robin variant as the control run for you
   </div>
   <div>
     <span>Storage</span>
-    <strong>Model cache PVC</strong>
+    <strong>Model and compilation cache PVCs</strong>
+  </div>
+  <div>
+    <span>KVBM memory</span>
+    <strong>150 GiB request / 200 GiB limit</strong>
   </div>
 </div>
 
 <Warning>
 Edit the recipe storage class, image tags, namespace, and secrets before applying these manifests.
 The benchmark pod downloads the Mooncake trace on first run and writes artifacts to the perf-cache PVC.
+For KVBM, the recipe reserves 100 GiB of CPU memory for offloaded KV blocks; raise the worker memory
+request and limit if you raise `DYN_KVBM_CPU_CACHE_GB`.
 </Warning>
 
 ## Deploy
@@ -274,6 +285,75 @@ The benchmark pod downloads the Mooncake trace on first run and writes artifacts
 
     kubectl apply -f recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml \
       -n ${NAMESPACE}
+    kubectl wait --for=condition=ready pod \
+      -l nvidia.com/dynamo-graph-deployment-name=agg-kvbm-qwen3-32b \
+      -n ${NAMESPACE} \
+      --timeout=1200s
+    ```
+  </Tab>
+</Tabs>
+
+The selector above describes the current recipe choice. Use the matching deploy tab for the
+manifest you want to apply.
+
+## Verify
+
+<Tabs>
+  <Tab title="Disagg + KV router" language="disagg-kv-router">
+    ```bash
+    kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 \
+      -n ${NAMESPACE}
+
+    curl http://localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "Qwen/Qwen3-32B",
+        "messages": [
+          {
+            "role": "user",
+            "content": "List three Dynamo recipe checks."
+          }
+        ],
+        "max_tokens": 128
+      }'
+    ```
+  </Tab>
+  <Tab title="Aggregated baseline" language="agg-round-robin">
+    ```bash
+    kubectl port-forward svc/agg-8xtp2-frontend 8000:8000 \
+      -n ${NAMESPACE}
+
+    curl http://localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "Qwen/Qwen3-32B",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Why run a baseline before tuning?"
+          }
+        ],
+        "max_tokens": 128
+      }'
+    ```
+  </Tab>
+  <Tab title="Aggregated + KVBM" language="agg-kvbm">
+    ```bash
+    kubectl port-forward svc/agg-kvbm-qwen3-32b-frontend 8000:8000 \
+      -n ${NAMESPACE}
+
+    curl http://localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "Qwen/Qwen3-32B",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Hello!"
+          }
+        ],
+        "max_tokens": 64
+      }'
     ```
   </Tab>
 </Tabs>
@@ -301,6 +381,16 @@ The benchmark pod downloads the Mooncake trace on first run and writes artifacts
     <strong>Fixed-schedule replay</strong>
     <p>Throughput is fixed by the trace; compare TTFT, ITL, and request latency.</p>
   </div>
+  <div>
+    <span>Goodput target</span>
+    <strong>TTFT 2s / ITL 25ms</strong>
+    <p>The benchmark pod passes these thresholds to AIPerf for both compared variants.</p>
+  </div>
+  <div>
+    <span>Tooling</span>
+    <strong>AIPerf 0.6.0</strong>
+    <p>The perf pod installs AIPerf, downloads the trace, and runs the profile inside tmux.</p>
+  </div>
 </div>
 
 <CodeBlocks>
@@ -324,6 +414,60 @@ Throughput: fixed by trace replay schedule
 ```
 </CodeBlocks>
 
+## Operate
+
+<CodeBlocks>
+```bash title="Watch benchmark progress"
+kubectl get pods -n ${NAMESPACE} -l app=benchmark
+
+kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- \
+  tmux a -t benchmark
+```
+
+```bash title="Retrieve benchmark artifacts"
+kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- \
+  ls -la /perf-cache/artifacts/
+
+kubectl cp \
+  ${NAMESPACE}/<benchmark-pod-name>:/perf-cache/artifacts \
+  ./qwen3-32b-benchmark-results
+```
+
+```bash title="Clean up this recipe"
+kubectl delete pod -l app=benchmark -n ${NAMESPACE}
+
+kubectl delete dynamographdeployment agg-8xtp2 -n ${NAMESPACE}
+kubectl delete dynamographdeployment disagg-router-6p-2d -n ${NAMESPACE}
+kubectl delete dynamographdeployment agg-kvbm-qwen3-32b -n ${NAMESPACE}
+```
+</CodeBlocks>
+
+The benchmark runs in a tmux session inside the pod so you can attach while it is running and detach
+without stopping the profile. Use `Ctrl+B`, then `D`, to detach from tmux.
+
+## Configuration Notes
+
+<Accordion title="Disagg + KV router">
+The frontend runs with KV routing enabled. Prefill and decode workers both use the NIXL KV connector,
+TP2, 64-token blocks, async scheduling, and a 131K max model length with YaRN rope scaling. Prefill
+workers publish KV cache events so the router can account for useful cached blocks. The manifest
+requests RDMA resources for both prefill and decode workers.
+</Accordion>
+
+<Accordion title="Aggregated round-robin">
+The aggregate baseline keeps the same model, TP2, block size, async scheduling, max model length, and
+YaRN rope scaling, but removes the prefill/decode split and KV-aware routing. Treat this as the
+control run when you compare Dynamo behavior on your own cluster.
+</Accordion>
+
+<Accordion title="Aggregated + KVBM">
+The KVBM variant uses the Dynamo KVBM connector through vLLM's `--kv-transfer-config` and sets
+`DYN_KVBM_CPU_CACHE_GB=100`. The worker asks for 1 GPU plus 150 GiB of host memory, with a 200 GiB
+limit. Metrics are off by default; enable `DYN_KVBM_METRICS=true` and expose port `6880` if you want
+Prometheus counters such as `kvbm_offload_blocks_d2h`, `kvbm_onboard_blocks_h2d`,
+`kvbm_matched_tokens`, and `kvbm_host_cache_hit_rate`.
+</Accordion>
+
 ## Why This Recipe
 
 This workload has long input sequences, shorter outputs, and meaningful prefix reuse. KV-aware
@@ -340,5 +484,6 @@ interruption from long prefill requests.
 | Hardware | 16x H200 across 2 nodes |
 | Recommended technique | Disaggregated prefill/decode with KV-aware routing |
 | Baseline technique | Aggregated round-robin |
+| Deployment-only variant | Aggregated KVBM on 1x H200 or B200 |
 | Dataset | Mooncake conversation trace |
 | Evidence | `deploy.yaml`, `perf.yaml`, and recipe README |

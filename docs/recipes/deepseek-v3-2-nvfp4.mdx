@@ -1,0 +1,420 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DeepSeek V3.2 NVFP4
+subtitle: Serve nvidia/DeepSeek-V3.2-NVFP4 with TensorRT-LLM on 32x GB200.
+---
+
+<div className="dynamo-model-detail-hero">
+  <div className="dynamo-model-hero-copy">
+    <div className="dynamo-model-title-lockup">
+      <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div>
+        <p className="dynamo-recipe-eyebrow">NVIDIA checkpoint / TensorRT-LLM / GB200</p>
+        <h2>Serve DeepSeek V3.2 NVFP4 with Dynamo</h2>
+      </div>
+    </div>
+    <p>
+      The recommended path uses prefill/decode disaggregation, KV-aware routing, and WideEP on
+      32x GB200 GPUs. The benchmark replays a Mooncake-derived synthetic coding trace with long
+      input sequences and high prefix reuse.
+    </p>
+    <div className="dynamo-hero-actions">
+      <a href="#deploy">Deploy</a>
+      <a href="#benchmark-evidence">Benchmark</a>
+      <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4">Source</a>
+    </div>
+  </div>
+
+  <div className="dynamo-recommendation-card">
+    <span>Recommended recipe</span>
+    <strong>Disagg + KV router + WideEP</strong>
+    <p>2 prefill workers and 2 decode workers, each using DEP8.</p>
+    <div className="dynamo-recommendation-facts">
+      <div>
+        <span>Runtime</span>
+        <strong>TRT-LLM</strong>
+      </div>
+      <div>
+        <span>Hardware</span>
+        <strong>32x GB200</strong>
+      </div>
+      <div>
+        <span>Evidence</span>
+        <strong>Trace replay</strong>
+      </div>
+    </div>
+  </div>
+</div>
+
+## Configure
+
+<form className="dynamo-recipe-detail-shell">
+  <input className="dynamo-filter-input" type="radio" name="dsv32-technique" id="dsv32-technique-disagg" defaultChecked />
+  <input className="dynamo-filter-input" type="radio" name="dsv32-technique" id="dsv32-technique-agg" />
+
+<div className="dynamo-recipe-browser" aria-label="DeepSeek V3.2 NVFP4 recipe selectors">
+  <div className="dynamo-filter-row">
+    <span className="dynamo-recipe-label">Hardware</span>
+    <div>
+      <div className="dynamo-filter-options">
+        <span className="dynamo-config-value">GB200 NVL72</span>
+        <span className="dynamo-config-value">32 GPUs / 8 nodes</span>
+      </div>
+      <p className="dynamo-unvalidated-note">The manifests rely on a ComputeDomain so DRA can place workers on MNNVL-connected nodes.</p>
+    </div>
+  </div>
+
+  <div className="dynamo-filter-row">
+    <span className="dynamo-recipe-label">Runtime</span>
+    <div>
+      <div className="dynamo-filter-options">
+        <span className="dynamo-config-value">TensorRT-LLM</span>
+      </div>
+      <p className="dynamo-unvalidated-note">This page covers the NVIDIA NVFP4 checkpoint path only.</p>
+    </div>
+  </div>
+
+  <div className="dynamo-filter-row">
+    <span className="dynamo-recipe-label">Technique</span>
+    <div className="dynamo-filter-options">
+      <label className="dynamo-recipe-chip" htmlFor="dsv32-technique-disagg">Disagg + KV router + WideEP</label>
+      <label className="dynamo-recipe-chip" htmlFor="dsv32-technique-agg">Aggregated round-robin</label>
+    </div>
+  </div>
+
+  <div className="dynamo-filter-row">
+    <span className="dynamo-recipe-label">Traffic facts</span>
+    <div className="dynamo-traffic-facts">
+      <div>
+        <span>Requests</span>
+        <strong>10,000 trace requests</strong>
+        <p>Fixed-schedule replay of a coding-oriented synthetic trace.</p>
+      </div>
+      <div>
+        <span>Input length</span>
+        <strong>39K avg ISL</strong>
+        <p>Long-context requests up to about 109K input tokens.</p>
+      </div>
+      <div>
+        <span>Prefix reuse</span>
+        <strong>44% token hit rate</strong>
+        <p>About 57% of input tokens are shared-context prefixes.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div className="dynamo-selected-facts dynamo-technique-panel dsv32-technique-disagg">
+  <div>
+    <span>Selected recipe</span>
+    <strong>Disagg + KV router + WideEP</strong>
+  </div>
+  <div>
+    <span>Topology</span>
+    <strong>2P + 2D, DEP8</strong>
+  </div>
+  <div>
+    <span>Workload</span>
+    <strong>Synthetic coding trace</strong>
+  </div>
+  <div>
+    <span>Goodput SLA</span>
+    <strong>TTFT 20s / ITL 50ms</strong>
+  </div>
+</div>
+
+<div className="dynamo-selected-facts dynamo-technique-panel dsv32-technique-agg">
+  <div>
+    <span>Selected recipe</span>
+    <strong>Aggregated round-robin</strong>
+  </div>
+  <div>
+    <span>Topology</span>
+    <strong>4 DEP8 workers</strong>
+  </div>
+  <div>
+    <span>Workload</span>
+    <strong>Synthetic coding trace</strong>
+  </div>
+  <div>
+    <span>Goodput SLA</span>
+    <strong>TTFT 20s / ITL 50ms</strong>
+  </div>
+</div>
+</form>
+
+## When to Use
+
+Use this recipe when the model is `nvidia/DeepSeek-V3.2-NVFP4`, the target hardware is GB200 NVL72,
+and the traffic has long coding prompts with repeated context. The disaggregated variant is the
+candidate serving path; the aggregated round-robin variant is the control run for measuring the
+effect of KV-aware routing, prefill/decode separation, and WideEP.
+
+## Variants
+
+<div className="dynamo-variant-list">
+  <div className="dynamo-variant-row active">
+    <div>
+      <h4>Disagg + KV router + WideEP</h4>
+      <p>Recommended path for long-context prefix-reuse traffic on 32x GB200.</p>
+    </div>
+    <span>Recommended</span>
+  </div>
+  <div className="dynamo-variant-row">
+    <div>
+      <h4>Aggregated round-robin</h4>
+      <p>Baseline deployment using four DEP8 workers without the P/D split.</p>
+    </div>
+    <span>Baseline</span>
+  </div>
+</div>
+
+## Before You Run
+
+<div className="dynamo-prereq-grid">
+  <div>
+    <span>Cluster</span>
+    <strong>32x GB200 across 8 nodes</strong>
+  </div>
+  <div>
+    <span>Placement</span>
+    <strong>ComputeDomain for MNNVL</strong>
+  </div>
+  <div>
+    <span>Checkpoint</span>
+    <strong>NVIDIA NVFP4 on Hugging Face</strong>
+  </div>
+  <div>
+    <span>Storage</span>
+    <strong>400 Gi model-cache PVC</strong>
+  </div>
+  <div>
+    <span>Trace</span>
+    <strong>Synthetic Mooncake coding JSONL</strong>
+  </div>
+  <div>
+    <span>Access</span>
+    <strong>Hugging Face token secret</strong>
+  </div>
+</div>
+
+<Warning>
+Edit the storage class, namespace, image tags, ComputeDomain names, and resource claim template
+names before applying these manifests. Copy the generated trace to
+`/model-cache/traces/conversation_trace_synth_16.00x1+10.00_speedup1_maxisl110000.jsonl` before
+running either benchmark job.
+</Warning>
+
+## Workload
+
+The benchmark trace is synthesized from the Mooncake conversation trace by increasing prompt length
+and prefix reuse. Use Dynamo's prefix data generator to reproduce the trace shape:
+
+```bash
+datagen synthesize \
+  --input-file conversation_trace.jsonl \
+  --prefix-len-multiplier 16 \
+  --prompt-len-multiplier 10 \
+  --max-isl 110000 \
+  --num-requests 10000
+```
+
+The resulting trace has 10,000 requests, 39,186 average input tokens, 344 average output tokens,
+about 44% block/token KV hit rate, and about 57% shared-prefix input tokens.
+
+## Deploy
+
+<CodeBlocks>
+```bash title="Prepare storage, placement, and model"
+export NAMESPACE=your-namespace
+
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/model-cache.yaml \
+  -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/compute-domain.yaml \
+  -n ${NAMESPACE}
+
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/model-download.yaml \
+  -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download \
+  -n ${NAMESPACE} \
+  --timeout=600s
+
+kubectl cp <local_trace.jsonl> \
+  ${NAMESPACE}/<helper-pod>:/model-cache/traces/
+```
+</CodeBlocks>
+
+<Tabs>
+  <Tab title="Disagg + KV router" language="disagg-kv-router">
+    ```bash
+    kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml \
+      -n ${NAMESPACE}
+
+    kubectl wait --for=condition=ready pod \
+      -l nvidia.com/dynamo-graph-deployment-name=disagg-kv-dsv32-nvfp4 \
+      -n ${NAMESPACE} \
+      --timeout=1200s
+    ```
+  </Tab>
+  <Tab title="Aggregated baseline" language="agg-round-robin">
+    ```bash
+    kubectl apply -f recipes/deepseek-v32-fp4/trtllm/agg-round-robin/deploy.yaml \
+      -n ${NAMESPACE}
+
+    kubectl wait --for=condition=ready pod \
+      -l nvidia.com/dynamo-graph-deployment-name=agg-round-robin-dsv32-nvfp4 \
+      -n ${NAMESPACE} \
+      --timeout=1200s
+    ```
+  </Tab>
+</Tabs>
+
+## Verify
+
+<Tabs>
+  <Tab title="Disagg + KV router" language="disagg-kv-router">
+    ```bash
+    kubectl port-forward svc/disagg-kv-dsv32-nvfp4-frontend 8000:8000 \
+      -n ${NAMESPACE}
+
+    curl http://localhost:8000/v1/models
+    ```
+  </Tab>
+  <Tab title="Aggregated baseline" language="agg-round-robin">
+    ```bash
+    kubectl port-forward svc/agg-round-robin-dsv32-nvfp4-frontend 8000:8000 \
+      -n ${NAMESPACE}
+
+    curl http://localhost:8000/v1/models
+    ```
+  </Tab>
+</Tabs>
+
+## Benchmark Evidence
+
+<div className="dynamo-evidence-grid">
+  <div>
+    <span>Dataset</span>
+    <strong>Mooncake-derived coding trace</strong>
+    <p>10,000 requests replayed at their original timestamps.</p>
+  </div>
+  <div>
+    <span>Traffic shape</span>
+    <strong>39K ISL / 344 OSL average</strong>
+    <p>Long prompts with short generated turns.</p>
+  </div>
+  <div>
+    <span>Prefix reuse</span>
+    <strong>44% token hit rate</strong>
+    <p>High enough reuse to test KV-aware routing.</p>
+  </div>
+  <div>
+    <span>Benchmark mode</span>
+    <strong>Fixed-schedule replay</strong>
+    <p>Compare latency and goodput; throughput is fixed by trace timing.</p>
+  </div>
+  <div>
+    <span>Goodput target</span>
+    <strong>TTFT 20s / ITL 50ms</strong>
+    <p>The benchmark jobs pass these thresholds to AIPerf.</p>
+  </div>
+  <div>
+    <span>Artifacts</span>
+    <strong>/model-cache/perf</strong>
+    <p>Each job writes results under an epoch and job-name directory.</p>
+  </div>
+</div>
+
+<CodeBlocks>
+```bash title="Run recommended benchmark"
+kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml \
+  -n ${NAMESPACE}
+
+kubectl logs -f job/disagg-kv-dsv32-nvfp4-bench -n ${NAMESPACE}
+```
+
+```bash title="Run baseline benchmark"
+kubectl apply -f recipes/deepseek-v32-fp4/trtllm/agg-round-robin/perf.yaml \
+  -n ${NAMESPACE}
+
+kubectl logs -f job/agg-round-robin-dsv32-nvfp4-bench -n ${NAMESPACE}
+```
+
+```text title="What to compare"
+Aggregated baseline: 4 DEP8 workers with round-robin routing
+Recommended recipe: 2 prefill + 2 decode workers with KV-aware routing and WideEP
+Primary metrics: TTFT, ITL, request latency, and goodput
+Throughput: fixed by trace replay schedule
+```
+</CodeBlocks>
+
+## Operate
+
+<CodeBlocks>
+```bash title="Find benchmark pods"
+kubectl get pods -n ${NAMESPACE} \
+  -l app=disagg-kv-dsv32-nvfp4-bench
+
+kubectl get pods -n ${NAMESPACE} \
+  -l app=agg-round-robin-dsv32-nvfp4-bench
+```
+
+```bash title="Retrieve benchmark artifacts"
+kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- \
+  find /model-cache/perf -maxdepth 3 -type f | tail
+
+kubectl cp \
+  ${NAMESPACE}/<benchmark-pod-name>:/model-cache/perf \
+  ./deepseek-v32-nvfp4-benchmark-results
+```
+
+```bash title="Clean up this recipe"
+kubectl delete job \
+  agg-round-robin-dsv32-nvfp4-bench \
+  disagg-kv-dsv32-nvfp4-bench \
+  -n ${NAMESPACE}
+
+kubectl delete dynamographdeployment \
+  agg-round-robin-dsv32-nvfp4 \
+  disagg-kv-dsv32-nvfp4 \
+  -n ${NAMESPACE}
+```
+</CodeBlocks>
+
+## Configuration Notes
+
+<Accordion title="Disagg + KV router + WideEP">
+The frontend runs in KV-router mode. Prefill and decode workers use TensorRT-LLM with DEP8,
+64-token KV blocks, UCX cache transfer, FP8 KV cache, and a 121K max sequence length. Decode uses
+`moe_config.backend: WIDEEP`; prefill uses the TRT-LLM MoE backend. Both worker groups use
+ComputeDomain resource claims for MNNVL placement.
+</Accordion>
+
+<Accordion title="Aggregated round-robin">
+The aggregate baseline keeps the NVIDIA NVFP4 checkpoint, DEP8, 64-token KV blocks, MNNVL allreduce,
+FP8 KV cache, and 121K max sequence length, but uses four aggregate workers with round-robin routing.
+</Accordion>
+
+<Accordion title="Benchmark job">
+The benchmark job installs `aiperf==0.6.0` and pins `transformers==4.57.6` so the DeepSeek V3.2
+tokenizer loads correctly. It runs a short synthetic warmup before the fixed-schedule trace replay.
+</Accordion>
+
+## Recipe Contract
+
+| Field | Value |
+| --- | --- |
+| Model | `nvidia/DeepSeek-V3.2-NVFP4` |
+| Runtime | TensorRT-LLM |
+| Hardware | 32x GB200 across 8 nodes |
+| Recommended technique | Disaggregated prefill/decode with KV-aware routing and WideEP |
+| Baseline technique | Aggregated round-robin |
+| Dataset | Mooncake-derived synthetic coding trace |
+| Evidence | `deploy.yaml`, `perf.yaml`, and recipe README |
+
+## References
+
+- [Source recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
+- [Mooncake trace source](https://github.com/kvcache-ai/Mooncake)
+- [TensorRT-LLM DeepSeek V3.2 optimization blog](https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog15_Optimizing_DeepSeek_V32_on_NVIDIA_Blackwell_GPUs.html)
