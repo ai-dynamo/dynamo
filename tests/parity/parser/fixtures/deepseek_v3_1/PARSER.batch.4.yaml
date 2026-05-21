@@ -17,16 +17,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token in normal_text on malformed input (impl-defined recovery)"
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
-      vllm:
+      dynamo: &d_4_a
         calls: []
         normal_text: ''
-      sglang:
-        calls: []
-        normal_text: ''
+      vllm: *d_4_a
+      sglang: *d_4_a
   PARSER.batch.4.b:
     description: Unterminated JSON string in args
     ref: dynamo
@@ -34,16 +29,19 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id002
-        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
+      dynamo:
         calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        normal_text: ''
       vllm:
+        reason: vLLM surfaces malformed DeepSeek V3.1 JSON arguments as a raw string while Dynamo treats the whole wrapper as malformed.
         calls:
         - name: get_weather
           arguments: '{"location":"NYC'
         normal_text: ''
-      sglang: *id002
+      sglang:
+        reason: SGLang preserves the malformed DeepSeek V3.1 wrapper as normal_text; Dynamo strips tool-call markup from message content.
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
   PARSER.batch.4.c:
     description: Missing function name (no token before tool_sep)
     ref: dynamo
@@ -51,19 +49,17 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
+      dynamo: &d_4_c
         calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜><｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        normal_text: ''
       vllm:
+        reason: vLLM recovers a call with an empty function name when the arguments are valid; Dynamo treats the missing name as malformed.
         calls:
         - name: ''
           arguments:
             location: NYC
         normal_text: ''
-      sglang:
-        calls: []
-        normal_text: ''
+      sglang: *d_4_c
   PARSER.batch.4.d:
     description: Mismatched fences (calls_end without call_end)
     ref: dynamo
@@ -71,16 +67,11 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
-        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁calls▁end｜>
-      vllm:
+      dynamo: &d_4_d
         calls: []
         normal_text: ''
-      sglang:
-        calls: []
-        normal_text: ''
+      vllm: *d_4_d
+      sglang: *d_4_d
   PARSER.batch.4.e:
     description: Malformed-prefix recovery — n/a for this family's syntax
     reason: |-

@@ -43,11 +43,11 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id004
-        reason: "Dynamo's deepseek_v3_1 parser leaves <｜tool▁call…｜> deepseek_v3 token in normal_text on minimal/no-body case"
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-      vllm:
+      dynamo: &d_6_c
         calls: []
         normal_text: ''
-      sglang: *id004
+      vllm: *d_6_c
+      sglang:
+        reason: SGLang preserves the minimal DeepSeek V3.1 no-args wrapper as normal_text; Dynamo and vLLM strip malformed tool-call markup from message content.
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
