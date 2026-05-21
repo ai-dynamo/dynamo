@@ -44,18 +44,20 @@ impl MooncakeObjectBlockClient {
     pub fn new(config: &kvbm_config::MooncakeObjectConfig) -> Result<Self> {
         let store = Arc::new(
             mooncake_store::MooncakeStore::new()
-                .map_err(|e| anyhow!("MooncakeStore::new failed: {}", e))?
+                .map_err(|e| anyhow!("MooncakeStore::new failed: {}", e))?,
         );
 
-        store.setup(
-            &config.local_hostname,
-            &config.metadata_server,
-            config.global_segment_size,
-            config.local_buffer_size,
-            &config.protocol.to_mooncake_str(),
-            &config.device_name,
-            &config.master_server_addr,
-        ).map_err(|e| anyhow!("MooncakeStore::setup failed: {}", e))?;
+        store
+            .setup(
+                &config.local_hostname,
+                &config.metadata_server,
+                config.global_segment_size,
+                config.local_buffer_size,
+                &config.protocol.to_mooncake_str(),
+                &config.device_name,
+                &config.master_server_addr,
+            )
+            .map_err(|e| anyhow!("MooncakeStore::setup failed: {}", e))?;
 
         Ok(Self {
             store,
@@ -136,9 +138,7 @@ impl MooncakeObjectBlockClient {
     ) -> Result<Vec<u8>> {
         if is_contiguous {
             let region = layout.memory_region(block_id, 0, 0)?;
-            let slice = unsafe {
-                std::slice::from_raw_parts(region.addr as *const u8, block_size)
-            };
+            let slice = unsafe { std::slice::from_raw_parts(region.addr as *const u8, block_size) };
             Ok(slice.to_vec())
         } else {
             let mut buf = Vec::with_capacity(block_size);
@@ -149,7 +149,8 @@ impl MooncakeObjectBlockClient {
                     if region.size < region_size {
                         return Err(anyhow!(
                             "memory region too small: got {} bytes, need {}",
-                            region.size, region_size
+                            region.size,
+                            region_size
                         ));
                     }
                     let slice = unsafe {
@@ -175,16 +176,13 @@ impl MooncakeObjectBlockClient {
             if data.len() < block_size {
                 return Err(anyhow!(
                     "Mooncake data too short: got {} bytes, expected {}",
-                    data.len(), block_size
+                    data.len(),
+                    block_size
                 ));
             }
             let region = layout.memory_region(block_id, 0, 0)?;
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data.as_ptr(),
-                    region.addr as *mut u8,
-                    block_size,
-                );
+                std::ptr::copy_nonoverlapping(data.as_ptr(), region.addr as *mut u8, block_size);
             }
         } else {
             let mut offset = 0;
@@ -192,15 +190,14 @@ impl MooncakeObjectBlockClient {
             for layer_id in 0..inner.num_layers() {
                 for outer_id in 0..inner.outer_dim() {
                     if offset + region_size > data.len() {
-                        return Err(anyhow!(
-                            "Mooncake data too short at offset {}", offset
-                        ));
+                        return Err(anyhow!("Mooncake data too short at offset {}", offset));
                     }
                     let region = layout.memory_region(block_id, layer_id, outer_id)?;
                     if region.size < region_size {
                         return Err(anyhow!(
                             "memory region too small: got {} bytes, need {}",
-                            region.size, region_size
+                            region.size,
+                            region_size
                         ));
                     }
                     unsafe {
@@ -239,6 +236,14 @@ impl MooncakeObjectBlockClient {
         let use_zero_copy = self.use_zero_copy;
 
         Box::pin(async move {
+            if keys.len() != block_ids.len() {
+                tracing::warn!(
+                    keys_len = keys.len(),
+                    block_ids_len = block_ids.len(),
+                    "put_blocks_with_layout: mismatched lengths, returning all errors"
+                );
+                return keys.into_iter().map(Err).collect();
+            }
             let work_items: Vec<_> = keys.into_iter().zip(block_ids).collect();
 
             // Fast batch path for contiguous zero-copy layouts
@@ -255,16 +260,20 @@ impl MooncakeObjectBlockClient {
                 let buffers: Result<Vec<*mut std::ffi::c_void>> = work_items
                     .iter()
                     .map(|(_, block_id)| {
-                        layout.memory_region(*block_id, 0, 0)
+                        layout
+                            .memory_region(*block_id, 0, 0)
                             .map(|r| r.addr as *mut std::ffi::c_void)
                     })
                     .collect();
 
                 if let Ok(buffers) = buffers {
-                    let sizes: Vec<usize> = std::iter::repeat(block_size).take(work_items.len()).collect();
+                    let sizes: Vec<usize> = std::iter::repeat(block_size)
+                        .take(work_items.len())
+                        .collect();
 
                     let batch_result = unsafe {
-                        store.batch_put_from(&key_refs, &buffers, &sizes, None)
+                        store
+                            .batch_put_from(&key_refs, &buffers, &sizes, None)
                             .map_err(|e| anyhow!("Mooncake batch_put_from failed: {}", e))
                     };
 
@@ -287,12 +296,14 @@ impl MooncakeObjectBlockClient {
                         }
                     }
                 } else {
-                    tracing::warn!("batch put: memory_region failed for one or more blocks, falling back to single-block");
+                    tracing::warn!(
+                        "batch put: memory_region failed for one or more blocks, falling back to single-block"
+                    );
                     // Fall through to single-block path
                 }
             }
 
-            let tasks = work_items.into_iter().map(|(hash, block_id)| {
+            let tasks = work_items.into_iter().enumerate().map(|(idx, (hash, block_id))| {
                 let store = store.clone();
                 let key = format_storage_key(&hash, &namespace, formatter.as_ref());
                 let layout = layout.clone();
@@ -324,20 +335,26 @@ impl MooncakeObjectBlockClient {
                         Ok(())
                     }.await;
 
-                    match result {
+                    let res = match result {
                         Ok(()) => Ok(hash),
                         Err(e) => {
                             tracing::warn!(key = %key, error = %e, "put block to Mooncake failed");
                             Err(hash)
                         }
-                    }
+                    };
+                    (idx, res)
                 }
             });
 
-            futures::stream::iter(tasks)
+            let mut results: Vec<_> = futures::stream::iter(tasks)
                 .buffer_unordered(max_concurrent)
                 .collect()
-                .await
+                .await;
+            // Sort by original input index to preserve deterministic ordering.
+            // SpmdParallelWorkers indexes results by position, so out-of-order
+            // returns would misattribute success/failure.
+            results.sort_by_key(|(idx, _)| *idx);
+            results.into_iter().map(|(_, res)| res).collect()
         })
     }
 
@@ -359,6 +376,14 @@ impl MooncakeObjectBlockClient {
         let use_zero_copy = self.use_zero_copy;
 
         Box::pin(async move {
+            if keys.len() != block_ids.len() {
+                tracing::warn!(
+                    keys_len = keys.len(),
+                    block_ids_len = block_ids.len(),
+                    "get_blocks_with_layout: mismatched lengths, returning all errors"
+                );
+                return keys.into_iter().map(Err).collect();
+            }
             let work_items: Vec<_> = keys.into_iter().zip(block_ids).collect();
 
             // Fast batch path for contiguous zero-copy layouts
@@ -375,22 +400,28 @@ impl MooncakeObjectBlockClient {
                 let buffers: Result<Vec<*mut std::ffi::c_void>> = work_items
                     .iter()
                     .map(|(_, block_id)| {
-                        layout.memory_region(*block_id, 0, 0)
+                        layout
+                            .memory_region(*block_id, 0, 0)
                             .map(|r| r.addr as *mut std::ffi::c_void)
                     })
                     .collect();
 
                 if let Ok(buffers) = buffers {
-                    let sizes: Vec<usize> = std::iter::repeat(block_size).take(work_items.len()).collect();
+                    let sizes: Vec<usize> = std::iter::repeat(block_size)
+                        .take(work_items.len())
+                        .collect();
 
                     let batch_result = unsafe {
-                        store.batch_get_into(&key_refs, &buffers, &sizes)
+                        store
+                            .batch_get_into(&key_refs, &buffers, &sizes)
                             .map_err(|e| anyhow!("Mooncake batch_get_into failed: {}", e))
                     };
 
                     match batch_result {
                         Ok(written_bytes) => {
-                            return work_items.into_iter().zip(written_bytes.into_iter())
+                            return work_items
+                                .into_iter()
+                                .zip(written_bytes.into_iter())
                                 .map(|((hash, _), written)| {
                                     if written == block_size as i64 {
                                         Ok(hash)
@@ -412,12 +443,14 @@ impl MooncakeObjectBlockClient {
                         }
                     }
                 } else {
-                    tracing::warn!("batch get: memory_region failed for one or more blocks, falling back to single-block");
+                    tracing::warn!(
+                        "batch get: memory_region failed for one or more blocks, falling back to single-block"
+                    );
                     // Fall through to single-block path
                 }
             }
 
-            let tasks = work_items.into_iter().map(|(hash, block_id)| {
+            let tasks = work_items.into_iter().enumerate().map(|(idx, (hash, block_id))| {
                 let store = store.clone();
                 let key = format_storage_key(&hash, &namespace, formatter.as_ref());
                 let layout = layout.clone();
@@ -454,20 +487,26 @@ impl MooncakeObjectBlockClient {
                         Ok(())
                     }.await;
 
-                    match result {
+                    let res = match result {
                         Ok(()) => Ok(hash),
                         Err(e) => {
                             tracing::warn!(key = %key, error = %e, "get block from Mooncake failed");
                             Err(hash)
                         }
-                    }
+                    };
+                    (idx, res)
                 }
             });
 
-            futures::stream::iter(tasks)
+            let mut results: Vec<_> = futures::stream::iter(tasks)
                 .buffer_unordered(max_concurrent)
                 .collect()
-                .await
+                .await;
+            // Sort by original input index to preserve deterministic ordering.
+            // SpmdParallelWorkers indexes results by position, so out-of-order
+            // returns would misattribute success/failure.
+            results.sort_by_key(|(idx, _)| *idx);
+            results.into_iter().map(|(_, res)| res).collect()
         })
     }
 }
@@ -502,35 +541,32 @@ impl ObjectBlockOps for MooncakeObjectBlockClient {
 
             // Separate existing (need size query) from non-existing keys.
             // Non-existing keys must still appear in the result as (hash, None).
+            // Process size queries sequentially to preserve 1:1 cardinality and
+            // deterministic ordering (callers like SpmdParallelWorkers index by position).
+            if exist_results.len() != keys.len() {
+                tracing::warn!(
+                    expected = keys.len(),
+                    got = exist_results.len(),
+                    "batch_is_exist size mismatch"
+                );
+                return keys.into_iter().map(|h| (h, None)).collect();
+            }
+
             let mut results: Vec<(SequenceHash, Option<usize>)> = Vec::with_capacity(keys.len());
-            let mut size_queries: Vec<(SequenceHash, String)> = Vec::new();
             for ((hash, key), exists) in keys.into_iter().zip(formatted).zip(exist_results) {
                 if exists {
-                    size_queries.push((hash, key));
+                    let size = match store.get_size(&key) {
+                        Ok(size) => Some(size as usize),
+                        Err(e) => {
+                            tracing::warn!(key = %key, error = %e, "get_size failed");
+                            None
+                        }
+                    };
+                    results.push((hash, size));
                 } else {
                     results.push((hash, None));
                 }
             }
-
-            let tasks = size_queries.into_iter().map(|(hash, key)| {
-                let store = store.clone();
-                async move {
-                    match store.get_size(&key) {
-                        Ok(size) => (hash, Some(size as usize)),
-                        Err(e) => {
-                            tracing::warn!(key = %key, error = %e, "get_size failed");
-                            (hash, None)
-                        }
-                    }
-                }
-            });
-
-            let size_results: Vec<(SequenceHash, Option<usize>)> = futures::stream::iter(tasks)
-                .buffer_unordered(max_concurrent)
-                .collect()
-                .await;
-
-            results.extend(size_results);
             results
         })
     }
@@ -586,7 +622,7 @@ mod tests {
 
     use kvbm_config::MooncakeObjectConfig;
     use kvbm_physical::testing::{create_fc_layout_system, create_lw_layout_system};
-    use kvbm_physical::transfer::{compute_block_checksums, fill_blocks, FillPattern};
+    use kvbm_physical::transfer::{FillPattern, compute_block_checksums, fill_blocks};
 
     #[allow(dead_code)]
     fn test_config() -> kvbm_physical::layout::LayoutConfig {
@@ -623,10 +659,8 @@ mod tests {
         let layout = create_fc_layout_system(4);
 
         let block_ids = vec![0, 1, 2];
-        fill_blocks(&layout, &block_ids, FillPattern::Sequential,
-        ).expect("fill blocks");
-        let src_checksums = compute_block_checksums(&layout, &block_ids,
-        ).expect("checksum");
+        fill_blocks(&layout, &block_ids, FillPattern::Sequential).expect("fill blocks");
+        let src_checksums = compute_block_checksums(&layout, &block_ids).expect("checksum");
 
         let hashes: Vec<SequenceHash> = block_ids
             .iter()
@@ -642,8 +676,7 @@ mod tests {
         }
 
         // Clear local memory
-        fill_blocks(&layout, &block_ids, FillPattern::Constant(0),
-        ).expect("clear blocks");
+        fill_blocks(&layout, &block_ids, FillPattern::Constant(0)).expect("clear blocks");
 
         let get_results = client
             .get_blocks_with_layout(hashes.clone(), layout.clone(), block_ids.clone())
@@ -653,12 +686,13 @@ mod tests {
             assert!(r.is_ok(), "get failed: {:?}", r);
         }
 
-        let dst_checksums = compute_block_checksums(&layout, &block_ids,
-        ).expect("checksum after get");
+        let dst_checksums =
+            compute_block_checksums(&layout, &block_ids).expect("checksum after get");
         for id in &block_ids {
             assert_eq!(
                 src_checksums[id], dst_checksums[id],
-                "checksum mismatch for block {}", id
+                "checksum mismatch for block {}",
+                id
             );
         }
     }
@@ -670,11 +704,8 @@ mod tests {
         let layout = create_lw_layout_system(4);
 
         let block_ids = vec![0, 1];
-        fill_blocks(&layout, &block_ids, FillPattern::Sequential,
-        ).expect("fill blocks");
-        let src_checksums = compute_block_checksums(
-            &layout, &block_ids,
-        ).expect("checksum");
+        fill_blocks(&layout, &block_ids, FillPattern::Sequential).expect("fill blocks");
+        let src_checksums = compute_block_checksums(&layout, &block_ids).expect("checksum");
 
         let hashes: Vec<SequenceHash> = block_ids
             .iter()
@@ -689,9 +720,7 @@ mod tests {
             assert!(r.is_ok(), "put failed: {:?}", r);
         }
 
-        fill_blocks(
-            &layout, &block_ids, FillPattern::Constant(0),
-        ).expect("clear blocks");
+        fill_blocks(&layout, &block_ids, FillPattern::Constant(0)).expect("clear blocks");
 
         let get_results = client
             .get_blocks_with_layout(hashes.clone(), layout.clone(), block_ids.clone())
@@ -701,13 +730,13 @@ mod tests {
             assert!(r.is_ok(), "get failed: {:?}", r);
         }
 
-        let dst_checksums = compute_block_checksums(
-            &layout, &block_ids,
-        ).expect("checksum after get");
+        let dst_checksums =
+            compute_block_checksums(&layout, &block_ids).expect("checksum after get");
         for id in &block_ids {
             assert_eq!(
                 src_checksums[id], dst_checksums[id],
-                "checksum mismatch for block {}", id
+                "checksum mismatch for block {}",
+                id
             );
         }
     }
@@ -721,10 +750,8 @@ mod tests {
         client.register_layout(&layout).expect("register layout");
 
         let block_ids = vec![0, 1, 2];
-        fill_blocks(&layout, &block_ids, FillPattern::Sequential)
-            .expect("fill blocks");
-        let src_checksums = compute_block_checksums(&layout, &block_ids)
-            .expect("checksum");
+        fill_blocks(&layout, &block_ids, FillPattern::Sequential).expect("fill blocks");
+        let src_checksums = compute_block_checksums(&layout, &block_ids).expect("checksum");
 
         let hashes: Vec<SequenceHash> = block_ids
             .iter()
@@ -739,8 +766,7 @@ mod tests {
             assert!(r.is_ok(), "put failed: {:?}", r);
         }
 
-        fill_blocks(&layout, &block_ids, FillPattern::Constant(0))
-            .expect("clear blocks");
+        fill_blocks(&layout, &block_ids, FillPattern::Constant(0)).expect("clear blocks");
 
         let get_results = client
             .get_blocks_with_layout(hashes.clone(), layout.clone(), block_ids.clone())
@@ -750,12 +776,13 @@ mod tests {
             assert!(r.is_ok(), "get failed: {:?}", r);
         }
 
-        let dst_checksums = compute_block_checksums(&layout, &block_ids)
-            .expect("checksum after get");
+        let dst_checksums =
+            compute_block_checksums(&layout, &block_ids).expect("checksum after get");
         for id in &block_ids {
             assert_eq!(
                 src_checksums[id], dst_checksums[id],
-                "checksum mismatch for block {}", id
+                "checksum mismatch for block {}",
+                id
             );
         }
     }

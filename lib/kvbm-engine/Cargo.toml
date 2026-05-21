@@ -49,6 +49,10 @@ chrono = { version = "0.4", optional = true }
 #   git clone https://github.com/kvcache-ai/Mooncake ../../Mooncake
 # See docs/integrations/mooncake-store-integration.md for full setup instructions.
 mooncake_store = { path = "../../../Mooncake/mooncake-store/rust", optional = true }
+# For CI environments without the local checkout, override via:
+#   [patch.'https://github.com/kvcache-ai/Mooncake']
+#   mooncake_store = { git = "https://github.com/kvcache-ai/Mooncake.git", package = "mooncake_store" }
+# Or set MOONCAKE_STORE_PATH env var in your CI build script.
 async-nats = { workspace = true, optional = true }
 flume = { version = "0.11", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }

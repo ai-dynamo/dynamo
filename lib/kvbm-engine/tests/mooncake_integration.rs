@@ -8,6 +8,8 @@
 //! cargo test -p kvbm-engine --features mooncake,testing --test mooncake_integration -- --ignored
 //! ```
 
+#![cfg(feature = "mooncake")]
+
 use kvbm_config::MooncakeProtocol;
 use mooncake_store::MooncakeStore;
 
