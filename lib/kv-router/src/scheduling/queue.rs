@@ -30,6 +30,20 @@ use std::time::Duration;
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
+#[inline(always)]
+fn checked_or_saturating_sub(value: usize, amount: usize, invariant: &'static str) -> usize {
+    #[cfg(debug_assertions)]
+    {
+        value.checked_sub(amount).expect(invariant)
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = invariant;
+        value.saturating_sub(amount)
+    }
+}
+
 /// Entry in the priority queue, ordered by key (higher key = higher priority).
 struct QueueEntry<K: Ord + Eq> {
     key: K,
@@ -61,6 +75,22 @@ impl<K: Ord + Eq> PartialOrd for QueueEntry<K> {
     }
 }
 
+struct PendingState<K: Ord + Eq> {
+    heap: BinaryHeap<QueueEntry<K>>,
+    count: usize,
+    isl_tokens: usize,
+}
+
+impl<K: Ord + Eq> Default for PendingState<K> {
+    fn default() -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            count: 0,
+            isl_tokens: 0,
+        }
+    }
+}
+
 /// Queue that gates scheduling requests behind a capacity check.
 /// When all workers exceed `threshold_frac` utilisation the request is parked in `pending`.
 /// When capacity frees up (`update()`), pending requests are scheduled in priority order.
@@ -72,20 +102,14 @@ pub struct SchedulerQueue<
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
     RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
-    pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
+    pending: Mutex<PendingState<S::Key>>,
     /// Serializes admission so worker selection always sees prior bookings.
     admission_gate: Mutex<()>,
-    /// Number of requests currently parked in the pending heap.
-    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
-    ///
-    /// Reflects heap occupancy only: during the overlap-refresh window in `update()` a
-    /// popped request is "in flight" between `pop` and `admit_one` and is counted as
-    /// neither pending nor admitted. The undercount is bounded by the refresh duration
-    /// (single indexer lookup, typically µs); if you need an "outstanding work" gauge,
-    /// observe pending + active-token deltas together rather than this counter alone.
+    /// Cached pending count for lock-free metrics reads. The authoritative state lives in
+    /// `pending`; this atomic is updated from that locked state after each mutation.
     pending_count: AtomicUsize,
-    /// Sum of `isl_tokens` for requests currently parked in the pending heap.
-    /// Same in-flight caveat as `pending_count`.
+    /// Cached pending ISL-token sum for lock-free metrics reads. The authoritative state
+    /// lives in `pending`; this atomic is updated from that locked state after each mutation.
     pending_isl_tokens: AtomicUsize,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
@@ -143,7 +167,7 @@ impl<
             None
         };
         Self {
-            pending: Mutex::new(BinaryHeap::new()),
+            pending: Mutex::new(PendingState::default()),
             admission_gate: Mutex::new(()),
             pending_count: AtomicUsize::new(0),
             pending_isl_tokens: AtomicUsize::new(0),
@@ -278,15 +302,19 @@ impl<
                     .enqueue_key(arrival_offset, SchedulingContext::new(&request, &workers))
             };
             let isl_tokens = request.isl_tokens;
-            self.pending.lock().await.push(QueueEntry {
+            let mut pending = self.pending.lock().await;
+            pending.heap.push(QueueEntry {
                 key,
                 request,
                 enqueue_at: decay_now,
                 block_hashes,
             });
-            self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
+            pending.count += 1;
+            pending.isl_tokens += isl_tokens;
+            self.pending_count
+                .store(pending.count, AtomicOrdering::Relaxed);
             self.pending_isl_tokens
-                .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
+                .store(pending.isl_tokens, AtomicOrdering::Relaxed);
         } else {
             // Workers have capacity — admit without queueing. `block_hashes` are intentionally
             // discarded; refresh is only meaningful for requests that actually wait.
@@ -304,9 +332,9 @@ impl<
 
         if S::DYNAMIC {
             let now = self.start_time.elapsed();
-            let mut heap = self.pending.lock().await;
+            let mut pending = self.pending.lock().await;
             let workers = self.workers_with_configs.borrow();
-            let rekeyed: Vec<_> = std::mem::take(&mut *heap)
+            let rekeyed: Vec<_> = std::mem::take(&mut pending.heap)
                 .into_vec()
                 .into_iter()
                 .map(|e| QueueEntry {
@@ -320,14 +348,14 @@ impl<
                     block_hashes: e.block_hashes,
                 })
                 .collect();
-            *heap = BinaryHeap::from(rekeyed);
+            pending.heap = BinaryHeap::from(rekeyed);
         }
 
         loop {
             let _admission = self.admission_gate.lock().await;
             let decay_now = Instant::now();
-            let mut heap = self.pending.lock().await;
-            let Some(front) = heap.peek() else {
+            let mut pending = self.pending.lock().await;
+            let Some(front) = pending.heap.peek() else {
                 break;
             };
             // TODO: This preserves head-of-line blocking for now to keep queue
@@ -353,7 +381,7 @@ impl<
                 decay_now,
             ) {
                 let refresh_inputs = front_hashes.map(|hashes| hashes.to_vec());
-                drop(heap);
+                drop(pending);
                 let refreshed = refresh_overlap(
                     self.overlap_scores_refresh.as_deref(),
                     self.overlap_refresh_after,
@@ -376,17 +404,24 @@ impl<
                         "overlap refresh returned None; dispatching with stale scores"
                     );
                 }
-                heap = self.pending.lock().await;
+                pending = self.pending.lock().await;
                 refreshed
             } else {
                 None
             };
 
-            let entry = heap.pop().expect("heap front vanished before pop");
-            drop(heap);
-            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+            let entry = pending.heap.pop().expect("heap front vanished before pop");
+            pending.count = checked_or_saturating_sub(pending.count, 1, "pending count underflow");
+            pending.isl_tokens = checked_or_saturating_sub(
+                pending.isl_tokens,
+                entry.request.isl_tokens,
+                "pending isl_tokens underflow",
+            );
+            self.pending_count
+                .store(pending.count, AtomicOrdering::Relaxed);
             self.pending_isl_tokens
-                .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
+                .store(pending.isl_tokens, AtomicOrdering::Relaxed);
+            drop(pending);
             let mut request = entry.request;
             if let Some(refreshed) = refreshed {
                 request.tier_overlap_blocks = refreshed.tier_overlap_blocks;
