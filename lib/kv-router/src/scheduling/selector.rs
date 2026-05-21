@@ -276,6 +276,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                best_logit: Some(logit),
+                runner_up_logit: None,
             });
         }
 
@@ -298,23 +300,29 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
         };
 
-        let worker_iter = workers
+        // Materialize the full candidate slate so we can (a) log every
+        // (worker_id, dp_rank) score for diagnosis, and (b) report the
+        // runner-up logit alongside the winner. The candidate count is bounded
+        // by (#workers × DP size) — typically a handful, never enough to dwarf
+        // the indexer/shared-cache work that runs before scheduling.
+        let mut candidates: Vec<(WorkerWithDpRank, f64)> = workers
             .iter()
-            .filter(move |(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
+            .filter(|(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
             .flat_map(|(worker_id, config)| {
                 let data_parallel_size = config.data_parallel_size();
                 let data_parallel_start_rank = config.data_parallel_start_rank();
                 (data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size))
                     .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
-            });
+            })
+            .map(|worker| (worker, get_score(worker)))
+            .collect();
 
         let (best_worker, best_logit) = if temperature == 0.0 {
             let mut best_worker = None;
             let mut best_logit = f64::INFINITY;
             let mut tie_count = 0usize;
             let mut rng = rand::rng();
-            for worker in worker_iter {
-                let score = get_score(worker);
+            for (worker, score) in candidates.iter().copied() {
                 if score < best_logit {
                     best_worker = Some(worker);
                     best_logit = score;
@@ -334,13 +342,44 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             (best_worker.expect("worker_iter non-empty"), best_logit)
         } else {
             let mut worker_logits = FxHashMap::default();
-            for worker in worker_iter {
-                let score = get_score(worker);
+            for (worker, score) in candidates.iter().copied() {
                 worker_logits.insert(worker, score);
             }
 
             softmax_sample(&worker_logits, temperature)
         };
+
+        // Per-candidate scoring trace. Skipped entirely when DEBUG isn't
+        // enabled so production scrape paths stay zero-cost. The slate is the
+        // primary diagnostic for "why did the router pick this DP rank" — it
+        // lets operators see every competitor's score in one place.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            // Sort ascending: lowest (winning) logit first. `total_cmp`
+            // tolerates NaN/inf without panicking.
+            candidates.sort_by(|a, b| a.1.total_cmp(&b.1));
+            for (worker, score) in &candidates {
+                tracing::debug!(
+                    request_id = request.maybe_request_id.as_deref().unwrap_or(""),
+                    worker_type = self.worker_type,
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    logit = score,
+                    winner = (*worker == best_worker),
+                    temperature = temperature,
+                    "[ROUTING-SLATE] candidate",
+                );
+            }
+        }
+
+        // Runner-up = second-best by logit, regardless of winner (handles both
+        // the deterministic argmin path and the softmax-sampled path where the
+        // winner may not be the argmin). Returned for the routing observability
+        // histogram `dynamo_router_runnerup_gap`.
+        let runner_up_logit = candidates
+            .iter()
+            .filter(|(worker, _)| *worker != best_worker)
+            .map(|(_, score)| *score)
+            .min_by(|a, b| a.total_cmp(b));
 
         let best_host_pinned_overlap_blocks = request
             .tier_overlap_blocks
@@ -373,6 +412,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                best_logit: Some(best_logit),
+                runner_up_logit,
             });
         }
 
@@ -402,6 +443,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             required_blocks: request_blocks,
             effective_overlap_blocks: best_overlap,
             cached_tokens: best_cached_tokens,
+            best_logit: Some(best_logit),
+            runner_up_logit,
         })
     }
 }

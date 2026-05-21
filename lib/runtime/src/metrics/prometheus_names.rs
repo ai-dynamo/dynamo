@@ -285,6 +285,23 @@ pub mod frontend_service {
     /// Number of requests pending in the router's scheduler queue (gauge per worker_type)
     pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
 
+    /// Number of waiting requests reported by the worker scheduler (gauge per worker_id, dp_rank)
+    pub const WORKER_NUM_WAITING_REQS: &str = "worker_num_waiting_reqs";
+
+    /// Number of running requests reported by the worker scheduler (gauge per worker_id, dp_rank)
+    pub const WORKER_NUM_RUNNING_REQS: &str = "worker_num_running_reqs";
+
+    /// KV cache fractional usage reported by the worker scheduler (gauge per worker_id, dp_rank)
+    pub const WORKER_KV_CACHE_USAGE_PCT: &str = "worker_kv_cache_usage_pct";
+
+    /// Prefix cache hit rate reported by the worker scheduler (gauge per worker_id, dp_rank)
+    pub const WORKER_PREFIX_CACHE_HIT_RATE: &str = "worker_prefix_cache_hit_rate";
+
+    /// Unix timestamp (seconds) of the last ActiveLoad payload received from a
+    /// worker. Subtract from `time()` in Prometheus to derive staleness.
+    pub const WORKER_ACTIVE_LOAD_LAST_SEEN_SECONDS: &str =
+        "worker_active_load_last_seen_seconds";
+
     /// Number of replicas allocated for a LoRA adapter (gauge per LoRA)
     pub const LORA_REPLICA_FACTOR: &str = "lora_replica_factor";
 
@@ -558,6 +575,18 @@ pub mod routing_overhead {
 
     /// Total shared cache query errors (timeouts, HTTP failures)
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
+
+    /// Per-DP-rank selection counter. One increment per routing decision,
+    /// labeled by the (worker_id, dp_rank, worker_type) that was chosen.
+    pub const SELECTED_TOTAL: &str = "selected_total";
+
+    /// Histogram of the winning candidate's logit for each routing decision.
+    pub const SELECTED_LOGIT: &str = "selected_logit";
+
+    /// Histogram of (runner_up_logit - winner_logit) per routing decision. A
+    /// value near 0 means the top two DP ranks were effectively tied; a large
+    /// value means the selection was confident.
+    pub const RUNNERUP_GAP: &str = "runnerup_gap";
 }
 
 /// Router request metrics (component-scoped aggregate histograms + counter)

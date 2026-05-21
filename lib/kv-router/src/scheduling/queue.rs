@@ -295,6 +295,8 @@ impl<
             best_worker: selection.worker,
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
+            best_logit: selection.best_logit,
+            runner_up_logit: selection.runner_up_logit,
         }));
 
         if !request.update_states {
@@ -530,6 +532,8 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
+                best_logit: None,
+                runner_up_logit: None,
             })
         }
     }

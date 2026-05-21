@@ -70,6 +70,10 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    /// Logit of the winning candidate, propagated for routing observability.
+    pub best_logit: Option<f64>,
+    /// Logit of the second-best candidate, propagated for routing observability.
+    pub runner_up_logit: Option<f64>,
 }
 
 pub struct SchedulingRequest {

@@ -51,6 +51,7 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
     frontend_service, kv_publisher, labels, name_prefix, router, router_request, routing_overhead,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
 fn router_metric(suffix: &str) -> String {
@@ -193,9 +194,21 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 
 /// Per-worker active load gauges, published by `ActiveSequencesMultiWorker`
 /// and cleaned up by `KvWorkerMonitor` when workers disappear.
+///
+/// The `active_*` gauges are router-bookkeeping numbers populated by
+/// `sequence.rs::observe_load`. The `num_*` / `kv_cache_usage_pct` /
+/// `prefix_cache_hit_rate` / `active_load_last_seen_seconds` gauges are
+/// populated by `KvWorkerMonitor` from the `ActiveLoad` payloads it receives
+/// from each DP worker, so per-DP-rank engine state is visible on the frontend
+/// without scraping each worker's own Prometheus endpoint.
 pub struct WorkerLoadMetrics {
     pub active_decode_blocks: IntGaugeVec,
     pub active_prefill_tokens: IntGaugeVec,
+    pub num_waiting_reqs: IntGaugeVec,
+    pub num_running_reqs: IntGaugeVec,
+    pub kv_cache_usage_pct: prometheus::GaugeVec,
+    pub prefix_cache_hit_rate: prometheus::GaugeVec,
+    pub active_load_last_seen_seconds: prometheus::GaugeVec,
 }
 
 impl WorkerLoadMetrics {
@@ -216,6 +229,72 @@ impl WorkerLoadMetrics {
         self.active_prefill_tokens
             .with_label_values(labels)
             .set(active_tokens as i64);
+    }
+
+    /// Populate the worker-reported engine-state gauges and stamp the
+    /// last-seen timestamp. Each field is independently optional — fields
+    /// the worker did not publish are left at their previous value (or unset
+    /// if this is the first sample).
+    ///
+    /// `worker_type` is not labeled here because the engine state is
+    /// per-(worker_id, dp_rank) and a single DP rank is only ever attached to
+    /// one worker_type; carrying the label would just bloat cardinality.
+    pub fn observe_engine_state(
+        &self,
+        worker_id: u64,
+        dp_rank: u32,
+        num_waiting_reqs: Option<u32>,
+        num_running_reqs: Option<u32>,
+        kv_cache_usage_pct: Option<f64>,
+        prefix_cache_hit_rate: Option<f64>,
+    ) {
+        let worker_id_str = worker_id.to_string();
+        let dp_rank_str = dp_rank.to_string();
+        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str()];
+
+        if let Some(v) = num_waiting_reqs {
+            self.num_waiting_reqs
+                .with_label_values(labels)
+                .set(v as i64);
+        }
+        if let Some(v) = num_running_reqs {
+            self.num_running_reqs
+                .with_label_values(labels)
+                .set(v as i64);
+        }
+        if let Some(v) = kv_cache_usage_pct {
+            self.kv_cache_usage_pct.with_label_values(labels).set(v);
+        }
+        if let Some(v) = prefix_cache_hit_rate {
+            self.prefix_cache_hit_rate.with_label_values(labels).set(v);
+        }
+
+        // Unix timestamp (seconds, float). Prometheus rule:
+        // `time() - dynamo_frontend_worker_active_load_last_seen_seconds`
+        // yields staleness in seconds.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        self.active_load_last_seen_seconds
+            .with_label_values(labels)
+            .set(now);
+    }
+
+    /// Remove engine-state and staleness gauge series for a (worker_id,
+    /// dp_rank). Called from `KvWorkerMonitor` when workers disappear so
+    /// label sets do not leak.
+    pub fn remove_engine_state(&self, worker_id: u64, dp_rank: u32) {
+        let worker_id_str = worker_id.to_string();
+        let dp_rank_str = dp_rank.to_string();
+        let labels = &[worker_id_str.as_str(), dp_rank_str.as_str()];
+        let _ = self.num_waiting_reqs.remove_label_values(labels);
+        let _ = self.num_running_reqs.remove_label_values(labels);
+        let _ = self.kv_cache_usage_pct.remove_label_values(labels);
+        let _ = self.prefix_cache_hit_rate.remove_label_values(labels);
+        let _ = self
+            .active_load_last_seen_seconds
+            .remove_label_values(labels);
     }
 }
 
@@ -244,6 +323,67 @@ pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(|| W
         &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
     )
     .expect("Failed to create worker_active_prefill_tokens gauge"),
+    num_waiting_reqs: IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_NUM_WAITING_REQS
+            ),
+            "Number of waiting requests reported by the worker scheduler",
+        ),
+        &[labels::WORKER_ID, labels::DP_RANK],
+    )
+    .expect("Failed to create worker_num_waiting_reqs gauge"),
+    num_running_reqs: IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_NUM_RUNNING_REQS
+            ),
+            "Number of running requests reported by the worker scheduler",
+        ),
+        &[labels::WORKER_ID, labels::DP_RANK],
+    )
+    .expect("Failed to create worker_num_running_reqs gauge"),
+    kv_cache_usage_pct: prometheus::GaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_KV_CACHE_USAGE_PCT
+            ),
+            "KV cache fractional usage (0.0-1.0) reported by the worker scheduler",
+        ),
+        &[labels::WORKER_ID, labels::DP_RANK],
+    )
+    .expect("Failed to create worker_kv_cache_usage_pct gauge"),
+    prefix_cache_hit_rate: prometheus::GaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_PREFIX_CACHE_HIT_RATE
+            ),
+            "Prefix cache hit rate (0.0-1.0) reported by the worker scheduler",
+        ),
+        &[labels::WORKER_ID, labels::DP_RANK],
+    )
+    .expect("Failed to create worker_prefix_cache_hit_rate gauge"),
+    active_load_last_seen_seconds: prometheus::GaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_ACTIVE_LOAD_LAST_SEEN_SECONDS
+            ),
+            "Unix timestamp of the last ActiveLoad payload received from the worker. \
+             Subtract from time() in PromQL for staleness in seconds.",
+        ),
+        &[labels::WORKER_ID, labels::DP_RANK],
+    )
+    .expect("Failed to create worker_active_load_last_seen_seconds gauge"),
 });
 
 /// Register the worker load gauges with the given Prometheus registry.
@@ -254,6 +394,11 @@ pub fn register_worker_load_metrics(
     let m = &*WORKER_LOAD_METRICS;
     registry.register(Box::new(m.active_decode_blocks.clone()))?;
     registry.register(Box::new(m.active_prefill_tokens.clone()))?;
+    registry.register(Box::new(m.num_waiting_reqs.clone()))?;
+    registry.register(Box::new(m.num_running_reqs.clone()))?;
+    registry.register(Box::new(m.kv_cache_usage_pct.clone()))?;
+    registry.register(Box::new(m.prefix_cache_hit_rate.clone()))?;
+    registry.register(Box::new(m.active_load_last_seen_seconds.clone()))?;
     Ok(())
 }
 
@@ -467,6 +612,131 @@ impl RoutingOverheadMetrics {
     pub fn inc_shared_cache_errors(&self) {
         self.shared_cache_errors_total.inc();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Routing decision metrics (per-DP-rank attribution)
+// ---------------------------------------------------------------------------
+
+/// Per-routing-decision telemetry registered globally on the frontend
+/// Prometheus registry (same lifecycle as `WORKER_LOAD_METRICS`). Populated
+/// by `KvPushRouter::generate` on every routing decision so operators can
+/// see (a) how many requests landed on each DP rank, (b) the winning logit,
+/// and (c) how confident the selection was (gap to runner-up).
+pub struct RoutingDecisionMetrics {
+    /// Counter: how many requests were routed to a given (worker_id, dp_rank,
+    /// worker_type). Compare across DP ranks to detect routing skew.
+    pub selected_total: IntCounterVec,
+    /// Histogram: logit of the winning candidate, per worker_type. Lower is
+    /// better in the dynamo scoring formula.
+    pub selected_logit: prometheus::HistogramVec,
+    /// Histogram: `runner_up_logit − winner_logit`, per worker_type. Values
+    /// near 0 indicate the top two candidates were effectively tied — useful
+    /// for diagnosing why the router shuffles between DP ranks under
+    /// near-equal load.
+    pub runnerup_gap: prometheus::HistogramVec,
+}
+
+/// Reasonable buckets for the logit/gap histograms. Dynamo logits combine
+/// prefill_load_scale * adjusted_prefill_blocks with decode block load, so
+/// values typically range from ~0 (perfect cache hit, idle worker) to a few
+/// thousand under heavy prefill load. Exponential coverage matches that
+/// dynamic range without exploding bucket count.
+fn logit_buckets() -> Vec<f64> {
+    // 0.0, 0.5, 1, 2, 4, ... up to ~16k (15 buckets).
+    let mut buckets = vec![0.0, 0.5];
+    let mut v = 1.0;
+    while v <= 16384.0 {
+        buckets.push(v);
+        v *= 2.0;
+    }
+    buckets
+}
+
+pub static ROUTING_DECISION_METRICS: LazyLock<RoutingDecisionMetrics> = LazyLock::new(|| {
+    RoutingDecisionMetrics {
+        selected_total: IntCounterVec::new(
+            Opts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::ROUTER,
+                    routing_overhead::SELECTED_TOTAL
+                ),
+                "Per-DP-rank routing decision counter. Increment per request, \
+                 labeled by the (worker_id, dp_rank, worker_type) that was chosen.",
+            ),
+            &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
+        )
+        .expect("Failed to create routing_decision_selected_total counter"),
+        selected_logit: prometheus::HistogramVec::new(
+            prometheus::HistogramOpts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::ROUTER,
+                    routing_overhead::SELECTED_LOGIT
+                ),
+                "Histogram of the winning candidate's logit per routing decision (lower is better).",
+            )
+            .buckets(logit_buckets()),
+            &[labels::WORKER_TYPE],
+        )
+        .expect("Failed to create routing_decision_selected_logit histogram"),
+        runnerup_gap: prometheus::HistogramVec::new(
+            prometheus::HistogramOpts::new(
+                format!("{}_{}", name_prefix::ROUTER, routing_overhead::RUNNERUP_GAP),
+                "Histogram of (runner_up_logit - winner_logit) per routing decision. \
+                 Values near 0 indicate the top two DP ranks were effectively tied.",
+            )
+            .buckets(logit_buckets()),
+            &[labels::WORKER_TYPE],
+        )
+        .expect("Failed to create routing_decision_runnerup_gap histogram"),
+    }
+});
+
+impl RoutingDecisionMetrics {
+    /// Record a routing decision. `best_logit` and `runner_up_logit` are
+    /// optional because some selectors (test stubs, the queue.rs
+    /// `MinDecodeSelector`) do not produce numeric scores; in that case only
+    /// the counter increments.
+    pub fn observe(
+        &self,
+        worker_id: u64,
+        dp_rank: u32,
+        worker_type: &str,
+        best_logit: Option<f64>,
+        runner_up_logit: Option<f64>,
+    ) {
+        let worker_id_str = worker_id.to_string();
+        let dp_rank_str = dp_rank.to_string();
+        self.selected_total
+            .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
+            .inc();
+
+        if let Some(winner) = best_logit {
+            // Histograms reject negative observations; clamp to >= 0 so a
+            // pathological negative score doesn't poison the metric.
+            self.selected_logit
+                .with_label_values(&[worker_type])
+                .observe(winner.max(0.0));
+            if let Some(runner_up) = runner_up_logit {
+                let gap = (runner_up - winner).max(0.0);
+                self.runnerup_gap
+                    .with_label_values(&[worker_type])
+                    .observe(gap);
+            }
+        }
+    }
+}
+
+pub fn register_routing_decision_metrics(
+    registry: &prometheus::Registry,
+) -> Result<(), prometheus::Error> {
+    let m = &*ROUTING_DECISION_METRICS;
+    registry.register(Box::new(m.selected_total.clone()))?;
+    registry.register(Box::new(m.selected_logit.clone()))?;
+    registry.register(Box::new(m.runnerup_gap.clone()))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

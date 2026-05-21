@@ -436,12 +436,24 @@ pub struct WorkerSelectionResult {
 
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
+
+    /// Logit of the selected candidate (lower is better). Used by routing
+    /// observability — `None` when the selector does not produce a numeric
+    /// score (e.g. dummy/test selectors).
+    pub best_logit: Option<f64>,
+
+    /// Logit of the second-best candidate, if any. Used together with
+    /// `best_logit` to derive `runnerup_gap = runner_up_logit - best_logit`,
+    /// which tells operators how confident the selection was.
+    pub runner_up_logit: Option<f64>,
 }
 
 /// Active load metrics for a worker, used for overload detection.
 ///
-/// Published by workers (with `kv_used_blocks`) and by the scheduler (with
-/// `active_decode_blocks` and `active_prefill_tokens`).
+/// Published by workers (with `kv_used_blocks` and the optional engine-state
+/// fields below) and by the scheduler (with `active_decode_blocks` and
+/// `active_prefill_tokens`). All fields except `worker_id`/`dp_rank` are
+/// `Option<...>` so publishers can populate only the signals they have.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ActiveLoad {
     pub worker_id: WorkerId,
@@ -457,6 +469,23 @@ pub struct ActiveLoad {
     /// backend KV occupancy used by overload detection.
     #[serde(default)]
     pub kv_used_blocks: Option<u64>,
+    /// Worker-reported `SchedulerStats.num_waiting_reqs`. Per-rank queue depth
+    /// before scheduling; observability only — not currently used for overload
+    /// detection.
+    #[serde(default)]
+    pub num_waiting_reqs: Option<u32>,
+    /// Worker-reported `SchedulerStats.num_running_reqs`.
+    #[serde(default)]
+    pub num_running_reqs: Option<u32>,
+    /// Worker-reported KV cache fractional usage (0.0–1.0). Same value as the
+    /// `vllm:kv_cache_usage_perc` Prometheus gauge but pushed to the router so
+    /// per-rank usage is visible without scraping each worker.
+    #[serde(default)]
+    pub kv_cache_usage_pct: Option<f64>,
+    /// Worker-reported prefix-cache hit rate (0.0–1.0) over the lifetime of
+    /// the engine, derived from `SchedulerStats.prefix_cache_stats`.
+    #[serde(default)]
+    pub prefix_cache_hit_rate: Option<f64>,
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,

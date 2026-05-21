@@ -150,7 +150,15 @@ fn publish_tick(
         else {
             continue;
         };
-        if let Err(e) = publisher.publish(Some(snap.dp_rank), None, Some(kv_used_blocks)) {
+        if let Err(e) = publisher.publish(
+            Some(snap.dp_rank),
+            None,
+            Some(kv_used_blocks),
+            None,
+            None,
+            None,
+            None,
+        ) {
             if !warned_ranks.contains(&snap.dp_rank) {
                 warned_ranks.push(snap.dp_rank);
                 tracing::warn!(dp_rank = snap.dp_rank, error = %e,

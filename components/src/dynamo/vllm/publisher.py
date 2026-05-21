@@ -62,7 +62,23 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             return
 
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
-        self.inner.publish(self.dp_rank, kv_used_blocks=active_decode_blocks)
+
+        # Derive prefix-cache hit rate, guarding for missing stats and zero queries.
+        prefix_cache_hit_rate: Optional[float] = None
+        prefix_cache_stats = getattr(scheduler_stats, "prefix_cache_stats", None)
+        if prefix_cache_stats is not None:
+            queries = getattr(prefix_cache_stats, "queries", 0)
+            if queries:
+                prefix_cache_hit_rate = prefix_cache_stats.hit_rate
+
+        self.inner.publish(
+            self.dp_rank,
+            kv_used_blocks=active_decode_blocks,
+            num_waiting_reqs=scheduler_stats.num_waiting_reqs,
+            num_running_reqs=scheduler_stats.num_running_reqs,
+            kv_cache_usage_pct=scheduler_stats.kv_cache_usage,
+            prefix_cache_hit_rate=prefix_cache_hit_rate,
+        )
 
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, self.num_gpu_block)

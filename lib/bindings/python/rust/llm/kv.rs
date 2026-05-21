@@ -190,15 +190,40 @@ impl WorkerMetricsPublisher {
     /// * `dp_rank` - Data parallel rank of the worker (None defaults to 0)
     /// * `active_decode_blocks` - Scheduler-compatible active decode block count
     /// * `kv_used_blocks` - Authoritative total KV blocks currently in use
-    #[pyo3(signature = (dp_rank=None, active_decode_blocks=None, kv_used_blocks=None))]
+    /// * `num_waiting_reqs` - Worker-reported scheduler waiting queue depth
+    /// * `num_running_reqs` - Worker-reported scheduler running request count
+    /// * `kv_cache_usage_pct` - Worker-reported KV cache fractional usage (0.0–1.0)
+    /// * `prefix_cache_hit_rate` - Worker-reported prefix cache hit rate (0.0–1.0)
+    #[pyo3(signature = (
+        dp_rank=None,
+        active_decode_blocks=None,
+        kv_used_blocks=None,
+        num_waiting_reqs=None,
+        num_running_reqs=None,
+        kv_cache_usage_pct=None,
+        prefix_cache_hit_rate=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn publish(
         &self,
         dp_rank: Option<u32>,
         active_decode_blocks: Option<u64>,
         kv_used_blocks: Option<u64>,
+        num_waiting_reqs: Option<u32>,
+        num_running_reqs: Option<u32>,
+        kv_cache_usage_pct: Option<f64>,
+        prefix_cache_hit_rate: Option<f64>,
     ) -> PyResult<()> {
         self.inner
-            .publish(dp_rank, active_decode_blocks, kv_used_blocks)
+            .publish(
+                dp_rank,
+                active_decode_blocks,
+                kv_used_blocks,
+                num_waiting_reqs,
+                num_running_reqs,
+                kv_cache_usage_pct,
+                prefix_cache_hit_rate,
+            )
             .map_err(to_pyerr)
     }
 }
