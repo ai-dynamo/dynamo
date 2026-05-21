@@ -9,7 +9,6 @@ incremental detokenization, error handling, and deprecation warnings.
 Parallels test_vllm_unit.py for the vLLM backend.
 """
 
-
 import asyncio
 import json
 import sys
@@ -2019,7 +2018,7 @@ class TestChatTemplateKwargsForwarding:
 
     def test_reasoning_effort_forwarded_to_template(self, tokenizer):
         """Top-level reasoning_effort is forwarded to apply_chat_template."""
-        default = self._preprocess(
+        _ = self._preprocess(
             {"model": MODEL, "messages": self._messages()}, tokenizer
         )
         with_effort = self._preprocess(
