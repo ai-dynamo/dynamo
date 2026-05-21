@@ -220,9 +220,7 @@ impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
 
     fn try_from(tiers: Vec<RouterQueueDepthByMissingIslTier>) -> Result<Self, Self::Error> {
         if tiers.is_empty() {
-            return Err(
-                "router_queue_by_incoming_missing_isl: must contain at least one tier".to_string(),
-            );
+            return Ok(Self::unbounded_cap());
         }
 
         // Must start with floor 0
@@ -979,14 +977,11 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_router_config_rejects_empty_queue_tiers() {
-        let error = serde_json::from_str::<KvRouterConfig>(
-            r#"{"router_queue_by_incoming_missing_isl":[]}"#,
-        )
-        .unwrap_err()
-        .to_string();
+    fn test_kv_router_config_deserializes_empty_queue_tiers_as_unbounded() {
+        let config: KvRouterConfig =
+            serde_json::from_str(r#"{"router_queue_by_incoming_missing_isl":[]}"#).unwrap();
 
-        assert!(error.contains("must contain at least one tier"));
+        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
     }
 
     #[test]
