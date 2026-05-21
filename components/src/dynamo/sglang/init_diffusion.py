@@ -67,6 +67,9 @@ async def init_llm_diffusion(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)

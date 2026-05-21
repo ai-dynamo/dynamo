@@ -93,6 +93,9 @@ async def init_decode(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
@@ -238,6 +241,9 @@ async def init_prefill(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
 
