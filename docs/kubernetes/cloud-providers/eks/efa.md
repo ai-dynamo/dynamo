@@ -201,37 +201,6 @@ volumes:
 > [!IMPORTANT]
 > `privileged: true` is required for NIXL to register CUDA VRAM with the EFA NIC via `fi_mr_reg`. `IPC_LOCK` alone is insufficient.
 
-## Known Issues
-
-One issue currently affects default-built Dynamo EFA images.
-
-### Issue 1: libfabric on GB200 fails `fi_mr_reg` on CUDA VRAM
-
-**Known affected platforms:** GB200.
-
-**Symptom:** Worker pod fails at startup with `fi_mr_reg` returning EFAULT during NIXL initialization. NIXL VRAM registration fails; depending on the framework, the worker either crashes or silently falls back to TCP.
-
-**Root cause:** The libfabric version (versions lower than 2.5.x) bundled with the EFA installer (up to currently latest 1.48.0) lacks a CUDA branch in the dmabuf-eligibility check in `prov/efa/src/efa_mr.c`. On x86_64 hosts the legacy `ibv_reg_mr` path handles CUDA pointers natively, so the bug doesn't surface. On arm64 64K-page kernels (GB200), the legacy path returns EFAULT for CUDA VRAM. Tracked in [ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/issues/12019).
-
-**Upstream status:** The bug is resolved in `ofiwg/libfabric` main and v2.5.x via a more comprehensive rewrite of `efa_mr_reg_ibv_mr()`. AWS's `aws/libfabric` fork has not picked up the upstream rewrite; the latest EFA installer (1.48.0) still ships `v2.4.0amzn3.0` with the older code path.
-
-**Workarounds:**
-
-1. **Apply the one-line patch to the bundled libfabric.** During image build, replace the `aws.Dockerfile` install step with a custom build:
-  ```dockerfile
-   RUN git clone --depth 1 --branch v2.4.0amzn3.0 https://github.com/aws/libfabric.git /tmp/libfabric && \
-       cd /tmp/libfabric && \
-       sed -i 's/efa_mr_is_neuron(efa_mr) || efa_mr_is_rocr(efa_mr)/efa_mr_is_neuron(efa_mr) || efa_mr_is_rocr(efa_mr) || efa_mr_is_cuda(efa_mr)/' prov/efa/src/efa_mr.c && \
-       ./autogen.sh && \
-       CPPFLAGS="-I/usr/local/cuda/include" \
-       LDFLAGS="-L/usr/local/cuda/lib64 -L/usr/local/cuda/lib64/stubs -Wl,-rpath,/usr/local/cuda/lib64" \
-         ./configure --prefix=/opt/amazon/efa --enable-efa --with-cuda=/usr/local/cuda --enable-cuda-dlopen && \
-       make -j$(nproc) && make install
-   # Then rebuild aws-ofi-nccl from source against the patched libfabric (do not mix versions)
-  ```
-2. **Replace bundled libfabric with `ofiwg/libfabric@v2.5.1`** (or newer). The upstream rewrite is already present; no patch needed. Rebuild `aws-ofi-nccl` against it.
-
-
 ## Verification
 
 After deployment, confirm EFA is actually being used (not silent TCP fallback):
@@ -302,8 +271,7 @@ kubectl logs <decode-pod> | grep "External prefix cache hit rate"
 | ------------------------------------------------------ | -------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | TTFT ~100 s, throughput ~MB/s                          | Silent TCP fallback — NIXL backend selection not applied             | Verify Step 4 backend env var; check NIXL startup log                         |
 | TTFT ~10 s, throughput 1–5 GB/s                        | UCX host-staged (no GPU-Direct on kernel ≥ 6.8)                      | Switch to LIBFABRIC backend                                                   |
-| Pod fails at startup with `fi_mr_reg` EFAULT on GB200  | Issue 1 (libfabric CUDA dmabuf bug)                                  | Apply patch or use ofiwg/libfabric v2.5.1                                     |
-| Pod fails at startup with `fi_mr_reg` EFAULT on x86_64 | `privileged: true` missing OR `efa_nv_peermem` missing on old kernel | Verify Step 5 security context                                                |
+| Pod fails at startup with `fi_mr_reg` EFAULT | `privileged: true` missing OR (on pre-DMA-BUF kernels) `efa_nv_peermem` not loaded | Verify Step 5 security context; verify Step 2 kernel/module state |
 | Bandwidth halves after image rebuild                   | libfabric / aws-ofi-nccl ABI mismatch                                | Rebuild aws-ofi-nccl from source against the libfabric used in the same image |
 | `rdma_write_bytes` shows 0                             | **Not a failure** — EFA SRD uses SEND, not WRITE                     | Use Prometheus `nixl_bytes_transferred` instead                               |
 
@@ -316,4 +284,3 @@ kubectl logs <decode-pod> | grep "External prefix cache hit rate"
 - [AWS — Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) — official EKS-side guide (DRA driver + device plugin)
 - [AWS EFA documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) — EC2-side EFA overview
 - [`aws/eks-charts` — `aws-efa-k8s-device-plugin`](https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin) — Helm chart source
-- [ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/issues/12019) — CUDA dmabuf registration on EFA
