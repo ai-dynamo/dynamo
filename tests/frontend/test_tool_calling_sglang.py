@@ -1110,6 +1110,7 @@ class TestToolCallingModelBehavior:
 
 
 def _run_with_assertion_reruns(func, *args, attempts: int = 3):
+    """Retry assertion-only checks that can vary with model generation."""
     for attempt in range(attempts):
         try:
             return func(*args)
@@ -1119,6 +1120,7 @@ def _run_with_assertion_reruns(func, *args, attempts: int = 3):
 
 
 @pytest.mark.pre_merge
+@pytest.mark.core
 @pytest.mark.timeout(420)
 def test_tool_calling_sglang_all(client: OpenAI, model: str):
     """Run the pre-merge tool-calling scenarios under one SGLang worker startup."""

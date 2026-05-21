@@ -83,7 +83,10 @@ async def started_engine():
 @pytest.mark.pre_merge
 @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
+@pytest.mark.core
+@pytest.mark.model(MODEL_ID)
 async def test_trtllm_engine_all(started_engine):
+    """Run the TRT-LLM engine pre-merge checks under one engine startup."""
     await _check_start_populates_registration_metadata(started_engine)
     await _check_generate_streams_chunks_with_coherent_final_usage(started_engine)
     await _check_abort_and_cleanup_are_safe_before_start()

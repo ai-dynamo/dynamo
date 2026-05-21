@@ -34,6 +34,7 @@ import pytest
             "predownload_models_sglang_gpu1",
             marks=[
                 pytest.mark.sglang,
+                pytest.mark.core,
                 pytest.mark.e2e,
                 pytest.mark.gpu_1,
                 pytest.mark.profiled_vram_gib(0),
@@ -43,6 +44,7 @@ import pytest
             "predownload_models_trtllm_gpu1",
             marks=[
                 pytest.mark.trtllm,
+                pytest.mark.core,
                 pytest.mark.e2e,
                 pytest.mark.gpu_1,
                 pytest.mark.profiled_vram_gib(0),

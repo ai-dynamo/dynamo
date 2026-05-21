@@ -86,7 +86,10 @@ async def started_engine():
 @pytest.mark.pre_merge
 @pytest.mark.profiled_vram_gib(3.7)
 @pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.core
+@pytest.mark.model(MODEL_ID)
 async def test_sglang_engine_all(started_engine, monkeypatch):
+    """Run the SGLang engine pre-merge checks under one engine startup."""
     await _check_start_populates_registration_metadata(started_engine)
     await _check_runtime_data_includes_worker_group(monkeypatch)
     await _check_generate_streams_chunks_with_coherent_final_usage(started_engine)
