@@ -5,12 +5,19 @@
 # Launch ONE plain aggregated vLLM instance with the KVBM v2 connector for the
 # kvindex smoke. No P/D specialization — `kv_role=kv_both`, no `disagg` block.
 #
-# The instance publishes G2 block events to the hub's KV index: the hub URL is
-# injected under `kv_connector_extra_config.leader.events.kv_index_hub_url` so
-# it survives vLLM's EngineCore subprocess spawn (an env var would not — see
-# disagg-bringup/SKILL.md's universal-mode note). The connector probes that hub
-# for the KV-indexer feature and, when present and block-size-compatible, wires
-# a ZMQ PUB publisher onto the block-registry EventsManager.
+# The instance publishes G2 block events to the hub's KV index. The connector
+# reaches the hub via `kv_connector_extra_config.leader.hub.{url,features}`
+# (injected into the `--kv-transfer-config` JSON so it survives vLLM's EngineCore
+# subprocess spawn — an env var would not; see disagg-bringup/SKILL.md's
+# universal-mode note). At startup the connector pulls `GET {hub}/v1/config`,
+# resolves the `indexer` feature, registers `Feature::Indexer`, and wires a
+# ZMQ PUB publisher onto the block-registry EventsManager from the aggregate's
+# advertised endpoint.
+#
+# The `--kv-transfer-config` blob is RENDERED by `kvbmctl` from the live hub
+# (block_size / max_model_len / block_layout / leader.hub all come from the hub
+# aggregate); only free fields (tokio workers, nixl backends, control.metrics)
+# are passed as `--kvbm` overrides here.
 #
 # Usage:
 #   KVBM_INSTANCE_PORT=8000 bash launch-instance.sh   # FOREGROUND; background from caller
@@ -19,6 +26,7 @@
 #   KVBM_VENV               (default: <repo>/.sandbox)
 #   KVBM_INSTANCE_PORT      (default: 8000)
 #   KVBM_HUB_URL            (default: http://127.0.0.1:1337) — discovery base
+#   KVBM_KVBMCTL_BIN        (default: <repo>/target/debug/kvbmctl — built by start-hub.sh)
 #   KVBM_CONNECTOR_MODULE_PATH (default: kvbm.v2.vllm.connector)
 #   KVBM_HARDWARE_PROFILE   (default: spark-gb10) — sizing via hardware-profiles.sh
 #   KVBM_GPU_MEMORY_UTILIZATION (default: 0.15 — two instances share one GB10)
@@ -29,13 +37,36 @@ REPO="${KVBM_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 # Reuse the disagg-bringup hardware profile for model + sizing.
 . "$REPO/.claude/skills/disagg-bringup/hardware-profiles.sh"
 kvbm_apply_disagg_bringup_profile
+# Reusable hub helpers (kvbm_hub_render_vllm).
+. "$REPO/.claude/skills/kvbm-hub-bringup/hub-lib.sh"
 
 KVBM_VENV=${KVBM_VENV:-$REPO/.sandbox}
 KVBM_CONNECTOR_MODULE_PATH=${KVBM_CONNECTOR_MODULE_PATH:-kvbm.v2.vllm.connector}
+KVBMCTL=${KVBM_KVBMCTL_BIN:-$REPO/target/debug/kvbmctl}
 PORT=${KVBM_INSTANCE_PORT:-8000}
 HUB_URL=${KVBM_HUB_URL:-http://127.0.0.1:1337}
 # Two instances coexist on one GB10 — keep utilization low.
 GMU=${KVBM_GPU_MEMORY_UTILIZATION:-0.15}
+
+# Render the vLLM connector args from the live hub via the shared helper
+# (kvbm_hub_render_vllm checks the binary exists). kvbmctl emits
+# `--block-size <N> --max-model-len <M> --kv-transfer-config '{…}'`; the hub is
+# the source of truth for those. Free fields are supplied as overrides:
+#   - leader/worker tokio worker_threads (smoke keeps these small)
+#   - leader.control.metrics (expose the control-plane metrics module)
+#   - worker.nixl backends (UCX + POSIX, as the worker transport)
+KV_RENDERED=$(kvbm_hub_render_vllm "$KVBMCTL" "$HUB_URL" indexer \
+    --kv-connector-module-path "$KVBM_CONNECTOR_MODULE_PATH" \
+    --kvbm leader.tokio.worker_threads=2 \
+    --kvbm worker.tokio.worker_threads=2 \
+    --kvbm leader.control.metrics=true \
+    --kvbm 'worker.nixl.backends.UCX={}' \
+    --kvbm 'worker.nixl.backends.POSIX={}') \
+  || { echo "kvbmctl render failed (is the hub up at $HUB_URL?)" >&2; exit 1; }
+
+# kvbmctl shell-quotes the (space-free) JSON; eval re-parses the quotes so the
+# blob stays a single argv element. Output is trusted (we built the renderer).
+eval "KV_ARGS=( $KV_RENDERED )"
 
 export CUDA_VISIBLE_DEVICES="${KVBM_SINGLE_CUDA_VISIBLE_DEVICES:-0}"
 export DYN_KVBM_CPU_CACHE_GB="$KVBM_CPU_CACHE_GB"
@@ -62,31 +93,16 @@ if [ -n "$NIXL_LIBS" ]; then
     export NIXL_PLUGIN_DIR="$NIXL_LIBS/plugins"
 fi
 
+# --block-size, --max-model-len, and --kv-transfer-config come from kvbmctl
+# (${KV_ARGS[@]}); do not also pass --max-model-len here — vLLM rejects dupes.
+# The connector module path is overridable via KVBM_CONNECTOR_MODULE_PATH; pass
+# it through kvbmctl's flag so the rendered blob carries it.
 exec "$KVBM_VENV/bin/python3" -m vllm.entrypoints.openai.api_server \
   --model "$KVBM_MODEL" \
   --served-model-name "$KVBM_MODEL" \
-  --max-model-len "$KVBM_MAX_MODEL_LEN" \
   --max-num-seqs "$KVBM_MAX_NUM_SEQS" \
   --gpu-memory-utilization "$GMU" \
   --enable-chunked-prefill \
   --no-enable-prefix-caching \
   --port "$PORT" \
-  --kv-transfer-config '{
-    "kv_connector": "DynamoConnector",
-    "kv_role": "kv_both",
-    "kv_load_failure_policy": "recompute",
-    "kv_connector_module_path": "'"$KVBM_CONNECTOR_MODULE_PATH"'",
-    "kv_connector_extra_config": {
-      "default": { "block_layout": "operational" },
-      "leader": {
-        "events":  { "kv_index_hub_url": "'"$HUB_URL"'" },
-        "cache":   { "host": { "cache_size_gb": '"$KVBM_CPU_CACHE_GB"' } },
-        "tokio":   { "worker_threads": 2 },
-        "control": { "metrics": true }
-      },
-      "worker": {
-        "nixl":  { "backends": { "UCX": {}, "POSIX": {} } },
-        "tokio": { "worker_threads": 2 }
-      }
-    }
-  }'
+  "${KV_ARGS[@]}"

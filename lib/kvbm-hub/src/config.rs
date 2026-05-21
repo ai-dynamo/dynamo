@@ -49,15 +49,15 @@ pub struct HubConfig {
     pub heartbeat_max_failures: u32,
     /// Hub-wide shared config ("primary"). Must-match fields here are validated
     /// against every registrant; advisory fields seed generated connector
-    /// config. Feature configs (e.g. `kv_indexer`) inherit unset sizing from
+    /// config. Feature configs (e.g. `indexer`) inherit unset sizing from
     /// here. See [`PrimaryConfig`].
     #[serde(default)]
     pub primary: PrimaryConfig,
     /// Optional KV indexer feature. When set, the hub binds a ZMQ `SUB`
-    /// ingest socket and serves the index under `/v1/features/kv-index`.
+    /// ingest socket and serves the index under `/v1/features/indexer`.
     /// `None` (default) leaves the feature off.
     #[serde(default)]
-    pub kv_indexer: Option<KvIndexerConfig>,
+    pub indexer: Option<IndexerConfig>,
 }
 
 /// Configuration for the optional KV indexer feature.
@@ -65,9 +65,9 @@ pub struct HubConfig {
 /// Sizing (`max_seq_len` / `block_size`) is optional and inherits from
 /// [`HubConfig::primary`] when unset — they are the same must-match values, so
 /// operators set them once on `primary`. The binary resolves the effective
-/// sizing before constructing the [`KvIndexerManager`](crate::KvIndexerManager).
+/// sizing before constructing the [`IndexerManager`](crate::IndexerManager).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct KvIndexerConfig {
+pub struct IndexerConfig {
     /// Maximum sequence length (tokens). Must be evenly divisible by
     /// `block_size`; the index is presized to `max_seq_len / block_size`
     /// position buckets. Inherits from `primary.max_seq_len` when `None`.
@@ -113,7 +113,7 @@ impl Default for HubConfig {
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             heartbeat_max_failures: default_heartbeat_max_failures(),
             primary: PrimaryConfig::default(),
-            kv_indexer: None,
+            indexer: None,
         }
     }
 }

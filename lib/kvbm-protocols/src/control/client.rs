@@ -4,7 +4,7 @@
 //! Public velo client for the leader control plane (`--features client`).
 //!
 //! [`LeaderControlClient`] targets a single leader instance and exposes one
-//! sub-client per control module — `client.core()`, `client.tests()`,
+//! sub-client per control module — `client.core()`,
 //! `client.transfer()` — plus the always-on `list_modules` query. Each
 //! sub-client's methods speak the protocol types defined alongside it.
 
@@ -17,7 +17,6 @@ use velo::Messenger;
 use velo_ext::InstanceId;
 
 use super::modules::metrics::MetricsClient;
-use super::modules::test::TestClient;
 use super::modules::transfer::TransferClient;
 use super::{
     ControlError, ControlReply, DESCRIBE_INSTANCE_HANDLER, DescribeInstanceRequest,
@@ -97,11 +96,6 @@ impl LeaderControlClient {
         DevClient {
             chan: self.chan.clone(),
         }
-    }
-
-    /// Sub-client for the opt-in `test` module (`register_test_blocks`).
-    pub fn test(&self) -> TestClient {
-        TestClient::new(self.chan.clone())
     }
 
     /// Sub-client for the always-on `transfer` module (`search_prefix`,

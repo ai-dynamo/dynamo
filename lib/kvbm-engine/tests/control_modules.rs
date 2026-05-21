@@ -22,7 +22,6 @@ use kvbm_engine::disagg::session::{
 };
 use kvbm_engine::leader::ControlPlane;
 use kvbm_engine::leader::InstanceLeader;
-use kvbm_engine::leader::control::TestModule;
 use kvbm_engine::leader::control::TransferModule;
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::{G2, G3};
@@ -31,7 +30,6 @@ use kvbm_logical::manager::BlockManager;
 use kvbm_observability::KvbmObservability;
 use kvbm_protocols::control::ModuleId;
 use kvbm_protocols::control::client::LeaderControlClient;
-use kvbm_protocols::control::modules::test::RegisterTestBlocksRequest;
 use kvbm_protocols::control::modules::transfer::{
     CloseTransferSessionRequest, FindMode, OpenTransferSessionRequest, OpenTransferSessionResponse,
     PullFromSessionRequest, SearchMode, SearchRequest, SearchResponse, TierSelection,
@@ -129,54 +127,6 @@ fn populate_g3(g3: &BlockManager<G3>, seq_hashes: &[SequenceHash]) {
         .map(|(m, h)| m.stage(*h, block_size).expect("stage"))
         .collect();
     let _immutables = g3.register_blocks(completes);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn tests_module_lists_and_registers_blocks() {
-    let fx = fixture().await;
-
-    let _plane = ControlPlane::builder(fx.server.messenger().clone(), fx.server.instance_id())
-        .with_module(TestModule::new(fx.g2.clone()))
-        .register()
-        .expect("register control plane");
-
-    let control = LeaderControlClient::new(fx.client.messenger().clone(), fx.server.instance_id());
-
-    // `list_modules` reports the enabled `Tests` module.
-    let modules = control.list_modules().await.expect("list_modules");
-    assert_eq!(modules, vec![ModuleId::Test]);
-
-    // `register_test_blocks` allocates one G2 block per hash (all-or-nothing).
-    let resp = control
-        .test()
-        .register_test_blocks(RegisterTestBlocksRequest {
-            sequence_hashes: hashes(8),
-        })
-        .await
-        .expect("register_test_blocks");
-    assert_eq!(resp.allocated, 8);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn register_test_blocks_is_all_or_nothing_when_pool_too_small() {
-    let fx = fixture().await;
-
-    let _plane = ControlPlane::builder(fx.server.messenger().clone(), fx.server.instance_id())
-        .with_module(TestModule::new(fx.g2.clone()))
-        .register()
-        .expect("register control plane");
-
-    let control = LeaderControlClient::new(fx.client.messenger().clone(), fx.server.instance_id());
-
-    // More hashes than the G2 pool can satisfy → allocated == 0.
-    let resp = control
-        .test()
-        .register_test_blocks(RegisterTestBlocksRequest {
-            sequence_hashes: hashes(G2_BLOCK_COUNT + 1),
-        })
-        .await
-        .expect("register_test_blocks");
-    assert_eq!(resp.allocated, 0);
 }
 
 // ---- transfer module -------------------------------------------------------
@@ -968,7 +918,7 @@ async fn register_control_plane_enables_metrics_when_observability_present() {
     );
 
     let _plane = leader
-        .register_control_plane(false, false, true)
+        .register_control_plane(false, true)
         .expect("register control plane");
 
     let control = LeaderControlClient::new(fx.client.messenger().clone(), fx.server.instance_id());
@@ -1018,7 +968,7 @@ async fn register_control_plane_skips_metrics_without_observability() {
     );
 
     let _plane = leader
-        .register_control_plane(false, false, true)
+        .register_control_plane(false, true)
         .expect("register control plane");
 
     let control = LeaderControlClient::new(fx.client.messenger().clone(), fx.server.instance_id());

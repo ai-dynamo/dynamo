@@ -49,9 +49,6 @@ pub use modules::dev::{RESET_HANDLER, ResetRequest, ResetResponse, Tier, TierErr
 pub use modules::metrics::{
     MetricsSnapshotRequest, MetricsSnapshotResponse, PoolBreakdown, SNAPSHOT_HANDLER,
 };
-pub use modules::test::{
-    REGISTER_TEST_BLOCKS_HANDLER, RegisterTestBlocksRequest, RegisterTestBlocksResponse,
-};
 pub use modules::transfer::{
     CLOSE_SESSION_HANDLER, CloseTransferSessionRequest, CloseTransferSessionResponse, FindMode,
     MatchBreakdown, OPEN_SESSION_HANDLER, OpenTransferSessionRequest, OpenTransferSessionResponse,
@@ -79,9 +76,6 @@ pub enum ModuleId {
     Core,
     /// Opt-in operator/debug tooling: `reset`. Safe in production.
     Dev,
-    /// Opt-in test-only helpers: `register_test_blocks`. Usable in
-    /// production but warns when enabled.
-    Test,
     /// Always-on: G2 search → disagg-session creation (and, later,
     /// `transfer_to` / `transfer_from`).
     Transfer,
@@ -98,7 +92,6 @@ impl ModuleId {
         match self {
             ModuleId::Core => "core",
             ModuleId::Dev => "dev",
-            ModuleId::Test => "test",
             ModuleId::Transfer => "transfer",
             ModuleId::Metrics => "metrics",
         }
@@ -253,7 +246,7 @@ mod tests {
             404
         );
         assert_eq!(
-            ControlError::ModuleNotEnabled(ModuleId::Test).http_status(),
+            ControlError::ModuleNotEnabled(ModuleId::Dev).http_status(),
             404
         );
         assert_eq!(ControlError::Internal("x".into()).http_status(), 500);
@@ -296,7 +289,6 @@ mod tests {
         for id in [
             ModuleId::Core,
             ModuleId::Dev,
-            ModuleId::Test,
             ModuleId::Transfer,
             ModuleId::Metrics,
         ] {

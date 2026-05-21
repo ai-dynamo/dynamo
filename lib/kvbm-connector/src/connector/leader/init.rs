@@ -56,37 +56,37 @@ impl ConnectorLeader {
         Ok(())
     }
 
-    /// Lightweight KV-index-only hub registration: declare `Feature::KvIndexer`
+    /// Lightweight KV-index-only hub registration: declare `Feature::Indexer`
     /// (+ the must-match runtime summary) so the hub reclaims this instance's
     /// index entries on unregister. Holds the [`HubClient`] alive on `self` so
     /// the RAII guard does not fire a premature `DELETE`. Used only when
-    /// ConditionalDisagg is *not* effective (otherwise KvIndexer rides the CD
+    /// ConditionalDisagg is *not* effective (otherwise Indexer rides the CD
     /// registration).
-    async fn register_kv_index_only(
+    async fn register_indexer_only(
         &self,
         handshake: &super::hub_handshake::HubHandshake,
     ) -> Result<()> {
         let velo = self
             .runtime
             .velo()
-            .ok_or_else(|| anyhow!("kv-index hub registration requires a Velo runtime"))?;
+            .ok_or_else(|| anyhow!("indexer hub registration requires a Velo runtime"))?;
         let hub = super::disagg::build_hub_client(&handshake.url)?;
         // Install hub velo handlers (heartbeat) so the hub's liveness probe
         // doesn't unregister us — which would prematurely sweep our index.
         hub.register_handlers_messenger(velo.messenger())
-            .context("installing hub velo handlers for kv-index registration")?;
+            .context("installing hub velo handlers for indexer registration")?;
         let max_seq_len = self.runtime.config().max_seq_len;
         hub.register_instance_with_features_and_runtime(
             velo.peer_info(),
-            vec![kvbm_hub::Feature::KvIndexer(
-                kvbm_hub::KvIndexerFeatureConfig { max_seq_len },
-            )],
+            vec![kvbm_hub::Feature::Indexer(kvbm_hub::IndexerFeatureConfig {
+                max_seq_len,
+            })],
             handshake.runtime_summary.clone(),
         )
         .await
-        .context("registering Feature::KvIndexer with kvbm-hub")?;
-        self.set_kv_index_hub_client(hub)?;
-        tracing::info!(url = %handshake.url, ?max_seq_len, "kv-index participation registered with hub");
+        .context("registering Feature::Indexer with kvbm-hub")?;
+        self.set_indexer_hub_client(hub)?;
+        tracing::info!(url = %handshake.url, ?max_seq_len, "indexer participation registered with hub");
         Ok(())
     }
 
@@ -458,9 +458,9 @@ impl ConnectorLeader {
             ),
             None => None,
         };
-        let kv_index_endpoint: Option<String> = handshake
+        let indexer_endpoint: Option<String> = handshake
             .as_ref()
-            .and_then(|h| h.kv_index_zmq_endpoint.clone());
+            .and_then(|h| h.indexer_zmq_endpoint.clone());
 
         // Create an EventsManager when either the consolidator or the KV-index
         // publisher needs block registration events. The same Arc is wired into
@@ -472,7 +472,7 @@ impl ConnectorLeader {
         // through here — the KV index wants full positional coverage, and the
         // consolidator path has always relied on the default.
         let events_manager: Option<std::sync::Arc<EventsManager>> =
-            (self.consolidator_endpoints.is_some() || kv_index_endpoint.is_some()).then(|| {
+            (self.consolidator_endpoints.is_some() || indexer_endpoint.is_some()).then(|| {
                 tracing::debug!("Creating EventsManager");
                 std::sync::Arc::new(EventsManager::builder().build())
             });
@@ -480,7 +480,7 @@ impl ConnectorLeader {
         // Wire the KV-index publisher onto the EventsManager subscription. The
         // publisher stamps this worker's velo instance id (as u128) so the
         // hub's query results map back to a discoverable peer.
-        if let (Some(endpoint), Some(em)) = (&kv_index_endpoint, events_manager.as_ref()) {
+        if let (Some(endpoint), Some(em)) = (&indexer_endpoint, events_manager.as_ref()) {
             match super::hub_indexer::ZmqHubPublisher::connect(endpoint) {
                 Ok(zmq_pub) => {
                     let instance_id = self.runtime.messenger().instance_id().as_u128();
@@ -492,30 +492,30 @@ impl ConnectorLeader {
                         .build()
                     {
                         Ok(publisher) => {
-                            self.set_kv_index_publisher(publisher)?;
-                            tracing::info!(endpoint, instance_id, "kv-index publisher wired");
+                            self.set_indexer_publisher(publisher)?;
+                            tracing::info!(endpoint, instance_id, "indexer publisher wired");
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "kv-index publisher build failed; skipping")
+                            tracing::warn!(error = %e, "indexer publisher build failed; skipping")
                         }
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "kv-index PUB connect failed; skipping"),
+                Err(e) => tracing::warn!(error = %e, "indexer PUB connect failed; skipping"),
             }
         }
 
-        // KV-index-only hub registration — fires only when KvIndexer is the
+        // KV-index-only hub registration — fires only when Indexer is the
         // *sole* effective hub feature. When P2P or ConditionalDisagg is also
-        // effective, `wire_p2p` folds KvIndexer into that single
+        // effective, `wire_p2p` folds Indexer into that single
         // `POST /v1/instances` instead (avoiding a double registration).
-        // Declaring `Feature::KvIndexer` lets the hub's `on_unregister` sweep
+        // Declaring `Feature::Indexer` lets the hub's `on_unregister` sweep
         // reclaim this instance's index entries.
         if let Some(h) = handshake.as_ref()
-            && h.has(kvbm_hub::FeatureKey::KvIndexer)
+            && h.has(kvbm_hub::FeatureKey::Indexer)
             && !h.has(kvbm_hub::FeatureKey::P2P)
             && !h.has(kvbm_hub::FeatureKey::ConditionalDisagg)
         {
-            self.register_kv_index_only(h).await?;
+            self.register_indexer_only(h).await?;
         }
 
         tracing::debug!("Creating block registry");
@@ -704,11 +704,10 @@ impl ConnectorLeader {
         // cell populated further below, once CD wiring builds the factory.
         let control_cfg = &self.runtime.config().control;
         let control_plane = leader
-            .register_control_plane(control_cfg.dev, control_cfg.test, control_cfg.metrics)
+            .register_control_plane(control_cfg.dev, control_cfg.metrics)
             .context("registering leader control plane")?;
         tracing::debug!(
             dev = control_cfg.dev,
-            test = control_cfg.test,
             metrics = control_cfg.metrics,
             "Leader control plane registered"
         );
@@ -973,7 +972,7 @@ impl ConnectorLeader {
             let layout_compat_payload =
                 self.build_layout_compat_payload(reference_config, num_workers)?;
 
-            // Register P2P (+ ConditionalDisagg, + KvIndexer when effective) and
+            // Register P2P (+ ConditionalDisagg, + Indexer when effective) and
             // build the shared P2P transfer foundation (peer resolver, session
             // factory, describe-push). CD layers its role-specific flow on top.
             let cd_role = match disagg_cfg.role {
@@ -1134,7 +1133,7 @@ impl ConnectorLeader {
         {
             // Standalone P2P (no CD): register Feature::P2P + build the transfer
             // foundation so this instance is a hub-discoverable,
-            // remote-controllable block-copy peer. KvIndexer (when effective) is
+            // remote-controllable block-copy peer. Indexer (when effective) is
             // folded into the same registration by wire_p2p.
             let layout_compat_payload =
                 self.build_layout_compat_payload(reference_config, num_workers)?;

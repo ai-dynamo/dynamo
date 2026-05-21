@@ -13,14 +13,19 @@ use kvbm_logical::SequenceHash;
 use serde::{Deserialize, Serialize};
 
 /// URL segment the server nests this feature's routers under
-/// (`/v1/features/kv-index/...`).
-pub const ROUTE_PREFIX: &str = "kv-index";
+/// (`/v1/features/indexer/...`).
+pub const ROUTE_PREFIX: &str = "indexer";
 
-/// Relative route paths (mounted under `/v1/features/kv-index`).
+/// Relative route paths (mounted under `/v1/features/indexer`).
 pub mod paths {
     /// `GET /config` — indexer configuration + ZMQ ingest endpoint. A `200`
     /// also serves as the capability probe used by connectors.
     pub const CONFIG: &str = "/config";
+
+    /// `GET /instances` — the set of instances that declared `Feature::Indexer`
+    /// at registration. Not every registered instance necessarily emits KV
+    /// events, so this is the *registered* (participating) set.
+    pub const INSTANCES: &str = "/instances";
 
     /// `GET /hashes/by_position/{pos}` — dump the index bucket at `pos`.
     pub const BY_POSITION: &str = "/hashes/by_position/{pos}";
@@ -32,7 +37,7 @@ pub mod paths {
 /// Response for `GET /config`. Doubles as the capability probe: a successful
 /// `200` tells a connector the indexer is present and where to publish.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KvIndexerConfigResponse {
+pub struct IndexerConfigResponse {
     /// Maximum sequence length (tokens) the index is sized for.
     pub max_seq_len: usize,
     /// Block size (tokens per block). Must match the publisher's page size.
@@ -42,6 +47,16 @@ pub struct KvIndexerConfigResponse {
     /// ZMQ endpoint a publisher connects its `PUB` socket to
     /// (e.g. `tcp://127.0.0.1:54231`). Empty when ingest is not yet bound.
     pub zmq_endpoint: String,
+}
+
+/// Response for `GET /instances`. The set of instances that declared
+/// `Feature::Indexer` at registration, as decimal `u128` strings (matching the
+/// holder ids in [`IndexEntry::instances`]). Lets an operator distinguish
+/// "registered to participate" from "actually holding indexed blocks".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct InstancesResponse {
+    /// Registered (participating) instance ids, decimal `u128`, sorted.
+    pub instances: Vec<String>,
 }
 
 /// One indexed block: a positional-lineage hash and the instances holding it.

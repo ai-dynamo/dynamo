@@ -142,7 +142,7 @@ pub struct KvbmConfig {
 
     /// Connector→hub configuration. The sole way the connector reaches a
     /// `kvbm-hub`. `None` = no hub features (normal hub-less connector work);
-    /// the hub is currently required for `kv_indexer`, `p2p`, and
+    /// the hub is currently required for `indexer`, `p2p`, and
     /// `conditional_disagg`.
     #[validate(nested)]
     #[serde(default)]
@@ -822,11 +822,15 @@ mod tests {
     #[test]
     fn test_control_default_is_disabled() {
         temp_env::with_vars_unset(
-            vec!["KVBM_CONFIG_PATH", "KVBM_CONTROL_DEV", "KVBM_CONTROL_TEST"],
+            vec![
+                "KVBM_CONFIG_PATH",
+                "KVBM_CONTROL_DEV",
+                "KVBM_CONTROL_METRICS",
+            ],
             || {
                 let cfg = KvbmConfig::from_env().unwrap();
                 assert!(!cfg.control.dev);
-                assert!(!cfg.control.test);
+                assert!(!cfg.control.metrics);
             },
         );
     }
@@ -836,12 +840,12 @@ mod tests {
         temp_env::with_vars(
             vec![
                 ("KVBM_CONTROL_DEV", Some("true")),
-                ("KVBM_CONTROL_TEST", Some("true")),
+                ("KVBM_CONTROL_METRICS", Some("true")),
             ],
             || {
                 let cfg = KvbmConfig::from_env().unwrap();
                 assert!(cfg.control.dev);
-                assert!(cfg.control.test);
+                assert!(cfg.control.metrics);
             },
         );
     }
@@ -882,7 +886,11 @@ mod tests {
     #[test]
     fn test_control_via_json_leader_profile() {
         temp_env::with_vars_unset(
-            vec!["KVBM_CONFIG_PATH", "KVBM_CONTROL_DEV", "KVBM_CONTROL_TEST"],
+            vec![
+                "KVBM_CONFIG_PATH",
+                "KVBM_CONTROL_DEV",
+                "KVBM_CONTROL_METRICS",
+            ],
             || {
                 let json = r#"{
                     "leader": {
@@ -891,7 +899,7 @@ mod tests {
                 }"#;
                 let cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
                 assert!(cfg.control.dev);
-                assert!(!cfg.control.test);
+                assert!(!cfg.control.metrics);
                 // Worker profile gets the default (all-disabled) since `control`
                 // was declared only under `leader`.
                 let wcfg = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();

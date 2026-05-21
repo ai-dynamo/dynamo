@@ -99,6 +99,28 @@ impl HubClientBuilder {
         Self::default()
     }
 
+    /// Build a client builder from a hub discovery URL (e.g.
+    /// `http://hub-host:1337`). Parses scheme, host, and discovery port; the
+    /// control port keeps its default unless set explicitly afterwards.
+    ///
+    /// Shared by the connector's hub-resolution path and the `kvbmctl` CLI so
+    /// a single URL string is the only source of truth (no second knob).
+    pub fn from_url(url: &str) -> Result<Self> {
+        let parsed = Url::parse(url).with_context(|| format!("parsing hub url: {url}"))?;
+        let host = match parsed.host_str() {
+            Some(h) if !h.is_empty() => h.to_string(),
+            _ => return Err(anyhow!("hub url has no host: {url}")),
+        };
+        Ok(Self::new()
+            .scheme(parsed.scheme())
+            .host(host)
+            .discovery_port(
+                parsed
+                    .port_or_known_default()
+                    .unwrap_or(DEFAULT_DISCOVERY_PORT),
+            ))
+    }
+
     /// Set the hub host (name or IP). Required.
     pub fn host(mut self, host: impl Into<String>) -> Self {
         self.host = Some(host.into());
@@ -308,6 +330,39 @@ impl HubClient {
     pub async fn get_config(&self) -> Result<crate::protocol::HubConfigResponse> {
         let url = self.discovery_url(protocol::paths::HUB_CONFIG)?;
         let resp = self.http.get(url).send().await.context("GET /v1/config")?;
+        parse_json(resp).await
+    }
+
+    /// `GET <discovery>/<path>` and decode the JSON body into `T`. Generic
+    /// helper for read-only feature endpoints (e.g. the `kvbmctl` per-feature
+    /// subcommands hitting `/v1/features/<feat>/...`).
+    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = self.discovery_url(path)?;
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("GET {path}"))?;
+        parse_json(resp).await
+    }
+
+    /// `POST <discovery>/<path>` with a JSON `body`, decoding the JSON response
+    /// into `T`. Companion to [`get_json`](Self::get_json) for feature
+    /// endpoints that take a request body (e.g. the KV-index `/query`).
+    pub async fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = self.discovery_url(path)?;
+        let resp = self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("POST {path}"))?;
         parse_json(resp).await
     }
 

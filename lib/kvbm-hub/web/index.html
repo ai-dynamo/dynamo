@@ -236,10 +236,6 @@
                 <button @click="devReset()">dev.reset (all tiers)</button>
                 <span class="mono" style="color: var(--fg-subtle); margin-left: 8px;" x-text="actionResults.dev_reset || ''"></span>
               </div>
-              <div x-show="modules.includes('test')">
-                <button @click="testRegister()">test.register_test_blocks (smoke)</button>
-                <span class="mono" style="color: var(--fg-subtle); margin-left: 8px;" x-text="actionResults.test_register || ''"></span>
-              </div>
             </div>
           </section>
         </div>

@@ -23,9 +23,9 @@ pub fn bind_sub_socket(endpoint: &str) -> Result<Subscribe> {
     let socket = subscribe(&ctx)
         .set_linger(ZMQ_LINGER_MS)
         .bind(endpoint)
-        .with_context(|| format!("binding kv-index SUB socket to {endpoint}"))?
+        .with_context(|| format!("binding indexer SUB socket to {endpoint}"))?
         .subscribe(b"")
-        .context("subscribing kv-index SUB socket to all topics")?;
+        .context("subscribing indexer SUB socket to all topics")?;
     Ok(socket)
 }
 

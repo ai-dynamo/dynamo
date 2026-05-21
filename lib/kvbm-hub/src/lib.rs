@@ -53,19 +53,29 @@ pub mod features;
 pub mod handlers;
 pub mod protocol;
 pub mod registry;
+/// `kvbmctl` config rendering. Gated behind the `kvbmctl` feature because it
+/// depends on `kvbm-config`, which transitively pulls CUDA (cudarc) — kept out
+/// of the default CPU-only hub build.
+#[cfg(feature = "kvbmctl")]
+pub mod render;
 pub mod server;
 pub mod web;
 
 pub use client::{HubClient, HubClientBuilder, HubClientConfig, HubRegistrationGuard};
-pub use config::{HubConfig, KvIndexerConfig};
+pub use config::{HubConfig, IndexerConfig};
+#[cfg(feature = "kvbmctl")]
+pub use features::cli::{FeatureCli, feature_clis, hub_arg};
 pub use features::conditional_disagg::{
     ConditionalDisaggClient, ConditionalDisaggManager, DispatchOutcome, HttpVllmDispatcher,
     PrefillRequestDispatcher, RecordingDispatcher,
 };
 pub use features::control_plane::ControlPlaneManager;
-pub use features::kv_indexer::{
-    KvIndexerConfigResponse, KvIndexerManager, PositionalIndex, QueryRequest, QueryResponse,
+pub use features::indexer::{
+    IndexerConfigResponse, IndexerManager, InstancesResponse, PositionalIndex, QueryRequest,
+    QueryResponse,
 };
+#[cfg(feature = "kvbmctl")]
+pub use features::p2p::cli::{p2p_command, run_p2p};
 pub use features::p2p::{P2pClient, P2pManager};
 pub use features::{FeatureConfigRequirements, FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
@@ -73,7 +83,7 @@ pub use kvbm_common::BlockLayoutMode;
 pub use protocol::{
     CD_PREFILL_QUEUE, ConditionalDisaggConfig, ConditionalDisaggInstancesResponse,
     ConditionalDisaggRole, DEFAULT_CONTROL_PORT, DEFAULT_DISCOVERY_PORT, Feature,
-    FeatureDescriptor, FeatureKey, HubConfigResponse, KvIndexerFeatureConfig, P2pConfig,
+    FeatureDescriptor, FeatureKey, HubConfigResponse, IndexerFeatureConfig, P2pConfig,
     PrefillRequest, PrimaryConfig, ProbeResponse, RuntimeConfigSummary,
 };
 pub use registry::{EvictionCallback, InMemoryRegistry, PeerRegistry, RegistryError};

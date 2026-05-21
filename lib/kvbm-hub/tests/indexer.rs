@@ -4,14 +4,14 @@
 //! End-to-end test for the KV indexer feature: two mock `PUB` publishers push
 //! `KvbmCacheEvents` over ZMQ to the hub's `SUB` ingest socket; the test then
 //! asserts the index via the feature's own HTTP surface
-//! (`/v1/features/kv-index/...`).
+//! (`/v1/features/indexer/...`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dynamo_tokens::TokenBlockSequence;
 use futures::SinkExt;
-use kvbm_hub::{HubServer, KvIndexerConfigResponse};
+use kvbm_hub::{HubServer, IndexerConfigResponse};
 use kvbm_logical::events::{KvCacheEvents, KvbmCacheEvents};
 use kvbm_logical::{KvbmSequenceHashProvider, SequenceHash};
 use serde_json::Value;
@@ -21,13 +21,13 @@ const BLOCK_SIZE: u32 = 4;
 const MAX_SEQ_LEN: usize = 64;
 
 async fn start_hub() -> HubServer {
-    let manager = kvbm_hub::KvIndexerManager::new(
+    let manager = kvbm_hub::IndexerManager::new(
         MAX_SEQ_LEN,
         BLOCK_SIZE as usize,
         Some("tcp://127.0.0.1:0".to_string()),
         Some("127.0.0.1".to_string()),
     )
-    .expect("build kv-index manager");
+    .expect("build indexer manager");
 
     kvbm_hub::create_server_builder()
         .bind_addr("127.0.0.1".parse().unwrap())
@@ -71,7 +71,7 @@ async fn send_batch(sock: &mut Publish, events: KvCacheEvents, instance_id: u128
 }
 
 async fn get_json(http: &reqwest::Client, base: &str, path: &str) -> Value {
-    http.get(format!("{base}/v1/features/kv-index{path}"))
+    http.get(format!("{base}/v1/features/indexer{path}"))
         .send()
         .await
         .expect("GET")
@@ -98,7 +98,7 @@ async fn two_instances_publish_index_and_query() {
     let http = reqwest::Client::new();
 
     // GET /config: feature present, sizing reported, ZMQ endpoint advertised.
-    let cfg: KvIndexerConfigResponse =
+    let cfg: IndexerConfigResponse =
         serde_json::from_value(get_json(&http, &base, "/config").await).expect("config");
     assert_eq!(cfg.block_size, BLOCK_SIZE as usize);
     assert_eq!(cfg.max_seq_len, MAX_SEQ_LEN);
@@ -147,7 +147,7 @@ async fn two_instances_publish_index_and_query() {
 
     // POST /query with the full sequence → deepest match (position 2).
     let resp: Value = http
-        .post(format!("{base}/v1/features/kv-index/query"))
+        .post(format!("{base}/v1/features/indexer/query"))
         .json(&serde_json::json!({ "hashes": hashes }))
         .send()
         .await

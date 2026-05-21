@@ -4733,6 +4733,7 @@ dependencies = [
  "figment",
  "futures",
  "kvbm-common",
+ "kvbm-config",
  "kvbm-logical",
  "kvbm-protocols",
  "parking_lot",

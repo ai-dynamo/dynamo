@@ -15,6 +15,9 @@
 //! pre-dispatch — see `crate::server::register_instance`. Do not duplicate
 //! the check inside this manager.
 
+/// `kvbmctl p2p` action CLI for this feature. Gated behind the `kvbmctl` feature.
+#[cfg(feature = "kvbmctl")]
+pub mod cli;
 mod client;
 mod manager;
 

@@ -5,10 +5,10 @@
 //!
 //! The hub's KV-index ZMQ ingest endpoint is discovered by the hub handshake
 //! ([`super::hub_handshake`]) from the aggregate `GET /v1/config`. When the
-//! KvIndexer feature is effective and block-size-compatible, the connector
+//! Indexer feature is effective and block-size-compatible, the connector
 //! connects a ZMQ `PUB` socket to that endpoint and wires a [`Publisher`] into
 //! the block-registry [`EventsManager`] so block create/remove events flow to
-//! the hub's index. The connector also registers `Feature::KvIndexer` with the
+//! the hub's index. The connector also registers `Feature::Indexer` with the
 //! hub so the hub's `on_unregister` sweep reclaims this instance's entries.
 
 use std::sync::Arc;
@@ -45,17 +45,17 @@ impl ZmqHubPublisher {
         let socket = publish(&ctx)
             .set_linger(ZMQ_LINGER_MS)
             .connect(endpoint)
-            .with_context(|| format!("connecting kv-index PUB socket to {endpoint}"))?;
+            .with_context(|| format!("connecting indexer PUB socket to {endpoint}"))?;
         let socket = Arc::new(Mutex::new(socket));
 
         let (tx, mut rx) = mpsc::channel::<Bytes>(1024);
         tokio::spawn(async move {
             while let Some(payload) = rx.recv().await {
                 if let Err(e) = send_batch(&socket, payload).await {
-                    tracing::warn!(error = %e, "kv-index PUB send failed");
+                    tracing::warn!(error = %e, "indexer PUB send failed");
                 }
             }
-            tracing::info!("kv-index PUB send task stopped");
+            tracing::info!("indexer PUB send task stopped");
         });
 
         Ok(Self { tx })
@@ -75,11 +75,11 @@ impl Publisher for ZmqHubPublisher {
         match self.tx.try_send(payload) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("kv-index publish channel full; dropping batch");
+                tracing::warn!("indexer publish channel full; dropping batch");
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                anyhow::bail!("kv-index publish channel closed")
+                anyhow::bail!("indexer publish channel closed")
             }
         }
     }

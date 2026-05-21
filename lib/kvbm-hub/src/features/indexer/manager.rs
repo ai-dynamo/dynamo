@@ -5,10 +5,11 @@
 //!
 //! Owns a [`PositionalIndex`], binds the ZMQ ingest socket during
 //! [`FeatureManager::attach`], and exports its own HTTP surface under
-//! `/v1/features/kv-index` (the server nests it via
+//! `/v1/features/indexer` (the server nests it via
 //! [`FeatureManager::route_prefix`]).
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use axum::{
     Json, Router,
@@ -22,7 +23,7 @@ use velo_ext::{InstanceId, PeerInfo};
 use super::index::PositionalIndex;
 use super::ingest::run_ingest_loop;
 use super::protocol::{
-    self, ByPositionResponse, KvIndexerConfigResponse, QueryRequest, QueryResponse,
+    self, ByPositionResponse, IndexerConfigResponse, InstancesResponse, QueryRequest, QueryResponse,
 };
 use super::zmq::{bind_sub_socket, bound_endpoint, port_of};
 use crate::features::{FeatureError, FeatureManager, HubContext};
@@ -34,7 +35,7 @@ use crate::protocol::{Feature, FeatureKey};
 const DEFAULT_ADVERTISE_HOST: &str = "127.0.0.1";
 
 /// Hub-side KV block index feature manager.
-pub struct KvIndexerManager {
+pub struct IndexerManager {
     index: Arc<PositionalIndex>,
     /// ZMQ bind spec (e.g. `tcp://0.0.0.0:0`).
     zmq_bind: String,
@@ -44,11 +45,18 @@ pub struct KvIndexerManager {
     endpoint: OnceLock<String>,
     /// Ingest task handle (set once spawned during `attach`).
     ingest_task: OnceLock<JoinHandle<()>>,
+    /// Instances that declared `Feature::Indexer` at registration. Tracked
+    /// separately from the index contents: an instance can register
+    /// (participate) before — or without ever — emitting KV events, so this is
+    /// the *registered* set, not the *emitting* set. Maintained by
+    /// `on_register`/`on_unregister`; `GET /instances` sorts the output for a
+    /// stable response (`InstanceId` is not `Ord`).
+    instances: RwLock<HashSet<InstanceId>>,
 }
 
-impl std::fmt::Debug for KvIndexerManager {
+impl std::fmt::Debug for IndexerManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KvIndexerManager")
+        f.debug_struct("IndexerManager")
             .field("max_seq_len", &self.index.max_seq_len())
             .field("block_size", &self.index.block_size())
             .field("num_positions", &self.index.num_positions())
@@ -57,7 +65,7 @@ impl std::fmt::Debug for KvIndexerManager {
     }
 }
 
-impl KvIndexerManager {
+impl IndexerManager {
     /// Builds a manager sized for `max_seq_len`/`block_size`, binding ingest to
     /// `zmq_bind` (defaults to `tcp://0.0.0.0:0`) and advertising
     /// `advertise_host` (defaults to `127.0.0.1`).
@@ -74,7 +82,21 @@ impl KvIndexerManager {
             advertise_host: advertise_host.unwrap_or_else(|| DEFAULT_ADVERTISE_HOST.to_string()),
             endpoint: OnceLock::new(),
             ingest_task: OnceLock::new(),
+            instances: RwLock::new(HashSet::new()),
         })
+    }
+
+    /// Snapshot of the registered instance set as decimal `u128` strings
+    /// (matching the holder ids in [`IndexEntry::instances`]), sorted for a
+    /// stable response.
+    fn instances_response(&self) -> InstancesResponse {
+        let mut instances: Vec<String> = self
+            .instances
+            .read()
+            .map(|s| s.iter().map(|id| id.as_u128().to_string()).collect())
+            .unwrap_or_default();
+        instances.sort();
+        InstancesResponse { instances }
     }
 
     /// Shared index handle (for tests / introspection).
@@ -87,8 +109,8 @@ impl KvIndexerManager {
         self.endpoint.get()
     }
 
-    fn config_response(&self) -> KvIndexerConfigResponse {
-        KvIndexerConfigResponse {
+    fn config_response(&self) -> IndexerConfigResponse {
+        IndexerConfigResponse {
             max_seq_len: self.index.max_seq_len(),
             block_size: self.index.block_size(),
             num_positions: self.index.num_positions(),
@@ -97,9 +119,9 @@ impl KvIndexerManager {
     }
 }
 
-impl FeatureManager for KvIndexerManager {
+impl FeatureManager for IndexerManager {
     fn key(&self) -> FeatureKey {
-        FeatureKey::KvIndexer
+        FeatureKey::Indexer
     }
 
     fn config_requirements(&self) -> crate::features::FeatureConfigRequirements {
@@ -139,18 +161,18 @@ impl FeatureManager for KvIndexerManager {
     fn attach<'a>(&'a self, ctx: HubContext) -> BoxFuture<'a, Result<(), FeatureError>> {
         Box::pin(async move {
             let sub = bind_sub_socket(&self.zmq_bind)
-                .map_err(|e| FeatureError::Other(anyhow::anyhow!("kv-index bind: {e}")))?;
+                .map_err(|e| FeatureError::Other(anyhow::anyhow!("indexer bind: {e}")))?;
             let bound = bound_endpoint(&sub)
-                .map_err(|e| FeatureError::Other(anyhow::anyhow!("kv-index endpoint: {e}")))?;
+                .map_err(|e| FeatureError::Other(anyhow::anyhow!("indexer endpoint: {e}")))?;
             let port = port_of(&bound)
-                .map_err(|e| FeatureError::Other(anyhow::anyhow!("kv-index port: {e}")))?;
+                .map_err(|e| FeatureError::Other(anyhow::anyhow!("indexer port: {e}")))?;
             let advertised = format!("tcp://{}:{}", self.advertise_host, port);
             tracing::info!(
                 bound = %bound,
                 advertised = %advertised,
                 max_seq_len = self.index.max_seq_len(),
                 block_size = self.index.block_size(),
-                "kv-index ingest bound"
+                "indexer ingest bound"
             );
             let _ = self.endpoint.set(advertised);
 
@@ -165,7 +187,7 @@ impl FeatureManager for KvIndexerManager {
         instance_id: InstanceId,
         feature: &'a Feature,
     ) -> BoxFuture<'a, Result<(), FeatureError>> {
-        // The client declares `Feature::KvIndexer` so the hub can reclaim its
+        // The client declares `Feature::Indexer` so the hub can reclaim its
         // index entries on unregister (`on_unregister` → `remove_instance`).
         // The index itself is populated out-of-band via the ZMQ ingest socket,
         // so there is nothing to do here beyond accepting the (empty) payload
@@ -173,22 +195,28 @@ impl FeatureManager for KvIndexerManager {
         // is validated centrally via `RuntimeConfigSummary`.
         Box::pin(async move {
             match feature {
-                Feature::KvIndexer(cfg) => {
+                Feature::Indexer(cfg) => {
                     // Grow the index to fit this registrant's max_seq_len (never
                     // shrinks). Block-size consistency is validated centrally.
                     if let Some(max_seq_len) = cfg.max_seq_len {
                         self.index.grow_to_max_seq_len(max_seq_len);
                     }
+                    // Track the registered (participating) instance so
+                    // `GET /instances` can report it even before it emits any
+                    // KV events.
+                    if let Ok(mut set) = self.instances.write() {
+                        set.insert(instance_id);
+                    }
                     tracing::debug!(
                         instance = %instance_id,
                         max_seq_len = ?cfg.max_seq_len,
                         num_positions = self.index.num_positions(),
-                        "kv-index participation registered"
+                        "indexer participation registered"
                     );
                     Ok(())
                 }
                 _ => Err(FeatureError::KeyMismatch {
-                    manager: FeatureKey::KvIndexer,
+                    manager: FeatureKey::Indexer,
                     payload: feature.key(),
                 }),
             }
@@ -199,6 +227,9 @@ impl FeatureManager for KvIndexerManager {
         // Bridge the registry's velo InstanceId to the u128 the events wire
         // format carries (publishers stamp `velo_id.as_u128()`).
         self.index.remove_instance(instance_id.as_u128());
+        if let Ok(mut set) = self.instances.write() {
+            set.remove(&instance_id);
+        }
     }
 
     fn on_register_any<'a>(
@@ -218,27 +249,32 @@ impl FeatureManager for KvIndexerManager {
     }
 }
 
-fn routes(manager: Arc<KvIndexerManager>) -> Router {
+fn routes(manager: Arc<IndexerManager>) -> Router {
     Router::new()
         .route(protocol::paths::CONFIG, get(get_config))
+        .route(protocol::paths::INSTANCES, get(get_instances))
         .route(protocol::paths::BY_POSITION, get(get_by_position))
         .route(protocol::paths::QUERY, post(post_query))
         .with_state(manager)
 }
 
-async fn get_config(State(mgr): State<Arc<KvIndexerManager>>) -> Json<KvIndexerConfigResponse> {
+async fn get_config(State(mgr): State<Arc<IndexerManager>>) -> Json<IndexerConfigResponse> {
     Json(mgr.config_response())
 }
 
+async fn get_instances(State(mgr): State<Arc<IndexerManager>>) -> Json<InstancesResponse> {
+    Json(mgr.instances_response())
+}
+
 async fn get_by_position(
-    State(mgr): State<Arc<KvIndexerManager>>,
+    State(mgr): State<Arc<IndexerManager>>,
     Path(pos): Path<usize>,
 ) -> Json<ByPositionResponse> {
     Json(mgr.index.by_position(pos))
 }
 
 async fn post_query(
-    State(mgr): State<Arc<KvIndexerManager>>,
+    State(mgr): State<Arc<IndexerManager>>,
     Json(req): Json<QueryRequest>,
 ) -> Json<QueryResponse> {
     Json(QueryResponse {

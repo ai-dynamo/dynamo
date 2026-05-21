@@ -19,10 +19,15 @@ pub use crate::protocol::FeatureConfigRequirements;
 use crate::protocol::{Feature, FeatureKey, PrimaryConfig};
 use crate::registry::PeerRegistry;
 
+/// Client-side per-feature `kvbmctl` CLI surface. Gated behind the `kvbmctl`
+/// feature (it pulls in `clap` usage + the client trait); the default hub build
+/// excludes it.
+#[cfg(feature = "kvbmctl")]
+pub mod cli;
 pub mod conditional_disagg;
 pub mod control_plane;
 pub(crate) mod http;
-pub mod kv_indexer;
+pub mod indexer;
 pub mod p2p;
 
 /// Context handed to a [`FeatureManager`] at hub startup so it can stash any

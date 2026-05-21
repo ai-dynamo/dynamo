@@ -22,7 +22,7 @@ pub async fn run_ingest_loop(
     index: Arc<PositionalIndex>,
     cancel: CancellationToken,
 ) {
-    tracing::info!("kv-index ingest loop started");
+    tracing::info!("indexer ingest loop started");
     loop {
         tokio::select! {
             biased;
@@ -30,25 +30,25 @@ pub async fn run_ingest_loop(
             msg = sub.next() => match msg {
                 Some(Ok(multipart)) => {
                     let Some(payload) = multipart.iter().last() else {
-                        tracing::trace!("kv-index: empty multipart, skipping");
+                        tracing::trace!("indexer: empty multipart, skipping");
                         continue;
                     };
                     match rmp_serde::from_slice::<KvbmCacheEvents>(payload) {
                         Ok(batch) => index.apply(batch),
                         Err(e) => {
-                            tracing::warn!(error = %e, bytes = payload.len(), "kv-index: undecodable batch, dropping");
+                            tracing::warn!(error = %e, bytes = payload.len(), "indexer: undecodable batch, dropping");
                         }
                     }
                 }
                 Some(Err(e)) => {
-                    tracing::warn!(error = %e, "kv-index: ZMQ recv error");
+                    tracing::warn!(error = %e, "indexer: ZMQ recv error");
                 }
                 None => {
-                    tracing::info!("kv-index: SUB stream ended");
+                    tracing::info!("indexer: SUB stream ended");
                     break;
                 }
             },
         }
     }
-    tracing::info!("kv-index ingest loop stopped");
+    tracing::info!("indexer ingest loop stopped");
 }

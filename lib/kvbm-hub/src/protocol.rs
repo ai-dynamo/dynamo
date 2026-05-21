@@ -114,12 +114,6 @@ pub mod paths {
     /// [`kvbm_protocols::control::ResetRequest`] (defaults to "all tiers").
     pub const CONTROL_DEV_RESET: &str = "/v1/instances/{instance_id}/control/dev/reset";
 
-    /// `POST` allocate-and-register one G2 block per requested hash. Module-
-    /// gated on [`kvbm_protocols::control::ModuleId::Test`]. Body:
-    /// [`kvbm_protocols::control::RegisterTestBlocksRequest`].
-    pub const CONTROL_TEST_REGISTER_TEST_BLOCKS: &str =
-        "/v1/instances/{instance_id}/control/test/register_test_blocks";
-
     /// `POST` contiguous-prefix search of the leader's G2 block manager.
     /// Served by `P2pManager` (requires the P2P feature). Body:
     /// [`kvbm_protocols::control::SearchRequest`].
@@ -240,7 +234,7 @@ pub enum Feature {
     /// entries on unregister (TTL or explicit `DELETE`). Carries no payload
     /// today — block-size consistency is validated via [`RuntimeConfigSummary`]
     /// at registration, not a per-feature config.
-    KvIndexer(KvIndexerFeatureConfig),
+    Indexer(IndexerFeatureConfig),
 }
 
 /// Stable discriminant for [`Feature`] — lets managers match by kind
@@ -258,10 +252,10 @@ pub enum FeatureKey {
     ConnectorControl,
     /// Hub-side KV block index. The client publishes block events to the ZMQ
     /// ingest endpoint (advertised in the aggregate config) *and* declares
-    /// [`Feature::KvIndexer`] at registration so the hub reclaims its index
+    /// [`Feature::Indexer`] at registration so the hub reclaims its index
     /// entries on unregister. The manager also contributes axum routes and the
     /// ingest loop.
-    KvIndexer,
+    Indexer,
 }
 
 impl FeatureKey {
@@ -273,7 +267,7 @@ impl FeatureKey {
             FeatureKey::P2P => "p2p",
             FeatureKey::ConditionalDisagg => "conditional_disagg",
             FeatureKey::ConnectorControl => "connector_control",
-            FeatureKey::KvIndexer => "kv_indexer",
+            FeatureKey::Indexer => "indexer",
         }
     }
 
@@ -283,7 +277,7 @@ impl FeatureKey {
             "p2p" => Some(FeatureKey::P2P),
             "conditional_disagg" => Some(FeatureKey::ConditionalDisagg),
             "connector_control" => Some(FeatureKey::ConnectorControl),
-            "kv_indexer" => Some(FeatureKey::KvIndexer),
+            "indexer" => Some(FeatureKey::Indexer),
             _ => None,
         }
     }
@@ -318,7 +312,7 @@ impl<'de> Deserialize<'de> for FeatureKey {
 ///   `advertise_host`): the hub publishes these as defaults for config
 ///   generation (`kvbmctl`) but does not enforce them. `max_seq_len` seeds the
 ///   KV-index's initial capacity and is grown by registrants reporting a larger
-///   value (see [`KvIndexerFeatureConfig`]); it is never a hard match.
+///   value (see [`IndexerFeatureConfig`]); it is never a hard match.
 ///
 /// All sizing fields are `Option` so the library / tests can build a hub that
 /// is not authoritative for a given field (must-match validation is skipped
@@ -399,7 +393,7 @@ pub struct FeatureConfigRequirements {
 /// One feature's contribution to [`HubConfigResponse`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureDescriptor {
-    /// Stable feature key (e.g. `"kv_indexer"`).
+    /// Stable feature key (e.g. `"indexer"`).
     pub key: FeatureKey,
     /// Feature keys this feature depends on (must also be enabled / declared).
     pub dependencies: Vec<FeatureKey>,
@@ -417,12 +411,12 @@ impl Feature {
         match self {
             Feature::P2P(_) => FeatureKey::P2P,
             Feature::ConditionalDisagg(_) => FeatureKey::ConditionalDisagg,
-            Feature::KvIndexer(_) => FeatureKey::KvIndexer,
+            Feature::Indexer(_) => FeatureKey::Indexer,
         }
     }
 }
 
-/// Configuration payload for [`Feature::KvIndexer`].
+/// Configuration payload for [`Feature::Indexer`].
 ///
 /// The connector opts into hub-side indexing (the hub records the registration
 /// so it can reclaim the instance's index entries on unregister) and reports
@@ -431,7 +425,7 @@ impl Feature {
 /// must-match field; block-size consistency is enforced via
 /// [`RuntimeConfigSummary`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KvIndexerFeatureConfig {
+pub struct IndexerFeatureConfig {
     /// The connector's max sequence length (from vLLM `max_model_len`), if
     /// known. When larger than the hub's current index capacity, the hub grows
     /// the index to fit it. `None` leaves capacity unchanged.

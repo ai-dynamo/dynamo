@@ -89,7 +89,7 @@ struct Cli {
     layout: Option<String>,
 
     /// Comma-separated feature set the hub serves — subset of
-    /// `p2p,conditional_disagg,kv_indexer`. Omitted = all. Dependencies are
+    /// `p2p,conditional_disagg,indexer`. Omitted = all. Dependencies are
     /// auto-included (selecting `conditional_disagg` pulls in `p2p`).
     #[arg(long)]
     features: Option<String>,
@@ -132,7 +132,7 @@ struct Cli {
 const SELECTABLE_FEATURES: [FeatureKey; 3] = [
     FeatureKey::P2P,
     FeatureKey::ConditionalDisagg,
-    FeatureKey::KvIndexer,
+    FeatureKey::Indexer,
 ];
 
 /// Parse `--layout` into a [`BlockLayoutMode`].
@@ -267,9 +267,9 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
 
     // KV indexer: resolve sizing from primary; carry ZMQ / advertise overrides.
     // Enabled iff selected in the feature set.
-    if enabled.contains(&FeatureKey::KvIndexer) {
-        let existing = config.kv_indexer.take().unwrap_or_default();
-        config.kv_indexer = Some(kvbm_hub::KvIndexerConfig {
+    if enabled.contains(&FeatureKey::Indexer) {
+        let existing = config.indexer.take().unwrap_or_default();
+        config.indexer = Some(kvbm_hub::IndexerConfig {
             max_seq_len: config.primary.max_seq_len,
             block_size: Some(block_size),
             zmq_bind: cli.kv_index_zmq_bind.clone().or(existing.zmq_bind),
@@ -280,7 +280,7 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
                 .or_else(|| config.primary.advertise_host.clone()),
         });
     } else {
-        config.kv_indexer = None;
+        config.indexer = None;
     }
 
     Ok(ResolvedConfig { config, enabled })
@@ -362,12 +362,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Optional KV indexer feature. `max_seq_len` is the *initial* index
     // capacity (0 = start empty); it grows as registrants report larger values.
-    if let Some(kvi) = &config.kv_indexer {
+    if let Some(kvi) = &config.indexer {
         let max_seq_len = kvi.max_seq_len.unwrap_or(0);
         let block_size = kvi
             .block_size
-            .expect("kv_indexer.block_size resolved by build_config");
-        let manager = kvbm_hub::KvIndexerManager::new(
+            .expect("indexer.block_size resolved by build_config");
+        let manager = kvbm_hub::IndexerManager::new(
             max_seq_len,
             block_size,
             kvi.zmq_bind.clone(),

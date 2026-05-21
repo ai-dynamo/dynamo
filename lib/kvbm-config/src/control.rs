@@ -4,8 +4,8 @@
 //! Configuration for the leader control plane's optional (togglable) modules.
 //!
 //! The leader control plane is served over velo by the engine. `core` and
-//! `transfer` are always on; `dev`, `test`, and `metrics` are opt-in via
-//! this config. When omitted, all default to `false`.
+//! `transfer` are always on; `dev` and `metrics` are opt-in via this config.
+//! When omitted, all default to `false`.
 
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -16,7 +16,6 @@ use validator::Validate;
 /// ```json
 /// {
 ///   "dev": true,
-///   "test": false,
 ///   "metrics": true
 /// }
 /// ```
@@ -26,12 +25,6 @@ pub struct ControlConfig {
     /// enable in production — no warning is logged when enabled.
     #[serde(default)]
     pub dev: bool,
-
-    /// Enable the `test` control module (test-only block helpers). Off by
-    /// default. May be enabled in production, but doing so logs a warning —
-    /// its handlers are not intended for production use.
-    #[serde(default)]
-    pub test: bool,
 
     /// Enable the `metrics` control module (`snapshot`). Off by default. A
     /// small dev/test affordance: lets the hub pull per-pool block populations
@@ -50,16 +43,13 @@ mod tests {
     fn default_is_all_disabled() {
         let cfg = ControlConfig::default();
         assert!(!cfg.dev);
-        assert!(!cfg.test);
         assert!(!cfg.metrics);
     }
 
     #[test]
     fn deserialize_explicit() {
-        let cfg: ControlConfig =
-            serde_json::from_str(r#"{"dev": true, "test": true, "metrics": true}"#).unwrap();
+        let cfg: ControlConfig = serde_json::from_str(r#"{"dev": true, "metrics": true}"#).unwrap();
         assert!(cfg.dev);
-        assert!(cfg.test);
         assert!(cfg.metrics);
     }
 
@@ -67,7 +57,6 @@ mod tests {
     fn deserialize_partial_uses_defaults() {
         let cfg: ControlConfig = serde_json::from_str(r#"{"dev": true}"#).unwrap();
         assert!(cfg.dev);
-        assert!(!cfg.test);
         assert!(!cfg.metrics);
     }
 
@@ -75,7 +64,6 @@ mod tests {
     fn deserialize_empty_uses_full_default() {
         let cfg: ControlConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.dev);
-        assert!(!cfg.test);
         assert!(!cfg.metrics);
     }
 

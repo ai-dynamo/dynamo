@@ -1136,22 +1136,19 @@ impl InstanceLeader {
     ///   the `SessionFactory` lazily from the cell populated by
     ///   [`set_session_factory`](Self::set_session_factory).
     /// - `dev` (opt-in) — `reset`. Safe in production.
-    /// - `test` (opt-in) — `register_test_blocks`. Usable in production but
-    ///   logs a warning when enabled.
     ///
-    /// `dev` / `test` come from `control.dev` / `control.test` in
-    /// `KvbmConfig`. Takes `Arc<Self>` because the `core` / `dev` modules
-    /// hold an `Arc<InstanceLeader>`. The returned [`ControlPlane`] carries
-    /// only introspection metadata; the handlers live on the messenger and
-    /// the modules' captured state outlives the returned handle.
+    /// `dev` comes from `control.dev` in `KvbmConfig`. Takes `Arc<Self>`
+    /// because the `core` / `dev` modules hold an `Arc<InstanceLeader>`. The
+    /// returned [`ControlPlane`] carries only introspection metadata; the
+    /// handlers live on the messenger and the modules' captured state outlives
+    /// the returned handle.
     pub fn register_control_plane(
         self: &Arc<Self>,
         dev: bool,
-        test: bool,
         metrics: bool,
     ) -> Result<Arc<crate::leader::ControlPlane>> {
         use crate::leader::control::{
-            ControlPlane, CoreModule, DevModule, MetricsModule, TestModule, TransferModule,
+            ControlPlane, CoreModule, DevModule, MetricsModule, TransferModule,
         };
 
         let mut builder =
@@ -1161,13 +1158,6 @@ impl InstanceLeader {
 
         if dev {
             builder = builder.with_module(DevModule::new(Arc::clone(self)));
-        }
-        if test {
-            tracing::warn!(
-                "control plane `test` module enabled — exposes test-only handlers; \
-                 not intended for production"
-            );
-            builder = builder.with_module(TestModule::new(self.g2_manager.clone()));
         }
         if metrics {
             match self.observability.as_ref() {
@@ -2526,7 +2516,7 @@ mod tests {
         assert_eq!(d.config.as_ref(), Some(&first));
 
         assert!(leader.set_modules(vec![kvbm_protocols::control::ModuleId::Core]));
-        assert!(!leader.set_modules(vec![kvbm_protocols::control::ModuleId::Test]));
+        assert!(!leader.set_modules(vec![kvbm_protocols::control::ModuleId::Dev]));
         let d2 = leader.describe().await.expect("describe ok");
         assert_eq!(d2.modules, vec![kvbm_protocols::control::ModuleId::Core]);
         Ok(())

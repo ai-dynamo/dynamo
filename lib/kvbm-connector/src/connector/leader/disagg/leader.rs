@@ -24,7 +24,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use kvbm_config::DisaggregationRole;
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggRole, HubClient, HubClientBuilder};
-use url::Url;
 use velo::{InstanceId, Velo};
 
 use crate::BlockId;
@@ -505,20 +504,7 @@ fn role_to_hub(role: DisaggregationRole) -> ConditionalDisaggRole {
 }
 
 pub fn build_hub_client(hub_url: &str) -> Result<Arc<HubClient>> {
-    let url =
-        Url::parse(hub_url).with_context(|| format!("parsing disagg hub_url: {}", hub_url))?;
-    let scheme = url.scheme().to_string();
-    let host = match url.host_str() {
-        Some(h) if !h.is_empty() => h.to_string(),
-        _ => return Err(anyhow!("disagg hub_url has no host: {}", hub_url)),
-    };
-    let discovery_port = url.port_or_known_default().unwrap_or(1337);
-
-    HubClientBuilder::new()
-        .scheme(scheme)
-        .host(host)
-        .discovery_port(discovery_port)
-        .build()
+    HubClientBuilder::from_url(hub_url)?.build()
 }
 
 #[cfg(test)]

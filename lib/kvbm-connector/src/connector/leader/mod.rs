@@ -86,12 +86,12 @@ pub struct ConnectorLeader {
     /// KV-index hub publisher, kept alive for the life of this leader.
     /// Populated in `initialize_async` when `leader.hub` enables the KV-indexer
     /// feature. Dropping it aborts the publish task, so it must be held here.
-    kv_index_publisher: OnceLock<kvbm_logical::events::KvbmCacheEventsPublisher>,
-    /// KV-index hub client, holding the lightweight `Feature::KvIndexer`
+    indexer_publisher: OnceLock<kvbm_logical::events::KvbmCacheEventsPublisher>,
+    /// KV-index hub client, holding the lightweight `Feature::Indexer`
     /// registration alive (RAII `DELETE` on drop → hub reclaims the index
     /// entries). Populated only on the kv-index-only path; the disagg path
-    /// folds KvIndexer into its own registration via `disagg_client`.
-    kv_index_hub_client: OnceLock<Arc<HubClient>>,
+    /// folds Indexer into its own registration via `disagg_client`.
+    indexer_hub_client: OnceLock<Arc<HubClient>>,
     /// Standalone-P2P hub client, holding the `Feature::P2P` registration alive
     /// (RAII `DELETE` on drop). Populated only on the p2p-without-CD path; the
     /// CD path holds its registration via `disagg_client`.
@@ -180,8 +180,8 @@ impl ConnectorLeader {
             pending_intra_pass_g2_blocks: Mutex::new(Vec::new()),
             forward_pass_samples: Mutex::new(None),
             disagg_client: OnceLock::new(),
-            kv_index_publisher: OnceLock::new(),
-            kv_index_hub_client: OnceLock::new(),
+            indexer_publisher: OnceLock::new(),
+            indexer_hub_client: OnceLock::new(),
             p2p_hub_client: OnceLock::new(),
             cd_api: OnceLock::new(),
         }
@@ -189,10 +189,10 @@ impl ConnectorLeader {
 
     /// Store the kv-index-only hub client to keep its registration guard alive
     /// for the life of the leader. Called once from `initialize_async`.
-    pub(crate) fn set_kv_index_hub_client(&self, client: Arc<HubClient>) -> Result<()> {
-        self.kv_index_hub_client
+    pub(crate) fn set_indexer_hub_client(&self, client: Arc<HubClient>) -> Result<()> {
+        self.indexer_hub_client
             .set(client)
-            .map_err(|_| anyhow!("kv_index_hub_client already set"))
+            .map_err(|_| anyhow!("indexer_hub_client already set"))
     }
 
     /// Store the standalone-P2P hub client to keep its registration guard alive
@@ -205,13 +205,13 @@ impl ConnectorLeader {
 
     /// Store the KV-index hub publisher to keep its background task alive.
     /// Called once from `initialize_async`.
-    pub(crate) fn set_kv_index_publisher(
+    pub(crate) fn set_indexer_publisher(
         &self,
         publisher: kvbm_logical::events::KvbmCacheEventsPublisher,
     ) -> Result<()> {
-        self.kv_index_publisher
+        self.indexer_publisher
             .set(publisher)
-            .map_err(|_| anyhow!("kv_index_publisher already set"))
+            .map_err(|_| anyhow!("indexer_publisher already set"))
     }
 
     /// Conditional-disagg dispatcher, populated in `initialize_async` when

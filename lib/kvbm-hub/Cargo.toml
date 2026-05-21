@@ -27,6 +27,13 @@ kvbm-common    = { workspace = true }
 kvbm-protocols = { workspace = true, features = ["client"] }
 kvbm-logical   = { workspace = true }
 dynamo-tokens  = { workspace = true }
+# Used by the `kvbmctl` binary's `render` module to validate the emitted
+# `kv_connector_extra_config` by round-tripping it through the same parser the
+# connector uses. Acyclic (kvbm-config does not depend on kvbm-hub), but it
+# transitively pulls dynamo-memory → cudarc (CUDA), which the CPU-only hub
+# server has no business building — so it is OPTIONAL and gated behind the
+# `kvbmctl` feature. The default hub library + `kvbm_hub` server stay CUDA-free.
+kvbm-config    = { workspace = true, optional = true }
 
 # KV index feature (positional block index + ZMQ event ingest)
 dashmap      = { workspace = true }
@@ -52,6 +59,21 @@ axum       = { workspace = true }
 
 # HTTP client
 reqwest = { workspace = true }
+
+[features]
+# Enables the `kvbmctl` CLI and its `render` module, which validate emitted
+# connector config by round-tripping through `kvbm-config` (pulls CUDA via
+# dynamo-memory). Off by default so the hub server builds CUDA-free.
+default = ["kvbmctl"]
+kvbmctl = ["dep:kvbm-config"]
+
+# The `kvbm_hub` server binary is auto-discovered and needs no features.
+# `kvbmctl` is gated so a default build never pulls `kvbm-config`/CUDA; build it
+# with `cargo run --bin kvbmctl --features kvbmctl`.
+[[bin]]
+name = "kvbmctl"
+path = "src/bin/kvbmctl.rs"
+required-features = ["kvbmctl"]
 
 [dev-dependencies]
 tokio              = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

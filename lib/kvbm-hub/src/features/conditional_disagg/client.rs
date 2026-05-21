@@ -118,7 +118,7 @@ impl ConditionalDisaggClient {
     }
 
     /// Like [`register`](Self::register) but additionally declares
-    /// `extra_features` (e.g. `Feature::KvIndexer`) and an optional must-match
+    /// `extra_features` (e.g. `Feature::Indexer`) and an optional must-match
     /// [`RuntimeConfigSummary`], all in a single `POST /v1/instances`. The
     /// mandatory `P2P` + `ConditionalDisagg` features are always prepended.
     pub async fn register_with(

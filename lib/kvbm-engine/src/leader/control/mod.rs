@@ -10,8 +10,8 @@
 //!
 //! Wiring: an [`InstanceLeader`](crate::leader::InstanceLeader) builds a
 //! [`ControlPlane`] via [`ControlPlane::builder`], attaches the modules it
-//! wants (`core` always, `transfer` always, `tests` under the `testing`
-//! feature), and calls [`ControlPlaneBuilder::register`].
+//! wants (`core` always, `transfer` always, `dev`/`metrics` opt-in), and calls
+//! [`ControlPlaneBuilder::register`].
 
 pub mod core;
 pub mod dev;
@@ -31,7 +31,6 @@ pub use core::CoreModule;
 pub use dev::DevModule;
 pub use module::ControlModule;
 pub use modules::metrics::MetricsModule;
-pub use modules::test::TestModule;
 pub use modules::transfer::TransferModule;
 
 /// A registered leader control plane.

@@ -6,7 +6,7 @@
 # indexer feature. No P/D specialization, no NATS, no consolidator.
 #
 # Flow:
-#   1. Start hub with --kv-index. Wait for /health.
+#   1. Start hub with KVBM_HUB_FEATURES=indexer. Wait for /health.
 #   2. Launch instance A (:8000) and B (:8001), both publishing G2 block
 #      events to the hub. Wait for /v1/models on each.
 #   3. Confirm each connector wired its KV-index publisher (parse logs for
@@ -28,7 +28,7 @@ export KVBM_REPO=$REPO
 HUB_DISC=${KVBM_HUB_DISCOVERY_PORT:-1337}
 HUB_CTRL=${KVBM_HUB_CONTROL_PORT:-8337}
 HUB_BASE="http://127.0.0.1:$HUB_DISC"
-KVI="$HUB_BASE/v1/features/kv-index"
+KVI="$HUB_BASE/v1/features/indexer"
 HUB_READY_TIMEOUT=${KVBM_HUB_READY_TIMEOUT:-300}
 VLLM_READY_TIMEOUT=${KVBM_VLLM_READY_TIMEOUT:-300}
 

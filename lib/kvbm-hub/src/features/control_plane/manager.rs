@@ -31,8 +31,7 @@ use axum::routing::{get, post};
 use futures::future::BoxFuture;
 use kvbm_protocols::control::{
     ControlError, DescribeInstanceRequest, InstanceDescription, LeaderControlClient,
-    MetricsSnapshotRequest, ModuleId, RegisterLeaderRequest, RegisterTestBlocksRequest,
-    ResetRequest,
+    MetricsSnapshotRequest, ModuleId, RegisterLeaderRequest, ResetRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -398,10 +397,6 @@ fn routes(manager: Arc<ControlPlaneManager>) -> Router {
         .route(CONTROL_CORE_REGISTER_LEADER, post(core_register_leader))
         .route(CONTROL_CORE_DESCRIBE_INSTANCE, post(core_describe_instance))
         .route(CONTROL_DEV_RESET, post(dev_reset))
-        .route(
-            CONTROL_TEST_REGISTER_TEST_BLOCKS,
-            post(test_register_test_blocks),
-        )
         // The `/control/transfer/*` routes moved to `P2pManager` — block copy
         // is a P2P concern, so the transfer surface only exists when the P2P
         // feature is enabled.
@@ -484,25 +479,6 @@ async fn dev_reset(
     match client.dev().reset(req).await {
         Ok(resp) => ok_response(&resp),
         Err(err) => control_error_response(instance_id, "reset", err),
-    }
-}
-
-/// `POST /control/test/register_test_blocks` — gated on [`ModuleId::Test`].
-async fn test_register_test_blocks(
-    State(mgr): State<Arc<ControlPlaneManager>>,
-    Path(instance_id): Path<InstanceId>,
-    Json(req): Json<RegisterTestBlocksRequest>,
-) -> Response {
-    if let Some(resp) = gate(&mgr, instance_id, ModuleId::Test) {
-        return resp;
-    }
-    let client = match leader_client(&mgr, instance_id) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    match client.test().register_test_blocks(req).await {
-        Ok(resp) => ok_response(&resp),
-        Err(err) => control_error_response(instance_id, "register_test_blocks", err),
     }
 }
 
