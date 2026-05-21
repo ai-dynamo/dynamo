@@ -347,7 +347,6 @@ impl ModelRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::WorkerConfigLike;
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
     // `#[serial_test::serial]` (serialize against every other env-touching test in the
@@ -485,15 +484,16 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_rejects_invalid_kv_transfer_enforcement() {
-        let json = r#"{"kv_transfer_enforcement":"fallback"}"#;
-        assert!(serde_json::from_str::<ModelRuntimeConfig>(json).is_err());
-    }
-
-    #[test]
-    fn test_serde_rejects_out_of_range_kv_transfer_preferred_weight() {
-        let json = r#"{"kv_transfer_preferred_weight":1.1}"#;
-        assert!(serde_json::from_str::<ModelRuntimeConfig>(json).is_err());
+    fn test_serde_rejects_invalid_kv_transfer_fields() {
+        for json in [
+            r#"{"kv_transfer_enforcement":"fallback"}"#,
+            r#"{"kv_transfer_preferred_weight":1.1}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ModelRuntimeConfig>(json).is_err(),
+                "{json} should fail"
+            );
+        }
     }
 
     #[test]
