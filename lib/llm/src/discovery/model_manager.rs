@@ -25,6 +25,7 @@ use crate::{
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     types::{
+        RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
@@ -250,6 +251,14 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_realtime_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_realtime_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_prefill_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -326,6 +335,16 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
+    }
+
+    pub fn get_realtime_engine(
+        &self,
+        model: &str,
+    ) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_realtime_engine()
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -515,6 +534,27 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_realtime_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: RealtimeBidirectionalEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_realtime_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_realtime_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.realtime_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -582,6 +622,13 @@ impl ModelManager {
 
     pub fn remove_videos_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_videos_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_realtime_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_realtime_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
@@ -1151,6 +1198,45 @@ mod tests {
     fn test_model_display_names_empty() {
         let mm = ModelManager::new();
         assert!(mm.model_display_names().is_empty());
+    }
+
+    #[test]
+    fn test_add_get_remove_realtime_model_round_trip() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+
+        mm.add_realtime_model("rt-echo", "0", engine.clone())
+            .unwrap();
+        assert!(mm.list_realtime_models().contains(&"rt-echo".to_string()));
+        assert!(mm.get_realtime_engine("rt-echo").is_ok());
+
+        mm.remove_realtime_model("rt-echo").unwrap();
+        assert!(!mm.list_realtime_models().contains(&"rt-echo".to_string()));
+        assert!(matches!(
+            mm.get_realtime_engine("rt-echo"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_add_realtime_model_duplicate() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+        mm.add_realtime_model("rt-echo", "0", engine.clone())
+            .unwrap();
+        assert!(matches!(
+            mm.add_realtime_model("rt-echo", "0", engine),
+            Err(ModelManagerError::ModelAlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn test_get_realtime_engine_missing() {
+        let mm = ModelManager::new();
+        assert!(matches!(
+            mm.get_realtime_engine("does-not-exist"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
     }
 
     #[test]

@@ -156,7 +156,9 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),  # actual profiled peak with kv-tokens
+            pytest.mark.profiled_vram_gib(
+                13.0
+            ),  # observed ~12.1 GiB with kv-tokens; rounded up
             pytest.mark.requested_sglang_kv_tokens(
                 37472
             ),  # KV cache cap (2x safety over min=18736)
@@ -200,7 +202,7 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.profiled_vram_gib(13.0),
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(420),
             pytest.mark.post_merge,
@@ -226,7 +228,7 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.profiled_vram_gib(13.0),
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(420),
             pytest.mark.post_merge,
@@ -600,6 +602,15 @@ sglang_configs = {
                 ],
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
+            ),
+            # Test `dimensions` truncation (Matryoshka). Qwen3-Embedding-4B
+            # has a hidden dim well above 128, so the truncated vector should
+            # be exactly 128 floats long.
+            embedding_payload(
+                input_text="Hello, world!",
+                repeat_count=1,
+                expected_response=["Generated 1 embeddings with dimension 128"],
+                extra_body={"dimensions": 128},
             ),
         ],
     ),

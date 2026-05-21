@@ -150,10 +150,10 @@ impl TreeSizeTestIndexer {
                 let _ = index.apply_event(event);
             }
             Self::Concurrent(index) => {
-                index.apply_event(event).await;
+                KvIndexerInterface::apply_event(index, event).await;
             }
             Self::ConcurrentCompressed(index) => {
-                index.apply_event(event).await;
+                KvIndexerInterface::apply_event(index, event).await;
             }
         }
     }
@@ -238,9 +238,11 @@ impl TreeSizeTestIndexer {
     async fn snapshot_tree(&self) -> Vec<RouterEvent> {
         match self {
             Self::Single(index) => snapshot_events(index.dump_tree_as_events()),
-            Self::Concurrent(index) => snapshot_events(index.dump_events().await.unwrap()),
+            Self::Concurrent(index) => {
+                snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
+            }
             Self::ConcurrentCompressed(index) => {
-                snapshot_events(index.dump_events().await.unwrap())
+                snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
             }
         }
     }
