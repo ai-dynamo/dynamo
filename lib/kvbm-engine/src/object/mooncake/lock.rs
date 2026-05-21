@@ -39,9 +39,7 @@ impl ObjectLockManager for MooncakeLockManager {
     /// treating a failed check as "not found" may cause redundant work but
     /// cannot cause data corruption. Propagating errors would block the
     /// offload pipeline for all blocks during temporary outages.
-    fn has_meta(
-        &self, hash: SequenceHash
-    ) -> BoxFuture<'static, Result<bool>> {
+    fn has_meta(&self, hash: SequenceHash) -> BoxFuture<'static, Result<bool>> {
         let store = self.client.store.clone();
         let key = format!("{}.meta", self.client.format_key(&hash));
 
@@ -56,29 +54,24 @@ impl ObjectLockManager for MooncakeLockManager {
         })
     }
 
-    fn try_acquire_lock(
-        &self, _hash: SequenceHash
-    ) -> BoxFuture<'static, Result<bool>> {
+    fn try_acquire_lock(&self, _hash: SequenceHash) -> BoxFuture<'static, Result<bool>> {
         // Optimistic lock: always succeed.
         Box::pin(async { Ok(true) })
     }
 
-    fn create_meta(
-        &self, hash: SequenceHash
-    ) -> BoxFuture<'static, Result<()>> {
+    fn create_meta(&self, hash: SequenceHash) -> BoxFuture<'static, Result<()>> {
         let store = self.client.store.clone();
         let key = format!("{}.meta", self.client.format_key(&hash));
 
         Box::pin(async move {
-            store.put(&key, b"1", None)
+            store
+                .put(&key, b"1", None)
                 .map_err(|e| anyhow::anyhow!("failed to create meta: {}", e))?;
             Ok(())
         })
     }
 
-    fn release_lock(
-        &self, _hash: SequenceHash
-    ) -> BoxFuture<'static, Result<()>> {
+    fn release_lock(&self, _hash: SequenceHash) -> BoxFuture<'static, Result<()>> {
         // Nothing to release for optimistic locking.
         Box::pin(async { Ok(()) })
     }

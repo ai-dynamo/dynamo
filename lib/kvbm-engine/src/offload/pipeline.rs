@@ -2280,4 +2280,105 @@ mod tests {
         assert_eq!(handle_b.completed_blocks(), vec![300, 400]);
         assert!(handle_b.failed_blocks().is_empty());
     }
+
+    /// Verify that KvCacheEvent::Create is emitted for successful hashes
+    /// but NOT for failed hashes in the partial-failure path.
+    #[tokio::test]
+    async fn test_execute_transfer_emits_events_for_successful_hashes() {
+        use crate::offload::handle::{TransferState, TransferStatus};
+
+        let hash_ok_1 = test_hash(10);
+        let hash_fail = test_hash(20);
+        let hash_ok_2 = test_hash(30);
+
+        let fail_hashes = [hash_fail].into_iter().collect();
+        let object_ops: Arc<dyn crate::object::ObjectBlockOps> =
+            Arc::new(FailableObjectBlockOps { fail_hashes });
+
+        let (sender, mut receiver) = tokio::sync::broadcast::channel::<KvCacheEvent>(16);
+
+        let shared = SharedObjectExecutorState {
+            object_ops,
+            src_layout: LogicalLayoutHandle::G2,
+            skip_transfers: false,
+            lock_manager: None,
+            event_sender: Some(sender.clone()),
+        };
+
+        let transfer_id = crate::offload::handle::TransferId::new();
+        let (mut state, handle) = TransferState::new(transfer_id, vec![100, 200, 300]);
+        state.add_passed(vec![100, 200, 300]);
+        state.mark_in_flight(vec![100, 200, 300]);
+        let state_arc = Arc::new(std::sync::Mutex::new(state));
+
+        let blocks = vec![
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 100,
+                sequence_hash: hash_ok_1,
+                guard: None,
+                state: state_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 200,
+                sequence_hash: hash_fail,
+                guard: None,
+                state: state_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 300,
+                sequence_hash: hash_ok_2,
+                guard: None,
+                state: state_arc.clone(),
+            },
+        ];
+
+        let mut timing = TimingTrace::new();
+        timing.mark_policy_complete();
+        timing.mark_precondition_complete();
+
+        let batch = ResolvedBatch {
+            blocks,
+            evicted: Vec::new(),
+            timing,
+        };
+
+        ObjectTransferExecutor::<crate::G2>::execute_transfer(&shared, batch)
+            .await
+            .expect("execute_transfer should succeed");
+
+        // Collect all received events
+        let mut received_hashes: Vec<crate::SequenceHash> = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let KvCacheEvent::Create(hash) = event {
+                received_hashes.push(hash);
+            }
+        }
+
+        // hash_ok_1 and hash_ok_2 should be in received events
+        assert!(
+            received_hashes.contains(&hash_ok_1),
+            "hash_ok_1 should be in received events, got {:?}",
+            received_hashes
+        );
+        assert!(
+            received_hashes.contains(&hash_ok_2),
+            "hash_ok_2 should be in received events, got {:?}",
+            received_hashes
+        );
+        // hash_fail should NOT be in received events
+        assert!(
+            !received_hashes.contains(&hash_fail),
+            "hash_fail should NOT be in received events, got {:?}",
+            received_hashes
+        );
+
+        // Verify transfer state is still correct
+        let state_guard = state_arc.lock().unwrap();
+        assert_eq!(state_guard.completed, vec![100, 300]);
+        assert_eq!(state_guard.failed, vec![200]);
+        drop(state_guard);
+    }
 }
