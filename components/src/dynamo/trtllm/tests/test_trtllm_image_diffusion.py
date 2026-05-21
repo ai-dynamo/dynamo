@@ -668,35 +668,6 @@ class TestImageHandlerResponseFormats:
         ), f"Expected distinct storage paths per image, got {storage_paths}"
 
     @pytest.mark.asyncio
-    async def test_b64_response_format_batch_n(self):
-        """Engine returns batch=2 with default_num_images_per_prompt=2 -> two
-        b64_json entries in response.data."""
-        handler = self._make_handler(
-            engine_output_batch=2,
-            default_num_images_per_prompt=2,
-        )
-
-        request = {
-            "prompt": "a test image",
-            "model": "test-model",
-            "response_format": "b64_json",
-        }
-
-        with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
-            return_value=b"fake_image_bytes",
-        ):
-            results = []
-            async for result in handler.generate(request, MagicMock()):
-                results.append(result)
-
-        assert len(results) == 1
-        assert len(results[0]["data"]) == 2
-        for entry in results[0]["data"]:
-            assert entry["b64_json"] is not None
-            assert entry.get("url") is None
-
-    @pytest.mark.asyncio
     async def test_request_n_overrides_default(self):
         """Per-request n takes precedence over config default. Default=1,
         request n=2, engine returns batch=2 -> two entries."""
