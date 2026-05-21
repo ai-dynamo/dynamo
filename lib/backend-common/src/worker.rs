@@ -394,6 +394,22 @@ impl Worker {
             return Ok(());
         }
 
+        self.engine
+            .start_kv_events(endpoint.clone(), &engine_config)
+            .await?;
+        tracing::debug!("engine.start_kv_events() complete");
+
+        // Mid-KV-event setup signal: the engine and optional KV relays are
+        // initialized, so use the orchestrator path to drain and clean up
+        // while the distributed runtime is still alive.
+        if shutdown.is_cancelled() {
+            tracing::info!(
+                "Shutdown signal observed during engine.start_kv_events(); running orchestrator"
+            );
+            self.orchestrator_steps(&endpoint).await;
+            return Ok(());
+        }
+
         self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
             .await
     }

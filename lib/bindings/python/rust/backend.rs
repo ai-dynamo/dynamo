@@ -34,6 +34,7 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 
+use crate::Endpoint;
 use crate::ModelInput;
 use crate::context::Context as PyContext;
 use crate::errors::py_exception_to_backend_error;
@@ -591,6 +592,48 @@ impl LLMEngine for PyLLMEngine {
             })
         })
         .map_err(py_err_to_dynamo)
+    }
+
+    async fn start_kv_events(
+        &self,
+        endpoint: dynamo_runtime::component::Endpoint,
+        engine_config: &RsEngineConfig,
+    ) -> Result<(), DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let engine_config = engine_config.clone();
+
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let py_endpoint = Py::new(
+                    py,
+                    Endpoint {
+                        inner: endpoint,
+                        event_loop: event_loop.as_ref().clone_ref(py),
+                    },
+                )?;
+                let py_engine_config = Py::new(
+                    py,
+                    EngineConfig {
+                        inner: engine_config,
+                    },
+                )?;
+                let bound = engine.bind(py);
+                let coroutine =
+                    bound.call_method1("start_kv_events", (py_endpoint, py_engine_config))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("offload error: {e}"))
+        })
+        .map_err(py_err_to_dynamo)?
+        .map_err(py_err_to_dynamo)?;
+
+        py_future.await.map_err(py_err_to_dynamo)?;
+        Ok(())
     }
 
     async fn generate(

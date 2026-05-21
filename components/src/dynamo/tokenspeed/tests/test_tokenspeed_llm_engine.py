@@ -1,13 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.backend.engine import EngineConfig
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.tokenspeed.args import kv_events_enabled
 from dynamo.tokenspeed.llm_engine import (
+    TokenspeedLLMEngine,
     _completion_delta_output,
+    _local_dp_rank_range,
+    _offset_zmq_endpoint_port,
     _validate_single_choice_sampling,
     build_sampling_params,
     convert_output_to_chunk,
@@ -209,3 +216,80 @@ def test_completion_delta_output_preserves_later_token_delta():
 
     assert emitted == 2
     assert delta_out["output_ids"] == [100]
+
+
+def test_kv_events_enabled_requires_enabled_non_null_publisher():
+    assert kv_events_enabled('{"enable_kv_cache_events": true}')
+    assert kv_events_enabled('{"publisher": "zmq", "enable_kv_cache_events": true}')
+    assert not kv_events_enabled(
+        '{"publisher": "null", "enable_kv_cache_events": true}'
+    )
+    assert not kv_events_enabled('{"enable_kv_cache_events": false}')
+
+
+def test_local_dp_rank_range_matches_tokenspeed_node_partitioning():
+    server_args = SimpleNamespace(
+        mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=4), nnodes=2),
+        node_rank=1,
+    )
+
+    assert list(_local_dp_rank_range(server_args)) == [2, 3]
+
+
+def test_offset_zmq_endpoint_port_matches_tokenspeed():
+    assert _offset_zmq_endpoint_port("tcp://*:5557", 0) == "tcp://*:5557"
+    assert _offset_zmq_endpoint_port("tcp://*:5557", 2) == "tcp://*:5559"
+    assert (
+        _offset_zmq_endpoint_port("inproc://kv-events", 2) == "inproc://kv-events_dp2"
+    )
+
+
+def test_start_kv_events_subscribes_to_tokenspeed_zmq_ports(monkeypatch):
+    created = []
+
+    class FakeKvEventPublisher:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(
+        "dynamo.tokenspeed.llm_engine._kv_event_publisher_cls",
+        lambda: FakeKvEventPublisher,
+    )
+    monkeypatch.setattr(
+        "dynamo.tokenspeed.llm_engine._assert_tokenspeed_kv_events_supported",
+        lambda: None,
+    )
+
+    server_args = SimpleNamespace(
+        kv_events_config=(
+            '{"publisher":"zmq","endpoint":"tcp://*:5557",'
+            '"enable_kv_cache_events":true}'
+        ),
+        block_size=64,
+        enable_prefix_caching=True,
+        mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=2), nnodes=1),
+        node_rank=0,
+    )
+    engine = TokenspeedLLMEngine(
+        server_args,
+        dynamo_config=SimpleNamespace(enable_local_indexer=True),
+    )
+
+    asyncio.run(
+        engine.start_kv_events(
+            endpoint="generate-endpoint",
+            engine_config=EngineConfig(model="m", kv_cache_block_size=64),
+        )
+    )
+
+    assert [item["dp_rank"] for item in created] == [0, 1]
+    assert [item["zmq_endpoint"] for item in created] == [
+        "tcp://127.0.0.1:5557",
+        "tcp://127.0.0.1:5558",
+    ]
+    assert all(item["endpoint"] == "generate-endpoint" for item in created)
+    assert all(item["kv_block_size"] == 64 for item in created)
+    assert all(item["enable_local_indexer"] is True for item in created)

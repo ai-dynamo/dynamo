@@ -13,6 +13,8 @@ from dynamo._core import Context
 from .publisher import KvEventSource, SnapshotSource
 
 if TYPE_CHECKING:
+    from dynamo.runtime import Endpoint
+
     from .worker import WorkerConfig
 
 
@@ -159,6 +161,17 @@ class LLMEngine(ABC):
         """
         ...
         yield  # type: ignore[misc]
+
+    async def start_kv_events(
+        self, endpoint: "Endpoint", engine_config: EngineConfig
+    ) -> None:
+        """Start optional backend-specific KV event relays.
+
+        Backends that publish native KV cache events over a side channel can
+        override this hook once the Dynamo endpoint exists. The default keeps
+        unified backends that do not support KV events unchanged.
+        """
+        return None
 
     async def abort(self, context: Context) -> None:
         """Abort an in-flight request (optional, default no-op).

@@ -193,6 +193,21 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// endpoint serving.
     async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
 
+    /// Start optional backend-specific KV event relays.
+    ///
+    /// Called after [`LLMEngine::start`] returns and after the Dynamo endpoint
+    /// has been constructed, but before the model is registered and request
+    /// serving begins. Backends that receive native KV cache events over a
+    /// side channel can override this hook to attach a relay to the worker's
+    /// endpoint. The default is a no-op for engines without KV event support.
+    async fn start_kv_events(
+        &self,
+        _endpoint: dynamo_runtime::component::Endpoint,
+        _engine_config: &EngineConfig,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
     /// Yield streaming response chunks for a single request.
     ///
     /// Called concurrently for multiple in-flight requests. The returned
