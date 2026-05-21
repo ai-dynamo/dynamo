@@ -40,8 +40,7 @@ use kvbm_protocols::control::modules::transfer::{
 use super::InstanceLeader;
 use super::discovery::RemoteDiscoveryHandle;
 use super::onboarding::OnboardingStatus;
-use super::session::SessionId;
-use super::types::MatchBreakdown;
+use super::types::{MatchBreakdown, SessionId};
 use crate::{G2, InstanceId, SequenceHash};
 
 /// Wall-clock bound on the whole remote-search attempt. Sized to the holder's

@@ -11,8 +11,10 @@ use std::sync::Arc;
 use crate::{G2, G3};
 use kvbm_logical::blocks::ImmutableBlock;
 
-use super::onboarding::{OnboardingStatus, SessionHandle};
-use super::session::SessionId;
+use super::onboarding::OnboardingStatus;
+
+/// Unique identifier for a find/onboarding session.
+pub type SessionId = uuid::Uuid;
 
 /// Staging mode for matched blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -166,7 +168,6 @@ pub struct AsyncSessionResult {
     status_rx: watch::Receiver<OnboardingStatus>,
     blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
     match_breakdown: Arc<Mutex<MatchBreakdown>>,
-    session_handle: Option<SessionHandle>,
 }
 
 impl AsyncSessionResult {
@@ -176,14 +177,12 @@ impl AsyncSessionResult {
         status_rx: watch::Receiver<OnboardingStatus>,
         blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
         match_breakdown: Arc<Mutex<MatchBreakdown>>,
-        session_handle: Option<SessionHandle>,
     ) -> Self {
         Self {
             session_id,
             status_rx,
             blocks,
             match_breakdown,
-            session_handle,
         }
     }
 
@@ -195,13 +194,6 @@ impl AsyncSessionResult {
     /// Get the current status of the onboarding operation.
     pub fn status(&self) -> OnboardingStatus {
         self.status_rx.borrow().clone()
-    }
-
-    /// Get session handle for deferred operations (Hold/Prepare modes only).
-    ///
-    /// Returns None for StagingMode::Full.
-    pub fn session_handle(&self) -> Option<&SessionHandle> {
-        self.session_handle.as_ref()
     }
 
     /// Non-blocking check if blocks are available.

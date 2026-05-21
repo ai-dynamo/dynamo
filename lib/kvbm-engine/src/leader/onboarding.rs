@@ -1,12 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
-use tokio::sync::mpsc;
-
-use super::session::SessionId;
-use super::types::StagingMode;
-
 /// Status of an onboarding operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnboardingStatus {
@@ -63,93 +57,4 @@ pub enum OnboardingStatus {
     /// Or terminal state for Hold/Prepare modes.
     /// - `matched`: total number of blocks in local G2
     Complete { matched_blocks: usize },
-}
-
-/// Control commands for managing live sessions.
-#[derive(Debug)]
-pub(crate) enum SessionControl {
-    /// Trigger prepare operation (Hold → Prepare): stage all G3→G2
-    Prepare,
-
-    /// Trigger pull operation (Prepare → Full): RDMA pull remote G2→local G2
-    Pull,
-
-    /// Cancel session and release all blocks
-    Cancel,
-
-    /// Shutdown session (normal completion)
-    Shutdown,
-}
-
-/// Handle to a live onboarding session for deferred operations.
-///
-/// Only available for StagingMode::Hold and StagingMode::Prepare.
-#[derive(Debug)]
-pub struct SessionHandle {
-    session_id: SessionId,
-    mode: StagingMode,
-    control_tx: mpsc::Sender<SessionControl>,
-}
-
-impl SessionHandle {
-    pub(crate) fn new(
-        session_id: SessionId,
-        mode: StagingMode,
-        control_tx: mpsc::Sender<SessionControl>,
-    ) -> Self {
-        Self {
-            session_id,
-            mode,
-            control_tx,
-        }
-    }
-
-    /// Get the session ID.
-    pub fn session_id(&self) -> SessionId {
-        self.session_id
-    }
-
-    /// Get the current staging mode.
-    pub fn mode(&self) -> StagingMode {
-        self.mode
-    }
-
-    /// Trigger G3→G2 staging on all instances (Hold → Prepare).
-    ///
-    /// The server validates that the session is in Hold mode before processing.
-    /// After this completes, the session transitions to Prepare mode internally.
-    pub async fn prepare(&self) -> Result<()> {
-        self.control_tx
-            .send(SessionControl::Prepare)
-            .await
-            .map_err(|_| anyhow::anyhow!("session task has exited"))
-    }
-
-    /// Trigger RDMA pull from remote G2→local G2 (Prepare → Complete).
-    ///
-    /// The server validates that the session is in Prepare mode before processing.
-    /// After this completes, the session transitions to Complete status.
-    pub async fn pull(&self) -> Result<()> {
-        self.control_tx
-            .send(SessionControl::Pull)
-            .await
-            .map_err(|_| anyhow::anyhow!("session task has exited"))
-    }
-
-    /// Cancel session and release all held blocks.
-    pub async fn cancel(&self) -> Result<()> {
-        self.control_tx
-            .send(SessionControl::Cancel)
-            .await
-            .map_err(|_| anyhow::anyhow!("session task has exited"))
-    }
-
-    /// Shutdown session (used internally).
-    #[expect(dead_code)]
-    pub(crate) async fn shutdown(&self) -> Result<()> {
-        self.control_tx
-            .send(SessionControl::Shutdown)
-            .await
-            .map_err(|_| anyhow::anyhow!("session task has exited"))
-    }
 }
