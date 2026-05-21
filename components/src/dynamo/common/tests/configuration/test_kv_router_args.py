@@ -347,7 +347,10 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
 
 
 def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
-    config = KvRouterConfigBase.from_cli_args(argparse.Namespace())
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
     config.router_queue_by_incoming_missing_isl = [(0, 2048), (2048, 512)]
 
     kwargs = config.kv_router_kwargs()
@@ -356,7 +359,10 @@ def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
 
 
 def test_kv_router_kwargs_uses_unbounded_queue_cap_by_default() -> None:
-    config = KvRouterConfigBase.from_cli_args(argparse.Namespace())
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
 
     kwargs = config.kv_router_kwargs()
 
