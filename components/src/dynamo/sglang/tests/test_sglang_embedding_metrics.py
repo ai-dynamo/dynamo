@@ -6,6 +6,7 @@
 import pytest
 from prometheus_client import CollectorRegistry
 
+from dynamo.sglang.request_handlers.embedding import embedding_handler as eh
 from dynamo.sglang.request_handlers.embedding.metrics import (
     init_embedding_metrics,
     observe_embedding_batch_size,
@@ -149,8 +150,6 @@ def test_observers_noop_before_init_embedding_metrics():
 def test_handler_observes_metrics_via_transform_response(monkeypatch):
     """Integration-light test: spy on the observe functions to confirm
     the handler actually calls them from ``_transform_response``."""
-    from dynamo.sglang.request_handlers.embedding import embedding_handler as eh
-
     # Use a mock for the BaseWorkerHandler superclass init to avoid pulling in
     # the engine-level state.
     monkeypatch.setattr(
@@ -192,8 +191,6 @@ def test_handler_observes_metrics_via_transform_response(monkeypatch):
 
 def test_metric_failure_does_not_break_transform_response(monkeypatch):
     """If a metric observe call throws, the request must still succeed."""
-    from dynamo.sglang.request_handlers.embedding import embedding_handler as eh
-
     monkeypatch.setattr(
         "dynamo.sglang.request_handlers.handler_base.BaseWorkerHandler.__init__",
         lambda self, *a, **kw: None,
