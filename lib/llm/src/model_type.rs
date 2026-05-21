@@ -29,9 +29,9 @@ bitflags! {
     ///
     /// Using bitflags avoids deep branching on a single enum variant,
     /// simplifies checks like `supports_chat()`, and enables efficient,
-    /// type-safe combinations of multiple endpoint types within a single byte.
+    /// type-safe combinations of multiple endpoint types.
     #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
-    pub struct ModelType: u8 {
+    pub struct ModelType: u16 {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
         const Embedding = 1 << 2;
@@ -40,6 +40,7 @@ bitflags! {
         const Images = 1 << 5;
         const Audios = 1 << 6;
         const Videos = 1 << 7;
+        const Realtime = 1 << 8;
     }
 }
 
@@ -72,6 +73,9 @@ impl ModelType {
     pub fn supports_videos(&self) -> bool {
         self.contains(ModelType::Videos)
     }
+    pub fn supports_realtime(&self) -> bool {
+        self.contains(ModelType::Realtime)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -98,6 +102,9 @@ impl ModelType {
         }
         if self.supports_videos() {
             result.push("videos");
+        }
+        if self.supports_realtime() {
+            result.push("realtime");
         }
         result
     }
@@ -129,6 +136,9 @@ impl ModelType {
         }
         if self.supports_videos() {
             result.push(ModelType::Videos);
+        }
+        if self.supports_realtime() {
+            result.push(ModelType::Realtime);
         }
         result
     }
@@ -163,6 +173,9 @@ impl ModelType {
         if self.contains(Self::Videos) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Videos);
         }
+        if self.contains(Self::Realtime) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Realtime);
+        }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
         // server that uses it.
@@ -194,5 +207,53 @@ impl ModelInput {
             Self::Tokens => "tokens",
             Self::Tensor => "tensor",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoint_type::EndpointType;
+
+    #[test]
+    fn realtime_bit_position() {
+        assert_eq!(ModelType::Realtime.bits(), 1 << 8);
+    }
+
+    #[test]
+    fn prefill_bit_position_unchanged() {
+        assert_eq!(ModelType::Prefill.bits(), 1 << 4);
+    }
+
+    #[test]
+    fn realtime_supports_realtime() {
+        assert!(ModelType::Realtime.supports_realtime());
+        assert!(!ModelType::Chat.supports_realtime());
+    }
+
+    #[test]
+    fn realtime_in_as_vec() {
+        assert_eq!(ModelType::Realtime.as_vec(), vec!["realtime"]);
+    }
+
+    #[test]
+    fn realtime_in_units() {
+        let combined = ModelType::Chat | ModelType::Realtime;
+        assert_eq!(combined.units(), vec![ModelType::Chat, ModelType::Realtime]);
+    }
+
+    #[test]
+    fn realtime_endpoint_mapping() {
+        assert_eq!(
+            ModelType::Realtime.as_endpoint_types(),
+            vec![EndpointType::Realtime]
+        );
+    }
+
+    #[test]
+    fn realtime_combines_with_other_endpoints() {
+        let endpoints = (ModelType::Chat | ModelType::Realtime).as_endpoint_types();
+        assert!(endpoints.contains(&EndpointType::Chat));
+        assert!(endpoints.contains(&EndpointType::Realtime));
     }
 }

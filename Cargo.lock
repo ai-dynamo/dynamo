@@ -2341,6 +2341,8 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "opentelemetry",
+ "parking_lot",
+ "prometheus",
  "serde",
  "serde_json",
  "tokio",
