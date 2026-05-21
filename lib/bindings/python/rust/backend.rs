@@ -417,6 +417,33 @@ impl Worker {
                 })
                 .map_err(to_pyerr)?;
 
+            // Initialize logging now that tokio context is available. Mirrors
+            // the DistributedRuntime init path — required so workers using
+            // `dynamo.common.backend.Worker` directly (without constructing a
+            // DistributedRuntime first) install the tracing + OTLP exporter
+            // layers. Without this, OTEL_EXPORT_ENABLED workers emit no
+            // logs and no spans.
+            if dynamo_runtime::config::env_is_truthy(
+                dynamo_runtime::config::environment_names::logging::otlp::OTEL_EXPORT_ENABLED,
+            ) {
+                rs::logging::init();
+                // Runtime canary: if a future refactor drops or breaks the
+                // init above, this loud stderr message fires once per worker
+                // startup so operators discover the regression without
+                // needing to chase silent missing-spans symptoms. We use
+                // `eprintln!` (not tracing::warn!) deliberately — a missing
+                // subscriber means tracing calls are silent no-ops, so the
+                // signal MUST bypass tracing.
+                if !tracing::dispatcher::has_been_set() {
+                    eprintln!(
+                        "ERROR: OTEL_EXPORT_ENABLED=1 but no tracing subscriber \
+                         installed after `Worker::run` init. Worker telemetry \
+                         (spans, logs) will be SILENT — check the conditional \
+                         `rs::logging::init()` call in `Worker::run`."
+                    );
+                }
+            }
+
             let py_engine = PyLLMEngine::new(engine, event_loop);
             let worker = RsWorker::new(Arc::new(py_engine), config);
 
@@ -593,6 +620,26 @@ impl LLMEngine for PyLLMEngine {
 
         let first_token = ctx.first_token_sender().cloned();
         let inner_ctx = ctx.inner_arc();
+        // **Invariant**: `tracing::Span::current()` here MUST be the
+        // `engine.generate` span opened by `EngineAdapter::generate`. The
+        // capture must happen BEFORE `spawn_blocking` because inside the
+        // blocking closure, `Span::current()` is the worker-thread root,
+        // not the auto-span.
+        //
+        // If anyone refactors this dispatch (extra task hop, different
+        // scheduler), they must re-verify the captured span. `Context`
+        // stores this span and routes engine telemetry calls to it via
+        // `current_span` / `start_span` — wrong span = wrong attributes
+        // silently. See the `auto_span_records_*` tests in
+        // `lib/backend-common/src/adapter.rs` for the assertions that depend
+        // on this invariant.
+        debug_assert_eq!(
+            tracing::Span::current().metadata().map(|m| m.name()),
+            Some("engine.generate"),
+            "Span::current() must be engine.generate at PyLLMEngine boundary; \
+             a dispatch refactor likely broke the capture point"
+        );
+        let engine_span = tracing::Span::current();
 
         // Pythonize the request, call generate(request, context=ctx), and
         // turn the resulting Python async generator into a Rust stream.
@@ -606,7 +653,8 @@ impl LLMEngine for PyLLMEngine {
                         trace_context,
                         first_token,
                         ctx.metadata().clone(),
-                    ),
+                    )
+                    .with_span(engine_span),
                 )?;
 
                 let kwargs = PyDict::new(py);

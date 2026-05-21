@@ -33,7 +33,7 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
-async def parse_tool_call(
+async def parse_tool_calls_batch(
     parser_name: str,
     message: str,
     tools_json: Optional[str] = None,
@@ -55,6 +55,26 @@ async def parse_tool_call(
 
     Raises:
         ValueError on parser failure or malformed `tools_json`.
+    """
+    ...
+
+async def parse_tool_calls_stream(
+    parser_name: str,
+    chunks_json: str,
+    tools_json: Optional[str] = None,
+) -> str:
+    """Parse streamed tool-call chunks using the specified parser.
+
+    Args:
+        parser_name: Parser name (e.g. "kimi_k2"). Empty string falls back to default.
+        chunks_json: JSON-serialized list of chunks with `delta_text` and optional `finish_reason`.
+        tools_json: Optional JSON-serialized list of tool definitions.
+
+    Returns:
+        JSON-serialized string `{"calls": [{"name", "arguments"}], "normal_text": str}`.
+
+    Raises:
+        ValueError on parser failure or malformed JSON.
     """
     ...
 
@@ -478,6 +498,75 @@ class Context:
             The parent span ID string, or None if no trace context.
         """
         ...
+
+    def trace_headers(self) -> Optional[dict[str, str]]:
+        """
+        Build W3C trace headers for propagating to downstream inference engines.
+
+        Returns:
+            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
+            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``x-request-id``, ``request-id`` when upstream propagated them.
+            Forward unchanged to the inference engine's ``trace_headers`` kwarg.
+        """
+        ...
+
+    def current_span(self) -> "SpanProxy":
+        """
+        Handle on the framework's ``engine.generate`` span. Use it to
+        ``set_attribute`` / ``add_event`` / ``set_status`` on the parent
+        span. Returns a silent no-op proxy when no parent was plumbed in
+        (test contexts) or the OTel bridge isn't installed.
+
+        Engines normally reach this through
+        ``dynamo.common.backend.telemetry.current_span(context)``.
+        """
+        ...
+
+    def start_span(
+        self, name: str, attrs: Optional[dict[str, Any]] = None
+    ) -> "SpanProxy":
+        """
+        Open a child span under ``engine.generate`` with a dynamic name.
+        The returned ``SpanProxy`` is a context manager — the span ends on
+        ``__exit__`` / ``close()`` / drop.
+
+        Engines normally reach this through
+        ``dynamo.common.backend.telemetry.start_span(context, name)``.
+        """
+        ...
+
+class SpanProxy:
+    """
+    Unified span handle returned by ``Context.current_span()`` (the
+    framework auto-span) and ``Context.start_span()`` (child spans).
+    Mirrors the OTel ``Span`` API: ``set_attribute`` / ``add_event`` /
+    ``set_status``. Usable as a Python context manager (closes on
+    ``__exit__``). All methods are silent no-ops when the underlying
+    span is absent.
+    """
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        """Set an attribute on the span. Any key is accepted; OTel imposes
+        no pre-declaration constraint."""
+        ...
+
+    def add_event(self, name: str, attrs: Optional[dict[str, Any]] = None) -> None:
+        """Emit a structured event on the span."""
+        ...
+
+    def set_status(self, status: str, description: Optional[str] = None) -> None:
+        """Set the span's status. ``status`` is ``"ok"`` or ``"error"``;
+        ``description`` is optional context (typically a short error name)."""
+        ...
+
+    def close(self) -> None:
+        """End the underlying span (child spans only — no-op for the
+        auto-span). Idempotent."""
+        ...
+
+    def __enter__(self) -> "SpanProxy": ...
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool: ...
 
 class WorkerMetricsPublisher:
     """

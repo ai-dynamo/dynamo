@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/onsi/gomega"
@@ -1543,6 +1544,213 @@ func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T)
 	g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Name: "test-dgd-frontend", Namespace: "default"}, service)).NotTo(gomega.HaveOccurred())
 	g.Expect(service.Labels["graph-label"]).To(gomega.Equal("kept"))
 	g.Expect(service.Labels["legacy-label"]).To(gomega.Equal("kept"))
+}
+
+func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesLegacyWorkerSelectors(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vllm-disagg-planner",
+			Namespace: "jsm",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
+				{ComponentName: "Planner", ComponentType: v1beta1.ComponentTypePlanner, Replicas: ptr.To(int32(1))},
+				{ComponentName: "VllmDecodeWorker", ComponentType: v1beta1.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
+				{ComponentName: "VllmPrefillWorker", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+			},
+		},
+	}
+	existingPCS := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vllm-disagg-planner",
+			Namespace: "jsm",
+		},
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{
+						Name: "vllmprefillworker",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent:        "VllmPrefillWorker",
+							commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
+							commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypePrefill,
+						},
+						Annotations: map[string]string{
+							commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
+						},
+					},
+					{Name: "frontend"},
+					{
+						Name: "vllmdecodeworker",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent:        "VllmDecodeWorker",
+							commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
+							commonconsts.KubeLabelDynamoSubComponentType: commonconsts.ComponentTypeDecode,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd, existingPCS).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{Client: fakeKubeClient}
+
+	renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(existing).NotTo(gomega.BeNil())
+	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
+
+	prefill := renderDGD.GetComponentByName("VllmPrefillWorker")
+	if prefill == nil {
+		t.Fatal("expected rendered prefill component")
+	}
+	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
+	g.Expect(prefill.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
+
+	decode := renderDGD.GetComponentByName("VllmDecodeWorker")
+	if decode == nil {
+		t.Fatal("expected rendered decode component")
+	}
+	g.Expect(decode.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
+	g.Expect(decode.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypeDecode))
+
+	generatedPCS, err := dynamo.GenerateGrovePodCliqueSet(ctx, renderDGD, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, fakeKubeClient, nil, nil, nil, nil)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	preserveGrovePodCliqueSetOrder(generatedPCS, existing)
+	g.Expect(generatedPCS.Spec.Template.Cliques[0].Name).To(gomega.Equal("vllmprefillworker"))
+
+	var prefillClique *grovev1alpha1.PodCliqueTemplateSpec
+	for _, clique := range generatedPCS.Spec.Template.Cliques {
+		if clique.Name == "vllmprefillworker" {
+			prefillClique = clique
+			break
+		}
+	}
+	if prefillClique == nil {
+		t.Fatal("expected rendered prefill clique")
+	}
+	g.Expect(prefillClique.Labels[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
+	g.Expect(prefillClique.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
+	g.Expect(prefillClique.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]).To(gomega.Equal("1.1.0"))
+
+	decodeService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+		ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
+		Namespace:       renderDGD.Namespace,
+		ComponentType:   string(decode.ComponentType),
+		DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decode),
+		ComponentName:   "VllmDecodeWorker",
+		Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decode),
+		IsK8sDiscovery:  true,
+	})
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(decodeService.Spec.Selector[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
+}
+
+func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	desired := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "new-worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 5}},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode-group", CliqueNames: []string{"decode"}, Replicas: ptr.To(int32(1))},
+					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(1))},
+					{Name: "new-group", Replicas: ptr.To(int32(7))},
+				},
+			},
+		},
+	}
+	existing := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}},
+					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 4}},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode-group", CliqueNames: []string{"decode"}},
+					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(6))},
+				},
+			},
+		},
+	}
+
+	preserveGrovePodCliqueSetReplicas(desired, existing)
+
+	replicasByClique := map[string]int32{}
+	for _, clique := range desired.Spec.Template.Cliques {
+		replicasByClique[clique.Name] = clique.Spec.Replicas
+	}
+	g.Expect(replicasByClique).To(gomega.Equal(map[string]int32{
+		"frontend":   2,
+		"prefill":    1,
+		"new-worker": 5,
+	}))
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.BeNil())
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).NotTo(gomega.BeNil())
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).To(gomega.Equal(int32(6)))
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[2].Replicas).To(gomega.Equal(int32(7)))
+}
+
+func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_KeepsNativeWorkerSelectors(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "native-dgd", Namespace: "jsm"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+			},
+		},
+	}
+	existingPCS := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "native-dgd", Namespace: "jsm"},
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{
+						Name: "prefill",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent:     "prefill",
+							commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypePrefill,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd, existingPCS).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{Client: fakeKubeClient}
+
+	renderDGD, _, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	prefill := renderDGD.GetComponentByName("prefill")
+	if prefill == nil {
+		t.Fatal("expected rendered prefill component")
+	}
+	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypePrefill))
 }
 
 func Test_computeRestartStatus(t *testing.T) {
