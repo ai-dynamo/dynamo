@@ -449,8 +449,24 @@ async def setup_sgl_metrics(
     config: Config,
     generate_endpoint: Endpoint,
     kv_worker_id: Optional[int] = None,
-) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
+) -> tuple[Optional[DynamoSglangPublisher], asyncio.Task, list[tuple[str, str]]]:
     """Create publisher, initialize metrics, and start the metrics publishing loop.
+
+    For chat/decode workers (the default), this registers SGLang's
+    multiprocess ``sglang:*`` metrics, the Dynamo ``LLMBackendMetrics``
+    chat-shaped gauges (KV total_blocks, gpu_cache_usage, model_load_time),
+    and starts a ``DynamoSglangPublisher`` that pulls scheduler metrics
+    over ZMQ and (optionally) forwards KV events / FPM stats.
+
+    For **embedding workers** (``config.dynamo_args.embedding_worker``),
+    the chat-shaped pipeline is **skipped entirely**: pooling engines
+    have no KV cache, no prefill/decode phase, and no scheduler metrics
+    worth collecting, so every metric in that pipeline would emit zeros
+    forever. The function returns ``(None, <noop task>, metrics_labels)``
+    so callers can keep the same ``await setup_sgl_metrics(...)`` shape
+    and ``metrics_task.cancel()`` cleanup. Embedding-shaped metrics are
+    registered separately by ``init_embedding.py`` via
+    ``init_embedding_metrics`` (see DIS-2094 part 1).
 
     Args:
         engine: The SGLang engine instance.
@@ -459,8 +475,21 @@ async def setup_sgl_metrics(
         kv_worker_id: Optional worker identity for KV event attribution.
 
     Returns:
-        Tuple of (publisher instance, running asyncio task, metrics labels).
+        Tuple of (publisher instance or None, asyncio task, metrics labels).
     """
+    metrics_labels = [("model", engine.server_args.served_model_name)]
+
+    if getattr(config.dynamo_args, "embedding_worker", False):
+        logging.info(
+            "Embedding worker: skipping chat-shaped Prometheus + KV-event "
+            "wiring (no KV cache, no prefill/decode, no scheduler metrics). "
+            "Embedding-shaped metrics are registered separately."
+        )
+        # Hold a never-completing task so callers can ``cancel()`` + ``await``
+        # it uniformly in their finally blocks, matching the chat-worker shape.
+        task = asyncio.create_task(asyncio.Event().wait())
+        return None, task, metrics_labels
+
     # Register SGLang multiprocess metrics only when --enable-metrics was passed.
     # SGLang only calls set_prometheus_multiproc_dir() when enable_metrics=True,
     # so MultiProcessCollector will crash without it.
@@ -487,7 +516,6 @@ async def setup_sgl_metrics(
         component_name=config.dynamo_args.component,
     )
 
-    metrics_labels = [("model", engine.server_args.served_model_name)]
     publisher = DynamoSglangPublisher(
         engine,
         config,
