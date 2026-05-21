@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
+import zmq
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -22,6 +23,7 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
+from dynamo.common.forward_pass_metrics import decode as decode_forward_pass_metrics
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -50,6 +52,7 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from . import envs
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
@@ -470,6 +473,77 @@ RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
 
+class _VllmSchedulerQueueDepthMonitor:
+    """Tracks vLLM scheduler waiting-queue depth from InstrumentedScheduler FPM."""
+
+    def __init__(self, base_port: int, dp_start: int, dp_size: int) -> None:
+        self._lock = threading.Lock()
+        self._queued_by_dp_rank = {
+            rank: 0 for rank in range(dp_start, dp_start + dp_size)
+        }
+        self._stop = threading.Event()
+        self._ctx = zmq.Context.instance()
+        self._poller = zmq.Poller()
+        self._sockets: list[zmq.Socket] = []
+
+        for dp_rank in self._queued_by_dp_rank:
+            sock = self._ctx.socket(zmq.SUB)
+            sock.setsockopt(zmq.SUBSCRIBE, b"")
+            sock.connect(f"tcp://127.0.0.1:{base_port + dp_rank}")
+            self._poller.register(sock, zmq.POLLIN)
+            self._sockets.append(sock)
+
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="vllm-scheduler-queue-depth-monitor",
+        )
+        self._thread.start()
+
+    def queued_depth(self) -> int:
+        with self._lock:
+            return sum(self._queued_by_dp_rank.values())
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        for sock in self._sockets:
+            try:
+                self._poller.unregister(sock)
+            except Exception:
+                pass
+            sock.close(linger=0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                events = dict(self._poller.poll(timeout=100))
+            except zmq.ZMQError:
+                continue
+
+            for sock in self._sockets:
+                if sock not in events:
+                    continue
+                try:
+                    parts = sock.recv_multipart(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    continue
+                except zmq.ZMQError:
+                    continue
+                if not parts:
+                    continue
+
+                metrics = decode_forward_pass_metrics(parts[-1])
+                if metrics is None:
+                    continue
+
+                queued = metrics.queued_requests
+                queued_depth = queued.num_prefill_requests + queued.num_decode_requests
+                with self._lock:
+                    if metrics.dp_rank in self._queued_by_dp_rank:
+                        self._queued_by_dp_rank[metrics.dp_rank] = queued_depth
+
+
 class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
@@ -536,6 +610,91 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
+
+        # Worker-side admission guard for AWS Ads repro. Queue depth comes from
+        # InstrumentedScheduler's self.waiting snapshot, not the duration from
+        # vLLM submission to first token.
+        self._reject_queue_threshold = int(
+            getattr(envs, "DYN_VLLM_REJECT_QUEUE_THRESHOLD", 0)
+        )
+        self._load_shed_rejections = 0
+        self._queue_depth_monitor: _VllmSchedulerQueueDepthMonitor | None = None
+        if self._reject_queue_threshold > 0:
+            dp_start, dp_size = self.dp_range
+            self._queue_depth_monitor = _VllmSchedulerQueueDepthMonitor(
+                envs.DYN_FORWARDPASS_METRIC_PORT,
+                dp_start,
+                dp_size,
+            )
+            logger.info(
+                "Worker-local load shedding enabled: rejecting new requests when "
+                "vLLM scheduler queued requests >= %d "
+                "(DYN_VLLM_REJECT_QUEUE_THRESHOLD)",
+                self._reject_queue_threshold,
+            )
+
+    def _vllm_scheduler_queue_depth(self) -> int:
+        if self._queue_depth_monitor is None:
+            return 0
+        return self._queue_depth_monitor.queued_depth()
+
+    def _should_load_shed(self) -> bool:
+        """Return True if vLLM's scheduler waiting queue is over threshold."""
+        return (
+            self._reject_queue_threshold > 0
+            and self._vllm_scheduler_queue_depth() >= self._reject_queue_threshold
+        )
+
+    def _load_shed_message(self, request_id: str) -> str:
+        return (
+            f"load_shed: worker rejected request_id={request_id} "
+            f"vllm_queued={self._vllm_scheduler_queue_depth()} "
+            f"threshold={self._reject_queue_threshold}"
+        )
+
+    def _load_shed_token_chunk(
+        self, request_id: str, *, include_disaggregated_params: bool = False
+    ) -> dict[str, Any]:
+        chunk: dict[str, Any] = {
+            "token_ids": [],
+            "finish_reason": f"error: {self._load_shed_message(request_id)}",
+        }
+        if include_disaggregated_params:
+            chunk["disaggregated_params"] = None
+        return chunk
+
+    def _load_shed_openai_chunk(self, request: dict[str, Any], request_id: str):
+        openai_request_id = request.get("id") or request.get("request_id", request_id)
+        message = self._load_shed_message(request_id)
+        return {
+            "id": openai_request_id,
+            "created": int(time.time()),
+            "object": "chat.completion.chunk",
+            "model": request.get("model", "unknown"),
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": message},
+                    "finish_reason": "stop",
+                }
+            ],
+            "error": message,
+        }
+
+    def _record_load_shed(self, request_id: str, role: str) -> None:
+        """Log a load-shed rejection with a stable, grep-able tag."""
+        self._load_shed_rejections += 1
+        # Stable tag "load_shed: rejected" makes this trivially grep-able
+        # in repro logs and easy to count over a window.
+        logger.warning(
+            "load_shed: rejected %s request_id=%s vllm_queued=%d threshold=%d "
+            "total_rejected=%d",
+            role,
+            request_id,
+            self._vllm_scheduler_queue_depth(),
+            self._reject_queue_threshold,
+            self._load_shed_rejections,
+        )
 
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
@@ -1224,6 +1383,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        queue_depth_monitor = getattr(self, "_queue_depth_monitor", None)
+        if queue_depth_monitor is not None:
+            queue_depth_monitor.close()
+            self._queue_depth_monitor = None
         for temp_dir in self.temp_dirs:
             try:
                 temp_dir.cleanup()
@@ -1786,6 +1949,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+
+        # Worker-local admission guard. Check before any heavy work so a hot
+        # decode worker drops the arrival immediately rather than queueing it.
+        if self._should_load_shed():
+            self._record_load_shed(request_id, role="decode")
+            if self.use_vllm_tokenizer:
+                yield self._load_shed_openai_chunk(request, request_id)
+            else:
+                yield self._load_shed_token_chunk(request_id)
+            return
+
         first_token = True
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
@@ -2102,6 +2276,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
         logger.debug(f"Prefill Request ID: {request_id}")
+
+        # Worker-local admission guard. Prefill error chunks must carry
+        # disaggregated_params=None (see _generate_token_mode error path).
+        if self._should_load_shed():
+            self._record_load_shed(request_id, role="prefill")
+            yield self._load_shed_token_chunk(
+                request_id, include_disaggregated_params=True
+            )
+            return
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):

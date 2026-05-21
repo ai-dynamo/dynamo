@@ -258,21 +258,29 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
-    if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    queue_rejection_enabled = envs.DYN_VLLM_REJECT_QUEUE_THRESHOLD > 0
+    fpm_enabled = envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
+    if fpm_enabled or queue_rejection_enabled:
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
             defaults[
                 "scheduler_cls"
             ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            reason = (
+                "forward pass metrics" if fpm_enabled else "vLLM queue-depth rejection"
+            )
             logger.info(
-                "Forward pass metrics enabled: scheduler_cls set to InstrumentedScheduler "
-                f"(port={envs.DYN_FORWARDPASS_METRIC_PORT})"
+                "%s enabled: scheduler_cls set to InstrumentedScheduler " "(port=%d)",
+                reason,
+                envs.DYN_FORWARDPASS_METRIC_PORT,
             )
         else:
             logger.warning(
-                f"DYN_FORWARDPASS_METRIC_PORT is set but scheduler_cls "
-                f"is already '{existing_cls}'. InstrumentedScheduler will NOT "
-                f"be injected. To use forward pass metrics, either remove "
+                f"InstrumentedScheduler was requested by "
+                f"{'DYN_FORWARDPASS_METRIC_PORT' if fpm_enabled else 'DYN_VLLM_REJECT_QUEUE_THRESHOLD'} "
+                f"but scheduler_cls is already '{existing_cls}'. "
+                f"InstrumentedScheduler will NOT be injected. To use forward pass "
+                f"metrics or vLLM queue-depth rejection, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
 

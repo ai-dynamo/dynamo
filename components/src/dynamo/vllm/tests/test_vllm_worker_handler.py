@@ -484,6 +484,129 @@ def _make_prefill_handler(model: str = "test-model") -> mod.PrefillWorkerHandler
     return handler
 
 
+def _enable_worker_load_shed(handler, *, vllm_queued: int = 1, threshold: int = 1):
+    monitor = MagicMock()
+    monitor.queued_depth.return_value = vllm_queued
+    handler._queue_depth_monitor = monitor
+    handler._reject_queue_threshold = threshold
+    handler._load_shed_rejections = 0
+
+
+@pytest.mark.asyncio(loop_scope="function")
+class TestWorkerLocalLoadShedding:
+    async def test_decode_generate_rejects_token_mode_when_threshold_reached(self):
+        handler = _make_decode_handler()
+        handler.use_vllm_tokenizer = False
+        _enable_worker_load_shed(handler)
+        context = MagicMock()
+        context.id.return_value = "req-decode-shed"
+
+        chunks = [chunk async for chunk in handler.generate({}, context)]
+
+        assert chunks == [
+            {
+                "token_ids": [],
+                "finish_reason": (
+                    "error: load_shed: worker rejected "
+                    "request_id=req-decode-shed vllm_queued=1 threshold=1"
+                ),
+            }
+        ]
+        assert handler._load_shed_rejections == 1
+        assert handler._vllm_scheduler_queue_depth() == 1
+
+    async def test_generate_tokens_does_not_track_time_to_first_token_as_queue(self):
+        handler = _make_decode_handler()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler._queue_depth_monitor = MagicMock()
+        handler._queue_depth_monitor.queued_depth.return_value = 3
+
+        first = MagicMock()
+        first.token_ids = [10]
+        first.finish_reason = "stop"
+        first.stop_reason = None
+        first.logprobs = None
+
+        response = _make_engine_response(request_id="req-queue", finished=True)
+        response.outputs = [first]
+
+        async def fake_generate(*args, **kwargs):
+            assert handler._vllm_scheduler_queue_depth() == 3
+            yield response
+            assert handler._vllm_scheduler_queue_depth() == 3
+
+        handler.engine_client.generate = fake_generate
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_tokens(
+                mod.TokensPrompt(prompt_token_ids=[1, 2, 3]),
+                MagicMock(),
+                "req-queue",
+            )
+        ]
+
+        assert chunks[0]["token_ids"] == [10]
+        assert chunks[0]["finish_reason"] == "stop"
+        assert handler._vllm_scheduler_queue_depth() == 3
+
+    async def test_decode_generate_rejects_openai_mode_with_openai_shape(self):
+        handler = _make_decode_handler()
+        handler.use_vllm_tokenizer = True
+        _enable_worker_load_shed(handler)
+        context = MagicMock()
+        context.id.return_value = "ctx-decode-shed"
+        request = {"id": "chatcmpl-load-shed", "model": "test-model"}
+
+        chunks = [chunk async for chunk in handler.generate(request, context)]
+
+        assert len(chunks) == 1
+        chunk = chunks[0]
+        assert chunk["id"] == "chatcmpl-load-shed"
+        assert chunk["model"] == "test-model"
+        assert chunk["object"] == "chat.completion.chunk"
+        assert chunk["choices"] == [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": (
+                        "load_shed: worker rejected request_id=ctx-decode-shed "
+                        "vllm_queued=1 threshold=1"
+                    ),
+                },
+                "finish_reason": "stop",
+            }
+        ]
+        assert (
+            chunk["error"] == "load_shed: worker rejected request_id=ctx-decode-shed "
+            "vllm_queued=1 threshold=1"
+        )
+        assert handler._load_shed_rejections == 1
+
+    async def test_prefill_generate_rejects_with_disagg_params_none(self):
+        handler = _make_prefill_handler()
+        _enable_worker_load_shed(handler)
+        context = MagicMock()
+        context.id.return_value = "req-prefill-shed"
+
+        chunks = [chunk async for chunk in handler.generate({}, context)]
+
+        assert chunks == [
+            {
+                "token_ids": [],
+                "finish_reason": (
+                    "error: load_shed: worker rejected "
+                    "request_id=req-prefill-shed vllm_queued=1 threshold=1"
+                ),
+                "disaggregated_params": None,
+            }
+        ]
+        assert handler._load_shed_rejections == 1
+        assert handler._vllm_scheduler_queue_depth() == 1
+
+
 class TestBuildEmbeddingParams:
     """Tests for PrefillWorkerHandler._build_embedding_params."""
 

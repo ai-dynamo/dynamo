@@ -20,6 +20,7 @@ REGISTERED_PORT_MAX = 49151
 
 if TYPE_CHECKING:
     DYN_FORWARDPASS_METRIC_PORT: int = 20380
+    DYN_VLLM_REJECT_QUEUE_THRESHOLD: int = 0
 
 
 def _resolve_port(env_var: str, default_port: int) -> int:
@@ -56,10 +57,33 @@ def _resolve_port(env_var: str, default_port: int) -> int:
     return port
 
 
+def _resolve_nonneg_int(env_var: str, default: int) -> int:
+    """Parse a non-negative integer env var. Raises ValueError on bad input."""
+    raw = os.getenv(env_var)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{env_var} must be a non-negative integer, got {raw!r}."
+        ) from exc
+    if value < 0:
+        raise ValueError(f"{env_var} must be >= 0, got {value}.")
+    return value
+
+
 # Environment variables configuration
 environment_variables: dict[str, Callable[[], Any]] = {
     "DYN_FORWARDPASS_METRIC_PORT": lambda: _resolve_port(
         "DYN_FORWARDPASS_METRIC_PORT", 20380
+    ),
+    # Worker-local admission guard for AWS Ads incident repro: when the
+    # latest vLLM scheduler waiting-queue depth has already reached this
+    # value, reject new arrivals before submitting them to the engine.
+    # 0 (default) disables the guard.
+    "DYN_VLLM_REJECT_QUEUE_THRESHOLD": lambda: _resolve_nonneg_int(
+        "DYN_VLLM_REJECT_QUEUE_THRESHOLD", 0
     ),
 }
 
