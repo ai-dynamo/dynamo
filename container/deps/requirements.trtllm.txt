@@ -10,6 +10,10 @@
 # later upgrades the venv copy to 1.x (datasets allows it) and breaks
 # `import transformers` against upstream's compiled stack.
 huggingface-hub<1.0,>=0.34.0
+# Used by the trtllm video_diffusion handler to encode generated frames to MP4.
+# Upstream tensorrt-llm/release does not ship them.
+imageio>=2.37.0
+imageio-ffmpeg>=0.6.0
 # Required by ai_dynamo_runtime + gpu_memory_service. Upstream tensorrt-llm/release
 # does not ship them; vllm/vllm-openai does (which is why DYN-2204's vllm path
 # does not need this).

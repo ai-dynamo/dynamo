@@ -436,31 +436,16 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
+# Build ai-dynamo (pure Python) wheel. ai-dynamo-runtime (maturin) is built in
+# the `wheel_builder` stage below after NIXL is installed — otherwise nixl-sys
+# links against stubs and runtime paths that go through NixlAgent::new() bail
+# with "NIXL is not supported in stub mode" (e.g. --frontend-decoding).
 ARG USE_SCCACHE
-ARG ENABLE_MEDIA_FFMPEG
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env cmake); \
-    fi && \
-    mkdir -p ${CARGO_TARGET_DIR} && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
-    uv build --wheel --out-dir /opt/dynamo/dist && \
-    cd /opt/dynamo/lib/bindings/python && \
-    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
-    else \
-        maturin build --release --features "kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
-    fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+    uv build --wheel --out-dir /opt/dynamo/dist
 
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
@@ -587,6 +572,32 @@ COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
+
+# Build ai-dynamo-runtime (maturin) here, after NIXL is installed and on
+# ld.so.conf, so nixl-sys links against the real libnixl_capi.so rather than
+# stubs. Otherwise NixlAgent::new() returns "NIXL is not supported in stub
+# mode" at runtime (e.g. --frontend-decoding in dynamo.frontend).
+ARG ENABLE_MEDIA_FFMPEG
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
+    mkdir -p ${CARGO_TARGET_DIR} && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    cd /opt/dynamo/lib/bindings/python && \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+    else \
+        maturin build --release --features "kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+    fi && \
+    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Build kvbm wheel (with nixl linkage via auditwheel repair)
 ARG ENABLE_KVBM
