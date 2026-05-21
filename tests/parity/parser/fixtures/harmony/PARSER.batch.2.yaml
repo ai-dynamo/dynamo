@@ -26,12 +26,23 @@ cases:
             type: string
     expected:
       dynamo:
-        reason: "Dynamo's harmony parser leaks the entire envelope into normal_text; SGLang extracts both calls"
-        calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: ''
       sglang:
         calls:
         - name: get_weather
@@ -43,7 +54,7 @@ cases:
         normal_text: ''
   PARSER.batch.2.c:
     description: With surrounding narration
-    ref: dynamo
+    ref: "OpenAI Harmony preambles should be commentary messages: https://developers.openai.com/cookbook/articles/openai-harmony#preambles"
     model_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
       to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
     tools:
@@ -51,12 +62,23 @@ cases:
     - *id002
     expected:
       dynamo:
-        reason: "Dynamo's harmony parser leaks the envelope (with surrounding narration) into normal_text; SGLang extracts both calls and preserves the narration"
-        calls: []
-        normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: I need both.  Done.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: I need both.  Done.
       sglang:
         calls:
         - name: get_weather
@@ -66,6 +88,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: I need both.   Done.
+        reason: "No spec-correct winner on whitespace: surrounding prose is outside Harmony messages, so this is recovery-only; SGLang extracts the same calls but preserves one extra separator space"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -76,12 +99,23 @@ cases:
     - *id001
     expected:
       dynamo:
-        reason: "Dynamo's harmony parser leaks the envelope into normal_text instead of extracting both same-name calls; SGLang extracts both"
-        calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: ''
       sglang:
         calls:
         - name: get_weather

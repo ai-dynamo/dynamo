@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 import os
-import re
 import shutil
 import threading
 import time
@@ -32,6 +31,10 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
+from tests.utils.router_logs import (
+    extract_router_kv_overlap_records,
+    wait_for_router_kv_overlap,
+)
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
@@ -62,11 +65,6 @@ _DOUBLE_IMAGE_FRESH_COLOR = (89, 210, 34)
 _STAIRCASE_IMAGE_FRESH_COLOR = (17, 99, 201)
 _SWAP_ORDER_FRESH_COLORS = [(14, 141, 77), (211, 66, 101), (44, 91, 233)]
 _HTTP_IMAGE_COLORS = [(180, 30, 90), (30, 180, 90), (90, 30, 180)]
-# Contract with lib/llm/src/kv_router/push_router.rs "[ROUTING]" debug log.
-# Keep this parser in sync with the router log format.
-_ROUTING_RECORD_PATTERN = re.compile(
-    r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
-)
 
 
 def _check_ready(response) -> bool:
@@ -93,7 +91,8 @@ def _prepare_log_dir(request, suffix: str) -> str:
 
 
 _COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    "display_output": True,
+    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
+    "display_output": False,
     "terminate_all_matching_process_names": False,
 }
 
@@ -236,49 +235,16 @@ def _build_payload(
     }
 
 
-def _extract_routing_records(log_text: str) -> list[tuple[int, int]]:
-    return [
-        (int(overlap), int(total))
-        for overlap, total in _ROUTING_RECORD_PATTERN.findall(log_text)
-    ]
-
-
-def _wait_for_new_routing_score(
-    router_proc: ManagedProcess,
-    start_offset: int,
-    pre_request_routing_count: int,
-    timeout_s: float = 25.0,
-) -> tuple[int, int, str]:
-    deadline = time.time() + timeout_s
-    last_segment = ""
-
-    while time.time() < deadline:
-        full_logs = router_proc.read_logs()
-        segment = full_logs[start_offset:]
-        last_segment = segment
-        records = _extract_routing_records(full_logs)
-        if len(records) >= pre_request_routing_count + 1:
-            overlap, total = records[-1]
-            return overlap, total, segment
-        time.sleep(1)
-
-    fallback_records = _extract_routing_records(last_segment)
-    if fallback_records:
-        overlap, total = fallback_records[-1]
-        return overlap, total, last_segment
-    return 0, 0, last_segment
-
-
 def _send_request_get_overlap(
     frontend_port: int,
     router_proc: ManagedProcess,
     payload: dict[str, Any],
     label: str,
 ) -> tuple[int, int, str]:
-    """Send one request and read the new routing overlap score."""
+    """Send one request and read the router's semantic overlap score."""
     pre_request_logs = router_proc.read_logs()
     start_offset = len(pre_request_logs)
-    pre_request_routing_count = len(_extract_routing_records(pre_request_logs))
+    pre_request_record_count = len(extract_router_kv_overlap_records(pre_request_logs))
     resp = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
@@ -288,15 +254,16 @@ def _send_request_get_overlap(
     data = resp.json()
     assert "choices" in data, f"Missing choices in response: {data}"
 
-    overlap, total, segment = _wait_for_new_routing_score(
-        router_proc=router_proc,
+    overlap, total, recent_logs = wait_for_router_kv_overlap(
+        router_proc.read_logs,
         start_offset=start_offset,
-        pre_request_routing_count=pre_request_routing_count,
-        timeout_s=25,
+        pre_request_record_count=pre_request_record_count,
+        context=label,
+        log_label="frontend",
     )
     print(f"[MM_ROUTER_E2E] {label}: current={overlap}/{total}")
     time.sleep(1)
-    return overlap, total, segment
+    return overlap, total, recent_logs
 
 
 @pytest.mark.pre_merge
@@ -362,22 +329,22 @@ def _check_text_only_overlap_repeated_prompt(
     assert total_1 > 0 and total_2 > 0 and total_3 > 0, (
         f"Expected non-zero total blocks for text-only request, got "
         f"{total_1}, {total_2}, {total_3}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert abs(total_1 - total_2) <= 2 and abs(total_2 - total_3) <= 2, (
         f"Expected text-only total blocks to remain stable across repeats, got "
         f"req1={total_1}, req2={total_2}, req3={total_3}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_2 > overlap_1, (
         f"Expected second text-only overlap > first, got "
         f"req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_3 == overlap_2, (
         f"Expected third text-only overlap == second, got "
         f"req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
 
 
@@ -402,15 +369,15 @@ def _check_repeated_three_images(start_vllm_mm_services, predownload_models):
 
     assert overlap_1 <= 1, (
         f"Expected first overlap <=1, got req1={overlap_1}/{total_1}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_2 > overlap_1, (
         f"Expected second overlap > first, got req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_3 == overlap_2, (
         f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
     assert low <= total_3 <= high, (
@@ -440,15 +407,15 @@ def _check_repeated_single_image(start_vllm_mm_services, predownload_models):
 
     assert overlap_1 <= 1, (
         f"Expected first overlap <=1, got req1={overlap_1}/{total_1}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_2 > overlap_1, (
         f"Expected second overlap > first, got req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_3 == overlap_2, (
         f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     low, high = SINGLE_IMAGE_TOTAL_BLOCKS_RANGE
     assert low <= total_3 <= high, (
@@ -479,15 +446,15 @@ def _check_repeated_two_identical_images(start_vllm_mm_services, predownload_mod
 
     assert overlap_1 <= 1, (
         f"Expected first overlap <=1, got req1={overlap_1}/{total_1}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_2 > overlap_1, (
         f"Expected second overlap > first, got req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_3 == overlap_2, (
         f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
 
 
@@ -521,12 +488,12 @@ def _check_staircase_single_to_double_to_triple_identical_image(
     assert overlap_2 > overlap_1, (
         f"Expected overlap to increase from 1 image to 2 images, got "
         f"1x={overlap_1}/{total_1}, 2x={overlap_2}/{total_2}.\n"
-        f"Recent router logs:\n{segment_2[-4000:]}"
+        f"Recent frontend logs:\n{segment_2[-4000:]}"
     )
     assert overlap_3 > overlap_2, (
         "Expected overlap to increase from 2 images to 3 images, got "
         f"2x={overlap_2}/{total_2}, 3x={overlap_3}/{total_3}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
 
     delta21 = overlap_2 - overlap_1
@@ -534,7 +501,7 @@ def _check_staircase_single_to_double_to_triple_identical_image(
     assert abs(delta32 - delta21) <= 4, (
         "Expected similar overlap increment per additional identical image, got "
         f"step(1->2)={delta21}, step(2->3)={delta32}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
 
     total_step_12 = total_2 - total_1
@@ -542,7 +509,7 @@ def _check_staircase_single_to_double_to_triple_identical_image(
     assert abs(total_step_12 - total_step_23) <= 4, (
         "Expected similar total-block increment per additional identical image, got "
         f"step(1->2)={total_step_12}, step(2->3)={total_step_23}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
 
 
@@ -568,7 +535,7 @@ def _check_diff_images_less_than_same(start_vllm_mm_services, predownload_models
     )
     assert overlap_baseline >= 2, (
         f"Baseline overlap did not reach 2 blocks. got {overlap_baseline}/{total_baseline}.\n"
-        f"Recent router logs:\n{segment_baseline[-4000:]}"
+        f"Recent frontend logs:\n{segment_baseline[-4000:]}"
     )
     low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
     assert low <= total_baseline <= high, (
@@ -585,7 +552,7 @@ def _check_diff_images_less_than_same(start_vllm_mm_services, predownload_models
     )
     assert (
         total_probe > 0
-    ), f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
+    ), f"No routing score found.\nRecent frontend logs:\n{segment_probe[-4000:]}"
     assert abs(total_probe - total_baseline) <= 4, (
         f"Expected different-images total blocks to stay near baseline, "
         f"got different={total_probe}, baseline={total_baseline}"
@@ -594,7 +561,7 @@ def _check_diff_images_less_than_same(start_vllm_mm_services, predownload_models
         f"Expected different-images overlap < baseline overlap, "
         f"got different={overlap_probe}/{total_probe}, "
         f"baseline={overlap_baseline}/{total_baseline}.\n"
-        f"Recent router logs:\n{segment_probe[-4000:]}"
+        f"Recent frontend logs:\n{segment_probe[-4000:]}"
     )
 
 
@@ -628,7 +595,7 @@ def _check_same_images_different_prompt_less_than_same_prompt(
     )
     assert overlap_baseline >= 2, (
         f"Baseline overlap did not reach 2 blocks. got {overlap_baseline}/{total_baseline}.\n"
-        f"Recent router logs:\n{segment_baseline[-4000:]}"
+        f"Recent frontend logs:\n{segment_baseline[-4000:]}"
     )
     low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
     assert low <= total_baseline <= high, (
@@ -645,7 +612,7 @@ def _check_same_images_different_prompt_less_than_same_prompt(
     )
     assert (
         total_probe > 0
-    ), f"No routing score found.\nRecent logs:\n{segment_probe[-4000:]}"
+    ), f"No routing score found.\nRecent frontend logs:\n{segment_probe[-4000:]}"
     assert abs(total_probe - total_baseline) <= 4, (
         f"Expected different-prompt total blocks to stay near baseline, "
         f"got different_prompt={total_probe}, baseline={total_baseline}"
@@ -654,7 +621,7 @@ def _check_same_images_different_prompt_less_than_same_prompt(
         f"Expected different-prompt overlap < baseline overlap, "
         f"got different_prompt={overlap_probe}/{total_probe}, "
         f"baseline={overlap_baseline}/{total_baseline}.\n"
-        f"Recent router logs:\n{segment_probe[-4000:]}"
+        f"Recent frontend logs:\n{segment_probe[-4000:]}"
     )
 
 
@@ -695,7 +662,7 @@ def _check_swapped_order_less_than_same_order(
     assert overlap_ordered_2 > overlap_ordered_1, (
         "Expected repeated identical order to increase overlap before swapped-order probe, "
         f"got req1={overlap_ordered_1}/{total_ordered_1}, req2={overlap_ordered_2}/{total_ordered_2}.\n"
-        f"Recent router logs:\n{segment_ordered_2[-4000:]}"
+        f"Recent frontend logs:\n{segment_ordered_2[-4000:]}"
     )
     assert abs(total_swapped - total_ordered_2) <= 4, (
         f"Expected swapped-order total blocks to stay near ordered baseline, "
@@ -704,7 +671,7 @@ def _check_swapped_order_less_than_same_order(
     assert overlap_swapped <= 1, (
         "Expected near-zero overlap for swapped order of three distinct images "
         f"(allowing 1 shared text block), got {overlap_swapped}/{total_swapped}.\n"
-        f"Recent router logs:\n{segment_swapped[-4000:]}"
+        f"Recent frontend logs:\n{segment_swapped[-4000:]}"
     )
 
 
@@ -776,15 +743,15 @@ def _check_repeated_http_images(
 
     assert overlap_1 <= 1, (
         f"Expected first overlap <=1, got req1={overlap_1}/{total_1}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_2 > overlap_1, (
         f"Expected second overlap > first, got req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     assert overlap_3 == overlap_2, (
         f"Expected third overlap == second, got req2={overlap_2}/{total_2}, req3={overlap_3}/{total_3}.\n"
-        f"Recent router logs:\n{segment_3[-4000:]}"
+        f"Recent frontend logs:\n{segment_3[-4000:]}"
     )
     low, high = THREE_IMAGE_TOTAL_BLOCKS_RANGE
     assert low <= total_3 <= high, (
@@ -825,18 +792,18 @@ def _check_http_vs_data_uri_same_image(
 
     assert total_http > 0, (
         f"No routing score for HTTP request.\n"
-        f"Recent router logs:\n{segment_http[-4000:]}"
+        f"Recent frontend logs:\n{segment_http[-4000:]}"
     )
     assert abs(total_http - total_data) <= 2, (
         f"Expected HTTP and data URI total blocks to match, "
         f"got http={total_http}, data_uri={total_data}.\n"
-        f"Recent router logs:\n{segment_http[-4000:]}"
+        f"Recent frontend logs:\n{segment_http[-4000:]}"
     )
     assert overlap_http > overlap_data, (
         f"Expected HTTP probe overlap > data URI seed overlap "
         f"(proving image cache hit, not just text overlap), "
         f"got http={overlap_http}/{total_http}, data_uri={overlap_data}/{total_data}.\n"
-        f"Recent router logs:\n{segment_http[-4000:]}"
+        f"Recent frontend logs:\n{segment_http[-4000:]}"
     )
 
 

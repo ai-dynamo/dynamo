@@ -121,7 +121,11 @@ fn create_request_context(
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
-            let child_ctx = RsContext::with_id(request, parent_ctx.inner().id().to_string());
+            let child_ctx = RsContext::with_id_and_metadata(
+                request,
+                parent_ctx.inner().id().to_string(),
+                parent_ctx.metadata_snapshot(),
+            );
             parent_ctx.inner().link_child(child_ctx.context());
             if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
                 // Let the server handle the cancellation for now since not all backends are
@@ -196,8 +200,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
+    m.add_class::<context::ContextMetadata>()?;
+    m.add_class::<context::SpanProxy>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
+    m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
@@ -269,7 +276,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, self_host_metadata=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -288,6 +295,8 @@ fn register_model<'p>(
     media_fetcher: Option<MediaFetcher>,
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
+    worker_type: Option<WorkerType>,
+    needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
@@ -310,6 +319,18 @@ fn register_model<'p>(
     let is_videos = model_type.inner.supports_videos();
 
     let model_type_obj = model_type.inner;
+
+    // Normalize the topology readiness fields `worker_type` and `needs` for
+    // the MDC. `worker_type = None` and `needs = []` is the pre-strict
+    // default — readers apply the missing-field shim. Backends are expected
+    // to pass explicit values (one of the four `WorkerType` variants and a
+    // DNF `needs` list); enforced strictly in a follow-up.
+    let worker_type_value: Option<llm_rs::worker_type::WorkerType> = worker_type.map(|w| w.into());
+    let needs_value: Vec<Vec<llm_rs::worker_type::WorkerType>> = needs
+        .unwrap_or_default()
+        .into_iter()
+        .map(|alt| alt.into_iter().map(|w| w.into()).collect())
+        .collect();
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
@@ -365,6 +386,8 @@ fn register_model<'p>(
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
             card.model_input = model_input;
+            card.worker_type = worker_type_value;
+            card.needs = needs_value.clone();
             card.user_data = user_data_json;
 
             if let Some(cfg) = runtime_config {
@@ -428,7 +451,14 @@ fn register_model<'p>(
             });
 
         local_model
-            .attach(&endpoint.inner, model_type_obj, model_input, lora_info)
+            .attach(
+                &endpoint.inner,
+                model_type_obj,
+                model_input,
+                lora_info,
+                worker_type_value,
+                needs_value,
+            )
             .await
             .map_err(to_pyerr)?;
 
@@ -596,6 +626,60 @@ enum ModelInput {
     Text = 1,
     Tokens = 2,
     Tensor = 3,
+}
+
+/// Processing stage a worker handles.
+///
+/// Each worker has exactly one role; values are not combinable. To express
+/// "an encode worker needs Prefill+Decode OR Aggregated", `register_model`
+/// takes `needs` in DNF form (a list of alternative AND-sets). See the Rust
+/// `WorkerType` enum in `lib/llm/src/worker_type.rs` and
+/// `docs/proposals/health-disagg-readiness.md`.
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WorkerType {
+    Prefill = 1,
+    Decode = 2,
+    Encode = 3,
+    Aggregated = 4,
+}
+
+#[pymethods]
+impl WorkerType {
+    fn __str__(&self) -> &'static str {
+        match self {
+            WorkerType::Prefill => "prefill",
+            WorkerType::Decode => "decode",
+            WorkerType::Encode => "encode",
+            WorkerType::Aggregated => "aggregated",
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("WorkerType.{:?}", self)
+    }
+}
+
+impl From<WorkerType> for llm_rs::worker_type::WorkerType {
+    fn from(w: WorkerType) -> Self {
+        match w {
+            WorkerType::Prefill => llm_rs::worker_type::WorkerType::Prefill,
+            WorkerType::Decode => llm_rs::worker_type::WorkerType::Decode,
+            WorkerType::Encode => llm_rs::worker_type::WorkerType::Encode,
+            WorkerType::Aggregated => llm_rs::worker_type::WorkerType::Aggregated,
+        }
+    }
+}
+
+impl From<llm_rs::worker_type::WorkerType> for WorkerType {
+    fn from(w: llm_rs::worker_type::WorkerType) -> Self {
+        match w {
+            llm_rs::worker_type::WorkerType::Prefill => WorkerType::Prefill,
+            llm_rs::worker_type::WorkerType::Decode => WorkerType::Decode,
+            llm_rs::worker_type::WorkerType::Encode => WorkerType::Encode,
+            llm_rs::worker_type::WorkerType::Aggregated => WorkerType::Aggregated,
+        }
+    }
 }
 
 #[pymethods]

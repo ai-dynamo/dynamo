@@ -25,6 +25,7 @@ from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
+from dynamo.common.backend import telemetry
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
@@ -97,6 +98,7 @@ class SglangLLMEngine(LLMEngine):
         self.dynamo_args = dynamo_args
         # SGLang's local name for disaggregation_mode. Same enum.
         self.serving_mode = serving_mode
+        self.enable_trace = getattr(server_args, "enable_trace", False)
         self.engine: Any = None
         self._bootstrap_host: str | None = None
         self._bootstrap_port: int | None = None
@@ -149,6 +151,11 @@ class SglangLLMEngine(LLMEngine):
             else None
         )
         self._input_param_manager = InputParamManager(tokenizer)
+
+        logger.info(
+            "Trace header forwarding: %s",
+            "enabled" if self.enable_trace else "disabled (--enable-trace=False)",
+        )
 
         if self.serving_mode == DisaggregationMode.PREFILL:
             self._bootstrap_host, self._bootstrap_port = compute_bootstrap_address(
@@ -278,6 +285,11 @@ class SglangLLMEngine(LLMEngine):
             stream=True,
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
+            **telemetry.engine_trace_kwargs(
+                context,
+                kwarg_name="external_trace_header",
+                enabled=self.enable_trace,
+            ),
             **bootstrap_kwargs,
         )
 

@@ -1733,7 +1733,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_harmony_parser_basic() {
         let input = r#"
-        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}"#;
+        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("harmony"), None)
             .await
             .unwrap();

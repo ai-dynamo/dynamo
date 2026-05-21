@@ -26,7 +26,10 @@ ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
 ENV PATH=/usr/local/bin/etcd:${PATH}
 
-{% if device == "cpu" %}
+{% if device == "xpu" %}
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+{% elif device == "cpu" %}
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% endif %}
@@ -54,17 +57,18 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
+{% set pip_target = "--python /opt/venv/bin/python" if device == "xpu" else "--system" %}
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
-    uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then uv pip install --system --no-deps "$KVBM_WHEEL"; fi; \
+        if [ -n "$KVBM_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$KVBM_WHEEL"; fi; \
     fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
+        if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
 {% if device == "cuda" %}
@@ -90,17 +94,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 {% endif %}
 {% endif %}
 
-{% if device == "cuda" and cuda_version == "12.9" %}
-# TODO: Remove when the next vLLM release line is adopted. The v0.20.1-cu129
-# image ships both nixl-cu12 and nixl-cu13, and the generic nixl shim tries
-# nixl-cu13 first. Drop only the wrong CUDA wheel so import nixl selects cu12.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip uninstall --system -y nixl-cu13 && \
-    python3 -c 'import nixl._api as api; assert "nixl_cu12" in api.__file__, api.__file__'
-
-{% endif %}
-
 {% if context.vllm.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
@@ -111,6 +104,11 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
 
+# Remove the vLLM source tree shipped in the base image to avoid pytest
+# collection conflicts (duplicate conftest plugin registration) and stale
+# tool scripts referencing files not present in Dynamo's build context.
+RUN rm -rf /workspace/vllm
+
 USER dynamo
 
 # Copy the workspace surface needed by the current vLLM pre-merge test image.
@@ -118,18 +116,17 @@ USER dynamo
 # runtime does not look like a fully-expanded generic image.
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
 COPY --chown=dynamo:0 lib /workspace/lib
-COPY --chmod=775 --chown=dynamo:0 deploy/sanity_check.py /workspace/deploy/sanity_check.py
 
 # Setup launch banner in common directory accessible to all users
-RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
-
 USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
+RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
+    chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
