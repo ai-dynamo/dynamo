@@ -212,6 +212,24 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 		return
 	}
 
+	if failed := failedRegularContainer(pod); failed != nil {
+		term := failed.State.Terminated
+		message := fmt.Sprintf("Checkpoint container %q terminated with exit code %d", failed.Name, term.ExitCode)
+		if term.Reason != "" {
+			message = fmt.Sprintf("%s: %s", message, term.Reason)
+		}
+		opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container", failed.Name)
+		opLog.Info("Checkpoint pod container failed", "exit_code", term.ExitCode, "reason", term.Reason)
+		emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", message)
+		if err := annotateJob(ctx, w.clientset, opLog, job, map[string]string{
+			snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed,
+		}); err != nil {
+			opLog.Error(err, "Failed to mark checkpoint job failed")
+		}
+		w.killRunningCheckpointContainers(ctx, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
+		return
+	}
+
 	// Checkpoint contract: exactly one target container per job.
 	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 1)
 	if err != nil {
@@ -375,6 +393,34 @@ func restoreContainerResolveAttemptContext(ctx context.Context, deadlineAt time.
 		attemptDeadline = deadlineAt
 	}
 	return context.WithDeadline(ctx, attemptDeadline)
+}
+
+func failedRegularContainer(pod *corev1.Pod) *corev1.ContainerStatus {
+	for i := range pod.Status.ContainerStatuses {
+		term := pod.Status.ContainerStatuses[i].State.Terminated
+		if term != nil && term.ExitCode != 0 {
+			return &pod.Status.ContainerStatuses[i]
+		}
+	}
+	return nil
+}
+
+func (w *NodeController) killRunningCheckpointContainers(ctx context.Context, pod *corev1.Pod, reason string) {
+	log := w.log.WithValues("pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Running == nil || status.ContainerID == "" {
+			continue
+		}
+		containerID := snapshotruntime.StripCRIScheme(status.ContainerID)
+		pid, _, err := w.runtime.ResolveContainer(ctx, containerID)
+		if err != nil {
+			log.Error(err, "Failed to resolve running checkpoint container", "container", status.Name)
+			continue
+		}
+		if err := snapshotruntime.SendSignalToPID(log, pid, syscall.SIGKILL, reason); err != nil {
+			log.Error(err, "Failed to signal running checkpoint container", "container", status.Name)
+		}
+	}
 }
 
 func (w *NodeController) startRestoreForContainer(
