@@ -49,12 +49,17 @@ subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H20
 
 ## Configure
 
+<form className="dynamo-recipe-detail-shell">
+  <input className="dynamo-filter-input" type="radio" name="qwen-technique" id="qwen-technique-disagg" defaultChecked />
+  <input className="dynamo-filter-input" type="radio" name="qwen-technique" id="qwen-technique-agg" />
+  <input className="dynamo-filter-input" type="radio" name="qwen-technique" id="qwen-technique-kvbm" />
+
 <div className="dynamo-recipe-browser" aria-label="Qwen3-32B recipe selectors">
   <div className="dynamo-filter-row">
     <span className="dynamo-recipe-label">Hardware</span>
     <div>
       <div className="dynamo-filter-options">
-        <button className="dynamo-recipe-chip active">H200 16 GPU</button>
+        <span className="dynamo-config-value">H200 16 GPU</span>
       </div>
       <p className="dynamo-unvalidated-note">Not yet validated for this model: H100, B200, GB200.</p>
     </div>
@@ -64,7 +69,7 @@ subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H20
     <span className="dynamo-recipe-label">Runtime</span>
     <div>
       <div className="dynamo-filter-options">
-        <button className="dynamo-recipe-chip active">vLLM</button>
+        <span className="dynamo-config-value">vLLM</span>
       </div>
       <p className="dynamo-unvalidated-note">TensorRT-LLM and SGLang do not have verified Qwen3-32B recipes yet.</p>
     </div>
@@ -73,9 +78,9 @@ subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H20
   <div className="dynamo-filter-row">
     <span className="dynamo-recipe-label">Technique</span>
     <div className="dynamo-filter-options">
-      <button className="dynamo-recipe-chip active">Disaggregated + KV router</button>
-      <button className="dynamo-recipe-chip">Aggregated round-robin</button>
-      <button className="dynamo-recipe-chip">Aggregated + KVBM deployment</button>
+      <label className="dynamo-recipe-chip" htmlFor="qwen-technique-disagg">Disaggregated + KV router</label>
+      <label className="dynamo-recipe-chip" htmlFor="qwen-technique-agg">Aggregated round-robin</label>
+      <label className="dynamo-recipe-chip" htmlFor="qwen-technique-kvbm">Aggregated + KVBM deployment</label>
     </div>
   </div>
 
@@ -101,7 +106,7 @@ subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H20
   </div>
 </div>
 
-<div className="dynamo-selected-facts">
+<div className="dynamo-selected-facts dynamo-technique-panel qwen-technique-disagg">
   <div>
     <span>Selected recipe</span>
     <strong>Disagg + KV router</strong>
@@ -119,6 +124,45 @@ subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H20
     <strong>12,031 trace requests</strong>
   </div>
 </div>
+
+<div className="dynamo-selected-facts dynamo-technique-panel qwen-technique-agg">
+  <div>
+    <span>Selected recipe</span>
+    <strong>Aggregated round-robin</strong>
+  </div>
+  <div>
+    <span>Topology</span>
+    <strong>8 workers, TP2</strong>
+  </div>
+  <div>
+    <span>Workload</span>
+    <strong>Mooncake trace baseline</strong>
+  </div>
+  <div>
+    <span>Benchmark</span>
+    <strong>12,031 trace requests</strong>
+  </div>
+</div>
+
+<div className="dynamo-selected-facts dynamo-technique-panel qwen-technique-kvbm">
+  <div>
+    <span>Selected recipe</span>
+    <strong>Aggregated + KVBM</strong>
+  </div>
+  <div>
+    <span>Topology</span>
+    <strong>1 GPU + CPU KV cache</strong>
+  </div>
+  <div>
+    <span>Workload</span>
+    <strong>Deployment validation</strong>
+  </div>
+  <div>
+    <span>Benchmark</span>
+    <strong>No perf.yaml yet</strong>
+  </div>
+</div>
+</form>
 
 ## When to Use
 
