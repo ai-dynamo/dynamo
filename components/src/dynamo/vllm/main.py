@@ -613,9 +613,7 @@ async def register_vllm_model(
             (Prefill / Decode / Encode / Aggregated). Required for the
             frontend's topology readiness check once strict mode lands.
         needs: Peer worker types required to serve traffic, in DNF form
-            (list of alternative AND-sets). For example, a prefill worker
-            with --route-to-encoder passes
-            ``[[WorkerType.Decode, WorkerType.Encode]]``.
+            (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
 

@@ -395,10 +395,7 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
-        # Topology readiness role.
-        # _create_decode_worker handles both DECODE and AGGREGATED disaggregation modes.
-        # Encode is omitted from `needs` until encode workers register a card —
-        # advertising it now would leave route-to-encoder deployments perma-not-ready.
+        # What the worker is advertising itself as, and what other worker it needs to serve traffic.
         if config.disaggregation_mode == DisaggregationMode.DECODE:
             worker_type = WorkerType.Decode
             needs_set: list[WorkerType] = [WorkerType.Prefill]
@@ -611,9 +608,7 @@ class WorkerFactory:
         )
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
 
-        # Register prefill model with ModelType.Prefill (the legacy bit that
-        # gates prefill-side routing) and the topology readiness role. Encode
-        # is omitted from `needs` until encode workers register a card.
+        # Register prefill model with ModelType.Prefill
         model_input = (
             ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
         )
