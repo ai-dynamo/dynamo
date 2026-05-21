@@ -1967,16 +1967,8 @@ class TestChatTemplateKwargsForwarding:
     def _decode(self, tokenizer, token_ids: list[int]) -> str:
         return tokenizer.decode(token_ids, skip_special_tokens=False)
 
-    def test_qwen3_default_has_open_think_tag(self, tokenizer):
-        """Without enable_thinking=False, Qwen3 opens a <think> block."""
-        result = self._preprocess(
-            {"model": MODEL, "messages": self.MESSAGES}, tokenizer
-        )
-        prompt = self._decode(tokenizer, result.prompt_token_ids)
-        assert "<think>" in prompt
-
-    def test_qwen3_enable_thinking_false_closes_think_tag(self, tokenizer):
-        """enable_thinking=False makes Qwen3 emit <think>\\n\\n</think> (no reasoning)."""
+    def test_qwen3_enable_thinking_false_inserts_closed_think_block(self, tokenizer):
+        """enable_thinking=False makes Qwen3 insert <think></think> to suppress reasoning."""
         result = self._preprocess(
             {
                 "model": MODEL,
@@ -1989,10 +1981,28 @@ class TestChatTemplateKwargsForwarding:
         assert "<think>" in prompt
         assert "</think>" in prompt
 
+    def test_qwen3_enable_thinking_true_no_closed_think_block(self, tokenizer):
+        """enable_thinking=True leaves reasoning open (model generates <think> itself)."""
+        result = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self.MESSAGES,
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        prompt = self._decode(tokenizer, result.prompt_token_ids)
+        assert "</think>" not in prompt
+
     def test_qwen3_thinking_flag_changes_tokens(self, tokenizer):
-        """enable_thinking=False produces different token sequence than default."""
-        default = self._preprocess(
-            {"model": MODEL, "messages": self.MESSAGES}, tokenizer
+        """enable_thinking=True vs False produces different token sequences."""
+        think = self._preprocess(
+            {
+                "model": MODEL,
+                "messages": self.MESSAGES,
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
         )
         no_think = self._preprocess(
             {
@@ -2002,7 +2012,7 @@ class TestChatTemplateKwargsForwarding:
             },
             tokenizer,
         )
-        assert default.prompt_token_ids != no_think.prompt_token_ids
+        assert think.prompt_token_ids != no_think.prompt_token_ids
 
     def test_reasoning_effort_forwarded_to_template(self, tokenizer):
         """Top-level reasoning_effort is forwarded to apply_chat_template."""
