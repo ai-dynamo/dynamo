@@ -325,22 +325,22 @@ impl<
             return;
         };
 
-        if S::DYNAMIC {
-            let now = self.start_time.elapsed();
-            let mut pending = self.pending.lock().await;
-            let workers = self.workers_with_configs.borrow();
-            pending.rekey(|e| QueueEntry {
-                key: self
-                    .policy
-                    .rekey(now, &e.key, SchedulingContext::new(&e.request, &workers)),
-                request: e.request,
-            });
-        }
-
         loop {
             let _admission = self.admission_gate.lock().await;
             let decay_now = Instant::now();
             let mut pending = self.pending.lock().await;
+            if S::DYNAMIC {
+                let now = self.start_time.elapsed();
+                let workers = self.workers_with_configs.borrow();
+                pending.rekey(|e| QueueEntry {
+                    key: self.policy.rekey(
+                        now,
+                        &e.key,
+                        SchedulingContext::new(&e.request, &workers),
+                    ),
+                    request: e.request,
+                });
+            }
             let Some(front) = pending.peek_front() else {
                 break;
             };
