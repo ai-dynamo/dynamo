@@ -4,8 +4,8 @@
 //! Prefill-side end-to-end test for the CD wrapper, against the new
 //! symmetric `Session` API (MockSession + MockSessionFactory).
 //!
-//! Mocks: `MockInnerLeaderShim`, `MockCdBlockTransport` (for the
-//! G2→G1 onboard only), `MockCdWorkerHook`, `MockSessionFactory`.
+//! Mocks: `MockInnerLeaderShim`, `MockP2pBlockTransport` (for the
+//! G2→G1 onboard only), `MockP2pWorkerHook`, `MockSessionFactory`.
 //! No velo, no real RDMA.
 
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use kvbm_connector::G2;
 use kvbm_connector::common::Request;
 use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillStatus;
 use kvbm_connector::connector::leader::disagg::testing::{
-    MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim, MockSlot, TEST_BLOCK_SIZE,
+    MockInnerLeaderShim, MockP2pBlockTransport, MockP2pWorkerHook, MockSlot, TEST_BLOCK_SIZE,
     wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{ConditionalDisaggCoordinator, CoordinatorParts};
@@ -79,8 +79,8 @@ struct TestHarness {
     wrapper: Arc<PrefillDisaggLeader>,
     coordinator: Arc<ConditionalDisaggCoordinator>,
     inner: Arc<MockInnerLeaderShim>,
-    transport: Arc<MockCdBlockTransport>,
-    workers: Arc<MockCdWorkerHook>,
+    transport: Arc<MockP2pBlockTransport>,
+    workers: Arc<MockP2pWorkerHook>,
     factory: Arc<MockSessionFactory>,
     all_hashes: Vec<kvbm_logical::SequenceHash>,
     g1_block_ids: Vec<usize>,
@@ -147,8 +147,8 @@ fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -
     };
     inner.install_slot("req-1", slot);
 
-    let transport = MockCdBlockTransport::new();
-    let workers = MockCdWorkerHook::new();
+    let transport = MockP2pBlockTransport::new();
+    let workers = MockP2pWorkerHook::new();
     let factory = MockSessionFactory::new();
 
     let coordinator = ConditionalDisaggCoordinator::new_with_watchdog(
@@ -158,7 +158,7 @@ fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -
             worker_hook: workers.clone(),
             session_factory: factory.clone(),
             peer_resolver: Arc::new(
-                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+                kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
             ),
             runtime: tokio::runtime::Handle::current(),
         },
@@ -456,8 +456,8 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
     };
     inner.install_slot("req-1", slot);
 
-    let transport = MockCdBlockTransport::new();
-    let workers = MockCdWorkerHook::new();
+    let transport = MockP2pBlockTransport::new();
+    let workers = MockP2pWorkerHook::new();
     let factory = MockSessionFactory::new();
     let coordinator = ConditionalDisaggCoordinator::new(CoordinatorParts {
         inner: inner.clone(),
@@ -465,7 +465,7 @@ fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness
         worker_hook: workers.clone(),
         session_factory: factory.clone(),
         peer_resolver: Arc::new(
-            kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+            kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
         ),
         runtime: tokio::runtime::Handle::current(),
     });

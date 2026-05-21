@@ -50,16 +50,6 @@ pub struct EventsConfig {
     /// - `all`: Emit for all blocks (testing/debugging)
     #[serde(default)]
     pub policy: EventPolicyConfig,
-
-    /// KV-index hub URL (discovery base, e.g. `http://hub-host:1337`).
-    ///
-    /// When set, the connector probes this hub for the KV-indexer feature and,
-    /// when present and block-size-compatible, publishes block events to it.
-    /// `None` (default) disables KV-index publishing. Inject via
-    /// `kv_connector_extra_config` so it survives vLLM's EngineCore spawn —
-    /// an env var would not.
-    #[serde(default)]
-    pub kv_index_hub_url: Option<String>,
 }
 
 impl Default for EventsConfig {
@@ -70,7 +60,6 @@ impl Default for EventsConfig {
             channel_capacity: default_channel_capacity(),
             subject: default_subject(),
             policy: EventPolicyConfig::default(),
-            kv_index_hub_url: None,
         }
     }
 }
@@ -213,7 +202,6 @@ mod tests {
             channel_capacity: 1024,
             subject: "test".to_string(),
             policy: EventPolicyConfig::PowerOfTwo,
-            kv_index_hub_url: None,
         };
         assert!(config.validate().is_ok());
     }

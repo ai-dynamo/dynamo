@@ -46,7 +46,7 @@ use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
 use kvbm_connector::connector::leader::disagg::testing::{
-    InMemoryRemotePrefillQueue, MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim,
+    InMemoryRemotePrefillQueue, MockInnerLeaderShim, MockP2pBlockTransport, MockP2pWorkerHook,
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
@@ -146,8 +146,8 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
 
     let factory = MockSessionFactory::new();
     let queue = InMemoryRemotePrefillQueue::new();
-    let transport = MockCdBlockTransport::new();
-    let workers = MockCdWorkerHook::new();
+    let transport = MockP2pBlockTransport::new();
+    let workers = MockP2pWorkerHook::new();
 
     let coordinator = ConditionalDisaggCoordinator::new_with_decode(
         CoordinatorParts {
@@ -156,7 +156,7 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
             worker_hook: workers.clone(),
             session_factory: factory.clone(),
             peer_resolver: Arc::new(
-                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+                kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
             ),
             runtime: tokio::runtime::Handle::current(),
         },
@@ -165,7 +165,6 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
     );
 
     let cfg = DisaggConfig {
-        hub_url: "http://127.0.0.1:1337".to_string(),
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
     };

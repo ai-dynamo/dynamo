@@ -29,6 +29,7 @@ mod debug;
 mod disagg;
 mod discovery;
 mod events;
+mod hub;
 mod messenger;
 mod metrics;
 mod nixl;
@@ -47,6 +48,7 @@ pub use discovery::{
     DiscoveryConfig, EtcdDiscoveryConfig, FilesystemDiscoveryConfig, P2pDiscoveryConfig,
 };
 pub use events::{BatchingConfig as EventsBatchingConfig, EventPolicyConfig, EventsConfig};
+pub use hub::LeaderHubConfig;
 pub use kvbm_common::BlockLayoutMode;
 pub use messenger::{MessengerBackendConfig, MessengerConfig};
 pub use metrics::MetricsConfig;
@@ -138,8 +140,24 @@ pub struct KvbmConfig {
     #[serde(default)]
     pub debug: DebugConfig,
 
-    /// Disaggregation configuration (P/D role + hub coordination).
-    /// None = aggregated (non-disagg) mode.
+    /// Connector→hub configuration. The sole way the connector reaches a
+    /// `kvbm-hub`. `None` = no hub features (normal hub-less connector work);
+    /// the hub is currently required for `kv_indexer`, `p2p`, and
+    /// `conditional_disagg`.
+    #[validate(nested)]
+    #[serde(default)]
+    pub hub: Option<LeaderHubConfig>,
+
+    /// Maximum sequence length (tokens). Sourced from vLLM's `max_model_len`
+    /// by the connector binding and reported to the hub for KV-index
+    /// must-match validation. `None` when not supplied.
+    #[serde(default)]
+    pub max_seq_len: Option<usize>,
+
+    /// Disaggregation configuration (P/D role). `None` = not a disagg
+    /// participant. The hub URL is no longer here — it comes from
+    /// [`hub`](Self::hub); this block only carries the per-instance role and
+    /// admission budget.
     #[validate(nested)]
     #[serde(default)]
     pub disagg: Option<DisaggConfig>,
@@ -765,15 +783,18 @@ mod tests {
         temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH"], || {
             let json = r#"{
                 "leader": {
-                    "disagg": { "hub_url": "http://127.0.0.1:1337", "role": "prefill" }
+                    "hub": { "url": "http://127.0.0.1:1337", "features": ["conditional_disagg"] },
+                    "disagg": { "role": "prefill" }
                 },
                 "worker": {}
             }"#;
 
             let leader_cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
             let disagg = leader_cfg.disagg.expect("leader should have disagg config");
-            assert_eq!(disagg.hub_url, "http://127.0.0.1:1337");
             assert_eq!(disagg.role, DisaggregationRole::Prefill);
+            let hub = leader_cfg.hub.expect("leader should have hub config");
+            assert_eq!(hub.url, "http://127.0.0.1:1337");
+            assert_eq!(hub.features, vec!["conditional_disagg"]);
 
             // Worker profile should not pick up the leader-only disagg block.
             let worker_cfg = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
@@ -795,8 +816,6 @@ mod tests {
             let cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
             let disagg = cfg.disagg.expect("disagg present");
             assert_eq!(disagg.role, DisaggregationRole::Decode);
-            // hub_url default applied
-            assert_eq!(disagg.hub_url, "http://127.0.0.1:1337");
         });
     }
 

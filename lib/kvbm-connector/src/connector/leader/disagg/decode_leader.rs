@@ -49,8 +49,8 @@ use crate::{G2, SequenceHash};
 
 use super::coordinator::{ConditionalDisaggCoordinator, RemotePrefillStart};
 use super::decode::CdFailureSink;
-use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::{ConnectorLeaderApi, PolicyInputs, PrefillSelection};
+use crate::connector::leader::p2p::transport::{InnerLeaderShim, P2pBlockTransport, P2pWorkerHook};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 
@@ -258,8 +258,8 @@ pub struct DecodeDisaggLeader {
     inner: Arc<dyn InnerLeaderShim>,
     role: DisaggregationRole,
     coordinator: Arc<ConditionalDisaggCoordinator>,
-    transport: Arc<dyn CdBlockTransport>,
-    worker_hook: Arc<dyn CdWorkerHook>,
+    transport: Arc<dyn P2pBlockTransport>,
+    worker_hook: Arc<dyn P2pWorkerHook>,
     tokio_handle: tokio::runtime::Handle,
 
     inflight_budget: InflightBudget,
@@ -299,8 +299,8 @@ impl DecodeDisaggLeader {
         inner: Arc<dyn InnerLeaderShim>,
         config: &DisaggConfig,
         coordinator: Arc<ConditionalDisaggCoordinator>,
-        transport: Arc<dyn CdBlockTransport>,
-        worker_hook: Arc<dyn CdWorkerHook>,
+        transport: Arc<dyn P2pBlockTransport>,
+        worker_hook: Arc<dyn P2pWorkerHook>,
         tokio_handle: tokio::runtime::Handle,
         hub_wiring: HubWiring,
     ) -> Arc<Self> {

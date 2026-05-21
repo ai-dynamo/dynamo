@@ -14,7 +14,7 @@ use futures::{FutureExt, future::BoxFuture};
 use kvbm_protocols::disagg::{RemotePrefillRequest, TransferParams};
 use tokio::sync::oneshot;
 
-use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
+use crate::connector::leader::p2p::transport::{InnerLeaderShim, P2pBlockTransport, P2pWorkerHook};
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_logical::blocks::{CompleteBlock, MutableBlock};
 use kvbm_logical::manager::BlockManager;
@@ -67,7 +67,7 @@ pub async fn wait_until(predicate: impl Fn() -> bool) {
 }
 
 // ============================================================================
-// MockCdBlockTransport — local G2→G1 only (remote pull is now handled by
+// MockP2pBlockTransport — local G2→G1 only (remote pull is now handled by
 // `Session::pull` inside the engine).
 // ============================================================================
 
@@ -77,7 +77,7 @@ pub struct LocalG2ToG1Call {
     pub dst_g1_block_ids: Vec<BlockId>,
 }
 
-pub struct MockCdBlockTransport {
+pub struct MockP2pBlockTransport {
     onboards: Mutex<Vec<PendingOnboardCall>>,
 }
 
@@ -86,7 +86,7 @@ struct PendingOnboardCall {
     resolver: Option<oneshot::Sender<Result<()>>>,
 }
 
-impl MockCdBlockTransport {
+impl MockP2pBlockTransport {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             onboards: Mutex::new(Vec::new()),
@@ -118,7 +118,7 @@ impl MockCdBlockTransport {
     }
 }
 
-impl CdBlockTransport for MockCdBlockTransport {
+impl P2pBlockTransport for MockP2pBlockTransport {
     fn local_g2_to_g1(
         &self,
         src_g2_block_ids: Vec<BlockId>,
@@ -141,7 +141,7 @@ impl CdBlockTransport for MockCdBlockTransport {
 }
 
 // ============================================================================
-// MockCdWorkerHook
+// MockP2pWorkerHook
 // ============================================================================
 
 #[derive(Debug, Clone)]
@@ -156,12 +156,12 @@ pub struct FailedCall {
 }
 
 #[derive(Default)]
-pub struct MockCdWorkerHook {
+pub struct MockP2pWorkerHook {
     completed: Mutex<Vec<CompleteCall>>,
     failed: Mutex<Vec<FailedCall>>,
 }
 
-impl MockCdWorkerHook {
+impl MockP2pWorkerHook {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -190,7 +190,7 @@ impl MockCdWorkerHook {
     }
 }
 
-impl CdWorkerHook for MockCdWorkerHook {
+impl P2pWorkerHook for MockP2pWorkerHook {
     fn mark_onboarding_complete(&self, request_id: String) -> BoxFuture<'static, Result<()>> {
         self.completed.lock().push(CompleteCall { request_id });
         async { Ok(()) }.boxed()

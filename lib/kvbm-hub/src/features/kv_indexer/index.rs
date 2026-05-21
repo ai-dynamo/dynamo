@@ -3,17 +3,21 @@
 
 //! Position-bucketed block index.
 //!
-//! The index is a fixed-size `Vec<DashMap>` presized to
-//! `max_seq_len / block_size`. Each bucket maps a
-//! [`SequenceHash`] (a self-describing [`PositionalLineageHash`]) to the set of
-//! worker `instance_id`s holding that block. The PLH carries its own
-//! `position()`, so ingest needs no out-of-band position data — and queries
-//! resolve by walking the candidate hashes and returning the **deepest** one
-//! present (PLH lineage guarantees holders of a deep block also hold its
-//! ancestors).
+//! Buckets are a sparse, **grow-only** `DashMap<position, …>`; the capacity
+//! (`max_positions = max_seq_len / block_size`) starts from the hub's optional
+//! `max_seq_len` and is raised — never lowered — by
+//! [`grow_to_max_seq_len`](PositionalIndex::grow_to_max_seq_len), called when a
+//! registrant reports a larger `max_seq_len`. Each bucket maps a
+//! [`SequenceHash`] (a self-describing PLH) to the set of worker `instance_id`s
+//! holding that block. The PLH carries its own `position()`, so ingest needs no
+//! out-of-band position data — and queries resolve by walking the candidate
+//! hashes and returning the **deepest** one present (PLH lineage guarantees
+//! holders of a deep block also hold its ancestors). A create whose position is
+//! `>= max_positions` is dropped (bounded against malformed input).
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 use kvbm_logical::SequenceHash;
@@ -21,39 +25,43 @@ use kvbm_logical::events::{KvCacheEvents, KvbmCacheEvents};
 
 use super::protocol::{ByPositionResponse, IndexEntry};
 
+/// One position's block-hash → holding-instances map.
+type Bucket = Arc<DashMap<SequenceHash, HashSet<u128>>>;
+
 /// Position-bucketed map of block hash → holding instances.
 pub struct PositionalIndex {
-    /// `buckets[pos]` indexes blocks at sequence position `pos`. Length is
-    /// `max_seq_len / block_size`.
-    buckets: Vec<DashMap<SequenceHash, HashSet<u128>>>,
+    /// Sparse position → bucket map. Buckets are created on demand; missing
+    /// positions are simply empty.
+    buckets: DashMap<usize, Bucket>,
     block_size: usize,
-    max_seq_len: usize,
-    /// Count of create events whose position exceeded the last bucket.
+    /// Current capacity in positions (`max_seq_len / block_size`). Grow-only.
+    max_positions: AtomicUsize,
+    /// Count of create events whose position exceeded the current capacity.
     dropped_out_of_range: AtomicU64,
 }
 
 impl PositionalIndex {
-    /// Builds an index sized for `max_seq_len` tokens at `block_size` tokens
-    /// per block. Requires `block_size > 0` and `max_seq_len % block_size == 0`.
+    /// Builds an index with initial capacity for `max_seq_len` tokens at
+    /// `block_size` tokens per block. Requires `block_size > 0` and
+    /// `max_seq_len % block_size == 0` (`max_seq_len == 0` is allowed — the
+    /// index starts empty and grows as registrants report their `max_seq_len`).
     pub fn new(max_seq_len: usize, block_size: usize) -> anyhow::Result<Self> {
         anyhow::ensure!(block_size > 0, "block_size must be > 0");
         anyhow::ensure!(
             max_seq_len.is_multiple_of(block_size),
             "max_seq_len ({max_seq_len}) must be evenly divisible by block_size ({block_size})"
         );
-        let num_positions = max_seq_len / block_size;
-        let buckets = (0..num_positions).map(|_| DashMap::new()).collect();
         Ok(Self {
-            buckets,
+            buckets: DashMap::new(),
             block_size,
-            max_seq_len,
+            max_positions: AtomicUsize::new(max_seq_len / block_size),
             dropped_out_of_range: AtomicU64::new(0),
         })
     }
 
-    /// Number of position buckets (`max_seq_len / block_size`).
+    /// Current number of position buckets (`max_seq_len / block_size`).
     pub fn num_positions(&self) -> usize {
-        self.buckets.len()
+        self.max_positions.load(Ordering::Relaxed)
     }
 
     /// Block size (tokens per block) the index was built for.
@@ -61,13 +69,21 @@ impl PositionalIndex {
         self.block_size
     }
 
-    /// Maximum sequence length (tokens) the index was built for.
+    /// Current maximum sequence length (tokens) the index can hold.
     pub fn max_seq_len(&self) -> usize {
-        self.max_seq_len
+        self.num_positions() * self.block_size
+    }
+
+    /// Raise capacity to fit `max_seq_len` tokens. Never lowers it. Called when
+    /// a KV-index registrant reports its `max_seq_len` (floored to a whole
+    /// number of blocks).
+    pub fn grow_to_max_seq_len(&self, max_seq_len: usize) {
+        self.max_positions
+            .fetch_max(max_seq_len / self.block_size, Ordering::Relaxed);
     }
 
     /// Count of create events dropped because their position exceeded the
-    /// last bucket.
+    /// current capacity.
     pub fn dropped_out_of_range(&self) -> u64 {
         self.dropped_out_of_range.load(Ordering::Relaxed)
     }
@@ -90,22 +106,26 @@ impl PositionalIndex {
         }
     }
 
+    /// Clone the bucket `Arc` at `pos` (if any), dropping the outer guard so
+    /// inner ops don't hold the outer shard lock.
+    fn bucket(&self, pos: usize) -> Option<Bucket> {
+        self.buckets.get(&pos).map(|b| Arc::clone(&b))
+    }
+
     fn insert(&self, hash: SequenceHash, instance: u128) {
         let pos = hash.position() as usize;
-        let Some(bucket) = self.buckets.get(pos) else {
+        if pos >= self.max_positions.load(Ordering::Relaxed) {
             self.dropped_out_of_range.fetch_add(1, Ordering::Relaxed);
             return;
-        };
+        }
+        let bucket = self.buckets.entry(pos).or_default().clone();
         bucket.entry(hash).or_default().insert(instance);
     }
 
     fn remove(&self, hash: SequenceHash, instance: u128) {
-        let pos = hash.position() as usize;
-        let Some(bucket) = self.buckets.get(pos) else {
+        let Some(bucket) = self.bucket(hash.position() as usize) else {
             return;
         };
-        // Drop the per-entry guard before `remove_if` to avoid re-locking the
-        // same shard while it is held.
         let now_empty = match bucket.get_mut(&hash) {
             Some(mut set) => {
                 set.remove(&instance);
@@ -121,7 +141,10 @@ impl PositionalIndex {
     /// Removes `instance` from every bucket (used for `Shutdown` and
     /// registry eviction). Empty entries are pruned.
     pub fn remove_instance(&self, instance: u128) {
-        for bucket in &self.buckets {
+        // Snapshot bucket Arcs so we don't hold the outer guard while mutating
+        // inner maps.
+        let buckets: Vec<Bucket> = self.buckets.iter().map(|b| Arc::clone(&b)).collect();
+        for bucket in buckets {
             bucket.retain(|_, set| {
                 set.remove(&instance);
                 !set.is_empty()
@@ -138,7 +161,7 @@ impl PositionalIndex {
         let mut best: Option<IndexEntry> = None;
         for hash in hashes {
             let pos = hash.position();
-            let Some(bucket) = self.buckets.get(pos as usize) else {
+            let Some(bucket) = self.bucket(pos as usize) else {
                 continue;
             };
             let Some(set) = bucket.get(hash) else {
@@ -157,7 +180,7 @@ impl PositionalIndex {
     /// Dumps the index bucket at `position`. Out-of-range positions yield an
     /// empty entry list.
     pub fn by_position(&self, position: usize) -> ByPositionResponse {
-        let entries = match self.buckets.get(position) {
+        let entries = match self.bucket(position) {
             Some(bucket) => bucket
                 .iter()
                 .map(|kv| entry_of(*kv.key(), kv.value()))
@@ -329,5 +352,32 @@ mod tests {
         assert_eq!(idx.dropped_out_of_range(), 2); // positions 2,3 dropped
         assert_eq!(idx.by_position(0).entries.len(), 1);
         assert_eq!(idx.by_position(1).entries.len(), 1);
+    }
+
+    #[test]
+    fn grow_raises_capacity_and_never_lowers() {
+        let idx = PositionalIndex::new(8, 4).unwrap(); // 2 positions
+        assert_eq!(idx.num_positions(), 2);
+
+        // Grow to fit 16 tokens → 4 positions; deeper creates now land.
+        idx.grow_to_max_seq_len(16);
+        assert_eq!(idx.num_positions(), 4);
+        assert_eq!(idx.max_seq_len(), 16);
+        let hashes = plhs(4, 4, 9); // positions 0..3
+        idx.apply(create(hashes.clone(), 1));
+        assert_eq!(idx.dropped_out_of_range(), 0);
+        assert_eq!(idx.by_position(3).entries.len(), 1);
+
+        // A smaller (or equal) max_seq_len never shrinks capacity.
+        idx.grow_to_max_seq_len(8);
+        assert_eq!(idx.num_positions(), 4);
+
+        // Starting from an empty index (max_seq_len 0) grows on demand.
+        let empty = PositionalIndex::new(0, 4).unwrap();
+        assert_eq!(empty.num_positions(), 0);
+        empty.apply(create(hashes, 2));
+        assert_eq!(empty.dropped_out_of_range(), 4); // all dropped: capacity 0
+        empty.grow_to_max_seq_len(16);
+        assert_eq!(empty.num_positions(), 4);
     }
 }

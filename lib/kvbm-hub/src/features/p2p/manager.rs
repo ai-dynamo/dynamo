@@ -4,15 +4,25 @@
 //! Hub-side manager for the P2P feature.
 
 use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
 
+use axum::Json;
 use axum::Router;
+use axum::extract::{Path, State};
+use axum::response::Response;
+use axum::routing::post;
 use futures::future::BoxFuture;
 use parking_lot::RwLock;
 use velo_ext::InstanceId;
 
+use crate::features::http::{control_error_response, leader_client, ok_response};
 use crate::features::{FeatureError, FeatureManager, HubContext};
-use crate::protocol::{Feature, FeatureKey, LayoutCompatPayload};
+use crate::protocol::{self, Feature, FeatureKey, LayoutCompatPayload};
+use crate::registry::PeerRegistry;
 use kvbm_protocols::control::layout_compat::check_layout_compat;
+use kvbm_protocols::control::{
+    CloseTransferSessionRequest, OpenTransferSessionRequest, PullFromSessionRequest, SearchRequest,
+};
 
 /// Tracks P2P registrations and enforces the layout-compatibility baseline.
 ///
@@ -23,6 +33,13 @@ use kvbm_protocols::control::layout_compat::check_layout_compat;
 /// bouncing the hub.
 pub struct P2pManager {
     inner: RwLock<P2pInner>,
+    /// Hub velo handle — needed to issue `/control/transfer/*` RPCs to the
+    /// target leader. Set in [`FeatureManager::attach`]; absent when the hub
+    /// has no velo transport (transfer routes then return 503).
+    velo: OnceLock<Arc<velo::Velo>>,
+    /// Shared peer registry — used to confirm a transfer target is currently
+    /// registered before issuing the velo call. Set in `attach`.
+    registry: OnceLock<Arc<dyn PeerRegistry>>,
 }
 
 struct P2pInner {
@@ -39,6 +56,8 @@ impl std::fmt::Debug for P2pManager {
         f.debug_struct("P2pManager")
             .field("instance_count", &inner.instances.len())
             .field("has_baseline", &inner.layout_baseline.is_some())
+            .field("velo_attached", &self.velo.get().is_some())
+            .field("registry_attached", &self.registry.get().is_some())
             .finish()
     }
 }
@@ -57,6 +76,8 @@ impl P2pManager {
                 instances: HashSet::new(),
                 layout_baseline: None,
             }),
+            velo: OnceLock::new(),
+            registry: OnceLock::new(),
         }
     }
 
@@ -130,14 +151,25 @@ impl FeatureManager for P2pManager {
         // primary-consistency gate.) CD inherits these via its P2P dependency.
         crate::features::FeatureConfigRequirements {
             block_size: true,
-            max_seq_len: false,
             block_layout: true,
         }
     }
 
-    fn attach<'a>(&'a self, _ctx: HubContext) -> BoxFuture<'a, Result<(), FeatureError>> {
-        // P2P is a gate-only feature; nothing to attach.
-        Box::pin(async { Ok(()) })
+    fn attach<'a>(&'a self, ctx: HubContext) -> BoxFuture<'a, Result<(), FeatureError>> {
+        // Stash the registry + (optional) velo so the `/control/transfer/*`
+        // handlers can proxy to the target leader. Mirrors `ControlPlaneManager`.
+        Box::pin(async move {
+            let _ = self.registry.set(ctx.registry.clone());
+            if let Some(v) = ctx.velo.clone() {
+                let _ = self.velo.set(v);
+            } else {
+                tracing::warn!(
+                    "P2pManager: hub has no velo transport — \
+                     /control/transfer/* routes will return 503"
+                );
+            }
+            Ok(())
+        })
     }
 
     fn on_register<'a>(
@@ -194,11 +226,127 @@ impl FeatureManager for P2pManager {
         }
     }
 
-    fn control_router(self: std::sync::Arc<Self>) -> Router {
-        Router::new()
+    fn control_router(self: Arc<Self>) -> Router {
+        transfer_routes(self)
     }
 
-    fn public_router(self: std::sync::Arc<Self>) -> Router {
-        Router::new()
+    fn public_router(self: Arc<Self>) -> Router {
+        // Mirror `ControlPlaneManager`: the transfer surface is mounted on
+        // both listeners so callers can reach it on either port.
+        transfer_routes(self)
+    }
+}
+
+/// The `/v1/instances/{id}/control/transfer/*` surface. Block-copy session
+/// management is a P2P concern, so these routes only exist when the P2P
+/// feature is enabled on the hub.
+fn transfer_routes(manager: Arc<P2pManager>) -> Router {
+    use protocol::paths::*;
+    Router::new()
+        .route(CONTROL_TRANSFER_SEARCH_PREFIX, post(transfer_search_prefix))
+        .route(
+            CONTROL_TRANSFER_SEARCH_SCATTER,
+            post(transfer_search_scatter),
+        )
+        .route(CONTROL_TRANSFER_OPEN_SESSION, post(transfer_open_session))
+        .route(
+            CONTROL_TRANSFER_PULL_FROM_SESSION,
+            post(transfer_pull_from_session),
+        )
+        .route(CONTROL_TRANSFER_CLOSE_SESSION, post(transfer_close_session))
+        .with_state(manager)
+}
+
+/// Build a `LeaderControlClient` for `instance_id` via the shared
+/// [`http::leader_client`](crate::features::http::leader_client) helper,
+/// supplying this manager's own velo + registry handles.
+#[allow(clippy::result_large_err)]
+fn p2p_leader_client(
+    mgr: &P2pManager,
+    instance_id: InstanceId,
+) -> Result<kvbm_protocols::control::LeaderControlClient, Response> {
+    leader_client(&mgr.velo, &mgr.registry, instance_id)
+}
+
+/// `POST /control/transfer/search_prefix` — always-on (when P2P is enabled).
+async fn transfer_search_prefix(
+    State(mgr): State<Arc<P2pManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<SearchRequest>,
+) -> Response {
+    let client = match p2p_leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().search_prefix(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "search_prefix", err),
+    }
+}
+
+/// `POST /control/transfer/search_scatter` — always-on (when P2P is enabled).
+async fn transfer_search_scatter(
+    State(mgr): State<Arc<P2pManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<SearchRequest>,
+) -> Response {
+    let client = match p2p_leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().search_scatter(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "search_scatter", err),
+    }
+}
+
+/// `POST /control/transfer/open_session` — dispatched at the holder. Returns
+/// the attach triple in
+/// [`kvbm_protocols::control::OpenTransferSessionResponse`].
+async fn transfer_open_session(
+    State(mgr): State<Arc<P2pManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<OpenTransferSessionRequest>,
+) -> Response {
+    let client = match p2p_leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().open_session(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "open_session", err),
+    }
+}
+
+/// `POST /control/transfer/pull_from_session` — dispatched at the puller.
+/// Long-poll: returns when the pull is complete.
+async fn transfer_pull_from_session(
+    State(mgr): State<Arc<P2pManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<PullFromSessionRequest>,
+) -> Response {
+    let client = match p2p_leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().pull_from_session(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "pull_from_session", err),
+    }
+}
+
+/// `POST /control/transfer/close_session` — idempotent.
+async fn transfer_close_session(
+    State(mgr): State<Arc<P2pManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<CloseTransferSessionRequest>,
+) -> Response {
+    let client = match p2p_leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().close_session(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "close_session", err),
     }
 }

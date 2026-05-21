@@ -300,6 +300,17 @@ impl HubClient {
         self.guard.get().is_some()
     }
 
+    /// Fetch the hub's aggregate configuration (`GET /v1/config` on the
+    /// discovery port) — the hub's `primary` config plus its enabled feature
+    /// set. The canonical way to learn what the hub offers before deciding
+    /// which features to participate in (used by the connector handshake and
+    /// `kvbmctl`). Read-only; does not require registration.
+    pub async fn get_config(&self) -> Result<crate::protocol::HubConfigResponse> {
+        let url = self.discovery_url(protocol::paths::HUB_CONFIG)?;
+        let resp = self.http.get(url).send().await.context("GET /v1/config")?;
+        parse_json(resp).await
+    }
+
     /// Push an [`InstanceDescription`] for `instance_id` to the hub's describe
     /// cache. Used by the leader-side connector after `set_config_blob` and
     /// (where applicable) `set_hub_instance_id` have populated the leader's

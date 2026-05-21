@@ -26,23 +26,20 @@ pub enum DisaggregationRole {
 
 /// Disaggregation configuration.
 ///
+/// The hub URL is **not** here — it comes from
+/// [`KvbmConfig::hub`](crate::KvbmConfig::hub). This block only carries the
+/// per-instance role (and admission budget); the `conditional_disagg` feature
+/// is enabled via `leader.hub.features`.
+///
 /// # JSON example
 /// ```json
 /// {
-///   "hub_url": "http://127.0.0.1:1337",
 ///   "role": "prefill",
 ///   "max_inflight_remote_prefill_tokens": 1048576
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct DisaggConfig {
-    /// Hub control-plane URL (default: `http://127.0.0.1:1337`).
-    ///
-    /// This is the private discovery port; the hub also exposes a public
-    /// port (`8337` by default) that serves the same registry.
-    #[serde(default = "default_hub_url")]
-    pub hub_url: String,
-
     /// Role this instance plays in the disagg topology.
     pub role: DisaggregationRole,
 
@@ -51,10 +48,6 @@ pub struct DisaggConfig {
     /// unless operators opt in to admission throttling.
     #[serde(default = "default_max_inflight_remote_prefill_tokens")]
     pub max_inflight_remote_prefill_tokens: usize,
-}
-
-fn default_hub_url() -> String {
-    "http://127.0.0.1:1337".to_string()
 }
 
 fn default_max_inflight_remote_prefill_tokens() -> usize {
@@ -67,43 +60,30 @@ mod tests {
 
     #[test]
     fn test_deserialize_prefill() {
-        let json = r#"{"hub_url": "http://127.0.0.1:1337", "role": "prefill"}"#;
+        let json = r#"{"role": "prefill"}"#;
         let cfg: DisaggConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.hub_url, "http://127.0.0.1:1337");
         assert_eq!(cfg.role, DisaggregationRole::Prefill);
         assert_eq!(cfg.max_inflight_remote_prefill_tokens, usize::MAX);
     }
 
     #[test]
     fn test_deserialize_decode() {
-        let json = r#"{"hub_url": "http://hub.local:8337", "role": "decode"}"#;
+        let json = r#"{"role": "decode"}"#;
         let cfg: DisaggConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.hub_url, "http://hub.local:8337");
         assert_eq!(cfg.role, DisaggregationRole::Decode);
-    }
-
-    #[test]
-    fn test_default_hub_url() {
-        let json = r#"{"role": "prefill"}"#;
-        let cfg: DisaggConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.hub_url, "http://127.0.0.1:1337");
-        assert_eq!(cfg.role, DisaggregationRole::Prefill);
     }
 
     #[test]
     fn test_serialize_roundtrip() {
         let cfg = DisaggConfig {
-            hub_url: "http://example.com:1337".to_string(),
             role: DisaggregationRole::Decode,
             max_inflight_remote_prefill_tokens: 4096,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains(r#""role":"decode""#));
-        assert!(json.contains(r#""hub_url":"http://example.com:1337""#));
         assert!(json.contains(r#""max_inflight_remote_prefill_tokens":4096"#));
 
         let roundtrip: DisaggConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtrip.hub_url, cfg.hub_url);
         assert_eq!(roundtrip.role, cfg.role);
         assert_eq!(
             roundtrip.max_inflight_remote_prefill_tokens,
@@ -114,7 +94,6 @@ mod tests {
     #[test]
     fn test_validate_ok() {
         let cfg = DisaggConfig {
-            hub_url: default_hub_url(),
             role: DisaggregationRole::Prefill,
             max_inflight_remote_prefill_tokens: default_max_inflight_remote_prefill_tokens(),
         };
@@ -124,7 +103,6 @@ mod tests {
     #[test]
     fn test_deserialize_inflight_budget() {
         let json = r#"{
-            "hub_url": "http://127.0.0.1:1337",
             "role": "decode",
             "max_inflight_remote_prefill_tokens": 64
         }"#;
@@ -134,7 +112,7 @@ mod tests {
 
     #[test]
     fn test_missing_role_fails() {
-        let json = r#"{"hub_url": "http://127.0.0.1:1337"}"#;
+        let json = r#"{"max_inflight_remote_prefill_tokens": 64}"#;
         let result: Result<DisaggConfig, _> = serde_json::from_str(json);
         assert!(result.is_err(), "role is required");
     }

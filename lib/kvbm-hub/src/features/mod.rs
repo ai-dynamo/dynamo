@@ -15,24 +15,13 @@ use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 use velo_ext::{InstanceId, PeerInfo};
 
+pub use crate::protocol::FeatureConfigRequirements;
 use crate::protocol::{Feature, FeatureKey, PrimaryConfig};
 use crate::registry::PeerRegistry;
 
-/// Which [`PrimaryConfig`] must-match fields a feature requires a registrant to
-/// declare (via [`RuntimeConfigSummary`](crate::protocol::RuntimeConfigSummary))
-/// and that the hub validates for consistency. All `false` by default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FeatureConfigRequirements {
-    /// Requires `block_size` to be declared and to match the hub's primary.
-    pub block_size: bool,
-    /// Requires `max_seq_len` to be declared and to match the hub's primary.
-    pub max_seq_len: bool,
-    /// Requires `block_layout` to be declared and to match the hub's primary.
-    pub block_layout: bool,
-}
-
 pub mod conditional_disagg;
 pub mod control_plane;
+pub(crate) mod http;
 pub mod kv_indexer;
 pub mod p2p;
 
@@ -104,17 +93,17 @@ pub trait FeatureManager: Send + Sync + 'static {
         FeatureConfigRequirements::default()
     }
 
-    /// The authoritative must-match sizing this feature owns, as
-    /// `(block_size, max_seq_len)`, if any. The hub reconciles this into
-    /// [`PrimaryConfig`] at startup
+    /// The authoritative must-match `block_size` this feature owns, if any. The
+    /// hub reconciles it into [`PrimaryConfig::block_size`] at startup
     /// ([`HubServerBuilder::serve`](crate::HubServerBuilder::serve)) — filling
-    /// unset primary fields and rejecting an explicit primary that conflicts —
-    /// so registrant validation always has a source of truth even when the
+    /// an unset primary and rejecting an explicit primary that conflicts — so
+    /// registrant validation always has a source of truth even when the
     /// operator did not set `primary` explicitly.
     ///
     /// Default `None` (the feature owns no sizing). KV-index returns its index
-    /// dimensions.
-    fn authoritative_sizing(&self) -> Option<(usize, usize)> {
+    /// block size. (`max_seq_len` is *not* reconciled — it is advisory and
+    /// grows dynamically per registrant.)
+    fn authoritative_block_size(&self) -> Option<usize> {
         None
     }
 

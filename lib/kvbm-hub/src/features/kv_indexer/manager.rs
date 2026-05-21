@@ -103,29 +103,27 @@ impl FeatureManager for KvIndexerManager {
     }
 
     fn config_requirements(&self) -> crate::features::FeatureConfigRequirements {
-        // The publisher's page size must match the index's block size, and the
-        // index is presized to `max_seq_len / block_size` buckets — both must
-        // agree with the hub's primary or events land in the wrong (or no)
-        // bucket.
+        // The publisher's page size must match the index's block size or events
+        // hash/bucket wrong. `max_seq_len` is NOT a must-match: a larger value
+        // simply grows the index (see `on_register`).
         crate::features::FeatureConfigRequirements {
             block_size: true,
-            max_seq_len: true,
             block_layout: false,
         }
     }
 
     fn requires_runtime_summary(&self) -> bool {
         // KV-index is new (introduced with the runtime summary): mandate it so
-        // a publisher cannot register without its block_size / max_seq_len
-        // being checked against the hub's index sizing.
+        // a publisher cannot register without its block_size being checked
+        // against the hub's index block size.
         true
     }
 
-    fn authoritative_sizing(&self) -> Option<(usize, usize)> {
-        // The index dimensions are the source of truth publishers must match.
+    fn authoritative_block_size(&self) -> Option<usize> {
+        // The index block size is the source of truth publishers must match.
         // Reconciled into `primary` at startup so validation never depends on
         // the operator having also set `primary` explicitly.
-        Some((self.index.block_size(), self.index.max_seq_len()))
+        Some(self.index.block_size())
     }
 
     fn descriptor(&self, _primary: &crate::protocol::PrimaryConfig) -> serde_json::Value {
@@ -175,8 +173,18 @@ impl FeatureManager for KvIndexerManager {
         // is validated centrally via `RuntimeConfigSummary`.
         Box::pin(async move {
             match feature {
-                Feature::KvIndexer(_) => {
-                    tracing::debug!(instance = %instance_id, "kv-index participation registered");
+                Feature::KvIndexer(cfg) => {
+                    // Grow the index to fit this registrant's max_seq_len (never
+                    // shrinks). Block-size consistency is validated centrally.
+                    if let Some(max_seq_len) = cfg.max_seq_len {
+                        self.index.grow_to_max_seq_len(max_seq_len);
+                    }
+                    tracing::debug!(
+                        instance = %instance_id,
+                        max_seq_len = ?cfg.max_seq_len,
+                        num_positions = self.index.num_positions(),
+                        "kv-index participation registered"
+                    );
                     Ok(())
                 }
                 _ => Err(FeatureError::KeyMismatch {

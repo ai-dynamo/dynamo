@@ -14,7 +14,7 @@ use kvbm_engine::leader::{EventSource, FindMatchesOptions, Leader, StagingMode};
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
 use kvbm_engine::worker::VeloWorkerClient;
-use kvbm_hub::ConditionalDisaggClient;
+use kvbm_hub::{ConditionalDisaggClient, HubClient};
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_observability::CacheStatsTracker;
 
@@ -84,10 +84,18 @@ pub struct ConnectorLeader {
     /// life of this leader.
     disagg_client: OnceLock<Arc<ConditionalDisaggClient>>,
     /// KV-index hub publisher, kept alive for the life of this leader.
-    /// Populated in `initialize_async` when the connector is given hub details
-    /// ([`hub_indexer::HUB_URL_ENV`]) and the hub exposes the KV-indexer
+    /// Populated in `initialize_async` when `leader.hub` enables the KV-indexer
     /// feature. Dropping it aborts the publish task, so it must be held here.
     kv_index_publisher: OnceLock<kvbm_logical::events::KvbmCacheEventsPublisher>,
+    /// KV-index hub client, holding the lightweight `Feature::KvIndexer`
+    /// registration alive (RAII `DELETE` on drop → hub reclaims the index
+    /// entries). Populated only on the kv-index-only path; the disagg path
+    /// folds KvIndexer into its own registration via `disagg_client`.
+    kv_index_hub_client: OnceLock<Arc<HubClient>>,
+    /// Standalone-P2P hub client, holding the `Feature::P2P` registration alive
+    /// (RAII `DELETE` on drop). Populated only on the p2p-without-CD path; the
+    /// CD path holds its registration via `disagg_client`.
+    p2p_hub_client: OnceLock<Arc<HubClient>>,
     /// CD-role dispatcher (`Arc<ConditionalDisaggLeader>`) installed by
     /// `initialize_async` when `config.disagg` is present. Bindings route
     /// `ConnectorLeaderApi` methods through this when set so role-specific
@@ -107,8 +115,17 @@ pub(crate) struct WorkerClients {
 // Connector leader implementation extensions
 mod init;
 
-// KV-index hub publisher (capability probe + ZMQ PUB egress).
+// KV-index hub publisher (ZMQ PUB egress) wired from the hub aggregate.
 pub(crate) mod hub_indexer;
+
+// Hub handshake: GET /v1/config, resolve the effective feature set + runtime
+// summary the connector registers with.
+pub(crate) mod hub_handshake;
+
+// P2P feature foundation (transport seam, hub peer resolver, P2P wiring).
+// ConditionalDisagg builds on top of this. `pub` so integration tests can
+// reach the transport/peer_resolver types (parity with the old `disagg` path).
+pub mod p2p;
 
 /// Implementation of the request_finished function.
 mod finish;
@@ -164,8 +181,26 @@ impl ConnectorLeader {
             forward_pass_samples: Mutex::new(None),
             disagg_client: OnceLock::new(),
             kv_index_publisher: OnceLock::new(),
+            kv_index_hub_client: OnceLock::new(),
+            p2p_hub_client: OnceLock::new(),
             cd_api: OnceLock::new(),
         }
+    }
+
+    /// Store the kv-index-only hub client to keep its registration guard alive
+    /// for the life of the leader. Called once from `initialize_async`.
+    pub(crate) fn set_kv_index_hub_client(&self, client: Arc<HubClient>) -> Result<()> {
+        self.kv_index_hub_client
+            .set(client)
+            .map_err(|_| anyhow!("kv_index_hub_client already set"))
+    }
+
+    /// Store the standalone-P2P hub client to keep its registration guard alive
+    /// for the life of the leader. Called once from `initialize_async`.
+    pub(crate) fn set_p2p_hub_client(&self, client: Arc<HubClient>) -> Result<()> {
+        self.p2p_hub_client
+            .set(client)
+            .map_err(|_| anyhow!("p2p_hub_client already set"))
     }
 
     /// Store the KV-index hub publisher to keep its background task alive.
@@ -319,7 +354,7 @@ impl ConnectorLeader {
     /// Conditional-disagg uses this on USAA-1 to align the vLLM-allocated
     /// G1 block_ids with the slot's sequence hashes; the wrapper then
     /// drives transfers for the local-match and remote-prefill slices
-    /// separately via `CdBlockTransport` (step 2 onward).
+    /// separately via `P2pBlockTransport` (step 2 onward).
     #[allow(dead_code)]
     pub(crate) fn apply_block_assignments(
         &self,
@@ -383,7 +418,7 @@ impl ConnectorLeader {
     ///
     /// Destructive: after this returns the slot's onboarding state has no
     /// G2 blocks left to give. The wrapper hands these to
-    /// [`CdBlockTransport::local_g2_to_g1`] for the matched portion of the
+    /// [`P2pBlockTransport::local_g2_to_g1`] for the matched portion of the
     /// G1 destination slice.
     ///
     /// Returns an empty vec when the slot has no onboarding state — that

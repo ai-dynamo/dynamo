@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use kvbm_config::{DisaggConfig, DisaggregationRole};
+use kvbm_config::DisaggregationRole;
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggRole, HubClient, HubClientBuilder};
 use url::Url;
 use velo::{InstanceId, Velo};
@@ -35,8 +35,8 @@ use super::ConnectorLeaderApi;
 use super::coordinator::ConditionalDisaggCoordinator;
 use super::decode_leader::DecodeDisaggLeader;
 use super::prefill_leader::PrefillDisaggLeader;
-use super::transport::InnerLeaderShim;
 use crate::connector::leader::audit::audit_build_meta;
+use crate::connector::leader::p2p::transport::InnerLeaderShim;
 
 /// Per-request classification used by [`ConditionalDisaggLeader`] to choose
 /// which wired flow handles a given API call.
@@ -452,21 +452,24 @@ impl ConnectorLeaderApi for ConditionalDisaggLeader {
 // ============================================================================
 
 pub async fn register_with_hub(
-    config: &DisaggConfig,
+    hub_url: &str,
+    role: DisaggregationRole,
     velo: Arc<Velo>,
     layout_compat: kvbm_hub::protocol::LayoutCompatPayload,
+    extra_features: Vec<kvbm_hub::Feature>,
+    runtime: kvbm_hub::RuntimeConfigSummary,
 ) -> Result<(
     Arc<HubClient>,
     Arc<ConditionalDisaggClient>,
     Option<InstanceId>,
 )> {
-    let hub = build_hub_client(&config.hub_url)?;
+    let hub = build_hub_client(hub_url)?;
     let messenger = velo.messenger().clone();
 
     hub.register_handlers_messenger(&messenger)
         .context("installing hub velo handlers on leader messenger")?;
 
-    let cd_role = role_to_hub(config.role);
+    let cd_role = role_to_hub(role);
     let client =
         ConditionalDisaggClient::with_messenger(Arc::clone(&hub), messenger.clone(), cd_role);
 
@@ -480,13 +483,13 @@ pub async fn register_with_hub(
     // `TCP streaming: peer <worker_id> not registered (call register_peer first)`.
     let peer_info = velo.peer_info();
     let hub_velo_id = client
-        .register(peer_info, layout_compat)
+        .register_with(peer_info, layout_compat, extra_features, Some(runtime))
         .await
-        .with_context(|| format!("registering with kvbm-hub at {}", config.hub_url))?;
+        .with_context(|| format!("registering with kvbm-hub at {hub_url}"))?;
 
     tracing::info!(
-        role = ?config.role,
-        hub_url = %config.hub_url,
+        role = ?role,
+        hub_url = %hub_url,
         hub_velo_id = ?hub_velo_id,
         "Registered with kvbm-hub"
     );

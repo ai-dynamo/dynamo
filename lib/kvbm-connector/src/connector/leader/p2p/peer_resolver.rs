@@ -70,6 +70,7 @@ impl PeerResolver for HubPeerResolver {
 /// directly (e.g., shared in-process velo) and there's nothing to
 /// resolve.
 #[cfg(any(test, feature = "testing"))]
+#[allow(dead_code)] // test/utility resolver; not constructed in this crate today
 pub struct NoopPeerResolver;
 
 #[cfg(any(test, feature = "testing"))]

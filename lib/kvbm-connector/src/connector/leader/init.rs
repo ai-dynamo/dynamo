@@ -56,6 +56,86 @@ impl ConnectorLeader {
         Ok(())
     }
 
+    /// Lightweight KV-index-only hub registration: declare `Feature::KvIndexer`
+    /// (+ the must-match runtime summary) so the hub reclaims this instance's
+    /// index entries on unregister. Holds the [`HubClient`] alive on `self` so
+    /// the RAII guard does not fire a premature `DELETE`. Used only when
+    /// ConditionalDisagg is *not* effective (otherwise KvIndexer rides the CD
+    /// registration).
+    async fn register_kv_index_only(
+        &self,
+        handshake: &super::hub_handshake::HubHandshake,
+    ) -> Result<()> {
+        let velo = self
+            .runtime
+            .velo()
+            .ok_or_else(|| anyhow!("kv-index hub registration requires a Velo runtime"))?;
+        let hub = super::disagg::build_hub_client(&handshake.url)?;
+        // Install hub velo handlers (heartbeat) so the hub's liveness probe
+        // doesn't unregister us — which would prematurely sweep our index.
+        hub.register_handlers_messenger(velo.messenger())
+            .context("installing hub velo handlers for kv-index registration")?;
+        let max_seq_len = self.runtime.config().max_seq_len;
+        hub.register_instance_with_features_and_runtime(
+            velo.peer_info(),
+            vec![kvbm_hub::Feature::KvIndexer(
+                kvbm_hub::KvIndexerFeatureConfig { max_seq_len },
+            )],
+            handshake.runtime_summary.clone(),
+        )
+        .await
+        .context("registering Feature::KvIndexer with kvbm-hub")?;
+        self.set_kv_index_hub_client(hub)?;
+        tracing::info!(url = %handshake.url, ?max_seq_len, "kv-index participation registered with hub");
+        Ok(())
+    }
+
+    /// Build the mandatory P2P `layout_compat` payload from the leader's rank-0
+    /// worker metadata. Shared by the CD and standalone-P2P registration paths.
+    ///
+    /// SPMD leaders carry identical per-worker shape (`validate_remote_metadata`
+    /// enforces it), so a rank-0 sample suffices. The cached metadata is raw
+    /// (`parallelism = None`); pass a freshly-built [`ParallelismTemplate`] so
+    /// universal mode derives its canonical aggregate without pre-stamping.
+    /// This must mirror the `leader_builder.parallelism_template(...)` site —
+    /// both derive from the same `(reference_config, parallelism, num_workers)`.
+    fn build_layout_compat_payload(
+        &self,
+        reference_config: &kvbm_physical::layout::LayoutConfig,
+        num_workers: usize,
+    ) -> Result<kvbm_hub::protocol::LayoutCompatPayload> {
+        let block_layout_mode = self.runtime.config().block_layout;
+        let template_for_payload = if reference_config.num_heads.is_some() {
+            Some(
+                kvbm_engine::leader::parallelism::ParallelismTemplate::from_layout_config(
+                    reference_config,
+                    self.runtime.config().cache.parallelism,
+                    num_workers,
+                )
+                .context("building ParallelismTemplate for hub registration payload")?,
+            )
+        } else {
+            None
+        };
+        let worker_metadata_for_payload = {
+            let state = self.init.lock();
+            state.worker_metadata.first().cloned()
+        }
+        .ok_or_else(|| {
+            anyhow!(
+                "cannot build layout_compat payload for hub registration: \
+                 worker_metadata is empty (SPMD bring-up must populate \
+                 state.worker_metadata before registration — call-ordering bug)."
+            )
+        })?;
+        kvbm_engine::leader::layout_compat::build_layout_compat_payload_with_template(
+            block_layout_mode,
+            &worker_metadata_for_payload,
+            template_for_payload.as_ref(),
+        )
+        .context("building layout_compat payload for hub registration")
+    }
+
     /// Initialize all workers via leader-driven deferred init flow (blocking version).
     ///
     /// NOTE: This uses block_on internally and should only be called from a blocking context.
@@ -359,29 +439,28 @@ impl ConnectorLeader {
         }
         tracing::debug!("Lock released, configured layout handles for all workers");
 
-        // Probe for the hub KV-indexer feature (best-effort). Hub details, in
-        // priority order:
-        //   1. `events.kv_index_hub_url` — the canonical knob, injectable via
-        //      `kv_connector_extra_config` so it survives vLLM's EngineCore
-        //      spawn (an env var would not). Works for plain aggregated
-        //      instances with no disagg config.
-        //   2. `disagg.hub_url` — reuse the disagg hub when running disagg.
-        //   3. `DYN_KVBM_KV_INDEX_HUB_URL` env var — local / non-vLLM testing.
+        // Hub handshake. `leader.hub` is the sole way the connector reaches a
+        // hub; absent ⇒ no hub features (normal hub-less work). When present we
+        // pull `GET /v1/config`, resolve the effective feature set, and learn
+        // the KV-index ZMQ endpoint. (See `hub_handshake` for auto best-effort
+        // vs explicit hard-fail semantics.)
         let cfg = self.runtime.config();
-        let kv_index_hub_url: Option<String> = cfg
-            .events
-            .kv_index_hub_url
-            .clone()
-            .or_else(|| cfg.disagg.as_ref().map(|d| d.hub_url.clone()))
-            .or_else(|| {
-                std::env::var(super::hub_indexer::HUB_URL_ENV)
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            });
-        let kv_index_endpoint: Option<String> = match kv_index_hub_url {
-            Some(hub_url) => super::hub_indexer::probe(&hub_url, reference_config.page_size).await,
+        let handshake: Option<super::hub_handshake::HubHandshake> = match cfg.hub.as_ref() {
+            Some(hub) => Some(
+                super::hub_handshake::resolve(
+                    hub,
+                    reference_config.page_size,
+                    cfg.block_layout,
+                    cfg.disagg.as_ref(),
+                )
+                .await
+                .context("kvbm-hub handshake")?,
+            ),
             None => None,
         };
+        let kv_index_endpoint: Option<String> = handshake
+            .as_ref()
+            .and_then(|h| h.kv_index_zmq_endpoint.clone());
 
         // Create an EventsManager when either the consolidator or the KV-index
         // publisher needs block registration events. The same Arc is wired into
@@ -423,6 +502,20 @@ impl ConnectorLeader {
                 }
                 Err(e) => tracing::warn!(error = %e, "kv-index PUB connect failed; skipping"),
             }
+        }
+
+        // KV-index-only hub registration — fires only when KvIndexer is the
+        // *sole* effective hub feature. When P2P or ConditionalDisagg is also
+        // effective, `wire_p2p` folds KvIndexer into that single
+        // `POST /v1/instances` instead (avoiding a double registration).
+        // Declaring `Feature::KvIndexer` lets the hub's `on_unregister` sweep
+        // reclaim this instance's index entries.
+        if let Some(h) = handshake.as_ref()
+            && h.has(kvbm_hub::FeatureKey::KvIndexer)
+            && !h.has(kvbm_hub::FeatureKey::P2P)
+            && !h.has(kvbm_hub::FeatureKey::ConditionalDisagg)
+        {
+            self.register_kv_index_only(h).await?;
         }
 
         tracing::debug!("Creating block registry");
@@ -851,132 +944,76 @@ impl ConnectorLeader {
             "KVBM leader instance started - use this ID for register_leader on remote instances"
         );
 
-        // Register with kvbm-hub for conditional disaggregation, if configured.
-        if let Some(disagg_cfg) = self.runtime.config().disagg.clone() {
+        // Register with kvbm-hub for conditional disaggregation when the hub
+        // handshake made ConditionalDisagg effective. Pre-flight guarantees a
+        // `disagg` role is configured.
+        if let Some(handshake) = handshake
+            .as_ref()
+            .filter(|h| h.has(kvbm_hub::FeatureKey::ConditionalDisagg))
+        {
+            let disagg_cfg =
+                self.runtime.config().disagg.clone().expect(
+                    "hub handshake pre-flight guarantees a disagg role for conditional_disagg",
+                );
             tracing::info!(
                 role = ?disagg_cfg.role,
-                hub_url = %disagg_cfg.hub_url,
+                hub_url = %handshake.url,
                 "Registering leader with kvbm-hub for conditional disaggregation"
             );
 
             use super::disagg::{
-                AlwaysRemote, CdBlockTransport, CdWorkerHook, ConditionalDisaggCoordinator,
-                ConditionalDisaggLeader, ConditionalDisaggPolicy, ConnectorLeaderApi,
-                ConnectorLeaderShim, CoordinatorParts, DecodeDisaggLeader, EngineCdBlockTransport,
-                HubPeerResolver, HubRemotePrefillQueue, HubWiring, InnerLeaderShim,
-                InnerLeaderWorkerHook, PeerResolver, PrefillDisaggLeader, RemotePrefillQueue,
+                AlwaysRemote, ConditionalDisaggCoordinator, ConditionalDisaggLeader,
+                ConditionalDisaggPolicy, ConnectorLeaderApi, ConnectorLeaderShim, CoordinatorParts,
+                DecodeDisaggLeader, EngineP2pBlockTransport, HubRemotePrefillQueue, HubWiring,
+                InnerLeaderShim, InnerLeaderWorkerHook, P2pBlockTransport, P2pWorkerHook,
+                PeerResolver, PrefillDisaggLeader, RemotePrefillQueue,
             };
             use kvbm_config::DisaggregationRole;
-            use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
 
-            // Build the layout-compat payload from the leader's
-            // rank-0 worker metadata so the hub can gate this
-            // registration against the first-registered baseline.
-            // SPMD leaders carry identical per-worker shape across
-            // workers (`validate_remote_metadata` enforces it), so a
-            // rank-0 sample is sufficient. The cached metadata is
-            // *raw* — workers emit `parallelism = None` and the
-            // descriptor is only stamped lazily inside the leader
-            // (`stamp_parallelism_descriptors`). Pass the freshly-
-            // built [`ParallelismTemplate`] so universal mode can
-            // derive its canonical aggregate without needing the
-            // metadata to be pre-stamped.
-            let block_layout_mode = self.runtime.config().block_layout;
-            // NOTE: this template construction mirrors the one further up
-            // at the `leader_builder.parallelism_template(...)` call site —
-            // both must derive from the same `(reference_config, parallelism
-            // mode, num_workers)` so the hub-side compat gate and the
-            // engine-side `connect_remote` gate agree on canonical extents.
-            // If you change one site, change the other.
-            let template_for_payload = if reference_config.num_heads.is_some() {
-                Some(
-                    kvbm_engine::leader::parallelism::ParallelismTemplate::from_layout_config(
-                        reference_config,
-                        self.runtime.config().cache.parallelism,
-                        num_workers,
-                    )
-                    .context("building ParallelismTemplate for hub registration payload")?,
-                )
-            } else {
-                None
-            };
-            // c2: layout_compat is mandatory for the P2P feature, which is
-            // emitted alongside CD on every connector register. Empty
-            // `worker_metadata` here would mean the SPMD bring-up
-            // didn't populate it at the expected call site — bail loudly
-            // rather than silently sending no payload (the pre-c2
-            // `.transpose()?` short-circuit).
-            let worker_metadata_for_payload = {
-                let state = self.init.lock();
-                state.worker_metadata.first().cloned()
-            }
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "cannot build layout_compat payload for hub registration: \
-                     worker_metadata is empty. The connector's SPMD bring-up \
-                     must populate state.worker_metadata before \
-                     register_with_hub fires (call-ordering bug)."
-                )
-            })?;
             let layout_compat_payload =
-                kvbm_engine::leader::layout_compat::build_layout_compat_payload_with_template(
-                    block_layout_mode,
-                    &worker_metadata_for_payload,
-                    template_for_payload.as_ref(),
-                )
-                .context("building layout_compat payload for hub registration")?;
+                self.build_layout_compat_payload(reference_config, num_workers)?;
 
-            let (hub, client, hub_velo_id) = super::disagg::register_with_hub(
-                &disagg_cfg,
-                Arc::clone(
-                    self.runtime
-                        .velo()
-                        .expect("velo not initialized on runtime"),
-                ),
+            // Register P2P (+ ConditionalDisagg, + KvIndexer when effective) and
+            // build the shared P2P transfer foundation (peer resolver, session
+            // factory, describe-push). CD layers its role-specific flow on top.
+            let cd_role = match disagg_cfg.role {
+                DisaggregationRole::Prefill => kvbm_hub::ConditionalDisaggRole::Prefill,
+                DisaggregationRole::Decode => kvbm_hub::ConditionalDisaggRole::Decode,
+            };
+            let super::p2p::wire::P2pFoundation {
+                hub,
+                hub_velo_id,
+                peer_resolver,
+                session_factory,
+                velo_runtime,
+                tokio_handle,
+            } = super::p2p::wire::wire_p2p(
+                &self,
+                &leader,
+                handshake,
                 layout_compat_payload,
+                vec![kvbm_hub::Feature::ConditionalDisagg(
+                    kvbm_hub::ConditionalDisaggConfig { role: cd_role },
+                )],
             )
             .await
-            .context("conditional-disagg hub registration failed")?;
-            let _ = self.disagg_client.set(Arc::clone(&client));
+            .context("conditional-disagg P2P foundation wiring failed")?;
 
-            // Resolve runtime components needed by CD wiring.
-            let velo_runtime = self
-                .runtime
-                .velo()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "conditional-disagg requires KvbmRuntime built with a Velo \
-                         (got bare Messenger only) — inject via \
-                         KvbmRuntimeBuilder::with_velo or omit injection \
-                         to let the builder construct one from config"
-                    )
-                })?
-                .clone();
-            let tokio_handle = self.runtime.tokio();
+            // CD client around the shared hub (wire_p2p already registered);
+            // seed the hub velo id for the prefill queue.
+            let client = kvbm_hub::ConditionalDisaggClient::with_messenger(
+                Arc::clone(&hub),
+                velo_runtime.messenger().clone(),
+                cd_role,
+            );
+            client.set_hub_velo_id(hub_velo_id);
+            let _ = self.disagg_client.set(Arc::clone(&client));
 
             // Common building blocks used by both roles.
             let inner_shim: Arc<dyn InnerLeaderShim> = ConnectorLeaderShim::new(self.clone());
-            let worker_hook: Arc<dyn CdWorkerHook> = InnerLeaderWorkerHook::new(self.clone());
-            let transport: Arc<dyn CdBlockTransport> =
-                EngineCdBlockTransport::new(Arc::clone(&leader));
-            // One hub-backed peer-resolver shared by the coordinator (used
-            // when prefill receives an RPR and needs to register the
-            // initiator) AND the session factory (used when either side
-            // opens or accepts an Attach and needs the peer in the local
-            // velo streaming registry). Sharing one instance ensures the
-            // resolver's internal de-dup cache works across both paths.
-            let peer_resolver: Arc<HubPeerResolver> =
-                HubPeerResolver::new(Arc::clone(&hub), Arc::clone(&velo_runtime));
-            let session_factory: Arc<dyn SessionFactory> = VeloSessionFactory::with_peer_resolver(
-                Arc::clone(&velo_runtime),
-                Arc::clone(&leader),
-                tokio_handle.clone(),
-                Arc::clone(&peer_resolver) as Arc<dyn kvbm_engine::disagg::session::PeerResolver>,
-            );
-
-            // Hand the factory to the engine control plane's `transfer`
-            // module (registered earlier with an empty cell). Idempotent.
-            leader.set_session_factory(Arc::clone(&session_factory));
+            let worker_hook: Arc<dyn P2pWorkerHook> = InnerLeaderWorkerHook::new(self.clone());
+            let transport: Arc<dyn P2pBlockTransport> =
+                EngineP2pBlockTransport::new(Arc::clone(&leader));
 
             // Construct the role-specific concrete leader (and, for
             // prefill, its coordinator).  We hold concrete `Arc<...>`
@@ -1090,74 +1127,28 @@ impl ConnectorLeader {
             );
             self.set_cd_api(dispatcher)
                 .context("install CD dispatcher")?;
-
-            // Phase C — push the leader's `InstanceDescription` to the hub.
-            //
-            // 1. Inject `hub_instance_id` (if the hub registered with a velo
-            //    participant — discovery-only hubs return `None`).
-            // 2. Inject `config_blob` so `describe.config` surfaces the
-            //    leader's `KvbmConfig`.
-            // 3. Spawn a task that briefly waits for workers to stamp their
-            //    layouts (500 ms cheat; replace with a stamping-ready signal
-            //    in a follow-up), then calls `leader.describe()` and POSTs
-            //    the result. Failures fall back to the hub's pull path.
-            if let Some(hub_id) = hub_velo_id {
-                leader.set_hub_instance_id(hub_id);
-            }
-            match serde_json::to_value(self.runtime.config()) {
-                Ok(blob) => {
-                    leader.set_config_blob(blob);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e,
-                        "failed to serialise KvbmConfig for describe push; \
-                         continuing without config in describe");
-                }
-            }
-            {
-                let hub = Arc::clone(&hub);
-                let leader = Arc::clone(&leader);
-                let instance_id = self.runtime.messenger().instance_id();
-                self.runtime.tokio().spawn(async move {
-                    // Brief settle wait — give workers a chance to stamp
-                    // before the first push so the initial snapshot isn't
-                    // empty. If they're slow, an incomplete payload still
-                    // ships and the operator can force a refresh later via
-                    // `?force=true`.
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    // Bound `describe()` so an unresponsive worker doesn't
-                    // hang the push task forever. The hub's fallback pull
-                    // path covers any leader that loses this race.
-                    let describe =
-                        tokio::time::timeout(std::time::Duration::from_secs(5), leader.describe())
-                            .await;
-                    match describe {
-                        Ok(Ok(payload)) => {
-                            if let Err(e) = hub.push_describe(instance_id, &payload).await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "initial describe push failed; hub can pull via ?force=true"
-                                );
-                            } else {
-                                tracing::info!(
-                                    instance = %instance_id,
-                                    workers = payload.workers.len(),
-                                    "describe pushed to hub"
-                                );
-                            }
-                        }
-                        Ok(Err(e)) => tracing::warn!(
-                            error = %e,
-                            "leader.describe() failed; hub describe will stay pending until \
-                             a forced pull"
-                        ),
-                        Err(_) => tracing::warn!(
-                            "leader.describe() timed out after 5s; hub describe will stay \
-                             pending until a forced pull"
-                        ),
-                    }
-                });
-            }
+            // (describe-push is handled inside wire_p2p.)
+        } else if let Some(handshake) = handshake
+            .as_ref()
+            .filter(|h| h.has(kvbm_hub::FeatureKey::P2P))
+        {
+            // Standalone P2P (no CD): register Feature::P2P + build the transfer
+            // foundation so this instance is a hub-discoverable,
+            // remote-controllable block-copy peer. KvIndexer (when effective) is
+            // folded into the same registration by wire_p2p.
+            let layout_compat_payload =
+                self.build_layout_compat_payload(reference_config, num_workers)?;
+            let foundation = super::p2p::wire::wire_p2p(
+                &self,
+                &leader,
+                handshake,
+                layout_compat_payload,
+                vec![],
+            )
+            .await
+            .context("standalone P2P foundation wiring failed")?;
+            self.set_p2p_hub_client(foundation.hub)?;
+            tracing::info!(url = %handshake.url, "standalone P2P participation registered with hub");
         }
 
         Ok(())

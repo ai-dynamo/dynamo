@@ -29,11 +29,11 @@ pub use kvbm_engine::{KvbmRuntimeBuilder, PeerInfo, WorkerAddress};
 // Re-export for bindings — consolidator source tagging
 pub use kvbm_engine::leader::EventSource;
 
-/// If the config carries `disagg.hub_url`, construct a [`kvbm_hub::HubClient`]
+/// If the config carries `leader.hub`, construct a [`kvbm_hub::HubClient`]
 /// and pre-seed the runtime builder so velo uses it as its peer-discovery
 /// backend.
 ///
-/// Standalone (no disagg) leaders return the builder unmodified — velo falls
+/// Leaders with no `leader.hub` return the builder unmodified — velo falls
 /// back to whatever static discovery the messenger config specifies (or none).
 ///
 /// This is the wiring the leader's `InstanceLeader::messenger`
@@ -50,10 +50,10 @@ pub fn seed_leader_builder_with_hub_discovery(
     config: &KvbmConfig,
     builder: KvbmRuntimeBuilder,
 ) -> anyhow::Result<KvbmRuntimeBuilder> {
-    let Some(disagg) = config.disagg.as_ref() else {
+    let Some(hub) = config.hub.as_ref() else {
         return Ok(builder);
     };
-    let hub_client = connector::leader::disagg::build_hub_client(&disagg.hub_url)?;
+    let hub_client = connector::leader::disagg::build_hub_client(&hub.url)?;
     // Coerce Arc<HubClient> → Arc<dyn PeerDiscovery>. HubClient's
     // `impl PeerDiscovery` (in kvbm-hub) makes this an upcast.
     let discovery: std::sync::Arc<dyn velo::discovery::PeerDiscovery> = hub_client;

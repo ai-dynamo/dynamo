@@ -90,6 +90,12 @@ pub mod paths {
     // leader; HTTP status comes from `ControlError::http_status`. Module-
     // gated routes return `404 module_not_enabled` for `has_module ==
     // Some(false)` *without* dispatching to velo.
+    //
+    // Routing ownership: the `core`/`dev`/`test`/`metrics` routes plus
+    // `/modules` + `/describe` are served by `ControlPlaneManager`
+    // (infrastructure, always attached). The `/control/transfer/*` routes are
+    // served by `P2pManager` — block-copy session management is a P2P concern,
+    // so those routes only exist when the P2P feature is enabled on the hub.
     // -----------------------------------------------------------------------
 
     /// `POST` register a remote leader by instance id (typed). Always-on.
@@ -115,31 +121,34 @@ pub mod paths {
         "/v1/instances/{instance_id}/control/test/register_test_blocks";
 
     /// `POST` contiguous-prefix search of the leader's G2 block manager.
-    /// Always-on. Body: [`kvbm_protocols::control::SearchRequest`].
+    /// Served by `P2pManager` (requires the P2P feature). Body:
+    /// [`kvbm_protocols::control::SearchRequest`].
     pub const CONTROL_TRANSFER_SEARCH_PREFIX: &str =
         "/v1/instances/{instance_id}/control/transfer/search_prefix";
 
     /// `POST` scatter (gather-all) search of the leader's G2 block manager.
-    /// Always-on. Body: [`kvbm_protocols::control::SearchRequest`].
+    /// Served by `P2pManager` (requires the P2P feature). Body:
+    /// [`kvbm_protocols::control::SearchRequest`].
     pub const CONTROL_TRANSFER_SEARCH_SCATTER: &str =
         "/v1/instances/{instance_id}/control/transfer/search_scatter";
 
     /// `POST` open a transfer session on the targeted (holder) leader.
-    /// Always-on. Body: [`kvbm_protocols::control::OpenTransferSessionRequest`].
+    /// Served by `P2pManager` (requires the P2P feature). Body:
+    /// [`kvbm_protocols::control::OpenTransferSessionRequest`].
     /// Returns [`kvbm_protocols::control::OpenTransferSessionResponse`].
     pub const CONTROL_TRANSFER_OPEN_SESSION: &str =
         "/v1/instances/{instance_id}/control/transfer/open_session";
 
     /// `POST` drive a pull on the targeted (puller) leader against a session
     /// living on `request.source_instance_id`. Long-poll: returns when the
-    /// pull is complete. Body:
-    /// [`kvbm_protocols::control::PullFromSessionRequest`]. Returns
+    /// pull is complete. Served by `P2pManager` (requires the P2P feature).
+    /// Body: [`kvbm_protocols::control::PullFromSessionRequest`]. Returns
     /// [`kvbm_protocols::control::PullFromSessionResponse`].
     pub const CONTROL_TRANSFER_PULL_FROM_SESSION: &str =
         "/v1/instances/{instance_id}/control/transfer/pull_from_session";
 
     /// `POST` close a transfer session on the targeted (holder) leader.
-    /// Idempotent. Body:
+    /// Idempotent. Served by `P2pManager` (requires the P2P feature). Body:
     /// [`kvbm_protocols::control::CloseTransferSessionRequest`].
     pub const CONTROL_TRANSFER_CLOSE_SESSION: &str =
         "/v1/instances/{instance_id}/control/transfer/close_session";
@@ -302,23 +311,27 @@ impl<'de> Deserialize<'de> for FeatureKey {
 
 /// Hub-wide shared configuration ("primary"). Split into two classes:
 ///
-/// - **Must-match** (`block_size`, `max_seq_len`, `block_layout`): the hub
-///   validates every registrant's [`RuntimeConfigSummary`] against these and
-///   rejects on mismatch — they define cross-instance compatibility.
-/// - **Free / advisory** (`g2_memory_gib`, `g2_blocks`, `advertise_host`): the
-///   hub publishes these as defaults for config generation (`kvbmctl`) but does
-///   not enforce them; the connector may override per-instance.
+/// - **Must-match** (`block_size`, `block_layout`): the hub validates every
+///   registrant's [`RuntimeConfigSummary`] against these and rejects on
+///   mismatch — they define cross-instance compatibility.
+/// - **Free / advisory** (`max_seq_len`, `g2_memory_gib`, `g2_blocks`,
+///   `advertise_host`): the hub publishes these as defaults for config
+///   generation (`kvbmctl`) but does not enforce them. `max_seq_len` seeds the
+///   KV-index's initial capacity and is grown by registrants reporting a larger
+///   value (see [`KvIndexerFeatureConfig`]); it is never a hard match.
 ///
-/// All must-match sizing fields are `Option` so the library / tests can build a
-/// hub that is not authoritative for a given field (validation is skipped when
-/// `None`). The `kvbm-hub` binary enforces the required subset (`max_seq_len`,
-/// `block_size`, at least one of `g2_*`) at startup.
+/// All sizing fields are `Option` so the library / tests can build a hub that
+/// is not authoritative for a given field (must-match validation is skipped
+/// when `None`). The `kvbm-hub` binary enforces the required subset
+/// (`block_size`, at least one of `g2_*`) at startup; `max_seq_len` is optional.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PrimaryConfig {
     /// Block size (tokens per block). Must-match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_size: Option<usize>,
-    /// Maximum sequence length (tokens). Must-match.
+    /// Maximum sequence length (tokens). Advisory: seeds the KV-index initial
+    /// capacity and feeds `kvbmctl`'s rendered `--max-model-len`; grown by
+    /// registrants, never a hard match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_seq_len: Option<usize>,
     /// Cross-leader block-layout compatibility mode. Must-match.
@@ -352,9 +365,6 @@ pub struct RuntimeConfigSummary {
     /// `primary.block_size` when the hub is authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_size: Option<usize>,
-    /// The client's max sequence length. Must equal `primary.max_seq_len`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_seq_len: Option<usize>,
     /// The client's block-layout mode. Must equal `primary.block_layout`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_layout: Option<BlockLayoutMode>,
@@ -371,6 +381,21 @@ pub struct HubConfigResponse {
     pub features: Vec<FeatureDescriptor>,
 }
 
+/// Which [`PrimaryConfig`] must-match fields a feature requires a registrant to
+/// declare (via [`RuntimeConfigSummary`]) and that the hub validates for
+/// consistency. All `false` by default. Surfaced in [`FeatureDescriptor`] so a
+/// client can pre-check compatibility before registering (and, in best-effort
+/// mode, drop an incompatible feature instead of being rejected at register).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureConfigRequirements {
+    /// Requires `block_size` to be declared and to match the hub's primary.
+    #[serde(default)]
+    pub block_size: bool,
+    /// Requires `block_layout` to be declared and to match the hub's primary.
+    #[serde(default)]
+    pub block_layout: bool,
+}
+
 /// One feature's contribution to [`HubConfigResponse`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureDescriptor {
@@ -378,6 +403,9 @@ pub struct FeatureDescriptor {
     pub key: FeatureKey,
     /// Feature keys this feature depends on (must also be enabled / declared).
     pub dependencies: Vec<FeatureKey>,
+    /// Must-match fields this feature requires of a registrant.
+    #[serde(default)]
+    pub config_requirements: FeatureConfigRequirements,
     /// Feature-specific config view (e.g. KV-index `zmq_endpoint`). `null` when
     /// the feature exposes nothing extra beyond its key.
     pub config: serde_json::Value,
@@ -394,15 +422,22 @@ impl Feature {
     }
 }
 
-/// Configuration payload for the [`Feature::KvIndexer`] participation marker.
+/// Configuration payload for [`Feature::KvIndexer`].
 ///
-/// Empty today: the connector opts into hub-side indexing and the hub records
-/// the registration so it can reclaim the instance's index entries on
-/// unregister. Block-size / sequence-length consistency is enforced centrally
-/// via [`RuntimeConfigSummary`]. Kept as a struct (not a unit variant) so
-/// fields can be added later without a wire break.
+/// The connector opts into hub-side indexing (the hub records the registration
+/// so it can reclaim the instance's index entries on unregister) and reports
+/// its `max_seq_len` so the hub can **grow** the index capacity to fit it.
+/// `max_seq_len` is advisory — it never shrinks the index and is not a
+/// must-match field; block-size consistency is enforced via
+/// [`RuntimeConfigSummary`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KvIndexerFeatureConfig {}
+pub struct KvIndexerFeatureConfig {
+    /// The connector's max sequence length (from vLLM `max_model_len`), if
+    /// known. When larger than the hub's current index capacity, the hub grows
+    /// the index to fit it. `None` leaves capacity unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seq_len: Option<usize>,
+}
 
 /// Configuration payload for the P2P feature. Carries the
 /// `layout_compat` payload that the hub validates against the baseline

@@ -36,14 +36,14 @@ use crate::{BlockId, G2, InstanceId, SequenceHash};
 
 use super::super::decode::{BeginOutcome, CdFailureSink};
 use super::super::lifecycle::{LIFECYCLE_WATCHDOG, LifecycleOutcome, spawn_lifecycle_watcher};
-use super::super::peer_resolver::PeerResolver;
 use super::super::prefill_coordinator::{
     ConditionalDecodeG2Observer, ObserverHandle, PrefillStatus,
 };
 use super::super::queue::RemotePrefillQueue;
-use super::super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::super::{ConditionalDisaggPolicy, PolicyInputs, PrefillSelection};
 use super::{CdRequest, CdRequestStatus, DecodeBits, PrefillBits};
+use crate::connector::leader::p2p::peer_resolver::PeerResolver;
+use crate::connector::leader::p2p::transport::{InnerLeaderShim, P2pBlockTransport, P2pWorkerHook};
 
 /// Type-erased register-observer callback handed to
 /// `Pipeline::add_register_observer`.
@@ -66,8 +66,8 @@ pub struct RemotePrefillStart<'a> {
 /// together.
 pub struct CoordinatorParts {
     pub inner: Arc<dyn InnerLeaderShim>,
-    pub transport: Arc<dyn CdBlockTransport>,
-    pub worker_hook: Arc<dyn CdWorkerHook>,
+    pub transport: Arc<dyn P2pBlockTransport>,
+    pub worker_hook: Arc<dyn P2pWorkerHook>,
     pub session_factory: Arc<dyn SessionFactory>,
     pub peer_resolver: Arc<dyn PeerResolver>,
     pub runtime: Handle,
@@ -85,8 +85,8 @@ pub struct CoordinatorParts {
 /// (prefill-only) or [`Self::new_with_decode`] (full dual-role).
 pub struct ConditionalDisaggCoordinator {
     inner: Arc<dyn InnerLeaderShim>,
-    transport: Arc<dyn CdBlockTransport>,
-    worker_hook: Arc<dyn CdWorkerHook>,
+    transport: Arc<dyn P2pBlockTransport>,
+    worker_hook: Arc<dyn P2pWorkerHook>,
     session_factory: Arc<dyn SessionFactory>,
     peer_resolver: Arc<dyn PeerResolver>,
     known_peers: dashmap::DashSet<InstanceId>,

@@ -29,7 +29,7 @@ use crate::{BlockId, G2, InstanceId};
 /// Transport seam used by the conditional-disagg wrapper to drive
 /// local G2→G1 transfers (decode's local-match kick at USAA-1, and
 /// the per-chunk onboard after pulling remote outputs).
-pub trait CdBlockTransport: Send + Sync {
+pub trait P2pBlockTransport: Send + Sync {
     /// Local G2 → G1 transfer for already-resident G2 blocks.
     ///
     /// `src_g2_block_ids` and `dst_g1_block_ids` must have equal length;
@@ -41,19 +41,19 @@ pub trait CdBlockTransport: Send + Sync {
     ) -> BoxFuture<'static, Result<()>>;
 }
 
-/// Production transport that bridges `CdBlockTransport` to the engine's
+/// Production transport that bridges `P2pBlockTransport` to the engine's
 /// `InstanceLeader::parallel_worker` for local G2→G1 transfers.
-pub struct EngineCdBlockTransport {
+pub struct EngineP2pBlockTransport {
     instance_leader: Arc<InstanceLeader>,
 }
 
-impl EngineCdBlockTransport {
+impl EngineP2pBlockTransport {
     pub fn new(instance_leader: Arc<InstanceLeader>) -> Arc<Self> {
         Arc::new(Self { instance_leader })
     }
 }
 
-impl CdBlockTransport for EngineCdBlockTransport {
+impl P2pBlockTransport for EngineP2pBlockTransport {
     fn local_g2_to_g1(
         &self,
         src_g2_block_ids: Vec<BlockId>,
@@ -81,7 +81,7 @@ impl CdBlockTransport for EngineCdBlockTransport {
 /// CD-bound request finishes onboarding (or fails partway). Factored out
 /// of the wrapper so tests can record these calls without standing up
 /// real worker clients.
-pub trait CdWorkerHook: Send + Sync {
+pub trait P2pWorkerHook: Send + Sync {
     /// All listed G1 blocks for `request_id` have been written; the
     /// scheduler can now run the request.
     fn mark_onboarding_complete(&self, request_id: String) -> BoxFuture<'static, Result<()>>;
@@ -107,7 +107,7 @@ impl InnerLeaderWorkerHook {
     }
 }
 
-impl CdWorkerHook for InnerLeaderWorkerHook {
+impl P2pWorkerHook for InnerLeaderWorkerHook {
     fn mark_onboarding_complete(&self, request_id: String) -> BoxFuture<'static, Result<()>> {
         self.inner.mark_workers_onboarding_complete(request_id)
     }

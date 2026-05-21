@@ -64,11 +64,13 @@ pub mod decode;
 pub mod decode_leader;
 pub mod leader;
 pub mod lifecycle;
-pub mod peer_resolver;
 pub mod prefill_coordinator;
 pub mod prefill_leader;
 pub mod queue;
-pub mod transport;
+
+// The block-transport seam and hub peer resolver moved to the P2P feature
+// module (`super::p2p`); CD builds on them. Re-exported below for path
+// stability.
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -84,6 +86,11 @@ use crate::common::RequestMetadata;
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{ConnectorLeader, FinishedStatus, Request};
 
+pub use crate::connector::leader::p2p::peer_resolver::{HubPeerResolver, PeerResolver};
+pub use crate::connector::leader::p2p::transport::{
+    ConnectorLeaderShim, EngineP2pBlockTransport, InnerLeaderShim, InnerLeaderWorkerHook,
+    P2pBlockTransport, P2pWorkerHook,
+};
 pub use coordinator::{
     CdRegisterObserverFn, ConditionalDisaggCoordinator, CoordinatorParts, RemotePrefillStart,
 };
@@ -93,13 +100,8 @@ pub use leader::{
     ConditionalDisaggLeader, ConditionalDisaggLeaderBuilder, build_hub_client, register_with_hub,
 };
 pub use lifecycle::{LIFECYCLE_WATCHDOG, LifecycleOutcome, spawn_lifecycle_watcher};
-pub use peer_resolver::{HubPeerResolver, PeerResolver};
 pub use prefill_leader::PrefillDisaggLeader;
 pub use queue::{HubRemotePrefillQueue, RemotePrefillQueue};
-pub use transport::{
-    CdBlockTransport, CdWorkerHook, ConnectorLeaderShim, EngineCdBlockTransport, InnerLeaderShim,
-    InnerLeaderWorkerHook,
-};
 
 /// Scheduler-facing connector leader API used by wrappers/compositions.
 ///

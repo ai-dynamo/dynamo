@@ -76,7 +76,7 @@ use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
 use kvbm_connector::connector::leader::disagg::testing::{
-    InMemoryRemotePrefillQueue, MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim,
+    InMemoryRemotePrefillQueue, MockInnerLeaderShim, MockP2pBlockTransport, MockP2pWorkerHook,
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
@@ -133,8 +133,8 @@ struct Harness {
     wrapper: Arc<DecodeDisaggLeader>,
     coordinator: Arc<ConditionalDisaggCoordinator>,
     factory: Arc<MockSessionFactory>,
-    transport: Arc<MockCdBlockTransport>,
-    workers: Arc<MockCdWorkerHook>,
+    transport: Arc<MockP2pBlockTransport>,
+    workers: Arc<MockP2pWorkerHook>,
     inner: Arc<MockInnerLeaderShim>,
     all_hashes: Vec<kvbm_logical::SequenceHash>,
 }
@@ -178,8 +178,8 @@ fn build_harness(request_id: &str, g1_base: usize) -> (Harness, Vec<usize>) {
 
     let factory = MockSessionFactory::new();
     let queue = InMemoryRemotePrefillQueue::new();
-    let transport = MockCdBlockTransport::new();
-    let workers = MockCdWorkerHook::new();
+    let transport = MockP2pBlockTransport::new();
+    let workers = MockP2pWorkerHook::new();
 
     let coordinator = ConditionalDisaggCoordinator::new_with_decode(
         CoordinatorParts {
@@ -188,7 +188,7 @@ fn build_harness(request_id: &str, g1_base: usize) -> (Harness, Vec<usize>) {
             worker_hook: workers.clone(),
             session_factory: factory.clone(),
             peer_resolver: Arc::new(
-                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+                kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
             ),
             runtime: tokio::runtime::Handle::current(),
         },
@@ -197,7 +197,6 @@ fn build_harness(request_id: &str, g1_base: usize) -> (Harness, Vec<usize>) {
     );
 
     let cfg = DisaggConfig {
-        hub_url: "http://127.0.0.1:1337".to_string(),
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
     };
@@ -502,8 +501,8 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
 
     let factory = MockSessionFactory::new();
     let queue = InMemoryRemotePrefillQueue::new();
-    let transport = MockCdBlockTransport::new();
-    let workers = MockCdWorkerHook::new();
+    let transport = MockP2pBlockTransport::new();
+    let workers = MockP2pWorkerHook::new();
 
     let coordinator = ConditionalDisaggCoordinator::new_with_decode(
         CoordinatorParts {
@@ -512,7 +511,7 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
             worker_hook: workers.clone(),
             session_factory: factory.clone(),
             peer_resolver: Arc::new(
-                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+                kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
             ),
             runtime: tokio::runtime::Handle::current(),
         },
@@ -520,7 +519,6 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
         queue.clone(),
     );
     let cfg = DisaggConfig {
-        hub_url: "http://127.0.0.1:1337".to_string(),
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
     };

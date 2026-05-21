@@ -17,7 +17,7 @@ use velo_ext::{InstanceId, PeerInfo};
 use crate::client::HubClient;
 use crate::protocol::{
     self, ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole,
-    Feature, LayoutCompatPayload, P2pConfig, PrefillRequest,
+    Feature, LayoutCompatPayload, P2pConfig, PrefillRequest, RuntimeConfigSummary,
 };
 
 /// Thin wrapper that registers an instance under the ConditionalDisagg
@@ -85,6 +85,15 @@ impl ConditionalDisaggClient {
         self.role
     }
 
+    /// Seed the hub's velo `InstanceId` when registration was performed
+    /// elsewhere (e.g. the shared P2P foundation registered `[P2P, CD, ...]` in
+    /// one call). Idempotent; needed before prefill-queue calls. No-op on `None`.
+    pub fn set_hub_velo_id(&self, hub_velo_id: Option<InstanceId>) {
+        if let Some(id) = hub_velo_id {
+            let _ = self.hub_velo_id.set(id);
+        }
+    }
+
     /// Underlying [`HubClient`] — useful for peer lookups that aren't
     /// feature-scoped.
     pub fn hub(&self) -> &Arc<HubClient> {
@@ -104,16 +113,38 @@ impl ConditionalDisaggClient {
         peer_info: PeerInfo,
         layout_compat: LayoutCompatPayload,
     ) -> Result<Option<InstanceId>> {
-        let hub_id = self
-            .hub
-            .register_instance_with_features(
-                peer_info,
-                vec![
-                    Feature::P2P(P2pConfig { layout_compat }),
-                    Feature::ConditionalDisagg(ConditionalDisaggConfig { role: self.role }),
-                ],
-            )
-            .await?;
+        self.register_with(peer_info, layout_compat, Vec::new(), None)
+            .await
+    }
+
+    /// Like [`register`](Self::register) but additionally declares
+    /// `extra_features` (e.g. `Feature::KvIndexer`) and an optional must-match
+    /// [`RuntimeConfigSummary`], all in a single `POST /v1/instances`. The
+    /// mandatory `P2P` + `ConditionalDisagg` features are always prepended.
+    pub async fn register_with(
+        &self,
+        peer_info: PeerInfo,
+        layout_compat: LayoutCompatPayload,
+        extra_features: Vec<Feature>,
+        runtime: Option<RuntimeConfigSummary>,
+    ) -> Result<Option<InstanceId>> {
+        let mut features = vec![
+            Feature::P2P(P2pConfig { layout_compat }),
+            Feature::ConditionalDisagg(ConditionalDisaggConfig { role: self.role }),
+        ];
+        features.extend(extra_features);
+        let hub_id = match runtime {
+            Some(rt) => {
+                self.hub
+                    .register_instance_with_features_and_runtime(peer_info, features, rt)
+                    .await?
+            }
+            None => {
+                self.hub
+                    .register_instance_with_features(peer_info, features)
+                    .await?
+            }
+        };
         if let Some(id) = hub_id {
             let _ = self.hub_velo_id.set(id);
         }

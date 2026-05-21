@@ -277,26 +277,17 @@ impl HubServerBuilder {
         // with nothing to validate against (a registration bypass).
         let mut primary = self.primary;
         for (key, mgr) in &managers {
-            let Some((block_size, max_seq_len)) = mgr.authoritative_sizing() else {
+            let Some(block_size) = mgr.authoritative_block_size() else {
                 continue;
             };
             match primary.block_size {
                 Some(existing) if existing != block_size => {
                     return Err(anyhow::anyhow!(
                         "primary.block_size ({existing}) conflicts with {key:?} \
-                         feature sizing ({block_size})"
+                         feature block_size ({block_size})"
                     ));
                 }
                 _ => primary.block_size = Some(block_size),
-            }
-            match primary.max_seq_len {
-                Some(existing) if existing != max_seq_len => {
-                    return Err(anyhow::anyhow!(
-                        "primary.max_seq_len ({existing}) conflicts with {key:?} \
-                         feature sizing ({max_seq_len})"
-                    ));
-                }
-                _ => primary.max_seq_len = Some(max_seq_len),
             }
         }
 
@@ -773,6 +764,7 @@ async fn get_hub_config(State(state): State<HubServerState>) -> Json<HubConfigRe
         .map(|mgr| FeatureDescriptor {
             key: mgr.key(),
             dependencies: mgr.dependencies().to_vec(),
+            config_requirements: mgr.config_requirements(),
             config: mgr.descriptor(&primary),
         })
         .collect();
@@ -975,7 +967,6 @@ fn validate_register(
         }
         let r = mgr.config_requirements();
         required.block_size |= r.block_size;
-        required.max_seq_len |= r.max_seq_len;
         required.block_layout |= r.block_layout;
     }
 
@@ -1003,11 +994,6 @@ fn validate_register(
         && let Some(want) = primary.block_size
     {
         check_match("block_size", want, summary.block_size)?;
-    }
-    if required.max_seq_len
-        && let Some(want) = primary.max_seq_len
-    {
-        check_match("max_seq_len", want, summary.max_seq_len)?;
     }
     if required.block_layout {
         // `block_layout` is always authoritative on the hub (non-Option).

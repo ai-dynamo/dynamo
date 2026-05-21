@@ -22,7 +22,7 @@ use crate::connector::leader::{FinishedStatus, Request};
 
 use super::ConnectorLeaderApi;
 use super::coordinator::ConditionalDisaggCoordinator;
-use super::transport::{CdWorkerHook, InnerLeaderShim};
+use crate::connector::leader::p2p::transport::{InnerLeaderShim, P2pWorkerHook};
 
 /// RAII payload installed on the prefill slot's `OnboardingState`
 /// when a CD-bound request enters the wrapper with n>0 (decode
@@ -74,7 +74,7 @@ pub struct PrefillDisaggLeader {
     inner: Arc<dyn InnerLeaderShim>,
     coordinator: Arc<ConditionalDisaggCoordinator>,
     #[allow(dead_code)]
-    worker_hook: Arc<dyn CdWorkerHook>,
+    worker_hook: Arc<dyn P2pWorkerHook>,
 }
 
 impl std::fmt::Debug for PrefillDisaggLeader {
@@ -87,7 +87,7 @@ impl PrefillDisaggLeader {
     pub fn from_parts(
         inner: Arc<dyn InnerLeaderShim>,
         coordinator: Arc<ConditionalDisaggCoordinator>,
-        worker_hook: Arc<dyn CdWorkerHook>,
+        worker_hook: Arc<dyn P2pWorkerHook>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner,

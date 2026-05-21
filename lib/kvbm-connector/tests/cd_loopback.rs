@@ -24,7 +24,7 @@ use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
 use kvbm_connector::connector::leader::disagg::testing::{
-    InMemoryRemotePrefillQueue, MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim,
+    InMemoryRemotePrefillQueue, MockInnerLeaderShim, MockP2pBlockTransport, MockP2pWorkerHook,
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
@@ -109,8 +109,8 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         },
     );
     let d_queue = InMemoryRemotePrefillQueue::new();
-    let d_transport = MockCdBlockTransport::new();
-    let d_workers = MockCdWorkerHook::new();
+    let d_transport = MockP2pBlockTransport::new();
+    let d_workers = MockP2pWorkerHook::new();
     let d_coordinator = ConditionalDisaggCoordinator::new_with_decode(
         CoordinatorParts {
             inner: d_inner.clone(),
@@ -118,7 +118,7 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
             worker_hook: d_workers.clone(),
             session_factory: d_factory.clone(),
             peer_resolver: Arc::new(
-                kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+                kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
             ),
             runtime: tokio::runtime::Handle::current(),
         },
@@ -126,7 +126,6 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
         d_queue.clone(),
     );
     let d_cfg = DisaggConfig {
-        hub_url: "http://127.0.0.1:1337".to_string(),
         role: DisaggregationRole::Decode,
         max_inflight_remote_prefill_tokens: usize::MAX,
     };
@@ -150,15 +149,15 @@ async fn cd_loopback_decode_prefill_session() -> Result<()> {
     let p_g1: Vec<usize> = (2000..2000 + LOCAL_BLOCKS).collect();
     let p_token_blocks: Vec<_> = token_blocks[..LOCAL_BLOCKS].to_vec();
 
-    let p_transport = MockCdBlockTransport::new();
-    let p_workers = MockCdWorkerHook::new();
+    let p_transport = MockP2pBlockTransport::new();
+    let p_workers = MockP2pWorkerHook::new();
     let p_coordinator = ConditionalDisaggCoordinator::new(CoordinatorParts {
         inner: p_inner.clone(),
         transport: p_transport.clone(),
         worker_hook: p_workers.clone(),
         session_factory: p_factory.clone(),
         peer_resolver: Arc::new(
-            kvbm_connector::connector::leader::disagg::peer_resolver::NoopPeerResolver,
+            kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
         ),
         runtime: tokio::runtime::Handle::current(),
     });

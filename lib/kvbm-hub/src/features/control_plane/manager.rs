@@ -25,15 +25,14 @@ use std::time::{Duration, Instant};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
-use axum::response::{IntoResponse, Response};
+use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::{get, post};
 use futures::future::BoxFuture;
 use kvbm_protocols::control::{
-    CloseTransferSessionRequest, ControlError, DescribeInstanceRequest, InstanceDescription,
-    LeaderControlClient, MetricsSnapshotRequest, ModuleId, OpenTransferSessionRequest,
-    PullFromSessionRequest, RegisterLeaderRequest, RegisterTestBlocksRequest, ResetRequest,
-    SearchRequest,
+    ControlError, DescribeInstanceRequest, InstanceDescription, LeaderControlClient,
+    MetricsSnapshotRequest, ModuleId, RegisterLeaderRequest, RegisterTestBlocksRequest,
+    ResetRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -41,12 +40,13 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use velo_ext::{InstanceId, PeerInfo};
 
+use crate::features::http::{
+    control_error_response, error_response, json_response, ok_response, service_unavailable,
+};
 use crate::features::p2p::P2pManager;
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
-use crate::protocol::{
-    self, ErrorBody, ErrorCode, Feature, FeatureKey, MetricsFanoutResponse, MetricsInstanceEntry,
-};
+use crate::protocol::{self, Feature, FeatureKey, MetricsFanoutResponse, MetricsInstanceEntry};
 use crate::registry::PeerRegistry;
 
 /// Periodic refresh interval for the modules cache. Picks up module-set
@@ -402,17 +402,9 @@ fn routes(manager: Arc<ControlPlaneManager>) -> Router {
             CONTROL_TEST_REGISTER_TEST_BLOCKS,
             post(test_register_test_blocks),
         )
-        .route(CONTROL_TRANSFER_SEARCH_PREFIX, post(transfer_search_prefix))
-        .route(
-            CONTROL_TRANSFER_SEARCH_SCATTER,
-            post(transfer_search_scatter),
-        )
-        .route(CONTROL_TRANSFER_OPEN_SESSION, post(transfer_open_session))
-        .route(
-            CONTROL_TRANSFER_PULL_FROM_SESSION,
-            post(transfer_pull_from_session),
-        )
-        .route(CONTROL_TRANSFER_CLOSE_SESSION, post(transfer_close_session))
+        // The `/control/transfer/*` routes moved to `P2pManager` — block copy
+        // is a P2P concern, so the transfer surface only exists when the P2P
+        // feature is enabled.
         .route(CONTROL_METRICS_SNAPSHOT, post(metrics_snapshot))
         .route(METRICS_FANOUT, get(metrics_fanout))
         .with_state(manager)
@@ -511,89 +503,6 @@ async fn test_register_test_blocks(
     match client.test().register_test_blocks(req).await {
         Ok(resp) => ok_response(&resp),
         Err(err) => control_error_response(instance_id, "register_test_blocks", err),
-    }
-}
-
-/// `POST /control/transfer/search_prefix` — always-on.
-async fn transfer_search_prefix(
-    State(mgr): State<Arc<ControlPlaneManager>>,
-    Path(instance_id): Path<InstanceId>,
-    Json(req): Json<SearchRequest>,
-) -> Response {
-    let client = match leader_client(&mgr, instance_id) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    match client.transfer().search_prefix(req).await {
-        Ok(resp) => ok_response(&resp),
-        Err(err) => control_error_response(instance_id, "search_prefix", err),
-    }
-}
-
-/// `POST /control/transfer/search_scatter` — always-on.
-async fn transfer_search_scatter(
-    State(mgr): State<Arc<ControlPlaneManager>>,
-    Path(instance_id): Path<InstanceId>,
-    Json(req): Json<SearchRequest>,
-) -> Response {
-    let client = match leader_client(&mgr, instance_id) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    match client.transfer().search_scatter(req).await {
-        Ok(resp) => ok_response(&resp),
-        Err(err) => control_error_response(instance_id, "search_scatter", err),
-    }
-}
-
-/// `POST /control/transfer/open_session` — always-on. Dispatched at the
-/// holder. Returns the attach triple in
-/// [`kvbm_protocols::control::OpenTransferSessionResponse`].
-async fn transfer_open_session(
-    State(mgr): State<Arc<ControlPlaneManager>>,
-    Path(instance_id): Path<InstanceId>,
-    Json(req): Json<OpenTransferSessionRequest>,
-) -> Response {
-    let client = match leader_client(&mgr, instance_id) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    match client.transfer().open_session(req).await {
-        Ok(resp) => ok_response(&resp),
-        Err(err) => control_error_response(instance_id, "open_session", err),
-    }
-}
-
-/// `POST /control/transfer/pull_from_session` — always-on. Dispatched at
-/// the puller. Long-poll: returns when the pull is complete.
-async fn transfer_pull_from_session(
-    State(mgr): State<Arc<ControlPlaneManager>>,
-    Path(instance_id): Path<InstanceId>,
-    Json(req): Json<PullFromSessionRequest>,
-) -> Response {
-    let client = match leader_client(&mgr, instance_id) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    match client.transfer().pull_from_session(req).await {
-        Ok(resp) => ok_response(&resp),
-        Err(err) => control_error_response(instance_id, "pull_from_session", err),
-    }
-}
-
-/// `POST /control/transfer/close_session` — always-on. Idempotent.
-async fn transfer_close_session(
-    State(mgr): State<Arc<ControlPlaneManager>>,
-    Path(instance_id): Path<InstanceId>,
-    Json(req): Json<CloseTransferSessionRequest>,
-) -> Response {
-    let client = match leader_client(&mgr, instance_id) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    match client.transfer().close_session(req).await {
-        Ok(resp) => ok_response(&resp),
-        Err(err) => control_error_response(instance_id, "close_session", err),
     }
 }
 
@@ -1103,96 +1012,13 @@ fn commit_if_registered<V, F>(
     w.insert(instance_id, build_value(instance_id));
 }
 
-/// Build a `LeaderControlClient` for `instance_id` after validating velo +
-/// registry attachment and that the instance is currently registered.
-///
-/// `Err` is boxed because [`axum::response::Response`] is ~120 bytes and
-/// would otherwise blow up the result-large-err clippy lint on the happy
-/// path.
+/// Build a `LeaderControlClient` for `instance_id`, validating velo + registry
+/// attachment via the shared [`http::leader_client`](crate::features::http::leader_client)
+/// helper. Thin wrapper that supplies this manager's own `OnceLock`s.
 #[allow(clippy::result_large_err)]
 fn leader_client(
     mgr: &ControlPlaneManager,
     instance_id: InstanceId,
 ) -> Result<LeaderControlClient, Response> {
-    let Some(velo) = mgr.velo.get() else {
-        return Err(service_unavailable("hub has no velo transport configured"));
-    };
-    // The hub self-registers in its own registry (so leaders can discover it),
-    // which means its own velo id passes the `contains` check below. A control
-    // RPC to ourselves would route through velo to a peer that is never in the
-    // hub's own messenger peer table — "Peer <id> not registered" → 500 — and a
-    // client that learned `hub_velo_id` from its registration response can spam
-    // that on every poll. The hub has no leader control handlers anyway. Reject
-    // the self id up front for every control handler that funnels through here.
-    if instance_id == velo.instance_id() {
-        return Err(error_response(
-            StatusCode::BAD_REQUEST,
-            "cannot issue leader control to the hub itself",
-        ));
-    }
-    let Some(registry) = mgr.registry.get() else {
-        return Err(service_unavailable("registry not attached"));
-    };
-    if !registry.contains(instance_id) {
-        return Err(error_response(
-            StatusCode::NOT_FOUND,
-            "instance not registered",
-        ));
-    }
-    Ok(LeaderControlClient::new(
-        velo.messenger().clone(),
-        instance_id,
-    ))
-}
-
-fn ok_response<T: Serialize>(value: &T) -> Response {
-    json_response(
-        StatusCode::OK,
-        serde_json::to_value(value).unwrap_or(serde_json::json!({})),
-    )
-}
-
-fn control_error_response(instance_id: InstanceId, handler: &str, err: ControlError) -> Response {
-    let status =
-        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    tracing::info!(
-        instance = %instance_id, %handler, kind = err.kind(), %status,
-        "control_plane: leader returned control error"
-    );
-    json_response(
-        status,
-        serde_json::json!({
-            "error": err.to_string(),
-            "kind": err.kind(),
-        }),
-    )
-}
-
-fn service_unavailable(msg: &str) -> Response {
-    error_response(StatusCode::SERVICE_UNAVAILABLE, msg)
-}
-
-fn error_response(status: StatusCode, msg: &str) -> Response {
-    let code = match status {
-        StatusCode::NOT_FOUND => ErrorCode::NotFound,
-        StatusCode::BAD_REQUEST => ErrorCode::BadRequest,
-        StatusCode::SERVICE_UNAVAILABLE => ErrorCode::Internal,
-        _ => ErrorCode::Internal,
-    };
-    let body = ErrorBody {
-        code,
-        message: msg.to_owned(),
-    };
-    json_response(
-        status,
-        serde_json::to_value(body)
-            .unwrap_or_else(|_| serde_json::json!({ "code": "internal", "message": msg })),
-    )
-}
-
-fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
-    let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec());
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    (status, headers, axum::body::Bytes::from(body)).into_response()
+    crate::features::http::leader_client(&mgr.velo, &mgr.registry, instance_id)
 }

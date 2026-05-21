@@ -240,11 +240,12 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
     if !block_size.is_power_of_two() || !(16..=512).contains(&block_size) {
         anyhow::bail!("--block-size must be a power of two in 16..=512, got {block_size}");
     }
-    let max_seq_len = config
-        .primary
-        .max_seq_len
-        .ok_or_else(|| anyhow::anyhow!("--max-seq-len is required"))?;
-    if max_seq_len == 0 || max_seq_len % block_size != 0 {
+    // `max_seq_len` is optional (advisory; the KV index grows dynamically as
+    // registrants report larger values). When set it seeds the initial index
+    // capacity and must be a non-zero multiple of block_size.
+    if let Some(max_seq_len) = config.primary.max_seq_len
+        && (max_seq_len == 0 || max_seq_len % block_size != 0)
+    {
         anyhow::bail!(
             "--max-seq-len ({max_seq_len}) must be a non-zero multiple of \
              --block-size ({block_size})"
@@ -269,7 +270,7 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
     if enabled.contains(&FeatureKey::KvIndexer) {
         let existing = config.kv_indexer.take().unwrap_or_default();
         config.kv_indexer = Some(kvbm_hub::KvIndexerConfig {
-            max_seq_len: Some(max_seq_len),
+            max_seq_len: config.primary.max_seq_len,
             block_size: Some(block_size),
             zmq_bind: cli.kv_index_zmq_bind.clone().or(existing.zmq_bind),
             advertise_host: cli
@@ -359,11 +360,10 @@ async fn main() -> anyhow::Result<()> {
 
     builder = builder.add_feature_manager(cpm as Arc<dyn kvbm_hub::FeatureManager>);
 
-    // Optional KV indexer feature (sizing resolved from primary by build_config).
+    // Optional KV indexer feature. `max_seq_len` is the *initial* index
+    // capacity (0 = start empty); it grows as registrants report larger values.
     if let Some(kvi) = &config.kv_indexer {
-        let max_seq_len = kvi
-            .max_seq_len
-            .expect("kv_indexer.max_seq_len resolved by build_config");
+        let max_seq_len = kvi.max_seq_len.unwrap_or(0);
         let block_size = kvi
             .block_size
             .expect("kv_indexer.block_size resolved by build_config");
