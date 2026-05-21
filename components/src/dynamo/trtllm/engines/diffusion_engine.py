@@ -259,7 +259,9 @@ class DiffusionEngine:
 
         logger.info(
             f"Generating: prompt='{prompt[:50]}...', "
-            f"size={width}x{height}, frames={num_frames}, steps={num_inference_steps}"
+            f"size={width}x{height}, frames={num_frames}, "
+            f"num_images_per_prompt={num_images_per_prompt}, "
+            f"steps={num_inference_steps}"
         )
 
         # Use TRT-LLM's DiffusionRequest dataclass so that all defaults
@@ -308,6 +310,13 @@ class DiffusionEngine:
                 logger.info(f"Generated video output with shape {output.video.shape}")
             elif output.image is not None:
                 logger.info(f"Generated image output with shape {output.image.shape}")
+                actual_num_images = output.image.shape[0]
+                if actual_num_images != num_images_per_prompt:
+                    logger.warning(
+                        f"Pipeline returned {actual_num_images} image(s) but "
+                        f"{num_images_per_prompt} were requested; the caller will "
+                        f"receive the pipeline's actual output unchanged."
+                    )
 
         return output
 
