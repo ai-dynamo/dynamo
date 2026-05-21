@@ -46,18 +46,18 @@ Each skill's `version` field in its frontmatter matches the Dynamo release line 
 
 ## Attribution
 
-The structural conventions in these skills — the 4-phase workflow shape, the DESTRUCTIVE / MUTATING / SAFE command rubric, the Human-in-the-Loop behavioral contract, the `pass / fail / warn` and `check()` script patterns, the strict 6-element known-issues entry format, the frontmatter shape, the progressive disclosure block, the `references/` + `scripts/` subdirectory layout, and the NV-ACES evaluation infrastructure — were developed and battle-tested by the team behind the internal **`ai-infra-agent`** repository. Several exemplar skills there established the patterns this skill set inherits:
+The structural conventions in these skills — the 4-phase workflow shape, the DESTRUCTIVE / MUTATING / SAFE command rubric, the Human-in-the-Loop behavioral contract, the `pass / fail / warn` and `check()` script patterns, the strict 6-element known-issues entry format, the frontmatter shape, the progressive disclosure block, the `references/` + `scripts/` subdirectory layout, and the NV-ACES evaluation infrastructure — were developed and battle-tested by the team behind the internal **`ai-infra-agent`** project. Several exemplar skills there established the patterns this skill set inherits:
 
 - `nvidia-inference-stack` — the 4-phase workflow, `pass / fail / warn`
-  script helper pattern, `check()` verification function, known-issues 6-element format, frontmatter shape.
+ script helper pattern, `check()` verification function, known-issues 6-element format, frontmatter shape.
 - `nvidia-inference-ra-orchestrator` — the Human-in-the-Loop behavioral
-  contract (present, then wait; no soft-language interpretation).
+ contract (present, then wait; no soft-language interpretation).
 - `gpu-operator` — the DESTRUCTIVE / MUTATING / SAFE command-tier rubric
-  with the explicit "you are responsible for the outcome" prompt.
+ with the explicit "you are responsible for the outcome" prompt.
 - `KAI` — minimal-frontmatter exemplar; the directory-casing vs
-  `name`-field-casing convention.
+ `name`-field-casing convention.
 
-0% of the content in this directory is copy-paste from `ai-infra-agent`; ~100% of the structural rigor is inherited. The Dynamo work is a domain-specific application of an existing methodology, not a new convention. Where this skill set extends `ai-infra-agent`, the extensions are upstreamable.
+0% of the content in this directory is copy-paste from `ai-infra-agent`; ~100% of the structural rigor is inherited. The Dynamo work is a domain-specific application of an existing methodology, not a new convention. Where this skill set extends `ai-infra-agent`, the extensions are upstreamable to `ai-infra-agent`.
 
 ---
 
@@ -121,40 +121,40 @@ Angle-bracket placeholders (`<backend>`, `<n>`) inside YAML folded- scalar `desc
 ### Per-release refresh procedure
 
 1. **Fetch the release branch.**
-   ```bash
-   git fetch origin release/<X.Y.Z>
-   ```
+ ```bash
+ git fetch origin release/<X.Y.Z>
+ ```
 2. **Re-derive per-release facts.** For each skill that needs the value,
-   run `git show origin/release/<X.Y.Z>:<source-file>` and embed the result. Typical touchpoints:
-   - `Cargo.toml` workspace version → skill `version` field
-   - `pyproject.toml` `[project.optional-dependencies]` → backend pin
-     tables (vLLM, TRT-LLM, SGLang)
-   - `container/context.yaml` `nixl_ref` / `nixl_ucx_ref` → NIXL pin
-     tables
-   - `deploy/helm/charts/platform/values.yaml` → etcd / NATS / operator
-     image tags
-   - `recipes/` directory listing → recipe set in `dynamo-deploy` and
-     `dynamo-benchmark`
+ run `git show origin/release/<X.Y.Z>:<source-file>` and embed the result. Typical touchpoints:
+ - `Cargo.toml` workspace version → skill `version` field
+ - `pyproject.toml` `[project.optional-dependencies]` → backend pin
+ tables (vLLM, TRT-LLM, SGLang)
+ - `container/context.yaml` `nixl_ref` / `nixl_ucx_ref` → NIXL pin
+ tables
+ - `deploy/helm/charts/platform/values.yaml` → etcd / NATS / operator
+ image tags
+ - `recipes/` directory listing → recipe set in `dynamo-deploy` and
+ `dynamo-benchmark`
 3. **Refresh known-issues** against the active QA tracker for the
-   release line. Resolved issues fall off the signature catalog; new RC cherry-pick fixes get added.
+ release line. Resolved issues fall off the signature catalog; new RC cherry-pick fixes get added.
 4. **Bump the `version` field** in every touched skill's frontmatter.
-   Mandatory if any per-release fact changed.
+ Mandatory if any per-release fact changed.
 5. **Re-run the pre-MR checklist.** YAML frontmatter parses, every claim
-   cites a `VERIFIED` row, every cluster-mutating command appears in a DESTRUCTIVE / MUTATING table, every script passes `shellcheck`, cross-link audit clean.
+ cites a `VERIFIED` row, every cluster-mutating command appears in a DESTRUCTIVE / MUTATING table, every script passes `shellcheck`, cross-link audit clean.
 6. **Re-run `astra-skill-eval` locally** against each touched skill.
-   Score should stay ≥ 90 (current floor); fix any new findings.
+ Score should stay ≥ 90 (current floor); fix any new findings.
 7. **Open the PR** to this repository. The `NVIDIA/skills` catalog picks
-   up the change in the next daily sync — no second PR per release.
+ up the change in the next daily sync — no second PR per release.
 
 ### When the survey itself refreshes
 
 Most release bumps touch the skill body and not the survey. The survey refreshes when:
 
 - A CRD is added, removed, or has its served/storage versions changed
-  (e.g., `DynamoModel` promoted from v1alpha1 to v1beta1).
+ (e.g., `DynamoModel` promoted from v1alpha1 to v1beta1).
 - A new lifecycle stage appears.
 - A top-level directory is renamed or restructured (`components/`,
-  `lib/`, `deploy/`, `examples/`).
+ `lib/`, `deploy/`, `examples/`).
 - A companion project's role changes (e.g., AIPerf replaces GenAI-Perf).
 
 Survey-refresh PRs touch many skills downstream (citations need updating). They're rare but worth flagging as refactor PRs rather than routine release bumps.
@@ -170,29 +170,28 @@ Skills meant to span multiple release lines gate per-release facts behind a rele
 The pre-MR checklist that gates publication:
 
 - YAML frontmatter parses; required fields (`name`, `description`,
-  `version`, `author`, `tags`, `tools`) present.
+ `version`, `author`, `tags`, `tools`) present.
 - Every load-bearing claim in every SKILL.md and `references/*.md`
-  cites a `VERIFIED` row in the citation manifest.
+ cites a `VERIFIED` row in the citation manifest.
 - Every cluster-mutating command appears in a DESTRUCTIVE / MUTATING
-  table (or a SAFE block); the human-in-the-loop contract applies to every decision point.
+ table (or a SAFE block); the human-in-the-loop contract applies to every decision point.
 - Every script passes `shellcheck` with no warnings.
 - Every script defaults to a non-destructive mode (e.g.
-  `kubectl apply --dry-run=server` rather than `kubectl apply`).
+ `kubectl apply --dry-run=server` rather than `kubectl apply`).
 - Cross-link audit clean — every `references/*.md` and `scripts/*.sh`
-  link in every SKILL.md resolves on disk.
+ link in every SKILL.md resolves on disk.
 - Local `astra-skill-eval evaluate <skill> --static` ≥ 90 with no
-  errors.
+ errors.
 
 ---
 
 ## Compatibility
 
 - **Agent Skills specification:** [agentskills.io/specification](https://agentskills.io/specification).
-  `name` and `description` frontmatter fields are required; `SKILL.md` is required at each skill directory root. These skills also use the optional `version`, `author`, `tags`, and `tools` fields plus the `## Workflow` / `## Available Scripts` / `## Prerequisites` / `## Limitations` / `## Troubleshooting` section headers (per the authoring guide that backs this set).
-- **Clients:** Cursor walks `.agents/skills/` natively; Claude Code
-  walks `.claude/skills/` (a symlink to `.agents/skills/` in this repo); Codex walks `.codex/skills/`. The cross-client convention is `.agents/skills/`.
+ `name` and `description` frontmatter fields are required; `SKILL.md` is required at each skill directory root. These skills also use the optional `version`, `author`, `tags`, and `tools` fields plus the `## Workflow` / `## Available Scripts` / `## Prerequisites` / `## Limitations` / `## Troubleshooting` section headers (per the authoring guide that backs this set).
+- **Clients:** Cursor walks `.agents/skills/` natively; Claude Code walks `.claude/skills/` (a symlink to `.agents/skills/` in this repo); Codex walks `.codex/skills/`. The cross-client convention is `.agents/skills/`.
 - **Mirror:** `NVIDIA/skills` syncs `.agents/skills/` daily via
-  `components.d/dynamo.yml`.
+ `components.d/dynamo.yml`.
 
 ## License
 
