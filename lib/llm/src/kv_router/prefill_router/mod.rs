@@ -192,7 +192,7 @@ impl
 
                 // In Direct mode, pass preselected_worker so execute_prefill uses
                 // router.direct() instead of router.generate() (which bails in Direct mode).
-                let (result, _worker_info) = Self::execute_prefill(
+                let completion = Self::execute_prefill(
                     self.prefill_router.get().cloned(),
                     prefill_context,
                     preselected_worker,
@@ -200,7 +200,10 @@ impl
                 )
                 .await?;
 
-                Ok(PrefillOutcome::Completed(result))
+                Ok(PrefillOutcome::Completed {
+                    result: completion.result,
+                    worker_link: completion.worker_link,
+                })
             }
         };
 
@@ -236,8 +239,12 @@ impl
                     PrefillOutcome::Bootstrap(info) => {
                         decode_req.bootstrap_info = Some(info);
                     }
-                    PrefillOutcome::Completed(result) => {
+                    PrefillOutcome::Completed {
+                        result,
+                        worker_link,
+                    } => {
                         decode_req.prefill_result = Some(result);
+                        decode_req.migration_link = worker_link;
                     }
                 }
 
