@@ -209,7 +209,7 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 	}
 
 	jobStatus := job.Annotations[snapshotprotocol.CheckpointStatusAnnotation]
-	if jobStatus == snapshotprotocol.CheckpointStatusCompleted || jobStatus == snapshotprotocol.CheckpointStatusFailed {
+	if jobStatus == snapshotprotocol.CheckpointStatusFailed {
 		return
 	}
 
@@ -248,6 +248,10 @@ func (w *NodeController) reconcileCheckpointPod(ctx context.Context, pod *corev1
 				opLog.Error(err, "Failed to signal running checkpoint container", "container", status.Name)
 			}
 		}
+		return
+	}
+
+	if jobStatus == snapshotprotocol.CheckpointStatusCompleted {
 		return
 	}
 
