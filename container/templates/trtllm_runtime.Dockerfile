@@ -21,6 +21,17 @@ ENV DYNAMO_HOME=/workspace
 ENV HOME=/home/dynamo
 ENV PATH=/usr/local/bin/etcd:${PATH}
 
+# Workaround: nixl-cu13's bundled UCX 1.20.0 hangs in `uct_md_query_tl_resources`
+# (md_resources realloc loop, >1 GiB) when two NIXL agents init on the same host —
+# blocks every TRT-LLM native-disagg multi-process test. Force-load TRT-LLM's
+# bundled libnixl 0.9.0 (uses system UCX, no bug). LD_PRELOAD is the only lever:
+# nixl-cu13's _bindings.so has DT_RPATH which beats LD_LIBRARY_PATH.
+ENV LD_PRELOAD=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so
+ENV NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+# Fail the build loudly if upstream moves these paths — otherwise LD_PRELOAD
+# silently logs "cannot be preloaded: ignored" and the hang returns at runtime.
+RUN test -f "${LD_PRELOAD}" && test -d "${NIXL_PLUGIN_DIR}"
+
 # Upstream's /etc/shinit_v2 prepends /usr/local/tensorrt/lib (and others) to
 # LD_LIBRARY_PATH, but only when a shell starts. K8s spawns python3 directly,
 # so the libs aren't found and `import tensorrt` fails. Register the paths
