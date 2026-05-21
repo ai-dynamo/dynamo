@@ -127,8 +127,9 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
-{% set pip_target = "--python /opt/venv/bin/python" if device == "xpu" else "--system" %}
-{% set vllm_omni_pip_python = "/opt/venv/bin/python" if device == "xpu" else "" %}
+
+# Install Dynamo runtime wheels and optional KVBM/GMS wheels.
+# Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
@@ -142,7 +143,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
-{% if device in ("cuda", "xpu") %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
 # jq for readable curl output just like the upstream omni image does.
 RUN set -eux; \
@@ -160,7 +160,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    export VLLM_OMNI_PYTHON={{ ('"' ~ vllm_omni_pip_python ~ '"') if vllm_omni_pip_python else '""' }}; \
+    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
 {% if device == "xpu" %}
@@ -215,3 +215,4 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 # Reset the upstream "vllm serve" entrypoint so the derived runtime behaves
 # like other Dynamo images and can execute arbitrary commands directly.
 ENTRYPOINT []
+
