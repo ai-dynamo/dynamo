@@ -76,7 +76,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Only run tests with @pytest.mark.profiled_vram_gib(N) that fit in N GiB. "
         "Without -n: runs tests sequentially. "
         "With -n N: runs N tests concurrently as subprocesses with VRAM-aware scheduling. "
-        "With -n auto: calculates max concurrent slots from GPU VRAM / max_vram_gib.",
+        "With -n auto: uses a bounded process cap with VRAM-aware launch gates.",
     )
     parser.addoption(
         "--dry-run",
@@ -144,7 +144,7 @@ logging.basicConfig(
 # ---------------------------------------------------------------------------
 # GPU-serial and GPU-parallel: VRAM-aware test scheduling
 #
-# Activated only when both --max-vram-gib and -n auto are passed:
+# Activated only when both --max-vram-gib and -n are passed:
 #   pytest --max-vram-gib=48 -n auto -m "gpu_1 and sglang" tests/serve/
 # ---------------------------------------------------------------------------
 

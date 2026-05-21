@@ -5,7 +5,7 @@
 
 Functions:
     detect_gpus()                  Enumerate GPUs via pynvml
-    auto_worker_count(gpus, limit) Calculate slot count for -n auto
+    auto_worker_count(gpus, limit) Calculate process slot count for -n auto
     write_test_meta(items)         Serialize profiled/requested vram + timeout
     load_test_meta()               Read the serialized test metadata
     print_gpu_plan(gpus, limit, would_run)  Dry-run GPU plan summary
@@ -32,6 +32,8 @@ _logger = logging.getLogger(__name__)
 # When 2+ tests run concurrently, reserve 15% of GPU VRAM for CUDA context
 # overhead across processes.  A single test gets the full GPU (0% margin).
 VRAM_MULTI_PROC_MARGIN = 0.15
+
+DEFAULT_GPU_PARALLEL_PROCESS_CAP = 16
 
 _TEST_META_FILENAME = "pytest_gpu_parallel_test_meta.json"
 
@@ -69,23 +71,17 @@ def auto_worker_count(
     gpus: list[dict],
     vram_limit: float,
     test_profiled_gibs: list[float] | None = None,
+    max_process_slots: int = DEFAULT_GPU_PARALLEL_PROCESS_CAP,
 ) -> int:
-    """Calculate slot count for -n auto.
+    """Calculate process slot count for -n auto.
 
-    Uses the smallest profiled test size (if provided) to maximize parallelism.
-    Falls back to vram_limit when no test sizes are available.
+    The scheduler separately gates each launch by reserved profiled VRAM and
+    live GPU memory. Keep auto as a bounded process cap so zero/low-VRAM tests
+    do not throttle GPU-heavy workloads by consuming a VRAM-derived slot count.
     """
     if not gpus or vram_limit <= 0:
         return len(gpus) or 1
-    min_gpu_gib = min(g["total_mib"] for g in gpus) / 1024.0
-    budget_gib = min_gpu_gib * (1.0 - VRAM_MULTI_PROC_MARGIN)
-    divisor = vram_limit
-    if test_profiled_gibs:
-        nonzero = [g for g in test_profiled_gibs if g > 0]
-        if nonzero:
-            divisor = min(nonzero)
-    workers_per_gpu = max(1, int(budget_gib / divisor)) if divisor > 0 else 1
-    return len(gpus) * workers_per_gpu
+    return max(1, int(max_process_slots))
 
 
 def write_test_meta(items, dest_dir: str | None = None) -> None:
@@ -149,8 +145,8 @@ def print_gpu_plan(
     min_gpu_gib = min(g["total_mib"] for g in gpus) / 1024.0
     budget_gib = min_gpu_gib * (1.0 - VRAM_MULTI_PROC_MARGIN)
     profiled_gibs = [gib for _, gib in would_run if gib is not None and gib > 0]
-    min_test_gib = min(profiled_gibs) if profiled_gibs else vram_limit
-    auto_slots = max(1, int(budget_gib / min_test_gib)) if min_test_gib > 0 else 1
+    min_test_gib = min(profiled_gibs) if profiled_gibs else None
+    auto_slots = auto_worker_count(gpus, vram_limit, profiled_gibs)
 
     print(f"\n{'=' * 60}")
     print("GPU-Parallel Plan")
@@ -162,12 +158,14 @@ def print_gpu_plan(
     print("\n  Run options:")
     print("    (no -n)  : sequential, 1 test at a time")
     print(
-        f"    -n auto  : up to {auto_slots} slots per GPU "
-        f"({budget_gib:.0f} / {min_test_gib:.0f} GiB smallest test)"
+        f"    -n auto  : up to {auto_slots} process slots; "
+        "VRAM gates still apply per GPU"
     )
     print(f"    -n N     : N concurrent slots across {len(gpus)} GPU(s)")
+    if min_test_gib is not None:
+        print(f"\n  Smallest nonzero profiled test: {min_test_gib:.1f} GiB")
     print("\n  Usage:")
     print(
-        f"    pytest --max-vram-gib={vram_limit:.0f} -n {auto_slots} "
+        f"    pytest --max-vram-gib={vram_limit:.0f} -n auto "
         f'-m "gpu_1 and vllm" tests/serve/'
     )

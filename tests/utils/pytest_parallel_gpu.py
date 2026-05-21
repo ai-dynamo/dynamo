@@ -15,12 +15,14 @@ Usage (always via pytest):
 
 Flags:
     --max-vram-gib=N   Only run tests with profiled_vram_gib <= N
-    -n N / -n auto     Run N tests concurrently (auto = GPU budget / smallest test)
+    -n N / -n auto     Run N tests concurrently (auto = bounded process cap)
     -s                 Stream subprocess output live with [wN] prefixes
     -v / -vv           Passed through to subprocesses for verbose test names
 
-A 10-second cooldown between launches avoids the vLLM profiling race
-(bug #10643). Tests that fail due to profiling race are retried up to 3 times.
+VRAM safety is enforced separately at launch time using profiled test memory and
+live GPU usage. A short per-GPU cooldown between vLLM launches avoids the vLLM
+profiling race (bug #10643). Tests that fail due to profiling race are retried
+up to 3 times.
 """
 
 from __future__ import annotations
@@ -898,7 +900,7 @@ def main() -> int:
         "-n",
         type=str,
         default="auto",
-        help="Number of concurrent slots. 'auto' = gpu_usable / max_vram_gib.",
+        help="Number of concurrent slots. 'auto' = bounded process cap with VRAM-aware launch gates.",
     )
 
     raw = sys.argv[1:]
