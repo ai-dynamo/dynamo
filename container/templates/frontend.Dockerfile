@@ -8,6 +8,36 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
+# Build `crick` as a wheel in an isolated stage so the C toolchain never
+# reaches the final frontend image. aiperf 0.8.0 depends on crick==0.0.8,
+# which publishes no manylinux aarch64 wheel — without this, arm64 builds
+# fall back to sdist and fail in the final stage where gcc is intentionally
+# absent. amd64 has a prebuilt manylinux_x86_64 wheel on PyPI, so the build
+# is gated on TARGETARCH=arm64; amd64 ships an empty /wheels and uv pulls
+# crick straight from PyPI in the final stage. /wheels is created either
+# way so the COPY --from=crick_builder in the final stage always succeeds.
+FROM ${FRONTEND_IMAGE} AS crick_builder
+ARG PYTHON_VERSION
+ARG TARGETARCH
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    mkdir -p /wheels \
+    && if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends \
+            ca-certificates \
+            gcc \
+            libc6-dev \
+            python${PYTHON_VERSION}-dev \
+            python${PYTHON_VERSION}-venv \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        python${PYTHON_VERSION} -m venv /tmp/buildenv \
+        && /tmp/buildenv/bin/pip install --no-cache-dir --upgrade pip wheel \
+        && /tmp/buildenv/bin/pip wheel --no-cache-dir --no-deps crick==0.0.8 -w /wheels; \
+    fi
+
 FROM ${FRONTEND_IMAGE} AS frontend
 
 ARG PYTHON_VERSION
@@ -65,6 +95,8 @@ COPY --chown=dynamo: --from=dynamo_base /bin/uv /bin/uvx /bin/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+# crick wheel pre-built in the crick_builder stage; see comment near the top.
+COPY --chown=dynamo: --from=crick_builder /wheels/ /opt/dynamo/wheelhouse/extra/
 
 # Create virtual environment
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
@@ -86,8 +118,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 # In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
+# UV_FIND_LINKS points at the crick wheel pre-built in the crick_builder stage;
+# uv prefers it over the sdist on arm64 where no manylinux aarch64 wheel exists.
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
