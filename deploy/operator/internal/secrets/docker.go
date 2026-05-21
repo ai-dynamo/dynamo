@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"sync"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
@@ -14,11 +16,11 @@ import (
 type DockerSecretIndexer struct {
 	// maps for a namespace, a docker registry server to a list of secret names
 	secrets map[string]map[string][]string
-	client  client.Client
+	client  client.Reader
 	mu      sync.RWMutex
 }
 
-func NewDockerSecretIndexer(client client.Client) *DockerSecretIndexer {
+func NewDockerSecretIndexer(client client.Reader) *DockerSecretIndexer {
 	return &DockerSecretIndexer{
 		secrets: make(map[string]map[string][]string),
 		client:  client,
@@ -31,6 +33,12 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 	if err := i.client.List(ctx, secrets); err != nil {
 		return fmt.Errorf("unable to list secrets: %w", err)
 	}
+	sort.Slice(secrets.Items, func(a, b int) bool {
+		if secrets.Items[a].Namespace != secrets.Items[b].Namespace {
+			return secrets.Items[a].Namespace < secrets.Items[b].Namespace
+		}
+		return secrets.Items[a].Name < secrets.Items[b].Name
+	})
 	tmpSecrets := make(map[string]map[string][]string)
 	for _, secret := range secrets.Items {
 		if secret.Type == corev1.SecretTypeDockerConfigJson {
@@ -55,6 +63,12 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 			}
 		}
 	}
+	for namespace := range tmpSecrets {
+		for registry, secretNames := range tmpSecrets[namespace] {
+			sort.Strings(secretNames)
+			tmpSecrets[namespace][registry] = slices.Compact(secretNames)
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.secrets = tmpSecrets
@@ -68,5 +82,5 @@ func (i *DockerSecretIndexer) GetSecrets(namespace, registry string) ([]string, 
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.secrets[namespace][registry], nil
+	return append([]string(nil), i.secrets[namespace][registry]...), nil
 }

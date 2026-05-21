@@ -421,14 +421,53 @@ func TestGetSpecChangeResult(t *testing.T) {
 	}
 }
 
+func TestGetSpecChangeResult_AnnotationOnlyForEquivalentSpec(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	current := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "worker",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(1),
+			},
+		},
+	}
+	desired := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "worker",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(1),
+			},
+		},
+	}
+	current.SetGeneration(7)
+
+	result, err := GetSpecChangeResult(current, desired)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(result.NeedsUpdate).To(gomega.BeTrue())
+	g.Expect(result.SpecNeedsUpdate).To(gomega.BeFalse())
+	g.Expect(result.NewGeneration).To(gomega.Equal(int64(7)))
+	g.Expect(result.NewHash).ToNot(gomega.BeNil())
+}
+
 func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 	tests := []struct {
 		name                       string
 		currentGeneration          int64
 		lastAppliedGeneration      string // empty string means annotation not set
-		lastAppliedHash            string // empty string means annotation not set, "match" means compute from desired
+		lastAppliedHash            string // empty string means annotation not set, "match" means compute from current
 		desiredReplicas            int64  // different from current (2) means hash will differ
 		expectNeedsUpdate          bool
+		expectSpecNeedsUpdate      bool
 		expectManualChangeDetected bool
 		expectNewGeneration        int64 // 0 means don't check
 	}{
@@ -441,35 +480,33 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			expectNeedsUpdate:     false,
 		},
 		{
-			name:                       "manual change detected - generation increased",
+			name:                       "generation increased but spec is equivalent - annotations only",
 			currentGeneration:          7,
 			lastAppliedGeneration:      "5",
 			lastAppliedHash:            "match",
 			desiredReplicas:            2,
 			expectNeedsUpdate:          true,
-			expectManualChangeDetected: true,
-			expectNewGeneration:        8, // current(7) + 1
+			expectManualChangeDetected: false,
+			expectNewGeneration:        7,
 		},
 		{
 			// Upgrade scenario: hash matches but no generation annotation yet.
-			// We do a full update to ensure spec is correct (could have been manual edits
-			// before we added generation tracking).
-			name:                  "missing generation annotation - full update for safety",
+			name:                  "missing generation annotation - annotations only when spec is equivalent",
 			currentGeneration:     5,
 			lastAppliedGeneration: "", // missing
 			lastAppliedHash:       "match",
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectNewGeneration:   6, // current + 1
+			expectNewGeneration:   5,
 		},
 		{
-			name:                  "missing hash annotation - needs full update",
+			name:                  "missing hash annotation - annotations only when spec is equivalent",
 			currentGeneration:     5,
 			lastAppliedGeneration: "5",
 			lastAppliedHash:       "", // missing
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectNewGeneration:   6, // current(5) + 1
+			expectNewGeneration:   5,
 		},
 		{
 			name:                  "hash changed - needs full update",
@@ -478,25 +515,26 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			lastAppliedHash:       "match",
 			desiredReplicas:       3, // different from current (2)
 			expectNeedsUpdate:     true,
+			expectSpecNeedsUpdate: true,
 			expectNewGeneration:   6, // current(5) + 1
 		},
 		{
-			name:                  "corrupted generation annotation - needs full update",
+			name:                  "corrupted generation annotation - annotations only when spec is equivalent",
 			currentGeneration:     5,
 			lastAppliedGeneration: "invalid",
 			lastAppliedHash:       "match",
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectNewGeneration:   6, // current(5) + 1
+			expectNewGeneration:   5,
 		},
 		{
-			name:                  "both annotations missing - needs full update",
+			name:                  "both annotations missing - annotations only when spec is equivalent",
 			currentGeneration:     5,
 			lastAppliedGeneration: "",
 			lastAppliedHash:       "",
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectNewGeneration:   6, // current(5) + 1
+			expectNewGeneration:   5,
 		},
 		{
 			name:                       "manual change with hash also changed",
@@ -505,6 +543,7 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			lastAppliedHash:            "match",
 			desiredReplicas:            3, // different
 			expectNeedsUpdate:          true,
+			expectSpecNeedsUpdate:      true,
 			expectManualChangeDetected: false, // hash change takes precedence
 			expectNewGeneration:        8,
 		},
@@ -578,6 +617,7 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			result, err := GetSpecChangeResult(current, desired)
 			g.Expect(err).To(gomega.BeNil())
 			g.Expect(result.NeedsUpdate).To(gomega.Equal(tt.expectNeedsUpdate), "NeedsUpdate mismatch")
+			g.Expect(result.SpecNeedsUpdate).To(gomega.Equal(tt.expectSpecNeedsUpdate), "SpecNeedsUpdate mismatch")
 			g.Expect(result.ManualChangeDetected).To(gomega.Equal(tt.expectManualChangeDetected), "ManualChangeDetected mismatch")
 			if tt.expectNewGeneration != 0 {
 				g.Expect(result.NewGeneration).To(gomega.Equal(tt.expectNewGeneration), "NewGeneration mismatch")
