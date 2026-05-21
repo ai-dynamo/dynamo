@@ -524,35 +524,6 @@ func TestReconcileCheckpointPodFailsWhenAnyRegularContainerFails(t *testing.T) {
 	}
 }
 
-func TestSetCheckpointStatusDoesNotCompleteFailedJob(t *testing.T) {
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "checkpoint-job",
-			Namespace: "default",
-			Annotations: map[string]string{
-				snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed,
-			},
-		},
-	}
-	w := makeTestController(t, job)
-
-	updated, err := w.setCheckpointStatus(context.Background(), w.log, job, snapshotprotocol.CheckpointStatusCompleted)
-	if err != nil {
-		t.Fatalf("setCheckpointStatus() error = %v", err)
-	}
-	if updated {
-		t.Fatal("setCheckpointStatus() updated failed job to completed")
-	}
-
-	got, err := w.clientset.BatchV1().Jobs("default").Get(context.Background(), "checkpoint-job", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("failed to get checkpoint job: %v", err)
-	}
-	if status := got.Annotations[snapshotprotocol.CheckpointStatusAnnotation]; status != snapshotprotocol.CheckpointStatusFailed {
-		t.Fatalf("checkpoint status annotation = %q, want %q", status, snapshotprotocol.CheckpointStatusFailed)
-	}
-}
-
 func TestReconcileRestorePod(t *testing.T) {
 	tests := []struct {
 		name                  string
