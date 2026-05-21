@@ -120,12 +120,14 @@ function renderCold(def, rows) {
   const left = 220;
   const right = 70;
   const top = 250;
-  const rowHeight = 74;
+  const rowHeight = 66;
   const barHeight = 44;
+  const plotTopPadding = 18;
+  const plotBottomPadding = 18;
   const plotWidth = width - left - right;
-  const axisBottom = top + models.length * rowHeight + 32;
+  const axisBottom = top + plotTopPadding + (models.length - 1) * rowHeight + barHeight + plotBottomPadding;
   const noteTop = axisBottom + 72;
-  const height = noteTop + 98;
+  const height = noteTop + 50;
   const maxEnd = Math.max(...rows.map((row) => row.end_s));
   const maxScale = maxEnd * 1.04;
   const x = (value) => left + (value / maxScale) * plotWidth;
@@ -138,7 +140,7 @@ function renderCold(def, rows) {
   renderColdAxis(svg, left, right, top, axisBottom, width, tickStep, maxScale, x);
 
   models.forEach((model, index) => {
-    const y = top + index * rowHeight;
+    const y = top + plotTopPadding + index * rowHeight;
     const centerY = y + barHeight / 2;
     if (index % 2 === 1) {
       svg.push(`<rect x="${left}" y="${y - 7}" width="${plotWidth}" height="${rowHeight}" fill="#F8FAFC"/>`);
@@ -318,9 +320,7 @@ function renderColdAxis(svg, left, right, top, axisBottom, width, tickStep, maxS
 }
 
 function renderColdNote(svg, left, top, width) {
-  svg.push(`<rect x="${left}" y="${top}" width="${width}" height="74" rx="6" fill="#F8FAFC" stroke="#E2E8F0"/>`);
-  svg.push(`<text x="${left + 24}" y="${top + 30}" style="font-size:20px;font-weight:800;fill:#0F172A">Takeaway</text>`);
-  svg.push(`<text x="${left + 24}" y="${top + 57}" style="font-size:20px;font-weight:600;fill:#334155">With high-bandwidth network storage, small-model startup is mostly engine initialization, not weight load; cached compile/warmup artifacts trim only part of the path.</text>`);
+  svg.push(`<text x="${left}" y="${top + 20}" style="font-size:20px;font-weight:600;fill:#334155">With high-bandwidth network storage, small-model startup is mostly engine initialization, not weight load; cached compile/warmup artifacts trim only part of the path.</text>`);
 }
 
 function renderBar(svg, row, x, y, height) {
