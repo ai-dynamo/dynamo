@@ -19,8 +19,8 @@ from typing import Any, Dict, Optional
 # environments that haven't rebuilt `_core` yet (CI pre-commit, stale
 # editable installs); the const must match the Rust definition.
 try:
-    from dynamo._core.backend import (
-        HEALTH_CHECK_KEY,  # type: ignore[import-not-found,import-untyped]
+    from dynamo._core.backend import (  # type: ignore[import-not-found,import-untyped]
+        HEALTH_CHECK_KEY,
     )
 except ImportError:
     HEALTH_CHECK_KEY = "_HEALTH_CHECK"
