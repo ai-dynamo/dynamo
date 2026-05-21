@@ -10,8 +10,11 @@ These tests do NOT require visual_gen, torch, or GPU - they test logic only.
 """
 
 import asyncio
+import logging
+import sys
 import threading
 import time
+import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -612,3 +615,155 @@ class TestImageHandlerResponseFormats:
                 pass
 
         assert "GPU OOM" in str(exc_info.value)
+
+
+# =============================================================================
+# Part 7: DiffusionEngine Mismatch Warning Tests
+# =============================================================================
+
+
+_DIFFUSION_ENGINE_LOGGER = "dynamo.trtllm.engines.diffusion_engine"
+
+
+class _StubVisualGenParams:
+    """Minimal stand-in for tensorrt_llm.visual_gen.params.VisualGenParams.
+
+    Accepts the same keyword arguments DiffusionEngine.generate() passes and
+    exposes them as attributes, so the engine's `_merge_defaults` mirror code
+    can read/set them. extra_params defaults to None (matches real behavior).
+    """
+
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        if not hasattr(self, "extra_params"):
+            self.extra_params = None
+
+
+class _StubDiffusionRequest:
+    """Minimal stand-in for tensorrt_llm._torch.visual_gen.executor.DiffusionRequest."""
+
+    def __init__(self, request_id, prompt, params):
+        self.request_id = request_id
+        self.prompt = prompt
+        self.params = params
+
+
+@pytest.fixture
+def stub_trtllm_modules(monkeypatch):
+    """Install minimal tensorrt_llm stubs so DiffusionEngine.generate() can run
+    in unit tests without TRT-LLM installed.
+
+    DiffusionEngine.generate() does two lazy imports inside its body:
+        from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
+        from tensorrt_llm.visual_gen.params import VisualGenParams
+    The unit-test environment doesn't ship TRT-LLM (see this file's header
+    docstring), so we substitute minimal classes that match the surface the
+    engine uses.
+    """
+    params_mod = types.ModuleType("tensorrt_llm.visual_gen.params")
+    params_mod.VisualGenParams = _StubVisualGenParams
+
+    executor_mod = types.ModuleType("tensorrt_llm._torch.visual_gen.executor")
+    executor_mod.DiffusionRequest = _StubDiffusionRequest
+
+    parent_modules = [
+        "tensorrt_llm",
+        "tensorrt_llm._torch",
+        "tensorrt_llm._torch.visual_gen",
+        "tensorrt_llm.visual_gen",
+    ]
+    for name in parent_modules:
+        if name not in sys.modules:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules, "tensorrt_llm._torch.visual_gen.executor", executor_mod
+    )
+    monkeypatch.setitem(sys.modules, "tensorrt_llm.visual_gen.params", params_mod)
+
+
+class TestDiffusionEngineMismatchWarning:
+    """Tests for DiffusionEngine.generate()'s pipeline-output mismatch warning.
+
+    The underlying TRT-LLM Flux2Pipeline (and likely FluxPipeline) silently
+    returns batch=1 regardless of the requested num_images_per_prompt.
+    DiffusionEngine.generate() stays a thin pass-through over pipeline.infer()
+    but logs a WARNING when output.image.shape[0] != num_images_per_prompt so
+    operators can see the mismatch in production logs. The pipeline output is
+    not mutated, padded, or looped — the engine is observability, not workaround.
+    """
+
+    def _make_pipeline(self, returned_batch: int):
+        """Mock pipeline that returns an image tensor with the given batch size."""
+        pipeline = MagicMock()
+        pipeline.default_generation_params = {}
+        pipeline.extra_param_specs = {}
+        pipeline.infer = MagicMock(
+            return_value=SimpleNamespace(
+                video=None,
+                image=torch.zeros((returned_batch, 64, 64, 3), dtype=torch.uint8),
+                audio=None,
+            )
+        )
+        return pipeline
+
+    def _make_engine(self, pipeline):
+        """Construct a DiffusionEngine with the given mock pipeline already loaded."""
+        from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
+
+        config = DiffusionConfig(media_output_fs_url="file:///tmp/test_media")
+        engine = DiffusionEngine(config)
+        engine._initialized = True
+        engine._pipeline = pipeline
+        return engine
+
+    def _warning_records(self, caplog):
+        return [
+            r
+            for r in caplog.records
+            if r.name == _DIFFUSION_ENGINE_LOGGER and r.levelno >= logging.WARNING
+        ]
+
+    def test_warns_on_count_mismatch(self, caplog, stub_trtllm_modules):
+        """Pipeline returns 1 image when 2 were requested -> WARNING naming both values."""
+        engine = self._make_engine(self._make_pipeline(returned_batch=1))
+
+        with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
+            engine.generate(prompt="a test prompt", num_images_per_prompt=2)
+
+        warnings = self._warning_records(caplog)
+        assert len(warnings) == 1, (
+            f"Expected exactly one WARNING for the 2-vs-1 mismatch, "
+            f"got {[r.getMessage() for r in warnings]}"
+        )
+        msg = warnings[0].getMessage()
+        assert "2" in msg and "1" in msg, (
+            f"WARNING message should name both requested (2) and actual (1) "
+            f"counts; got: {msg!r}"
+        )
+
+    def test_silent_when_count_matches(self, caplog, stub_trtllm_modules):
+        """Pipeline returns 2 images when 2 were requested -> no WARNING."""
+        engine = self._make_engine(self._make_pipeline(returned_batch=2))
+
+        with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
+            engine.generate(prompt="a test prompt", num_images_per_prompt=2)
+
+        warnings = self._warning_records(caplog)
+        assert warnings == [], (
+            f"Expected no WARNING when pipeline returns the requested batch size, "
+            f"got {[r.getMessage() for r in warnings]}"
+        )
+
+    def test_silent_for_num_images_per_prompt_1(self, caplog, stub_trtllm_modules):
+        """The common N=1 case stays silent (pipeline returns 1, request is 1)."""
+        engine = self._make_engine(self._make_pipeline(returned_batch=1))
+
+        with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
+            engine.generate(prompt="a test prompt", num_images_per_prompt=1)
+
+        warnings = self._warning_records(caplog)
+        assert warnings == [], (
+            f"Expected no WARNING in the N=1 common case, "
+            f"got {[r.getMessage() for r in warnings]}"
+        )
