@@ -504,6 +504,22 @@ async def init_llm_worker(
             worker_id_path,
         )
 
+    # Bind the target-side REP socket BEFORE engine subprocess startup.
+    # The engine subprocess calls maybe_start_remote_g2_target_client
+    # inside register_kv_caches and polls for this socket; if we bind
+    # later (e.g. inside get_publisher) the engine times out before the
+    # socket appears. The bind itself is synchronous and only needs the
+    # dynamo runtime, so it's safe here.
+    _remote_g2_target_handle = None
+    if config.has_connector("remote_g2"):
+        from dynamo.trtllm.kv_p2p.target_rpc_local import (
+            setup_target_rpc_local,
+        )
+
+        _remote_g2_target_handle = setup_target_rpc_local(
+            runtime, config.namespace, config.component
+        )
+
     async with get_llm_engine(
         engine_args,
         config.disaggregation_mode,
@@ -736,10 +752,26 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
 
-                # remote-G2 source registry is now bootstrapped inside the
-                # engine subprocess (in RemoteG2KvCacheConnectorWorker.
-                # register_kv_caches), reading DYNAMO_REMOTE_G2_WORKER_ID
-                # from env vars set above.
+                # remote-G2 source registry is bootstrapped inside the
+                # engine subprocess (in PyExecutor, via
+                # maybe_start_remote_g2_service). It exposes a ZMQ REP
+                # socket; here we register dynamo runtime endpoints that
+                # forward to it, so other workers can reach this source
+                # via client.direct(...).
+                _remote_g2_rpc_handle = None
+                if config.has_connector("remote_g2"):
+                    from dynamo.trtllm.kv_p2p.source_rpc_server import (
+                        setup_source_rpc_endpoints,
+                    )
+
+                    # Source REP socket is bound by the engine subprocess;
+                    # the parent's REQ side waits for it to appear. The
+                    # target REP bind was already done before get_llm_engine
+                    # (see _remote_g2_target_handle above) — we keep that
+                    # reference alive but don't re-bind here.
+                    _remote_g2_rpc_handle = await setup_source_rpc_endpoints(
+                        runtime, config.namespace, config.component
+                    )
 
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
                 if config.load_format == "gms":
