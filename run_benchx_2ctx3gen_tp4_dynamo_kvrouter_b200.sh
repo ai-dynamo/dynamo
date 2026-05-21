@@ -1,20 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=coreai_comparch_aarwlt-benchx.1ctx3gen.dynamo.kvrouter
-#SBATCH --nodes=1
+#SBATCH --job-name=coreai_comparch_aarwlt-benchx.2ctx3gen_tp4.dynamo.kvrouter
+#SBATCH --nodes=2
 #SBATCH --partition=batch_long
 #SBATCH --account=coreai_comparch_aarwlt
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=10:00:00
-#SBATCH --output=bench/logs/run_benchx_1ctx3gen_dynamo_kvrouter_%j.log
-#SBATCH --error=bench/logs/run_benchx_1ctx3gen_dynamo_kvrouter_%j.err
+#SBATCH --output=bench/logs/run_benchx_2ctx3gen_tp4_dynamo_kvrouter_%j.log
+#SBATCH --error=bench/logs/run_benchx_2ctx3gen_tp4_dynamo_kvrouter_%j.err
 
 # =============================================================================
-# benchx (feat/bench_x sha 11e16c) — 1 ctx + 3 gen with kv router,
+# benchx (feat/bench_x sha 11e16c) — 2 ctx TP1 + 3 gen TP4 with kv router,
 # driven by dynamo.trtllm (etcd + nats + dynamo frontend).
 #
 # Layout:
-#   NODE0 — etcd + nats + dynamo frontend + 1 ctx worker(s) (GPUs 0-0) + 3 gen worker(s) (GPUs 1-3)
+#   NODE0 — etcd + nats + dynamo frontend + 2 ctx worker(s) (GPUs 0-1) TP1
+#   NODE0 — gen worker 0 GPUs 2,3,4,5 (TP4)
+#   NODE1 — gen worker 1 GPUs 0,1,2,3 (TP4)
+#   NODE1 — gen worker 2 GPUs 4,5,6,7 (TP4)
 #
 # Driven by dynamo.trtllm (etcd + nats + dynamo frontend) instead of
 # trtllm-serve disaggregated.
@@ -23,7 +26,7 @@
 #
 # Env:
 #   CONCURRENCY    — comma-separated concurrency sweep
-#                    (default: 1,2,3,6,8,10,16,32,48,64,80,96,112,128)
+#                    (default: 1,2,3,6,8,10,16,32,48,64,80,96,112,128,144,160)
 #   HOSTCACHE      — 1 = enable kv_cache_config.host_cache_size: 80GB on ctx
 #                    0 = no host offloading (default)
 #   WORKER_METRICS — 1 = pass --publish-events-and-metrics to dynamo.trtllm workers
@@ -31,8 +34,8 @@
 #                    0 = neither (default; reduces publisher GIL pressure on workers)
 #
 # Submit:
-#   sbatch --export=ALL,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_1ctx3gen_dynamo_kvrouter.sh
-#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_1ctx3gen_dynamo_kvrouter.sh
+#   sbatch --export=ALL,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_2ctx3gen_tp4_dynamo_kvrouter.sh
+#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_2ctx3gen_tp4_dynamo_kvrouter.sh
 # =============================================================================
 
 set -uo pipefail
@@ -51,7 +54,7 @@ else
 fi
 
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/dynamo-trtllm-rihuo-x86_64-1-2-0-989902-with-trace.sqsh}"
-EXP_NAME="run_benchx_1ctx3gen_dynamo_kvrouter_${HCTAG}_c${C_TAG}"
+EXP_NAME="run_benchx_2ctx3gen_tp4_dynamo_kvrouter_${HCTAG}_c${C_TAG}"
 
 HF_TOKEN="${HF_TOKEN:-}"
 REPO_DIR="${REPO_DIR:-/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/rihuo/artificial-analysis}"
@@ -62,6 +65,7 @@ TRAJECTORY_PATH="${REPO_DIR}/data/agentic_coding_v2_full.jsonl"
 CONTAINER_MOUNTS="/lustre/:/lustre/"
 
 NODE0=$(scontrol show hostnames $SLURM_NODELIST | sed -n '1p')
+NODE1=$(scontrol show hostnames $SLURM_NODELIST | sed -n '2p')
 
 # Dynamo ports
 ETCD_PORT=2379
@@ -71,9 +75,10 @@ DYNAMO_REQUEST_PLANE=tcp
 
 # DYN_SYSTEM_PORT assignments (one per worker)
 DYN_SYS_PORT_CTX_0=8081
-DYN_SYS_PORT_GEN_1=8085
-DYN_SYS_PORT_GEN_2=8086
-DYN_SYS_PORT_GEN_3=8087
+DYN_SYS_PORT_CTX_1=8082
+DYN_SYS_PORT_GEN_0=8085
+DYN_SYS_PORT_GEN_1=8086
+DYN_SYS_PORT_GEN_2=8087
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
@@ -228,13 +233,13 @@ print(len(models))
 }
 
 echo "============================================"
-echo "$EXP_NAME (job $SLURM_JOB_ID) $NODE0  CONCURRENCY=$CONCURRENCY HOSTCACHE=$HOSTCACHE WORKER_METRICS=$WORKER_METRICS"
+echo "$EXP_NAME (job $SLURM_JOB_ID) ctx=$NODE0 gen=$NODE0+$NODE1  CONCURRENCY=$CONCURRENCY HOSTCACHE=$HOSTCACHE WORKER_METRICS=$WORKER_METRICS"
 echo "Container: $CONTAINER_IMAGE"
 echo "Results: $RESULTS_DIR"
 echo "============================================"
 
 CTX_CONFIG_SRC="${REPO_DIR}/bench/ctx_config_b200.yaml"
-GEN_CONFIG_SRC="${REPO_DIR}/bench/gen_config_b200.yaml"
+GEN_CONFIG_SRC="${REPO_DIR}/bench/gen_config_tp4_b200.yaml"
 
 if [ ! -f "$CTX_CONFIG_SRC" ]; then echo "ERROR: ctx config not found at $CTX_CONFIG_SRC"; exit 1; fi
 if [ ! -f "$GEN_CONFIG_SRC" ]; then echo "ERROR: gen config not found at $GEN_CONFIG_SRC"; exit 1; fi
@@ -312,31 +317,64 @@ echo "Infrastructure services are ready"
 # Stage 2: Start TRTLLM workers via dynamo.trtllm
 # ==============================================================================
 
-# --- 3 gen worker(s) on $NODE0 GPUs 1-3 (decode) ---
 GEN_PIDS=()
-for GPU in 1 2 3; do
-  PORT_VAR="DYN_SYS_PORT_GEN_${GPU}"
-  GEN_PORT="${!PORT_VAR}"
-  echo "[$(date +%H:%M:%S)] Starting gen worker on $NODE0 GPU $GPU (DYN_SYSTEM_PORT=${GEN_PORT})..."
-  start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
-    --output="$RESULTS_DIR/gen_worker_g${GPU}.log" \
-    --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
-    --no-container-entrypoint \
-    --no-container-mount-home \
-    bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=${GPU} && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
-      export DYN_SYSTEM_PORT=${GEN_PORT} && \
-      trtllm-llmapi-launch python3 -m dynamo.trtllm \
-        --model-path $MODEL_PATH --served-model-name $MODEL \
-        --disaggregation-mode decode \
-        --extra-engine-args $RESULTS_DIR/gen.yaml \
-        --request-plane ${DYNAMO_REQUEST_PLANE} \
-        ${WORKER_METRICS_FLAG}"
-  GEN_PIDS+=("${SRUN_PIDS[-1]}")
-done
+# --- decode worker 0 on $NODE0 GPUs 2,3,4,5 (TP4) ---
+GEN_PORT=8085
+echo "[$(date +%H:%M:%S)] Starting gen worker 0 on $NODE0 GPUs 2,3,4,5 (DYN_SYSTEM_PORT=${GEN_PORT})..."
+start_bg srun --overlap --ntasks=4 --ntasks-per-node=4 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
+  --output="$RESULTS_DIR/gen_worker_g0.log" \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --no-container-entrypoint \
+  --no-container-mount-home \
+  bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=2,3,4,5 && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
+    export DYN_SYSTEM_PORT=${GEN_PORT} && \
+    trtllm-llmapi-launch python3 -m dynamo.trtllm \
+      --model-path $MODEL_PATH --served-model-name $MODEL \
+      --disaggregation-mode decode \
+      --extra-engine-args $RESULTS_DIR/gen.yaml \
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      ${WORKER_METRICS_FLAG}"
+GEN_PIDS+=("${SRUN_PIDS[-1]}")
 
-# --- 1 ctx worker(s) on $NODE0 GPUs 0-0 (prefill) ---
+# --- decode worker 1 on $NODE1 GPUs 0,1,2,3 (TP4) ---
+GEN_PORT=8086
+echo "[$(date +%H:%M:%S)] Starting gen worker 1 on $NODE1 GPUs 0,1,2,3 (DYN_SYSTEM_PORT=${GEN_PORT})..."
+start_bg srun --overlap --ntasks=4 --ntasks-per-node=4 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
+  --output="$RESULTS_DIR/gen_worker_g1.log" \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --no-container-entrypoint \
+  --no-container-mount-home \
+  bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=0,1,2,3 && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
+    export DYN_SYSTEM_PORT=${GEN_PORT} && \
+    trtllm-llmapi-launch python3 -m dynamo.trtllm \
+      --model-path $MODEL_PATH --served-model-name $MODEL \
+      --disaggregation-mode decode \
+      --extra-engine-args $RESULTS_DIR/gen.yaml \
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      ${WORKER_METRICS_FLAG}"
+GEN_PIDS+=("${SRUN_PIDS[-1]}")
+
+# --- decode worker 2 on $NODE1 GPUs 4,5,6,7 (TP4) ---
+GEN_PORT=8087
+echo "[$(date +%H:%M:%S)] Starting gen worker 2 on $NODE1 GPUs 4,5,6,7 (DYN_SYSTEM_PORT=${GEN_PORT})..."
+start_bg srun --overlap --ntasks=4 --ntasks-per-node=4 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
+  --output="$RESULTS_DIR/gen_worker_g2.log" \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --no-container-entrypoint \
+  --no-container-mount-home \
+  bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=4,5,6,7 && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
+    export DYN_SYSTEM_PORT=${GEN_PORT} && \
+    trtllm-llmapi-launch python3 -m dynamo.trtllm \
+      --model-path $MODEL_PATH --served-model-name $MODEL \
+      --disaggregation-mode decode \
+      --extra-engine-args $RESULTS_DIR/gen.yaml \
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      ${WORKER_METRICS_FLAG}"
+GEN_PIDS+=("${SRUN_PIDS[-1]}")
+
+# --- 2 ctx worker(s) on $NODE0 GPUs 0-1 (prefill, TP1) ---
 CTX_PIDS=()
-for GPU in 0; do
+for GPU in 0 1; do
   PORT_VAR="DYN_SYS_PORT_CTX_${GPU}"
   CTX_PORT="${!PORT_VAR}"
   echo "[$(date +%H:%M:%S)] Starting ctx worker on $NODE0 GPU $GPU (DYN_SYSTEM_PORT=${CTX_PORT})..."
@@ -388,8 +426,8 @@ require_alive "${FRONTEND_PID}" "FRONTEND_PID"
 # ==============================================================================
 # Stage 4: Wait for all workers to register, then verify model is serving
 # ==============================================================================
-echo "[$(date +%H:%M:%S)] Waiting for servers (1 prefill + 3 decode)..."
-if ! wait_for_dynamo_workers "${NODE0}" "${FRONTEND_PORT}" 1 3 2700 60; then
+echo "[$(date +%H:%M:%S)] Waiting for servers (2 prefill + 3 decode)..."
+if ! wait_for_dynamo_workers "${NODE0}" "${FRONTEND_PORT}" 2 3 2700 60; then
     echo "ERROR: workers did not become healthy"
     for f in $RESULTS_DIR/*.log; do echo "=== $(basename $f) ==="; tail -30 "$f"; done
     exit 1
@@ -407,8 +445,8 @@ echo "[$(date +%H:%M:%S)] All workers healthy and model is serving"
 if [ "$WORKER_METRICS" = "1" ]; then
   echo "[$(date +%H:%M:%S)] Starting metrics capture sidecar (interval=2s)..."
   python3 "$REPO_DIR/bench/capture_metrics.py" \
-    --endpoints "${NODE0}:8081,${NODE0}:8085,${NODE0}:8086,${NODE0}:8087" \
-    --labels "ctx_g0,gen_g0,gen_g1,gen_g2" \
+    --endpoints "${NODE0}:8081,${NODE0}:8082,${NODE0}:8085,${NODE1}:8086,${NODE1}:8087" \
+    --labels "ctx_g0,ctx_g1,gen_g0,gen_g1,gen_g2" \
     --output-dir "$RESULTS_DIR/metrics" \
     --interval 2 \
     > "$RESULTS_DIR/metrics/capture.stderr.log" 2>&1 &

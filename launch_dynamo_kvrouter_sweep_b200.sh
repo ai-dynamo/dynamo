@@ -3,7 +3,7 @@
 # Each sbatch script internally sweeps the full concurrency list, so the outer
 # loop here is (script, rep) only.
 #
-# Each sbatch script writes to $REPO_DIR/bench/results/dynamo/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID}
+# Each sbatch script writes to $REPO_DIR/bench/results/dynamo-b200/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID}
 # so multiple reps land in distinct dirs.
 #
 # Submitted job IDs are appended to launch_<timestamp>.log next to this script.

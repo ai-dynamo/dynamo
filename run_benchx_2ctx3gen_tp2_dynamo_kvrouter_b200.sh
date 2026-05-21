@@ -5,7 +5,7 @@
 #SBATCH --account=coreai_comparch_aarwlt
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
-#SBATCH --time=04:00:00
+#SBATCH --time=10:00:00
 #SBATCH --output=bench/logs/run_benchx_2ctx3gen_tp2_dynamo_kvrouter_%j.log
 #SBATCH --error=bench/logs/run_benchx_2ctx3gen_tp2_dynamo_kvrouter_%j.err
 
@@ -80,7 +80,7 @@ DYN_SYS_PORT_GEN_1=8086
 DYN_SYS_PORT_GEN_2=8087
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="$REPO_DIR/bench/results/dynamo/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo-b200/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
 mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
 cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
 
