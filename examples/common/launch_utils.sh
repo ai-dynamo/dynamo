@@ -222,6 +222,25 @@ CURL_EOF
     echo "=========================================="
 }
 
+# resolve_local_model_dir <hf_id_or_dir>
+#
+# If the argument is a local directory, echo it unchanged. Otherwise treat
+# it as an HF id and resolve a snapshot directory (downloading
+# config + tokenizer only) so callers that need a path-on-disk (e.g.
+# dynamo.frontend with --dyn-engine sglang-grpc) get one.
+resolve_local_model_dir() {
+    local _model="$1"
+    if [ -d "$_model" ]; then
+        echo "$_model"
+        return
+    fi
+    python3 - "$_model" <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+print(snapshot_download(sys.argv[1], allow_patterns=["*.json", "*.txt", "tokenizer*"]))
+PY
+}
+
 # wait_for_ready <url> [timeout_seconds]
 #
 # Polls an HTTP endpoint until it returns 200 or timeout is reached.
