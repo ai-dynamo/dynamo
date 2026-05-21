@@ -416,13 +416,16 @@ class TestSchemaAwareToolParser:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.core
 class TestChatTemplateKwargsForwarding:
     """chat_template_kwargs from the request are forwarded to ChatParams.
 
     Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
     """
 
-    MESSAGES = [{"role": "user", "content": "Hello"}]
+    @staticmethod
+    def _messages():
+        return [{"role": "user", "content": "Hello"}]
 
     def _prepare(self, request, tokenizer):
         """Return (chat_params, messages) from _prepare_request."""
@@ -436,14 +439,14 @@ class TestChatTemplateKwargsForwarding:
     def _render(self, tokenizer, chat_params) -> str:
         """Render prompt text using the chat_params template kwargs."""
         kwargs = {**chat_params.chat_template_kwargs, "tokenize": False}
-        return tokenizer.apply_chat_template(self.MESSAGES, **kwargs)
+        return tokenizer.apply_chat_template(self._messages(), **kwargs)
 
     def test_qwen3_enable_thinking_false_inserts_closed_think_block(self, tokenizer):
         """enable_thinking=False makes Qwen3 insert <think></think> to suppress reasoning."""
         chat_params, _ = self._prepare(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"enable_thinking": False},
             },
             tokenizer,
@@ -457,7 +460,7 @@ class TestChatTemplateKwargsForwarding:
         chat_params, _ = self._prepare(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"enable_thinking": True},
             },
             tokenizer,
@@ -470,7 +473,7 @@ class TestChatTemplateKwargsForwarding:
         think_params, _ = self._prepare(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"enable_thinking": True},
             },
             tokenizer,
@@ -478,7 +481,7 @@ class TestChatTemplateKwargsForwarding:
         no_think_params, _ = self._prepare(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"enable_thinking": False},
             },
             tokenizer,
@@ -492,7 +495,7 @@ class TestChatTemplateKwargsForwarding:
         chat_params, _ = self._prepare(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "reasoning_effort": "low",
             },
             tokenizer,
@@ -504,7 +507,7 @@ class TestChatTemplateKwargsForwarding:
         chat_params, _ = self._prepare(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"nonexistent_flag": True},
             },
             tokenizer,

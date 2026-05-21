@@ -1948,13 +1948,16 @@ class TestDeprecationWarning:  # FRONTEND.8 — legacy/deprecated field warnings
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.core
 class TestChatTemplateKwargsForwarding:
     """chat_template_kwargs from the request are forwarded to apply_chat_template.
 
     Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
     """
 
-    MESSAGES = [{"role": "user", "content": "Hello"}]
+    @staticmethod
+    def _messages():
+        return [{"role": "user", "content": "Hello"}]
 
     def _preprocess(self, request, tokenizer):
         return preprocess_chat_request(
@@ -1972,7 +1975,7 @@ class TestChatTemplateKwargsForwarding:
         result = self._preprocess(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"enable_thinking": False},
             },
             tokenizer,
@@ -1986,7 +1989,7 @@ class TestChatTemplateKwargsForwarding:
         result = self._preprocess(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"enable_thinking": True},
             },
             tokenizer,
@@ -1999,7 +2002,7 @@ class TestChatTemplateKwargsForwarding:
         think = self._preprocess(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"enable_thinking": True},
             },
             tokenizer,
@@ -2007,7 +2010,7 @@ class TestChatTemplateKwargsForwarding:
         no_think = self._preprocess(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"enable_thinking": False},
             },
             tokenizer,
@@ -2017,12 +2020,12 @@ class TestChatTemplateKwargsForwarding:
     def test_reasoning_effort_forwarded_to_template(self, tokenizer):
         """Top-level reasoning_effort is forwarded to apply_chat_template."""
         default = self._preprocess(
-            {"model": MODEL, "messages": self.MESSAGES}, tokenizer
+            {"model": MODEL, "messages": self._messages()}, tokenizer
         )
         with_effort = self._preprocess(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "reasoning_effort": "low",
             },
             tokenizer,
@@ -2036,7 +2039,7 @@ class TestChatTemplateKwargsForwarding:
         result = self._preprocess(
             {
                 "model": MODEL,
-                "messages": self.MESSAGES,
+                "messages": self._messages(),
                 "chat_template_kwargs": {"nonexistent_flag": True},
             },
             tokenizer,
