@@ -15,8 +15,10 @@ use crate::telemetry::bus::TelemetryBus;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
 pub(crate) use integration::{
-    build_agent_trace_request_end_state, record_llm_metric_tokens, request_metrics,
-    start_tool_event_ingest_from_policy, wrap_agent_trace_request_end_stream,
+    SharedFinishReasonMetadata, build_agent_trace_request_end_state, finish_reason_metadata_handle,
+    record_backend_finish_reason_metadata, record_llm_metric_tokens, request_metrics,
+    start_tool_event_ingest_from_policy, wrap_agent_trace_chat_request_end_stream,
+    wrap_agent_trace_request_end_stream,
 };
 pub(crate) use record::validate_tool_record;
 pub use record::{emit_request_end, publish_tool_record};
@@ -24,7 +26,8 @@ pub use relay::AgentToolEventRelay;
 pub(crate) use replay::request_replay_metrics;
 pub use types::{
     AgentReplayMetrics, AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord,
-    TraceEventSource, TraceEventType, TraceSchema, WorkerInfo,
+    ChoiceFinishReasonMetadata, FinishReasonMetadata, ToolCallMetadata, TraceEventSource,
+    TraceEventType, TraceSchema, WorkerInfo,
 };
 
 pub const DEFAULT_TOOL_EVENTS_TOPIC: &str = "agent-tool-events";
