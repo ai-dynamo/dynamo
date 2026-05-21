@@ -26,9 +26,9 @@ limitations under the License.
 
 | **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/digest/index.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[How to Contribute](#community-and-contributing)** |
 
-<!-- GitHub does not support browser-language negotiation for repository README rendering; keep explicit alternate-language links in sync. -->
+<!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
 <p align="right">
-  <strong>English</strong> | <a href="./README.zh-CN.md" hreflang="zh-CN">简体中文</a>
+  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="./docs/assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
 
 # Dynamo
