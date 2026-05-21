@@ -320,6 +320,7 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
+        let metadata = request.metadata().clone();
         let model = request.get_ref().model_name.clone();
         let request = request.into_inner();
         let request_id = request.id.clone();
@@ -330,7 +331,8 @@ impl GrpcInferenceService for KserveService {
             let tensor_request: NvCreateTensorRequest = NvCreateTensorRequest::try_from(request)
                 .map_err(|e| Status::invalid_argument(format!("Failed to parse request: {}", e)))?;
 
-            let stream = tensor_response_stream(self.state_clone(), tensor_request, false).await?;
+            let stream =
+                tensor_response_stream(self.state_clone(), tensor_request, false, metadata).await?;
 
             let tensor_response = ExtendedNvCreateTensorResponse {
                 response: NvCreateTensorResponse::from_annotated_stream(stream)
@@ -378,7 +380,7 @@ impl GrpcInferenceService for KserveService {
         }
 
         let (stream, parsing_options) =
-            completion_response_stream(self.state_clone(), completion_request).await?;
+            completion_response_stream(self.state_clone(), completion_request, metadata).await?;
 
         let completion_response =
             NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
@@ -403,6 +405,7 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<tonic::Streaming<ModelInferRequest>>,
     ) -> Result<Response<Self::ModelStreamInferStream>, Status> {
+        let metadata = request.metadata().clone();
         let mut request_stream = request.into_inner();
         let state = self.state_clone();
         let template = self.request_template.clone();
@@ -437,7 +440,13 @@ impl GrpcInferenceService for KserveService {
                         Status::invalid_argument(format!("Failed to parse request: {}", e))
                     })?;
 
-                    let stream = tensor_response_stream(state.clone(), tensor_request, true).await?;
+                    let stream = tensor_response_stream(
+                        state.clone(),
+                        tensor_request,
+                        true,
+                        metadata.clone(),
+                    )
+                    .await?;
 
                     pin_mut!(stream);
                     while let Some(delta) = stream.next().await {
@@ -494,7 +503,12 @@ impl GrpcInferenceService for KserveService {
 
                 let streaming = completion_request.inner.stream.unwrap_or(false);
 
-                let (stream, parsing_options) = completion_response_stream(state.clone(), completion_request).await?;
+                let (stream, parsing_options) = completion_response_stream(
+                    state.clone(),
+                    completion_request,
+                    metadata.clone(),
+                )
+                .await?;
 
                 if streaming {
                     pin_mut!(stream);
