@@ -7,6 +7,7 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from dynamo.sglang.request_handlers.embedding.metrics import (
+    init_embedding_metrics,
     observe_embedding_batch_size,
     observe_embedding_input_tokens,
     reset_metrics_for_testing,
@@ -15,21 +16,26 @@ from dynamo.sglang.request_handlers.embedding.metrics import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
 
 
-@pytest.fixture(autouse=True)
-def _isolate_metrics_singletons():
-    """Reset the module-level Histogram singletons between tests.
+@pytest.fixture
+def fresh_registry() -> CollectorRegistry:
+    """Reset the metrics-module singletons and hand back a fresh registry.
 
-    The metrics module caches Histograms keyed by registry; we don't want
-    a previous test's registry to leak into a later test.
+    Pairing the reset with the registry creation ensures that
+    ``init_embedding_metrics`` actually creates new Histograms bound to
+    THIS test's registry rather than reusing whichever one a previous
+    test bound to.
     """
     reset_metrics_for_testing()
-    yield
+    registry = CollectorRegistry()
+    init_embedding_metrics(registry)
+    yield registry
     reset_metrics_for_testing()
 
 
@@ -56,38 +62,35 @@ def _collect_histogram(registry: CollectorRegistry, metric_name: str) -> dict:
     return out
 
 
-def test_observe_batch_size_increments_count():
-    registry = CollectorRegistry()
-    observe_embedding_batch_size("Qwen/Qwen3-Embedding-4B", 3, registry=registry)
-    observe_embedding_batch_size("Qwen/Qwen3-Embedding-4B", 1, registry=registry)
+def test_observe_batch_size_increments_count(fresh_registry):
+    observe_embedding_batch_size("Qwen/Qwen3-Embedding-4B", 3)
+    observe_embedding_batch_size("Qwen/Qwen3-Embedding-4B", 1)
 
-    data = _collect_histogram(registry, "dynamo_embedding_batch_size")
+    data = _collect_histogram(fresh_registry, "dynamo_embedding_batch_size")
     key = (("model", "Qwen/Qwen3-Embedding-4B"),)
     assert key in data
     assert data[key]["count"] == 2
     assert data[key]["sum"] == 4.0  # 3 + 1
 
 
-def test_observe_input_tokens_increments_count_and_sum():
-    registry = CollectorRegistry()
-    observe_embedding_input_tokens("Qwen/Qwen3-Embedding-4B", 70, registry=registry)
-    observe_embedding_input_tokens("Qwen/Qwen3-Embedding-4B", 200, registry=registry)
-    observe_embedding_input_tokens("Qwen/Qwen3-Embedding-4B", 12, registry=registry)
+def test_observe_input_tokens_increments_count_and_sum(fresh_registry):
+    observe_embedding_input_tokens("Qwen/Qwen3-Embedding-4B", 70)
+    observe_embedding_input_tokens("Qwen/Qwen3-Embedding-4B", 200)
+    observe_embedding_input_tokens("Qwen/Qwen3-Embedding-4B", 12)
 
-    data = _collect_histogram(registry, "dynamo_embedding_input_tokens")
+    data = _collect_histogram(fresh_registry, "dynamo_embedding_input_tokens")
     key = (("model", "Qwen/Qwen3-Embedding-4B"),)
     assert key in data
     assert data[key]["count"] == 3
     assert data[key]["sum"] == 282.0  # 70 + 200 + 12
 
 
-def test_observe_partitioned_by_model_label():
-    registry = CollectorRegistry()
-    observe_embedding_batch_size("model-A", 5, registry=registry)
-    observe_embedding_batch_size("model-B", 7, registry=registry)
-    observe_embedding_batch_size("model-A", 2, registry=registry)
+def test_observe_partitioned_by_model_label(fresh_registry):
+    observe_embedding_batch_size("model-A", 5)
+    observe_embedding_batch_size("model-B", 7)
+    observe_embedding_batch_size("model-A", 2)
 
-    data = _collect_histogram(registry, "dynamo_embedding_batch_size")
+    data = _collect_histogram(fresh_registry, "dynamo_embedding_batch_size")
     key_a = (("model", "model-A"),)
     key_b = (("model", "model-B"),)
     assert data[key_a]["count"] == 2
@@ -96,19 +99,17 @@ def test_observe_partitioned_by_model_label():
     assert data[key_b]["sum"] == 7.0
 
 
-def test_negative_values_are_silently_dropped():
+def test_negative_values_are_silently_dropped(fresh_registry):
     """Negative values are nonsensical for batch_size / input_tokens. The
     observation helper logs a warning and skips rather than raising or
     polluting the histogram."""
-    registry = CollectorRegistry()
-    # First a real observation, then a bad one.
-    observe_embedding_batch_size("model-A", 4, registry=registry)
-    observe_embedding_batch_size("model-A", -1, registry=registry)
-    observe_embedding_input_tokens("model-A", 100, registry=registry)
-    observe_embedding_input_tokens("model-A", -5, registry=registry)
+    observe_embedding_batch_size("model-A", 4)
+    observe_embedding_batch_size("model-A", -1)
+    observe_embedding_input_tokens("model-A", 100)
+    observe_embedding_input_tokens("model-A", -5)
 
-    bs = _collect_histogram(registry, "dynamo_embedding_batch_size")
-    it = _collect_histogram(registry, "dynamo_embedding_input_tokens")
+    bs = _collect_histogram(fresh_registry, "dynamo_embedding_batch_size")
+    it = _collect_histogram(fresh_registry, "dynamo_embedding_input_tokens")
     key = (("model", "model-A"),)
     # Negative observations did NOT increment the count.
     assert bs[key]["count"] == 1
@@ -117,14 +118,13 @@ def test_negative_values_are_silently_dropped():
     assert it[key]["sum"] == 100.0
 
 
-def test_buckets_are_in_expected_order():
+def test_buckets_are_in_expected_order(fresh_registry):
     """The histogram's buckets should be monotonically non-decreasing in
     cumulative count. Catches accidental bucket-reordering regressions."""
-    registry = CollectorRegistry()
     for value in (1, 2, 5, 33, 200, 1000):
-        observe_embedding_batch_size("m", value, registry=registry)
+        observe_embedding_batch_size("m", value)
 
-    data = _collect_histogram(registry, "dynamo_embedding_batch_size")
+    data = _collect_histogram(fresh_registry, "dynamo_embedding_batch_size")
     key = (("model", "m"),)
     assert data[key]["count"] == 6
     buckets = data[key]["buckets"]
@@ -132,6 +132,18 @@ def test_buckets_are_in_expected_order():
     # cumulative counts must be monotonically non-decreasing.
     counts = [c for _le, c in buckets]
     assert counts == sorted(counts), f"Bucket counts not monotonic: {counts}"
+
+
+def test_observers_noop_before_init_embedding_metrics():
+    """Until ``init_embedding_metrics`` is called, ``observe_*`` is a no-op.
+
+    Important: in test/CI configurations that don't wire the embedding
+    metrics endpoint, handler call sites must NOT crash.
+    """
+    reset_metrics_for_testing()
+    # Both helpers should silently do nothing — no exception.
+    observe_embedding_batch_size("m", 3)
+    observe_embedding_input_tokens("m", 100)
 
 
 def test_handler_observes_metrics_via_transform_response(monkeypatch):
@@ -146,7 +158,7 @@ def test_handler_observes_metrics_via_transform_response(monkeypatch):
         lambda self, *a, **kw: None,
     )
 
-    observed: list[tuple[str, int, int]] = []
+    observed: list[tuple[str, str, int]] = []
     monkeypatch.setattr(
         eh,
         "observe_embedding_batch_size",

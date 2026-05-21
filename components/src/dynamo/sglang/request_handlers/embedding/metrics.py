@@ -3,25 +3,26 @@
 
 """Prometheus metrics specific to the SGLang embedding worker.
 
-The existing SGLang publisher emits chat-shaped metrics (KV gauges,
-prefill/decode counters) which are always zero on a pooling engine.
-The histograms here capture the signals that actually move on an
-embedding worker: how many inputs per request, and how many input
-tokens those inputs amount to.
+``prometheus_client`` imports are deferred behind helper functions because
+this module is loaded via ``dynamo.sglang.request_handlers`` before
+``sgl.Engine(...)`` runs its multiprocess-aware Prometheus setup; pulling
+``prometheus_client`` in at module load time interferes with that setup.
 
-A third histogram (per-request embedding latency, with a `worker_id`
-label) is more naturally implemented on the Rust frontend side
-because that's where per-worker timing is observable end-to-end;
-that piece is tracked separately. The two histograms below cover
-the worker-internal view.
+Histograms are also bound to a caller-provided ``CollectorRegistry`` (NOT
+the default global ``REGISTRY``) because the Dynamo SGLang worker exposes
+metrics on ``/metrics`` only when the registry has been attached via
+``dynamo.common.utils.prometheus.register_engine_metrics_callback``. The
+init function below should be called from ``init_embedding.py`` after
+engine setup, paired with that callback registration.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from prometheus_client import REGISTRY, CollectorRegistry, Histogram
+if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry, Histogram
 
 logger = logging.getLogger(__name__)
 
@@ -35,29 +36,26 @@ _BATCH_SIZE_BUCKETS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048)
 # input_tokens (summed across all inputs in a request): typical embedding
 # ISLs are 60-200 (sentence-level); OpenAI's per-input limit is 8192
 # tokens. Buckets span 1..8K with denser coverage in the common range.
-_INPUT_TOKENS_BUCKETS = (
-    1,
-    4,
-    16,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    2048,
-    4096,
-    8192,
-)
+_INPUT_TOKENS_BUCKETS = (1, 4, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192)
 
 
-_EMBEDDING_BATCH_SIZE: Optional[Histogram] = None
-_EMBEDDING_INPUT_TOKENS: Optional[Histogram] = None
+_EMBEDDING_BATCH_SIZE: Optional["Histogram"] = None
+_EMBEDDING_INPUT_TOKENS: Optional["Histogram"] = None
 
 
-def _get_or_create_batch_size_histogram(
-    registry: CollectorRegistry,
-) -> Histogram:
-    global _EMBEDDING_BATCH_SIZE
+def init_embedding_metrics(registry: "CollectorRegistry") -> None:
+    """Create the embedding histograms against the provided registry.
+
+    Must be called AFTER engine init and ONCE per process. Subsequent
+    calls leave the existing histograms alone — this lets tests reuse
+    the function without colliding with prior production registration.
+    The caller is responsible for wiring ``registry`` to the worker's
+    ``/metrics`` endpoint via
+    ``dynamo.common.utils.prometheus.register_engine_metrics_callback``.
+    """
+    from prometheus_client import Histogram
+
+    global _EMBEDDING_BATCH_SIZE, _EMBEDDING_INPUT_TOKENS
     if _EMBEDDING_BATCH_SIZE is None:
         _EMBEDDING_BATCH_SIZE = Histogram(
             "dynamo_embedding_batch_size",
@@ -68,13 +66,6 @@ def _get_or_create_batch_size_histogram(
             buckets=_BATCH_SIZE_BUCKETS,
             registry=registry,
         )
-    return _EMBEDDING_BATCH_SIZE
-
-
-def _get_or_create_input_tokens_histogram(
-    registry: CollectorRegistry,
-) -> Histogram:
-    global _EMBEDDING_INPUT_TOKENS
     if _EMBEDDING_INPUT_TOKENS is None:
         _EMBEDDING_INPUT_TOKENS = Histogram(
             "dynamo_embedding_input_tokens",
@@ -84,49 +75,38 @@ def _get_or_create_input_tokens_histogram(
             buckets=_INPUT_TOKENS_BUCKETS,
             registry=registry,
         )
-    return _EMBEDDING_INPUT_TOKENS
 
 
-def observe_embedding_batch_size(
-    model: str,
-    batch_size: int,
-    *,
-    registry: CollectorRegistry = REGISTRY,
-) -> None:
+def observe_embedding_batch_size(model: str, batch_size: int) -> None:
     """Record one observation of the request's batch size.
 
-    ``registry`` is overridable for tests; production code uses the
-    default Prometheus global registry.
+    No-op when ``init_embedding_metrics`` has not been called — keeps
+    handler call sites cheap and crash-free in test/CI configurations
+    that don't wire metrics.
     """
+    if _EMBEDDING_BATCH_SIZE is None:
+        return
     if batch_size < 0:
         logger.warning(
             "Skipping batch_size observation with negative value %d", batch_size
         )
         return
-    _get_or_create_batch_size_histogram(registry).labels(model=model).observe(
-        batch_size
-    )
+    _EMBEDDING_BATCH_SIZE.labels(model=model).observe(batch_size)
 
 
-def observe_embedding_input_tokens(
-    model: str,
-    input_tokens: int,
-    *,
-    registry: CollectorRegistry = REGISTRY,
-) -> None:
+def observe_embedding_input_tokens(model: str, input_tokens: int) -> None:
     """Record one observation of the request's total input tokens.
 
-    ``registry`` is overridable for tests; production code uses the
-    default Prometheus global registry.
+    No-op when ``init_embedding_metrics`` has not been called.
     """
+    if _EMBEDDING_INPUT_TOKENS is None:
+        return
     if input_tokens < 0:
         logger.warning(
             "Skipping input_tokens observation with negative value %d", input_tokens
         )
         return
-    _get_or_create_input_tokens_histogram(registry).labels(model=model).observe(
-        input_tokens
-    )
+    _EMBEDDING_INPUT_TOKENS.labels(model=model).observe(input_tokens)
 
 
 def reset_metrics_for_testing() -> None:
