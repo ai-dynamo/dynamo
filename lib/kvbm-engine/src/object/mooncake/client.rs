@@ -519,7 +519,6 @@ impl ObjectBlockOps for MooncakeObjectBlockClient {
         let store = self.store.clone();
         let formatter = self.key_formatter.clone();
         let namespace = self.namespace.clone();
-        let max_concurrent = self.max_concurrent;
 
         Box::pin(async move {
             // Format all keys upfront
