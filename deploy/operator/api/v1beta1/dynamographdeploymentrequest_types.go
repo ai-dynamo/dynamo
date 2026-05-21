@@ -445,6 +445,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// Image is the container image reference for the profiling job (planner image).
 	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1".
+	// For Dynamo versions before 1.1.0, use dynamo-frontend with the same tag.
 	// +optional
 	Image string `json:"image,omitempty"`
 

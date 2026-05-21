@@ -19,6 +19,7 @@ metadata:
   name: qwen-0-6b
 spec:
   model: "Qwen/Qwen3-0.6B"
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 
@@ -34,6 +35,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
   searchStrategy: thorough
 ```
@@ -55,6 +57,7 @@ metadata:
 spec:
   model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 
   hardware:
@@ -85,6 +88,7 @@ metadata:
   name: llama-private
 spec:
   model: "meta-llama/Llama-3.1-8B-Instruct"
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 
   overrides:
@@ -116,6 +120,7 @@ metadata:
   name: low-latency-dense
 spec:
   model: "Qwen/Qwen3-0.6B"
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 
   sla:
@@ -150,6 +155,7 @@ metadata:
   name: dense-with-tolerations
 spec:
   model: "Qwen/Qwen3-0.6B"
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 
   overrides:

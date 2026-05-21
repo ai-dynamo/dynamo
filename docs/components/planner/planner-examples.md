@@ -20,6 +20,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: vllm
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 
@@ -42,6 +43,7 @@ metadata:
 spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 
@@ -67,6 +69,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 
@@ -99,6 +102,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 
@@ -139,6 +143,7 @@ spec:
     mocker:
       enabled: true  # Deploy mocker instead of real backend
 
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 

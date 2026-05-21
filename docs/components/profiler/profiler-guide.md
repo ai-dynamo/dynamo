@@ -198,6 +198,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 
@@ -215,6 +216,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 ```
 
@@ -372,6 +374,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
+  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
 
   searchStrategy: rapid  # or thorough
