@@ -654,8 +654,8 @@ vllm_configs = {
             ),
             # `dimensions` truncation (Matryoshka). Qwen3-Embedding-0.6B has a
             # hidden dim of 1024, so the truncated vector should be exactly 128.
-            # Built inline since `embedding_payload()`'s `extra_body` kwarg
-            # lives in PR #9722 and isn't in this branch's base.
+            # Built inline because the `embedding_payload()` helper doesn't
+            # expose an `extra_body` kwarg yet.
             EmbeddingPayload(
                 body={"input": ["Hello, world!"], "dimensions": 128},
                 repeat_count=1,
