@@ -158,6 +158,11 @@ class ImageGenerationHandler(BaseGenerativeHandler):
         num_images_per_prompt = (
             req.n if req.n is not None else self.config.default_num_images_per_prompt
         )
+        if not 1 <= num_images_per_prompt <= 10:
+            raise ValueError(
+                f"num_images_per_prompt must be in [1, 10], got "
+                f"{num_images_per_prompt}."
+            )
         num_inference_steps = (
             nvext.num_inference_steps
             if nvext.num_inference_steps is not None

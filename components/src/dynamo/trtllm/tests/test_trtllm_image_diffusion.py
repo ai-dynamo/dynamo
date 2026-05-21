@@ -749,6 +749,28 @@ class TestImageHandlerResponseFormats:
         assert mock_upload.call_count == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("n", [0, -1, 11, 100])
+    async def test_n_out_of_range_is_rejected(self, n):
+        """Requests with n < 1 or n > 10 (OpenAI's documented range) raise
+        ValueError before the engine is called."""
+        handler = self._make_handler(default_num_images_per_prompt=1)
+        handler.engine.generate = MagicMock()  # Should never be called.
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": n,
+        }
+
+        with pytest.raises(
+            ValueError, match=r"num_images_per_prompt must be in \[1, 10\]"
+        ):
+            async for _ in handler.generate(request, MagicMock()):
+                pass
+
+        handler.engine.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_handler_clamps_when_engine_overproduces(self):
         """Engine returns batch=3 when request asks for n=2 -> response is
         truncated to 2 entries. Defensive: bounds the handler's iteration by
@@ -875,11 +897,11 @@ class TestDiffusionEngineMismatchWarning:
         )
         return pipeline
 
-    def _make_engine(self, pipeline):
+    def _make_engine(self, pipeline, tmp_path):
         """Construct a DiffusionEngine with the given mock pipeline already loaded."""
         from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 
-        config = DiffusionConfig(media_output_fs_url="file:///tmp/test_media")
+        config = DiffusionConfig(media_output_fs_url=(tmp_path / "test_media").as_uri())
         engine = DiffusionEngine(config)
         engine._initialized = True
         engine._pipeline = pipeline
@@ -892,9 +914,9 @@ class TestDiffusionEngineMismatchWarning:
             if r.name == _DIFFUSION_ENGINE_LOGGER and r.levelno >= logging.WARNING
         ]
 
-    def test_warns_on_count_mismatch(self, caplog, stub_trtllm_modules):
+    def test_warns_on_count_mismatch(self, tmp_path, caplog, stub_trtllm_modules):
         """Pipeline returns 1 image when 2 were requested -> WARNING naming both values."""
-        engine = self._make_engine(self._make_pipeline(returned_batch=1))
+        engine = self._make_engine(self._make_pipeline(returned_batch=1), tmp_path)
 
         with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
             engine.generate(prompt="a test prompt", num_images_per_prompt=2)
@@ -910,9 +932,9 @@ class TestDiffusionEngineMismatchWarning:
             f"counts; got: {msg!r}"
         )
 
-    def test_silent_when_count_matches(self, caplog, stub_trtllm_modules):
+    def test_silent_when_count_matches(self, tmp_path, caplog, stub_trtllm_modules):
         """Pipeline returns 2 images when 2 were requested -> no WARNING."""
-        engine = self._make_engine(self._make_pipeline(returned_batch=2))
+        engine = self._make_engine(self._make_pipeline(returned_batch=2), tmp_path)
 
         with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
             engine.generate(prompt="a test prompt", num_images_per_prompt=2)
