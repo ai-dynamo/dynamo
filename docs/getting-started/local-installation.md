@@ -5,7 +5,6 @@ sidebar-title: Local Installation
 description: Install and run Dynamo on a local machine or VM with containers or PyPI
 ---
 
-<!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
 <p align="left">
   <a href="./local-installation.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>

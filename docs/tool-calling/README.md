@@ -5,7 +5,6 @@ title: Tool Calling
 subtitle: Parse tool calls from model output and surface them as OpenAI-compatible tool_calls
 ---
 
-<!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
 <p align="left">
   <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
