@@ -2285,6 +2285,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-protocols",
  "dynamo-runtime",
  "futures",
  "once_cell",

@@ -432,11 +432,15 @@ def embedding_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> EmbeddingPayload:
+    body: Dict[str, Any] = {
+        "input": ["The sky is blue.", "Machine learning is fascinating."],
+    }
+    if extra_body:
+        body.update(extra_body)
     return EmbeddingPayload(
-        body={
-            "input": ["The sky is blue.", "Machine learning is fascinating."],
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response
@@ -449,6 +453,7 @@ def embedding_payload(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
     expected_log: Optional[List[str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
 ) -> EmbeddingPayload:
     # Normalize input to list for consistent processing
     if isinstance(input_text, str):
@@ -458,10 +463,14 @@ def embedding_payload(
         input_list = input_text
         expected_count = len(input_text)
 
+    body: Dict[str, Any] = {
+        "input": input_list,
+    }
+    if extra_body:
+        body.update(extra_body)
+
     return EmbeddingPayload(
-        body={
-            "input": input_list,
-        },
+        body=body,
         repeat_count=repeat_count,
         expected_log=expected_log or [],
         expected_response=expected_response

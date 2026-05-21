@@ -33,7 +33,7 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
-async def parse_tool_call(
+async def parse_tool_calls_batch(
     parser_name: str,
     message: str,
     tools_json: Optional[str] = None,
@@ -55,6 +55,26 @@ async def parse_tool_call(
 
     Raises:
         ValueError on parser failure or malformed `tools_json`.
+    """
+    ...
+
+async def parse_tool_calls_stream(
+    parser_name: str,
+    chunks_json: str,
+    tools_json: Optional[str] = None,
+) -> str:
+    """Parse streamed tool-call chunks using the specified parser.
+
+    Args:
+        parser_name: Parser name (e.g. "kimi_k2"). Empty string falls back to default.
+        chunks_json: JSON-serialized list of chunks with `delta_text` and optional `finish_reason`.
+        tools_json: Optional JSON-serialized list of tool definitions.
+
+    Returns:
+        JSON-serialized string `{"calls": [{"name", "arguments"}], "normal_text": str}`.
+
+    Raises:
+        ValueError on parser failure or malformed JSON.
     """
     ...
 
