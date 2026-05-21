@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use validator::{Validate, ValidationError};
 
 use crate::protocols::tensor;
 use dynamo_kv_router::protocols::{KvTransferEnforcement, KvTransferPreferredWeight};
@@ -28,7 +29,8 @@ pub struct DisaggregatedEndpoint {
     pub bootstrap_port: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
+#[validate(schema(function = "validate_model_runtime_config"))]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
 
@@ -207,9 +209,105 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
     }
 }
 
+fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    for (domain, value) in &config.topology_domains {
+        let trimmed_domain = domain.trim();
+        if trimmed_domain.is_empty() {
+            return Err(ValidationError::new(
+                "topology_domains keys must be non-empty",
+            ));
+        }
+        if trimmed_domain != domain {
+            return Err(ValidationError::new(
+                "topology_domains key must not contain leading or trailing whitespace",
+            ));
+        }
+        if domain.contains('=') {
+            return Err(ValidationError::new(
+                "topology_domains key must not contain '='",
+            ));
+        }
+
+        let trimmed_value = value.trim();
+        if trimmed_value.is_empty() {
+            return Err(ValidationError::new(
+                "topology_domains values must be non-empty",
+            ));
+        }
+        if trimmed_value != value {
+            return Err(ValidationError::new(
+                "topology_domains value must not contain leading or trailing whitespace",
+            ));
+        }
+        if value.contains('=') {
+            return Err(ValidationError::new(
+                "topology_domains value must not contain '='",
+            ));
+        }
+    }
+
+    if let Some(domain) = &config.kv_transfer_domain {
+        let trimmed_domain = domain.trim();
+        if trimmed_domain.is_empty() {
+            return Err(ValidationError::new(
+                "kv_transfer_domain must be non-empty when set",
+            ));
+        }
+        if trimmed_domain != domain {
+            return Err(ValidationError::new(
+                "kv_transfer_domain must not contain leading or trailing whitespace",
+            ));
+        }
+        if domain.contains('=') {
+            return Err(ValidationError::new(
+                "kv_transfer_domain must not contain '='",
+            ));
+        }
+
+        if !config.topology_domains.contains_key(domain) {
+            return Err(ValidationError::new(
+                "kv_transfer_domain must reference a key in topology_domains",
+            ));
+        }
+    }
+
+    if config.kv_transfer_enforcement.is_some() && config.kv_transfer_domain.is_none() {
+        return Err(ValidationError::new(
+            "kv_transfer_enforcement requires kv_transfer_domain",
+        ));
+    }
+
+    if matches!(
+        config.kv_transfer_enforcement,
+        Some(KvTransferEnforcement::Preferred)
+    ) && config.kv_transfer_preferred_weight.is_none()
+    {
+        return Err(ValidationError::new(
+            "kv_transfer_preferred_weight is required when kv_transfer_enforcement is preferred",
+        ));
+    }
+
+    if config.kv_transfer_preferred_weight.is_some()
+        && !matches!(
+            config.kv_transfer_enforcement,
+            Some(KvTransferEnforcement::Preferred)
+        )
+    {
+        return Err(ValidationError::new(
+            "kv_transfer_preferred_weight can only be set when kv_transfer_enforcement is preferred",
+        ));
+    }
+
+    Ok(())
+}
+
 impl ModelRuntimeConfig {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn validate_config(&self) -> Result<(), String> {
+        self.validate().map_err(|error| error.to_string())
     }
 
     pub fn set_engine_specific<T: Serialize>(&mut self, key: &str, value: T) -> anyhow::Result<()> {
@@ -224,79 +322,6 @@ impl ModelRuntimeConfig {
         } else {
             Ok(None)
         }
-    }
-
-    /// Validate topology and KV-transfer fields before the runtime config is published.
-    pub fn validate_topology_config(&self) -> anyhow::Result<()> {
-        for (domain, value) in &self.topology_domains {
-            let trimmed_domain = domain.trim();
-            if trimmed_domain.is_empty() {
-                anyhow::bail!("topology_domains keys must be non-empty");
-            }
-            if trimmed_domain != domain {
-                anyhow::bail!(
-                    "topology_domains key {domain:?} must not contain leading or trailing whitespace"
-                );
-            }
-
-            let trimmed_value = value.trim();
-            if trimmed_value.is_empty() {
-                anyhow::bail!("topology_domains value for {domain:?} must be non-empty");
-            }
-            if trimmed_value != value {
-                anyhow::bail!(
-                    "topology_domains value for {domain:?} must not contain leading or trailing whitespace"
-                );
-            }
-        }
-
-        if let Some(domain) = &self.kv_transfer_domain {
-            let trimmed_domain = domain.trim();
-            if trimmed_domain.is_empty() {
-                anyhow::bail!("kv_transfer_domain must be non-empty when set");
-            }
-            if trimmed_domain != domain {
-                anyhow::bail!("kv_transfer_domain must not contain leading or trailing whitespace");
-            }
-
-            let Some(value) = self.topology_domains.get(domain) else {
-                anyhow::bail!(
-                    "kv_transfer_domain {domain:?} must reference a key in topology_domains"
-                );
-            };
-            if value.is_empty() {
-                anyhow::bail!(
-                    "topology_domains entry for kv_transfer_domain {domain:?} must be non-empty"
-                );
-            }
-        }
-
-        if self.kv_transfer_enforcement.is_some() && self.kv_transfer_domain.is_none() {
-            anyhow::bail!("kv_transfer_enforcement requires kv_transfer_domain");
-        }
-
-        if matches!(
-            self.kv_transfer_enforcement,
-            Some(KvTransferEnforcement::Preferred)
-        ) && self.kv_transfer_preferred_weight.is_none()
-        {
-            anyhow::bail!(
-                "kv_transfer_preferred_weight is required when kv_transfer_enforcement is preferred"
-            );
-        }
-
-        if self.kv_transfer_preferred_weight.is_some()
-            && !matches!(
-                self.kv_transfer_enforcement,
-                Some(KvTransferEnforcement::Preferred)
-            )
-        {
-            anyhow::bail!(
-                "kv_transfer_preferred_weight can only be set when kv_transfer_enforcement is preferred"
-            );
-        }
-
-        Ok(())
     }
 
     /// Rebuild canonical topology taints derived from `topology_domains`.
@@ -497,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_topology_config_accepts_matching_transfer_domain() {
+    fn test_validate_config_accepts_matching_transfer_domain() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
             kv_transfer_domain: Some("zone".to_string()),
@@ -505,11 +530,11 @@ mod tests {
             ..Default::default()
         };
 
-        config.validate_topology_config().unwrap();
+        config.validate_config().unwrap();
     }
 
     #[test]
-    fn test_validate_topology_config_accepts_preferred_with_weight() {
+    fn test_validate_config_accepts_preferred_with_weight() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
             kv_transfer_domain: Some("zone".to_string()),
@@ -518,83 +543,107 @@ mod tests {
             ..Default::default()
         };
 
-        config.validate_topology_config().unwrap();
+        config.validate_config().unwrap();
     }
 
     #[test]
-    fn test_validate_topology_config_rejects_missing_transfer_domain_key() {
+    fn test_validate_config_rejects_missing_transfer_domain_key() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
             kv_transfer_domain: Some("rack".to_string()),
             ..Default::default()
         };
 
-        let error = config.validate_topology_config().unwrap_err().to_string();
+        let error = config.validate_config().unwrap_err();
         assert!(error.contains("must reference a key in topology_domains"));
     }
 
     #[test]
-    fn test_validate_topology_config_rejects_empty_transfer_domain_value() {
+    fn test_validate_config_rejects_empty_transfer_domain_value() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), " ".to_string())]),
             kv_transfer_domain: Some("zone".to_string()),
             ..Default::default()
         };
 
-        let error = config.validate_topology_config().unwrap_err().to_string();
+        let error = config.validate_config().unwrap_err();
         assert!(error.contains("must be non-empty"));
     }
 
     #[test]
-    fn test_validate_topology_config_rejects_padded_topology_value() {
+    fn test_validate_config_rejects_padded_topology_value() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), " us-east-1a ".to_string())]),
             ..Default::default()
         };
 
-        let error = config.validate_topology_config().unwrap_err().to_string();
+        let error = config.validate_config().unwrap_err();
         assert!(error.contains("must not contain leading or trailing whitespace"));
     }
 
     #[test]
-    fn test_validate_topology_config_rejects_empty_transfer_domain() {
+    fn test_validate_config_rejects_topology_taint_delimiters() {
+        for config in [
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([(
+                    "zone=primary".to_string(),
+                    "us-east-1a".to_string(),
+                )]),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east=1a".to_string())]),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
+                kv_transfer_domain: Some("zone=primary".to_string()),
+                ..Default::default()
+            },
+        ] {
+            let error = config.validate_config().unwrap_err();
+            assert!(error.contains("must not contain '='"));
+        }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_empty_transfer_domain() {
         let config = ModelRuntimeConfig {
             kv_transfer_domain: Some(" ".to_string()),
             ..Default::default()
         };
 
-        let error = config.validate_topology_config().unwrap_err().to_string();
-        assert_eq!(error, "kv_transfer_domain must be non-empty when set");
+        let error = config.validate_config().unwrap_err();
+        assert!(error.contains("kv_transfer_domain must be non-empty when set"));
     }
 
     #[test]
-    fn test_validate_topology_config_rejects_padded_transfer_domain() {
+    fn test_validate_config_rejects_padded_transfer_domain() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
             kv_transfer_domain: Some(" zone ".to_string()),
             ..Default::default()
         };
 
-        let error = config.validate_topology_config().unwrap_err().to_string();
-        assert_eq!(
-            error,
-            "kv_transfer_domain must not contain leading or trailing whitespace"
+        let error = config.validate_config().unwrap_err();
+        assert!(
+            error.contains("kv_transfer_domain must not contain leading or trailing whitespace")
         );
     }
 
     #[test]
-    fn test_validate_topology_config_rejects_enforcement_without_transfer_domain() {
+    fn test_validate_config_rejects_enforcement_without_transfer_domain() {
         let config = ModelRuntimeConfig {
             kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
             ..Default::default()
         };
 
-        let error = config.validate_topology_config().unwrap_err().to_string();
-        assert_eq!(error, "kv_transfer_enforcement requires kv_transfer_domain");
+        let error = config.validate_config().unwrap_err();
+        assert!(error.contains("kv_transfer_enforcement requires kv_transfer_domain"));
     }
 
     #[test]
-    fn test_validate_topology_config_requires_weight_for_preferred() {
+    fn test_validate_config_requires_weight_for_preferred() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
             kv_transfer_domain: Some("zone".to_string()),
@@ -602,15 +651,14 @@ mod tests {
             ..Default::default()
         };
 
-        let error = config.validate_topology_config().unwrap_err().to_string();
-        assert_eq!(
-            error,
+        let error = config.validate_config().unwrap_err();
+        assert!(error.contains(
             "kv_transfer_preferred_weight is required when kv_transfer_enforcement is preferred"
-        );
+        ));
     }
 
     #[test]
-    fn test_validate_topology_config_rejects_weight_without_preferred() {
+    fn test_validate_config_rejects_weight_without_preferred() {
         let config = ModelRuntimeConfig {
             topology_domains: HashMap::from([("zone".to_string(), "us-east-1a".to_string())]),
             kv_transfer_domain: Some("zone".to_string()),
@@ -619,11 +667,10 @@ mod tests {
             ..Default::default()
         };
 
-        let error = config.validate_topology_config().unwrap_err().to_string();
-        assert_eq!(
-            error,
+        let error = config.validate_config().unwrap_err();
+        assert!(error.contains(
             "kv_transfer_preferred_weight can only be set when kv_transfer_enforcement is preferred"
-        );
+        ));
     }
 
     #[test]
