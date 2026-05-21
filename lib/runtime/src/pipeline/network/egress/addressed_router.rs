@@ -283,6 +283,24 @@ where
                     STAGE_DURATION_SECONDS
                         .with_label_values(&["transport_roundtrip"])
                         .observe(queue_start.elapsed().as_secs_f64());
+
+                    // Worker-side admission-rejection signal (DIS-2105): if the
+                    // first response bytes are a plain string starting with one
+                    // of the worker's overload markers, the worker load-shed
+                    // this request in shared_tcp_endpoint.rs. Map to a typed
+                    // ResourceExhausted error so the HTTP layer's
+                    // request_was_rejected() check at
+                    // lib/llm/src/http/service/openai.rs::from_anyhow returns
+                    // StatusCode::SERVICE_UNAVAILABLE (503) instead of falling
+                    // through to a generic 500.
+                    if let Some(err) = detect_worker_overload_response(&res_bytes) {
+                        tracing::warn!(
+                            worker_response = %err.to_string(),
+                            "Worker rejected request with overload signal — mapping to ResourceExhausted (HTTP 503)"
+                        );
+                        is_complete_final = true;
+                        return Some(U::from_err(err));
+                    }
                 }
                 if is_complete_final {
                     let err = DynamoError::msg(
@@ -335,5 +353,91 @@ where
         inflight_guard.disarm();
         let stream = InflightDecStream { inner: stream };
         Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+    }
+}
+
+/// Detect a worker-side admission-rejection payload (see DIS-2105).
+///
+/// When `shared_tcp_endpoint.rs`'s `try_send` hits a Full or Closed channel,
+/// it sends an error response on the TCP connection prefixed with one of the
+/// known overload markers. The receive side checks for these markers on the
+/// FIRST response in a stream and converts them into a typed
+/// `DynamoError(ErrorType::ResourceExhausted)` so the HTTP layer produces a
+/// 503 Service Unavailable.
+///
+/// Returns `None` for normal responses (including the empty ACK that signals
+/// "queued, stream starts") so the regular JSON-stream decoder downstream
+/// sees them.
+fn detect_worker_overload_response(res_bytes: &[u8]) -> Option<DynamoError> {
+    const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
+    const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
+
+    if res_bytes.starts_with(OVERLOAD_PREFIX) || res_bytes.starts_with(UNAVAILABLE_PREFIX) {
+        let msg = String::from_utf8_lossy(res_bytes).into_owned();
+        Some(
+            DynamoError::builder()
+                .error_type(ErrorType::ResourceExhausted)
+                .message(msg)
+                .build(),
+        )
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overload_payload_maps_to_resource_exhausted() {
+        let bytes = b"Server overloaded: worker pool queue full";
+        let err = detect_worker_overload_response(bytes).expect("should detect overload");
+        assert_eq!(err.error_type(), ErrorType::ResourceExhausted);
+        assert!(err.to_string().contains("Server overloaded"));
+    }
+
+    #[test]
+    fn unavailable_payload_maps_to_resource_exhausted() {
+        let bytes = b"Server unavailable: worker pool channel closed";
+        let err = detect_worker_overload_response(bytes).expect("should detect unavailable");
+        assert_eq!(err.error_type(), ErrorType::ResourceExhausted);
+    }
+
+    #[test]
+    fn empty_payload_is_not_overload() {
+        // The success-path ACK from the worker is an empty TcpResponseMessage.
+        assert!(detect_worker_overload_response(b"").is_none());
+    }
+
+    #[test]
+    fn json_stream_payload_is_not_overload() {
+        // Regular streaming-response data should pass through untouched.
+        let json = br#"{"data":"chunk","complete_final":false}"#;
+        assert!(detect_worker_overload_response(json).is_none());
+    }
+
+    #[test]
+    fn unrelated_string_is_not_overload() {
+        // Other error strings (e.g., codec errors) must not be misinterpreted.
+        assert!(detect_worker_overload_response(b"Failed to decode response: foo").is_none());
+    }
+
+    #[test]
+    fn resource_exhausted_satisfies_http_503_check() {
+        // Cross-check against the FE→503 gate in
+        // lib/llm/src/http/service/metrics.rs::request_was_rejected.
+        // That function calls dynamo_runtime::error::match_error_chain with
+        // REJECTION=[ResourceExhausted]. If our error type matches, the HTTP
+        // layer returns StatusCode::SERVICE_UNAVAILABLE.
+        let err = detect_worker_overload_response(b"Server overloaded: test")
+            .expect("should detect");
+        const REJECTION: &[ErrorType] = &[ErrorType::ResourceExhausted];
+        const NON_REJECTION: &[ErrorType] = &[];
+        let any_err: anyhow::Error = err.into();
+        assert!(
+            crate::error::match_error_chain(any_err.as_ref(), REJECTION, NON_REJECTION),
+            "DIS-2105: ResourceExhausted error must satisfy request_was_rejected to surface as 503"
+        );
     }
 }
