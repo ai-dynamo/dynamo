@@ -16,7 +16,9 @@ fallback and any associated polyfills.
 """
 
 import inspect
+import ipaddress
 import logging
+import socket
 from functools import lru_cache
 from typing import Any
 
@@ -103,6 +105,94 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+# ---------------------------------------------------------------------------
+# Network utilities: NetworkAddress, get_local_ip_auto, get_zmq_socket
+#
+# Canonical: sglang.srt.utils.network (0.5.10 release + 0.5.11+).
+#
+# Fallback covers the SGLang dsv4 base snapshot (sglang.__version__ ==
+# 0.5.10rc0, sglang/__init__.py from commit 6d0858d2a8) shipped as
+# lmsysorg/sglang:deepseek-v4-blackwell, where `sglang.srt.utils` is a
+# package whose __init__ is just `from sglang.srt.utils.common import *`:
+# get_local_ip_auto / get_zmq_socket reach us via the wildcard re-export
+# from common, but NetworkAddress does not exist yet anywhere in that tree
+# so we polyfill it.
+#
+# Remove when min supported SGLang base ships sglang.srt.utils.network.
+# ---------------------------------------------------------------------------
+try:
+    from sglang.srt.utils.network import (  # noqa: F401
+        NetworkAddress,
+        get_local_ip_auto,
+        get_zmq_socket,
+    )
+except ImportError:
+    from sglang.srt.utils import (  # type: ignore[no-redef]  # noqa: F401
+        get_local_ip_auto,
+        get_zmq_socket,
+    )
+
+    logger.info(
+        "sglang.srt.utils.network not found; using compatibility shim for "
+        "NetworkAddress (dsv4 sglang 0.5.10rc0 snapshot)"
+    )
+
+    class NetworkAddress:  # type: ignore[no-redef]
+        """Minimal polyfill for sglang.srt.utils.network.NetworkAddress."""
+
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        @property
+        def is_ipv6(self) -> bool:
+            try:
+                ipaddress.IPv6Address(self.host)
+                return True
+            except ValueError:
+                return False
+
+        @classmethod
+        def parse(cls, addr: str) -> "NetworkAddress":
+            """Parse 'host:port', '[IPv6]:port', or bare host."""
+            addr = addr.strip()
+            if addr.startswith("["):
+                end = addr.find("]")
+                host = addr[1:end] if end != -1 else addr.strip("[]")
+                rest = addr[end + 1 :] if end != -1 else ""
+                if rest.startswith(":") and rest[1:].isdigit():
+                    return cls(host, int(rest[1:]))
+                return cls(host, 0)
+            if addr.count(":") == 1:
+                host_part, port_part = addr.rsplit(":", 1)
+                if port_part.isdigit():
+                    return cls(host_part, int(port_part))
+            return cls(addr, 0)
+
+        def resolved(self) -> "NetworkAddress":
+            """DNS-resolve the host, preserving port."""
+            try:
+                infos = socket.getaddrinfo(
+                    self.host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+                )
+                resolved_ip = infos[0][4][0]
+                return NetworkAddress(resolved_ip, self.port)
+            except socket.gaierror:
+                return self
+
+        def to_host_port_str(self) -> str:
+            """Return '[IPv6]:port' or 'host:port'."""
+            if self.is_ipv6:
+                return f"[{self.host}]:{self.port}"
+            return f"{self.host}:{self.port}"
+
+        def to_tcp(self) -> str:
+            """Return 'tcp://[IPv6]:port' or 'tcp://host:port'."""
+            if self.is_ipv6:
+                return f"tcp://[{self.host}]:{self.port}"
+            return f"tcp://{self.host}:{self.port}"
+
+
 def get_scheduler_info(engine: Any) -> dict:
     """Return the scheduler-info dict for rank-0 of an ``sgl.Engine``.
 
@@ -146,8 +236,11 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
 
 
 __all__ = [
+    "NetworkAddress",
     "enable_disjoint_streaming_output",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "get_local_ip_auto",
     "get_scheduler_info",
+    "get_zmq_socket",
 ]
