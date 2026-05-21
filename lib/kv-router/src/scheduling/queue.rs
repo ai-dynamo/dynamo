@@ -1937,21 +1937,19 @@ mod tests {
         }
     }
 
+    type TestBlockingRefreshQueue = SchedulerQueue<
+        NoopSequencePublisher,
+        SimpleWorkerConfig,
+        FcfsPolicy,
+        DefaultWorkerSelector,
+        BlockingRefresher,
+    >;
+    type TestSlots = ActiveSequencesMultiWorker<NoopSequencePublisher>;
+
     fn make_queue_with_blocking_refresher(
         refresher: Arc<BlockingRefresher>,
         queue_depth_tiers: RouterQueueDepthTiers,
-    ) -> (
-        Arc<
-            SchedulerQueue<
-                NoopSequencePublisher,
-                SimpleWorkerConfig,
-                FcfsPolicy,
-                DefaultWorkerSelector,
-                BlockingRefresher,
-            >,
-        >,
-        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
-    ) {
+    ) -> (Arc<TestBlockingRefreshQueue>, Arc<TestSlots>) {
         let block_size = 16u32;
         let isl = 512usize;
         let dp_range = HashMap::from([(0_u64, (0_u32, 1_u32))]);
