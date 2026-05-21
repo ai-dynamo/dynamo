@@ -58,6 +58,9 @@ navigation:
           - page: Kimi-K2.5 NVFP4
             slug: kimi-k2-5
             path: recipes/kimi-k2-5.mdx
+          - page: GLM-5 NVFP4
+            slug: glm-5-nvfp4
+            path: recipes/glm-5-nvfp4.mdx
       - page: Glossary
         path: reference/glossary.md
 
