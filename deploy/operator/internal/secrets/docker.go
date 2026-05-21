@@ -14,9 +14,10 @@ import (
 
 type DockerSecretIndexer struct {
 	// maps for a namespace, a docker registry server to a list of secret names
-	secrets map[string]map[string][]string
-	client  client.Reader
-	mu      sync.RWMutex
+	secrets   map[string]map[string][]string
+	client    client.Reader
+	namespace string
+	mu        sync.RWMutex
 }
 
 func NewDockerSecretIndexer(client client.Reader) *DockerSecretIndexer {
@@ -26,10 +27,20 @@ func NewDockerSecretIndexer(client client.Reader) *DockerSecretIndexer {
 	}
 }
 
+func NewNamespacedDockerSecretIndexer(client client.Reader, namespace string) *DockerSecretIndexer {
+	indexer := NewDockerSecretIndexer(client)
+	indexer.namespace = namespace
+	return indexer
+}
+
 func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 	// scan for all secrets in the namespace
 	secrets := &corev1.SecretList{}
-	if err := i.client.List(ctx, secrets); err != nil {
+	var opts []client.ListOption
+	if i.namespace != "" {
+		opts = append(opts, client.InNamespace(i.namespace))
+	}
+	if err := i.client.List(ctx, secrets, opts...); err != nil {
 		return fmt.Errorf("unable to list secrets: %w", err)
 	}
 	slices.SortFunc(secrets.Items, func(a, b corev1.Secret) int {
