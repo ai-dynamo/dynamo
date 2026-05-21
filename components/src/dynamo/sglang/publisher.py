@@ -466,7 +466,7 @@ async def setup_sgl_metrics(
     so callers can keep the same ``await setup_sgl_metrics(...)`` shape
     and ``metrics_task.cancel()`` cleanup. Embedding-shaped metrics are
     registered separately by ``init_embedding.py`` via
-    ``init_embedding_metrics`` (see DIS-2094 part 1).
+    ``init_embedding_metrics``.
 
     Args:
         engine: The SGLang engine instance.
@@ -485,9 +485,13 @@ async def setup_sgl_metrics(
             "wiring (no KV cache, no prefill/decode, no scheduler metrics). "
             "Embedding-shaped metrics are registered separately."
         )
+
         # Hold a never-completing task so callers can ``cancel()`` + ``await``
         # it uniformly in their finally blocks, matching the chat-worker shape.
-        task = asyncio.create_task(asyncio.Event().wait())
+        async def _idle() -> None:
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_idle())
         return None, task, metrics_labels
 
     # Register SGLang multiprocess metrics only when --enable-metrics was passed.

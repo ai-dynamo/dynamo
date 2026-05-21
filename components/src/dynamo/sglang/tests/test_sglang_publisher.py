@@ -479,7 +479,7 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     publisher.cleanup()
 
 
-# ---- DIS-2107: per-worker metric gating ----
+# ---- per-worker metric gating (embedding vs chat) ----
 
 
 @pytest.mark.asyncio
@@ -505,12 +505,18 @@ async def test_setup_sgl_metrics_skips_chat_pipeline_for_embedding_worker(monkey
 
         return _wrapped
 
-    monkeypatch.setattr(publisher_mod, "setup_prometheus_registry", _track("setup_prometheus_registry"))
     monkeypatch.setattr(
-        publisher_mod, "register_engine_metrics_callback", _track("register_engine_metrics_callback")
+        publisher_mod, "setup_prometheus_registry", _track("setup_prometheus_registry")
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "register_engine_metrics_callback",
+        _track("register_engine_metrics_callback"),
     )
     monkeypatch.setattr(publisher_mod, "LLMBackendMetrics", _track("LLMBackendMetrics"))
-    monkeypatch.setattr(publisher_mod, "DynamoSglangPublisher", _track("DynamoSglangPublisher"))
+    monkeypatch.setattr(
+        publisher_mod, "DynamoSglangPublisher", _track("DynamoSglangPublisher")
+    )
 
     engine = SimpleNamespace(
         server_args=SimpleNamespace(
@@ -563,9 +569,13 @@ async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
 
         return _wrapped
 
-    monkeypatch.setattr(publisher_mod, "setup_prometheus_registry", _count("setup_prometheus_registry"))
     monkeypatch.setattr(
-        publisher_mod, "register_engine_metrics_callback", _count("register_engine_metrics_callback")
+        publisher_mod, "setup_prometheus_registry", _count("setup_prometheus_registry")
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "register_engine_metrics_callback",
+        _count("register_engine_metrics_callback"),
     )
     monkeypatch.setattr(publisher_mod, "LLMBackendMetrics", _count("LLMBackendMetrics"))
 
@@ -573,7 +583,9 @@ async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
     # methods exist but no-op, so we can keep the test free of real ZMQ / NATS.
     class _StubPublisher:
         def __init__(self, *_a, **_kw):
-            constructed["DynamoSglangPublisher"] = constructed.get("DynamoSglangPublisher", 0) + 1
+            constructed["DynamoSglangPublisher"] = (
+                constructed.get("DynamoSglangPublisher", 0) + 1
+            )
             self.metrics_publisher = SimpleNamespace(
                 create_endpoint=lambda _ep: _async_noop()
             )
