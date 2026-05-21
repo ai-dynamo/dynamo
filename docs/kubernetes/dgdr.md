@@ -42,8 +42,7 @@ metadata:
   name: my-model
 spec:
   model: Qwen/Qwen3-0.6B
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ### Field Reference
@@ -95,8 +94,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-30B-A3B
   backend: sglang
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
   overrides:
     dgd:
       apiVersion: nvidia.com/v1alpha1

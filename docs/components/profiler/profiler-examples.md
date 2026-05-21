@@ -19,8 +19,7 @@ metadata:
   name: qwen-0-6b
 spec:
   model: "Qwen/Qwen3-0.6B"
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ### Dense Model: Thorough
@@ -35,8 +34,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
   searchStrategy: thorough
 ```
 
@@ -57,8 +55,7 @@ metadata:
 spec:
   model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   hardware:
     numGpusPerNode: 8
@@ -88,8 +85,7 @@ metadata:
   name: llama-private
 spec:
   model: "meta-llama/Llama-3.1-8B-Instruct"
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   overrides:
     profilingJob:
@@ -120,8 +116,7 @@ metadata:
   name: low-latency-dense
 spec:
   model: "Qwen/Qwen3-0.6B"
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   sla:
     ttft: 500      # Time To First Token target in milliseconds
@@ -155,8 +150,7 @@ metadata:
   name: dense-with-tolerations
 spec:
   model: "Qwen/Qwen3-0.6B"
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   overrides:
     profilingJob:

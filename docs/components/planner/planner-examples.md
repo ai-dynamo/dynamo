@@ -20,8 +20,7 @@ metadata:
 spec:
   model: Qwen/Qwen3-32B
   backend: vllm
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Deploy:
@@ -43,8 +42,7 @@ metadata:
 spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Deploy:
@@ -69,8 +67,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Deploy:
@@ -102,8 +99,7 @@ metadata:
 spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` and `spec.backend` into the final configuration.
@@ -143,8 +139,7 @@ spec:
     mocker:
       enabled: true  # Deploy mocker instead of real backend
 
-  # For Dynamo < 1.1.0, use dynamo-frontend with the same tag.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 Profiling runs against the real backend (via GPUs or AIC). The mocker deployment then uses profiling data to simulate realistic timing.
