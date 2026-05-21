@@ -47,11 +47,12 @@ DEFAULT_SGLANG_AGG_CONFIG_PATH = resolve_deploy_path(
 
 
 def _arg_value(args: list[str], key: str) -> str | None:
-    for idx, arg in enumerate(args):
-        if arg == key and idx + 1 < len(args):
-            return args[idx + 1]
+    for idx in range(len(args) - 1, -1, -1):
+        arg = args[idx]
         if arg.startswith(f"{key}="):
             return arg.split("=", 1)[1]
+        if arg == key:
+            return args[idx + 1] if idx + 1 < len(args) else None
     return None
 
 
