@@ -91,8 +91,6 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             )
             prompt_tokens += ret_item.get("meta_info", {}).get("prompt_tokens", 0)
 
-        # Observe per-request embedding histograms. Failures here must never
-        # break inference, hence the broad except + log.
         try:
             observe_embedding_batch_size(model_name, len(embedding_objects))
             observe_embedding_input_tokens(model_name, prompt_tokens)

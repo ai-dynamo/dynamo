@@ -14,13 +14,6 @@ label) is more naturally implemented on the Rust frontend side
 because that's where per-worker timing is observable end-to-end;
 that piece is tracked separately. The two histograms below cover
 the worker-internal view.
-
-Metric names follow Dynamo's existing ``dynamo_<scope>_<unit>``
-convention. They are intentionally NOT prefixed with ``sglang:``
-because they describe an OpenAI-spec workload shape, not an
-SGLang-engine-internal signal — once the vLLM embedding worker
-ships (see PR #9713), it will observe the same names from its own
-handler.
 """
 
 from __future__ import annotations
