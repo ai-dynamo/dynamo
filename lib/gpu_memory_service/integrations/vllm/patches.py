@@ -5,6 +5,9 @@
 
 Patches:
   - MemorySnapshot.measure: adds GMS-committed bytes to free_memory in RO mode.
+  - FusedMoE routing-buffer initialization: creates deterministic expert maps
+    on CPU during RO/meta model construction so vLLM construction-time logging
+    and scalar lookups do not touch meta tensors.
   - request_memory: bypasses the free>=requested check during deferred-KV init.
   - NixlConnector.register_kv_caches: defers registration during the scratch
     phase and stashes the dict for replay at wake.
@@ -15,6 +18,10 @@ The torch.cuda.empty_cache patch lives in integrations/common/patches.py.
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 
 from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
 from gpu_memory_service.common.locks import GrantedLockType
@@ -25,6 +32,11 @@ logger = logging.getLogger(__name__)
 _memory_snapshot_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
+_fused_moe_patch_lock = threading.Lock()
+_fused_moe_patch_depth = 0
+_fused_moe_layer_module: Any | None = None
+_fused_moe_original_determine_expert_map: Any | None = None
+_fused_moe_determine_expert_map_wrapper: Any | None = None
 
 
 # =============================================================================
@@ -76,6 +88,89 @@ def patch_memory_snapshot() -> None:
     MemorySnapshot.measure = patched_measure
     _memory_snapshot_patched = True
     logger.info("[GMS Patch] Patched MemorySnapshot.measure")
+
+
+# =============================================================================
+# Read-only/meta model construction helpers
+# =============================================================================
+
+
+@contextmanager
+def fused_moe_cpu_routing_buffers_during_meta_init() -> Iterator[None]:
+    """Create vLLM FusedMoE expert maps on CPU during GMS RO meta init.
+
+    GMS read-only loading constructs a vLLM module tree on ``torch.device("meta")``
+    and then replaces tensors from the committed GMS layout.  vLLM's FusedMoE
+    constructor currently also creates ``_expert_map`` in that default-device
+    context, then immediately formats/logs it via ``Tensor.item()``.  ``item()``
+    is invalid for meta tensors, so standby/shadow MoE engines can fail before
+    GMS has a chance to materialize the buffers.
+
+    While constructing the read-only meta model, force vLLM's
+    ``determine_expert_map`` helper to allocate this small deterministic expert
+    map on CPU.  This also makes ``update_expert_map`` meta-safe if vLLM calls it
+    during post-processing.  After construction, ``materialize_module_from_gms``
+    replaces buffers saved by the writer with CUDA copies from the committed
+    layout.
+
+    Note that optional round-robin routing tables are created by vLLM from
+    ``_expert_map.device`` and are not read with ``item()`` during construction;
+    with this patch they may be CPU placeholders during meta init, then are
+    replaced by their CUDA writer copies when present in GMS metadata.
+
+    TODO: Replace this scoped monkey-patch with an upstream vLLM hook/meta-safe
+    initialization path.  Ideally vLLM would either make
+    ``get_compressed_expert_map``/construction-time scalar reads meta-aware or
+    expose a first-class way for meta-loaders to choose the device for
+    deterministic non-parameter routing buffers.
+    """
+    try:
+        import torch
+        import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+    except ImportError:
+        logger.debug("[GMS Patch] vLLM FusedMoE layer not available")
+        yield
+        return
+
+    global _fused_moe_determine_expert_map_wrapper
+    global _fused_moe_layer_module
+    global _fused_moe_original_determine_expert_map
+    global _fused_moe_patch_depth
+
+    with _fused_moe_patch_lock:
+        if _fused_moe_patch_depth == 0:
+
+            def determine_expert_map_on_cpu(*args, **kwargs):
+                assert _fused_moe_original_determine_expert_map is not None
+                with torch.device("cpu"):
+                    return _fused_moe_original_determine_expert_map(*args, **kwargs)
+
+            _fused_moe_layer_module = fused_moe_layer
+            _fused_moe_original_determine_expert_map = (
+                fused_moe_layer.determine_expert_map
+            )
+            _fused_moe_determine_expert_map_wrapper = determine_expert_map_on_cpu
+            fused_moe_layer.determine_expert_map = determine_expert_map_on_cpu
+
+        _fused_moe_patch_depth += 1
+
+    try:
+        yield
+    finally:
+        with _fused_moe_patch_lock:
+            _fused_moe_patch_depth -= 1
+            if _fused_moe_patch_depth == 0:
+                if (
+                    _fused_moe_layer_module is not None
+                    and _fused_moe_layer_module.determine_expert_map
+                    is _fused_moe_determine_expert_map_wrapper
+                ):
+                    _fused_moe_layer_module.determine_expert_map = (
+                        _fused_moe_original_determine_expert_map
+                    )
+                _fused_moe_layer_module = None
+                _fused_moe_original_determine_expert_map = None
+                _fused_moe_determine_expert_map_wrapper = None
 
 
 # =============================================================================
