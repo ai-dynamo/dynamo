@@ -20,6 +20,7 @@ use crate::registry::PeerRegistry;
 
 pub mod conditional_disagg;
 pub mod control_plane;
+pub mod kv_indexer;
 pub mod p2p;
 
 /// Context handed to a [`FeatureManager`] at hub startup so it can stash any
@@ -112,6 +113,16 @@ pub trait FeatureManager: Send + Sync + 'static {
     /// Called when an instance leaves the registry — either explicitly via
     /// HTTP `DELETE` or implicitly via TTL reaper. Must be idempotent.
     fn on_unregister(&self, instance_id: InstanceId);
+
+    /// Feature-owned URL segment. When `Some("x")`, the server nests this
+    /// manager's `control_router`/`public_router` under `/v1/features/x` —
+    /// the manager declares **relative** routes (e.g. `/config`) and owns its
+    /// whole namespace. Default `None` keeps the legacy behavior where the
+    /// manager declares full absolute paths itself (p2p, conditional_disagg,
+    /// control_plane).
+    fn route_prefix(&self) -> Option<&'static str> {
+        None
+    }
 
     /// Axum routes mounted on the control-plane listener (port 8337).
     fn control_router(self: Arc<Self>) -> Router;

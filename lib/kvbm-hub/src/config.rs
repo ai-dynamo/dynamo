@@ -46,6 +46,31 @@ pub struct HubConfig {
     /// is in use.
     #[serde(default = "default_heartbeat_max_failures")]
     pub heartbeat_max_failures: u32,
+    /// Optional KV indexer feature. When set, the hub binds a ZMQ `SUB`
+    /// ingest socket and serves the index under `/v1/features/kv-index`.
+    /// `None` (default) leaves the feature off.
+    #[serde(default)]
+    pub kv_indexer: Option<KvIndexerConfig>,
+}
+
+/// Configuration for the optional KV indexer feature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvIndexerConfig {
+    /// Maximum sequence length (tokens). Must be evenly divisible by
+    /// `block_size`; the index is presized to `max_seq_len / block_size`
+    /// position buckets.
+    pub max_seq_len: usize,
+    /// Block size (tokens per block). Must match the publishers' page size.
+    pub block_size: usize,
+    /// ZMQ bind spec for the ingest `SUB` socket. Default `tcp://0.0.0.0:0`
+    /// (OS-assigned port, reported via `GET /config`).
+    #[serde(default)]
+    pub zmq_bind: Option<String>,
+    /// Host advertised to publishers in `GET /config`'s `zmq_endpoint`.
+    /// Default `127.0.0.1`; multi-host deployments must set this to a
+    /// routable address.
+    #[serde(default)]
+    pub advertise_host: Option<String>,
 }
 
 fn default_registration_ttl_secs() -> u64 {
@@ -72,6 +97,7 @@ impl Default for HubConfig {
             velo_port: None,
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
             heartbeat_max_failures: default_heartbeat_max_failures(),
+            kv_indexer: None,
         }
     }
 }

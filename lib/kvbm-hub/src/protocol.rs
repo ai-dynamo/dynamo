@@ -225,6 +225,12 @@ pub enum FeatureKey {
     /// payload — the manager only contributes axum routes, so this key
     /// never matches an incoming registration.
     ConnectorControl,
+    /// Hub-side KV block index. No client-side `Feature` payload — workers
+    /// opt in by publishing block events to the ZMQ ingest endpoint
+    /// advertised by `GET /v1/features/kv-index/config`, not via the
+    /// registration feature list. The manager only contributes axum routes
+    /// and the ingest loop, so this key never matches a registration.
+    KvIndexer,
 }
 
 impl Feature {

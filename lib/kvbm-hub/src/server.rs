@@ -378,8 +378,21 @@ impl HubServerBuilder {
         let mut discovery_router = discovery_router(state.clone());
         let mut control_router = control_router(state.clone());
         for mgr in managers.values() {
-            discovery_router = discovery_router.merge(Arc::clone(mgr).public_router());
-            control_router = control_router.merge(Arc::clone(mgr).control_router());
+            let public = Arc::clone(mgr).public_router();
+            let control = Arc::clone(mgr).control_router();
+            match mgr.route_prefix() {
+                // Feature owns a namespace: nest its relative routes under it.
+                Some(seg) => {
+                    let base = format!("/v1/features/{seg}");
+                    discovery_router = discovery_router.nest(&base, public);
+                    control_router = control_router.nest(&base, control);
+                }
+                // Legacy: manager declares full absolute paths itself.
+                None => {
+                    discovery_router = discovery_router.merge(public);
+                    control_router = control_router.merge(control);
+                }
+            }
         }
         // Phase E — embedded operator UI mounted on the control listener.
         // Same-origin so the SPA's fetches need no CORS.

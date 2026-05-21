@@ -359,15 +359,71 @@ impl ConnectorLeader {
         }
         tracing::debug!("Lock released, configured layout handles for all workers");
 
-        // Create an EventsManager when the consolidator is configured so it can
-        // subscribe to G2/G3 block registration events.  The same Arc is wired
-        // into the BlockRegistry (so events are emitted on register/evict) and
-        // into ConsolidatorParams (so the consolidator can subscribe).
+        // Probe for the hub KV-indexer feature (best-effort). Hub details, in
+        // priority order:
+        //   1. `events.kv_index_hub_url` — the canonical knob, injectable via
+        //      `kv_connector_extra_config` so it survives vLLM's EngineCore
+        //      spawn (an env var would not). Works for plain aggregated
+        //      instances with no disagg config.
+        //   2. `disagg.hub_url` — reuse the disagg hub when running disagg.
+        //   3. `DYN_KVBM_KV_INDEX_HUB_URL` env var — local / non-vLLM testing.
+        let cfg = self.runtime.config();
+        let kv_index_hub_url: Option<String> = cfg
+            .events
+            .kv_index_hub_url
+            .clone()
+            .or_else(|| cfg.disagg.as_ref().map(|d| d.hub_url.clone()))
+            .or_else(|| {
+                std::env::var(super::hub_indexer::HUB_URL_ENV)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            });
+        let kv_index_endpoint: Option<String> = match kv_index_hub_url {
+            Some(hub_url) => super::hub_indexer::probe(&hub_url, reference_config.page_size).await,
+            None => None,
+        };
+
+        // Create an EventsManager when either the consolidator or the KV-index
+        // publisher needs block registration events. The same Arc is wired into
+        // the BlockRegistry (so events are emitted on register/evict) and into
+        // every subscriber (ConsolidatorParams, KV-index publisher).
+        //
+        // NOTE: the builder default policy is `AllEventsPolicy` (every block
+        // position emits). We intentionally do not thread `EventsConfig.policy`
+        // through here — the KV index wants full positional coverage, and the
+        // consolidator path has always relied on the default.
         let events_manager: Option<std::sync::Arc<EventsManager>> =
-            self.consolidator_endpoints.as_ref().map(|_| {
-                tracing::debug!("Creating EventsManager for consolidator");
+            (self.consolidator_endpoints.is_some() || kv_index_endpoint.is_some()).then(|| {
+                tracing::debug!("Creating EventsManager");
                 std::sync::Arc::new(EventsManager::builder().build())
             });
+
+        // Wire the KV-index publisher onto the EventsManager subscription. The
+        // publisher stamps this worker's velo instance id (as u128) so the
+        // hub's query results map back to a discoverable peer.
+        if let (Some(endpoint), Some(em)) = (&kv_index_endpoint, events_manager.as_ref()) {
+            match super::hub_indexer::ZmqHubPublisher::connect(endpoint) {
+                Ok(zmq_pub) => {
+                    let instance_id = self.runtime.messenger().instance_id().as_u128();
+                    match kvbm_logical::events::KvbmCacheEventsPublisher::builder()
+                        .instance_id(instance_id)
+                        .event_stream(em.subscribe())
+                        .publisher(std::sync::Arc::new(zmq_pub))
+                        .subject(super::hub_indexer::SUBJECT)
+                        .build()
+                    {
+                        Ok(publisher) => {
+                            self.set_kv_index_publisher(publisher)?;
+                            tracing::info!(endpoint, instance_id, "kv-index publisher wired");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "kv-index publisher build failed; skipping")
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "kv-index PUB connect failed; skipping"),
+            }
+        }
 
         tracing::debug!("Creating block registry");
         let mut registry_builder = BlockRegistry::builder()

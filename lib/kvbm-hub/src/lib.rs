@@ -57,12 +57,15 @@ pub mod server;
 pub mod web;
 
 pub use client::{HubClient, HubClientBuilder, HubClientConfig, HubRegistrationGuard};
-pub use config::HubConfig;
+pub use config::{HubConfig, KvIndexerConfig};
 pub use features::conditional_disagg::{
     ConditionalDisaggClient, ConditionalDisaggManager, DispatchOutcome, HttpVllmDispatcher,
     PrefillRequestDispatcher, RecordingDispatcher,
 };
 pub use features::control_plane::ControlPlaneManager;
+pub use features::kv_indexer::{
+    KvIndexerConfigResponse, KvIndexerManager, PositionalIndex, QueryRequest, QueryResponse,
+};
 pub use features::p2p::{P2pClient, P2pManager};
 pub use features::{FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};

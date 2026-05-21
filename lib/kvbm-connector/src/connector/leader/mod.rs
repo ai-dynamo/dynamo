@@ -83,6 +83,11 @@ pub struct ConnectorLeader {
     /// `config.disagg` is present. Holds the hub registration alive for the
     /// life of this leader.
     disagg_client: OnceLock<Arc<ConditionalDisaggClient>>,
+    /// KV-index hub publisher, kept alive for the life of this leader.
+    /// Populated in `initialize_async` when the connector is given hub details
+    /// ([`hub_indexer::HUB_URL_ENV`]) and the hub exposes the KV-indexer
+    /// feature. Dropping it aborts the publish task, so it must be held here.
+    kv_index_publisher: OnceLock<kvbm_logical::events::KvbmCacheEventsPublisher>,
     /// CD-role dispatcher (`Arc<ConditionalDisaggLeader>`) installed by
     /// `initialize_async` when `config.disagg` is present. Bindings route
     /// `ConnectorLeaderApi` methods through this when set so role-specific
@@ -101,6 +106,9 @@ pub(crate) struct WorkerClients {
 
 // Connector leader implementation extensions
 mod init;
+
+// KV-index hub publisher (capability probe + ZMQ PUB egress).
+pub(crate) mod hub_indexer;
 
 /// Implementation of the request_finished function.
 mod finish;
@@ -155,8 +163,20 @@ impl ConnectorLeader {
             pending_intra_pass_g2_blocks: Mutex::new(Vec::new()),
             forward_pass_samples: Mutex::new(None),
             disagg_client: OnceLock::new(),
+            kv_index_publisher: OnceLock::new(),
             cd_api: OnceLock::new(),
         }
+    }
+
+    /// Store the KV-index hub publisher to keep its background task alive.
+    /// Called once from `initialize_async`.
+    pub(crate) fn set_kv_index_publisher(
+        &self,
+        publisher: kvbm_logical::events::KvbmCacheEventsPublisher,
+    ) -> Result<()> {
+        self.kv_index_publisher
+            .set(publisher)
+            .map_err(|_| anyhow!("kv_index_publisher already set"))
     }
 
     /// Conditional-disagg dispatcher, populated in `initialize_async` when

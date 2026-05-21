@@ -24,6 +24,13 @@ velo-ext = { workspace = true }
 
 # KVBM
 kvbm-protocols = { workspace = true, features = ["client"] }
+kvbm-logical   = { workspace = true }
+dynamo-tokens  = { workspace = true }
+
+# KV index feature (positional block index + ZMQ event ingest)
+dashmap      = { workspace = true }
+rmp-serde    = { workspace = true }
+tmq          = { workspace = true }
 
 # Async / core
 anyhow       = { workspace = true }

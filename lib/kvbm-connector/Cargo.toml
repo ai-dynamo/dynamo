@@ -48,6 +48,9 @@ uuid           = { workspace = true }
 oneshot        = { workspace = true }
 serde_json     = { workspace = true }
 url            = { workspace = true }
+# KV-index hub publisher (capability probe + ZMQ PUB egress)
+reqwest        = { workspace = true }
+tmq            = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

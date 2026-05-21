@@ -68,6 +68,27 @@ struct Cli {
     /// `--prefill-vllm-url` is set.
     #[arg(long)]
     prefill_vllm_model: Option<String>,
+
+    /// Maximum sequence length (tokens) for the KV indexer. Enables the
+    /// feature when set together with `--kv-index-block-size`. Must be
+    /// evenly divisible by the block size.
+    #[arg(long)]
+    kv_index_max_seq_len: Option<usize>,
+
+    /// Block size (tokens per block) for the KV indexer. Must match the
+    /// publishers' page size. Required to enable the feature.
+    #[arg(long)]
+    kv_index_block_size: Option<usize>,
+
+    /// ZMQ bind spec for the KV indexer ingest socket
+    /// (default `tcp://0.0.0.0:0`, OS-assigned port).
+    #[arg(long)]
+    kv_index_zmq_bind: Option<String>,
+
+    /// Host advertised to publishers in the KV indexer's `GET /config`
+    /// (default `127.0.0.1`).
+    #[arg(long)]
+    kv_index_advertise_host: Option<String>,
 }
 
 fn build_config(cli: &Cli) -> anyhow::Result<HubConfig> {
@@ -96,7 +117,37 @@ fn build_config(cli: &Cli) -> anyhow::Result<HubConfig> {
     if let Some(n) = cli.heartbeat_max_failures {
         f = f.merge(("heartbeat_max_failures", n));
     }
-    Ok(f.extract()?)
+    let mut config: HubConfig = f.extract()?;
+
+    // KV indexer: CLI flags win over file/env when explicitly passed. The two
+    // sizing flags must be passed together (or neither, leaving file/env in
+    // control).
+    match (cli.kv_index_max_seq_len, cli.kv_index_block_size) {
+        (Some(max_seq_len), Some(block_size)) => {
+            config.kv_indexer = Some(kvbm_hub::KvIndexerConfig {
+                max_seq_len,
+                block_size,
+                zmq_bind: cli.kv_index_zmq_bind.clone(),
+                advertise_host: cli.kv_index_advertise_host.clone(),
+            });
+        }
+        (None, None) => {
+            // No CLI override; apply optional ZMQ overrides onto a file/env
+            // config if one exists.
+            if let Some(kvi) = config.kv_indexer.as_mut() {
+                if cli.kv_index_zmq_bind.is_some() {
+                    kvi.zmq_bind = cli.kv_index_zmq_bind.clone();
+                }
+                if cli.kv_index_advertise_host.is_some() {
+                    kvi.advertise_host = cli.kv_index_advertise_host.clone();
+                }
+            }
+        }
+        _ => anyhow::bail!(
+            "--kv-index-max-seq-len and --kv-index-block-size must be specified together"
+        ),
+    }
+    Ok(config)
 }
 
 #[tokio::main]
@@ -156,6 +207,23 @@ async fn main() -> anyhow::Result<()> {
         .add_feature_manager(p2p_manager as Arc<dyn kvbm_hub::FeatureManager>)
         .add_feature_manager(Arc::new(cd_manager) as Arc<dyn kvbm_hub::FeatureManager>)
         .add_feature_manager(cpm as Arc<dyn kvbm_hub::FeatureManager>);
+
+    // Optional KV indexer feature.
+    if let Some(kvi) = &config.kv_indexer {
+        let manager = kvbm_hub::KvIndexerManager::new(
+            kvi.max_seq_len,
+            kvi.block_size,
+            kvi.zmq_bind.clone(),
+            kvi.advertise_host.clone(),
+        )?;
+        tracing::info!(
+            max_seq_len = kvi.max_seq_len,
+            block_size = kvi.block_size,
+            "KV indexer feature enabled"
+        );
+        builder =
+            builder.add_feature_manager(Arc::new(manager) as Arc<dyn kvbm_hub::FeatureManager>);
+    }
 
     if let Some(velo_port) = config.velo_port {
         let bind = SocketAddr::new(config.bind_addr, velo_port);
