@@ -14,15 +14,18 @@ use std::collections::HashMap;
 
 use crate::BlockId;
 use crate::{
-    layout::{BlockDimension, FullyContiguousLayout, LayoutConfig, LayerSeparateLayout, NixlMetadata, PhysicalLayout},
+    layout::{
+        BlockDimension, FullyContiguousLayout, LayerSeparateLayout, LayoutConfig, NixlMetadata,
+        PhysicalLayout,
+    },
     manager::{LayoutHandle, TransferManager},
     transfer::{
         BlockChecksum, FillPattern, NixlAgent, StorageKind, TransferCapabilities,
         compute_block_checksums, compute_layer_checksums, fill_blocks, fill_layers,
     },
 };
-use dynamo_memory::{Buffer, SystemStorage};
 use dynamo_memory::nixl::MemType;
+use dynamo_memory::{Buffer, SystemStorage};
 
 // =============================================================================
 // Flexible Backend Agent Builder
@@ -733,7 +736,11 @@ pub fn create_fc_layout_system(num_blocks: usize) -> PhysicalLayout {
     let buffer = Buffer::new(storage);
     let layout = FullyContiguousLayout::new(config, buffer).expect("layout creation failed");
     let nixl_metadata = NixlMetadata::new("stub".to_string(), MemType::Dram, 0);
-    PhysicalLayout::new_local(std::sync::Arc::new(layout), StorageKind::System, nixl_metadata)
+    PhysicalLayout::new_local(
+        std::sync::Arc::new(layout),
+        StorageKind::System,
+        nixl_metadata,
+    )
 }
 
 /// Create a layer-separate physical layout backed by system memory,
@@ -753,6 +760,9 @@ pub fn create_lw_layout_system(num_blocks: usize) -> PhysicalLayout {
     let layout = LayerSeparateLayout::new(config, buffers, BlockDimension::BlockIsFirstDim)
         .expect("layout creation failed");
     let nixl_metadata = NixlMetadata::new("stub".to_string(), MemType::Dram, 0);
-    PhysicalLayout::new_local(std::sync::Arc::new(layout), StorageKind::System, nixl_metadata)
+    PhysicalLayout::new_local(
+        std::sync::Arc::new(layout),
+        StorageKind::System,
+        nixl_metadata,
+    )
 }
-
