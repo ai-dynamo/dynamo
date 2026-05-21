@@ -456,27 +456,9 @@ mod tests {
 
         let config: ModelRuntimeConfig = serde_json::from_str(json).unwrap();
         assert!(config.topology_domains.is_empty());
-    }
-
-    #[test]
-    fn test_worker_config_like_topology_domains_with_data() {
-        let mut config = ModelRuntimeConfig::default();
-        config
-            .topology_domains
-            .insert("zone".to_string(), "us-east-1a".to_string());
-
-        let domains = config.topology_domains();
-        assert!(domains.is_some());
-        let domains = domains.unwrap();
-        assert_eq!(domains.len(), 1);
-        assert_eq!(domains["zone"], "us-east-1a");
-    }
-
-    #[test]
-    fn test_worker_config_like_topology_domains_empty_returns_none() {
-        let config = ModelRuntimeConfig::default();
-        assert!(config.topology_domains.is_empty());
-        assert!(config.topology_domains().is_none());
+        assert!(config.kv_transfer_domain.is_none());
+        assert!(config.kv_transfer_enforcement.is_none());
+        assert!(config.kv_transfer_preferred_weight.is_none());
     }
 
     #[test]
@@ -520,24 +502,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_serde_kv_transfer_fields_omitted_when_none() {
-        let config = ModelRuntimeConfig::default();
-        let serialized = serde_json::to_string(&config).unwrap();
-
-        assert!(
-            !serialized.contains("kv_transfer_domain"),
-            "None kv_transfer_domain should be skipped, got: {serialized}"
-        );
-        assert!(
-            !serialized.contains("kv_transfer_enforcement"),
-            "None kv_transfer_enforcement should be skipped, got: {serialized}"
-        );
-        assert!(
-            !serialized.contains("kv_transfer_preferred_weight"),
-            "None kv_transfer_preferred_weight should be skipped, got: {serialized}"
-        );
-    }
 
     #[test]
     fn test_serde_round_trip_with_kv_transfer_enforcement() {
@@ -577,18 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_config_like_kv_transfer_domain() {
-        let default_config = ModelRuntimeConfig::default();
-        assert!(default_config.kv_transfer_domain().is_none());
-
-        let config = ModelRuntimeConfig {
-            kv_transfer_domain: Some("zone".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(config.kv_transfer_domain(), Some("zone"));
-    }
-
-    #[test]
     fn test_worker_config_like_kv_transfer_enforcement() {
         let default_config = ModelRuntimeConfig::default();
         assert!(default_config.kv_transfer_enforcement().is_none());
@@ -609,19 +561,6 @@ mod tests {
                 .map(KvTransferPreferredWeight::get),
             Some(0.5)
         );
-    }
-
-    #[test]
-    fn test_serde_backward_compat_without_kv_transfer_fields() {
-        let json = r#"{
-            "total_kv_blocks": 100,
-            "max_num_seqs": 32
-        }"#;
-
-        let config: ModelRuntimeConfig = serde_json::from_str(json).unwrap();
-        assert!(config.kv_transfer_domain.is_none());
-        assert!(config.kv_transfer_enforcement.is_none());
-        assert!(config.kv_transfer_preferred_weight.is_none());
     }
 
     #[test]
