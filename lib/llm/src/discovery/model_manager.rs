@@ -69,6 +69,13 @@ pub enum ModelManagerError {
     ModelAlreadyExists(String),
 }
 
+/// Sentinel label value used in frontend Prometheus metrics for requests
+/// that target an unregistered model. Bounds label cardinality so arbitrary
+/// client-supplied model strings cannot create unbounded Prometheus series.
+/// The `_model` suffix makes accidental collision with a real model name
+/// implausible while keeping the value readable in Grafana dropdowns.
+pub const UNKNOWN_METRIC_MODEL: &str = "unknown_model";
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -184,6 +191,29 @@ impl ModelManager {
     /// Check if any model (decode or prefill) is registered.
     pub fn has_model_any(&self, model: &str) -> bool {
         self.has_decode_model(model) || self.has_prefill_model(model)
+    }
+
+    /// Check if any engine (chat, completions, embeddings, images, etc.) is
+    /// registered under this exact model name. Case-sensitive. Distinct from
+    /// [`has_model_any`](Self::has_model_any), which checks specifically for a
+    /// decode or prefill engine.
+    pub fn has_registered_model(&self, model: &str) -> bool {
+        self.models.contains_key(model)
+    }
+
+    /// Resolve the model name to use in frontend Prometheus metrics.
+    ///
+    /// Returns the user-supplied name if a model is registered under it
+    /// (preserving original casing), otherwise returns the bounded sentinel
+    /// [`UNKNOWN_METRIC_MODEL`]. Callers should use this resolved name
+    /// for every metric child created before engine lookup so unknown-model
+    /// requests do not pollute Prometheus label cardinality.
+    pub fn metric_model_for<'a>(&self, model: &'a str) -> &'a str {
+        if self.has_registered_model(model) {
+            model
+        } else {
+            UNKNOWN_METRIC_MODEL
+        }
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {
@@ -1136,6 +1166,35 @@ mod tests {
 
         mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.has_model_any("llama")); // has prefill
+    }
+
+    #[test]
+    fn test_metric_model_for_resolves_to_sentinel_for_unknown() {
+        let mm = ModelManager::new();
+        mm.add_worker_set(
+            "Llama-3.1-8B-Instruct",
+            "ns1",
+            make_worker_set("ns1", "abc"),
+        );
+
+        // Registered models preserve their original casing.
+        assert_eq!(
+            mm.metric_model_for("Llama-3.1-8B-Instruct"),
+            "Llama-3.1-8B-Instruct"
+        );
+
+        // Case mismatches and unregistered strings collapse to the sentinel so
+        // arbitrary client-supplied values cannot create unbounded Prometheus
+        // series.
+        assert_eq!(
+            mm.metric_model_for("llama-3.1-8b-instruct"),
+            UNKNOWN_METRIC_MODEL
+        );
+        assert_eq!(
+            mm.metric_model_for("nonexistent-model-1"),
+            UNKNOWN_METRIC_MODEL
+        );
+        assert_eq!(mm.metric_model_for(""), UNKNOWN_METRIC_MODEL);
     }
 
     #[test]

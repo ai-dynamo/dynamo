@@ -211,7 +211,8 @@ async fn anthropic_messages(
     }
 
     let model = request.model.clone();
-    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
+    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
