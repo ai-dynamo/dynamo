@@ -988,7 +988,6 @@ impl PySnapshotPublisher {
         py.allow_threads(move || inner.publish(dp_rank, snap));
         Ok(())
     }
-
 }
 
 // ---------------------------------------------------------------------------
