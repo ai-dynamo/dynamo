@@ -52,6 +52,9 @@ navigation:
           - page: DeepSeek V3.2 NVFP4
             slug: deepseek-v3-2-nvfp4
             path: recipes/deepseek-v3-2-nvfp4.mdx
+          - page: Qwen3-VL-30B
+            slug: qwen3-vl-30b
+            path: recipes/qwen3-vl-30b.mdx
       - page: Glossary
         path: reference/glossary.md
 

@@ -917,7 +917,9 @@ svg.card-icon{
 #qwen-technique-agg:checked ~ .dynamo-recipe-browser label[for="qwen-technique-agg"],
 #qwen-technique-kvbm:checked ~ .dynamo-recipe-browser label[for="qwen-technique-kvbm"],
 #dsv32-technique-disagg:checked ~ .dynamo-recipe-browser label[for="dsv32-technique-disagg"],
-#dsv32-technique-agg:checked ~ .dynamo-recipe-browser label[for="dsv32-technique-agg"] {
+#dsv32-technique-agg:checked ~ .dynamo-recipe-browser label[for="dsv32-technique-agg"],
+#qwenvl-cache-on:checked ~ .dynamo-recipe-browser label[for="qwenvl-cache-on"],
+#qwenvl-cache-off:checked ~ .dynamo-recipe-browser label[for="qwenvl-cache-off"] {
     border-color: var(--nv-color-green);
     box-shadow: 0 0 0 1px var(--nv-color-green);
     font-weight: 700;
@@ -1474,7 +1476,9 @@ svg.card-icon{
 #qwen-technique-agg:checked ~ .qwen-technique-agg,
 #qwen-technique-kvbm:checked ~ .qwen-technique-kvbm,
 #dsv32-technique-disagg:checked ~ .dsv32-technique-disagg,
-#dsv32-technique-agg:checked ~ .dsv32-technique-agg {
+#dsv32-technique-agg:checked ~ .dsv32-technique-agg,
+#qwenvl-cache-on:checked ~ .qwenvl-cache-on,
+#qwenvl-cache-off:checked ~ .qwenvl-cache-off {
     display: grid;
 }
 

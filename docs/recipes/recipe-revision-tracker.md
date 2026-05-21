@@ -84,7 +84,7 @@ explicit eviction decision before the revised Recipes section is real.
 | --- | --- | --- | --- |
 | todo | Monitoring, logs, artifact retrieval, cleanup | Benchmark-heavy READMEs, especially Qwen3-32B and DeepSeek V3.2 | Add `Operate` section to detail pages; keep generic cleanup in setup/troubleshooting docs. |
 | todo | Container/image build flows | DeepSeek V4 container, Nemotron Omni, Kimi TokenSpeed | Create shared image guide, then add short image provenance notes per recipe. |
-| todo | Dataset generation and trace preparation | Qwen3-VL, Kimi K2.5, Qwen3.6 | Add `Workload` or `Benchmark Evidence` subsections that describe how traffic was produced. |
+| draft | Dataset generation and trace preparation | Qwen3-VL, Kimi K2.5, Qwen3.6 | Qwen3-VL now has a `Dataset` section; Kimi and Qwen3.6 still need first-class homes. |
 | todo | Cluster-specific networking and fabric setup | DeepSeek V4 Pro, DeepSeek-R1, GLM-5 | Keep recipe-specific required settings in `Configuration Notes`; link generic platform setup. |
 | todo | GAIE accessory manifests | Llama 3.3 70B | Move to optional integration note; do not count as a separate recipe variant. |
 | todo | Script-driven benchmark workflows | Qwen3.6 | Give the detail page a `Run Scripts` section instead of forcing it into deploy-command tabs. |
@@ -109,7 +109,7 @@ explicit eviction decision before the revised Recipes section is real.
 | todo | `qwen3-235b-a22b-fp8.mdx` | `recipes/qwen3-235b-a22b-fp8/README.md` | TRT-LLM agg Hopper, agg Blackwell, disagg Hopper, disagg Blackwell | Hardware-specific MoE backend differences, static 4K/200 perf rows, hardware requirements | Boilerplate setup | Need explain Hopper vs Blackwell as customer choice, not implementation trivia. |
 | draft | `qwen3-32b.mdx` | `recipes/qwen3-32b/README.md`, `recipes/qwen3-32b/vllm/agg-kvbm/README.md` | vLLM agg round-robin, vLLM disagg KV router, vLLM agg KVBM | Mooncake trace, P/D vs agg comparison, KVBM deploy-only caveats, traffic facts, benchmark commands, verify commands, operate/artifacts/cleanup, KVBM config notes | Generic setup boilerplate | Needs visual check and final decision on whether deploy commands should auto-follow the selector. |
 | todo | `qwen3-32b-fp8.mdx` | `recipes/qwen3-32b-fp8/README.md` | TRT-LLM agg, TRT-LLM disagg, vLLM disagg | FP8 variants, port-forward variants, static perf rows | Boilerplate setup | Needs stronger guidance on why choose FP8 page vs BF16 Qwen3-32B page. |
-| todo | `qwen3-vl-30b.mdx` | `recipes/qwen3-vl-30b/README.md` | vLLM agg embedding cache | Cache-on/off result, dataset generation, 80% image reuse, cache env vars, artifact path | Generic setup | Need include dataset generation as first-class section, not bury it. |
+| draft | `qwen3-vl-30b.mdx` | `recipes/qwen3-vl-30b/README.md` | vLLM agg embedding cache | Cache-on/off result, dataset generation, 80% image reuse, cache env vars, artifact path, helper script behavior, operate/cleanup | Generic setup | Visually checked; still needs final scrutiny of cache-off deploy instructions. |
 | todo | `qwen3-6-35b.mdx` | `recipes/qwen3.6-35b/README.md` | vanilla vLLM serve, Dynamo frontend decoding, Dynamo FD plus embedding cache | 3-way comparison, run scripts, sliding-window dataset, hardware env files, shared-model-cache, aiperf pin | Maintainer layout rule unless needed | Page must explain why this uses scripts rather than direct manifest tabs. |
 | todo | Maintainer/global page | `recipes/README.md` | Root recipes index, recipe structure, troubleshooting, contributing | Only if we create a maintainer recipe authoring page | Most of it from customer-facing page | Decide whether this belongs under contributor docs rather than Recipes. |
 | todo | Container build guide | `recipes/deepseek-v4/container/README.md` plus build-required recipe sections | DeepSeek V4 SGLang overlay, TokenSpeed, Nemotron Omni | Build flow, image provenance, build args | None if build is required | Decide whether each recipe page owns build steps or links to a shared image guide. |
@@ -165,7 +165,7 @@ or moved to a separate operational/build guide.
 | todo | Qwen3-32B FP8 TRT-LLM agg | `recipes/qwen3-32b-fp8/trtllm/agg` | Yes | Family only | Add benchmark-backed variant. |
 | todo | Qwen3-32B FP8 TRT-LLM disagg | `recipes/qwen3-32b-fp8/trtllm/disagg` | Yes | Family only | Add benchmark-backed variant. |
 | todo | Qwen3-32B FP8 vLLM disagg | `recipes/qwen3-32b-fp8/vllm/disagg` | Yes | Family only | Add benchmark-backed variant. |
-| todo | Qwen3-VL-30B vLLM agg embedding cache | `recipes/qwen3-vl-30b/vllm/agg-embedding-cache` | Yes | Yes | Create detail page; include dataset generation and cache-on/off. |
+| draft | Qwen3-VL-30B vLLM agg embedding cache | `recipes/qwen3-vl-30b/vllm/agg-embedding-cache` | Yes | Yes | Represented with cache on/off selector, dataset generation, deploy, benchmark, artifact, and cleanup sections; visually checked. |
 | todo | Qwen3.6-35B vanilla vLLM serve | `recipes/qwen3.6-35b/deploy/vllm-serve.yaml` | Yes | Family only | Add baseline variant; explain script-driven workflow. |
 | todo | Qwen3.6-35B Dynamo frontend decoding | `recipes/qwen3.6-35b/deploy/dynamo-fd.yaml` | Yes | Family only | Add comparison variant. |
 | todo | Qwen3.6-35B Dynamo FD plus embedding cache | `recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml` | Yes | Family only | Add recommended/interesting variant. |
@@ -178,7 +178,8 @@ or moved to a separate operational/build guide.
 2. Finish `deepseek-v3-2-nvfp4.mdx` as the second benchmark-heavy exemplar:
    - Visual check the updated page.
    - Confirm README benchmark-monitoring wording should follow the Job-based `perf.yaml`.
-3. Add `qwen3-vl-30b.mdx` to prove the multimodal/reuse pattern.
+3. Finish `qwen3-vl-30b.mdx` to prove the multimodal/reuse pattern:
+   - Confirm cache-off deploy guidance should stay as an inline patch or move entirely to the helper script.
 4. Add `kimi-k2-5.mdx` to prove agentic coding workload navigation.
 5. Fill deployment-only pages after benchmark-backed pages, with no implied perf claims.
 6. Revisit the landing page after pages 1-4 exist:
