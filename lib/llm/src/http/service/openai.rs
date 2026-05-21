@@ -436,7 +436,10 @@ async fn handler_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone(),
+        model: state
+            .manager()
+            .metric_model_for(&request.inner.model)
+            .to_string(),
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -943,7 +946,10 @@ async fn handler_chat_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone(),
+        model: state
+            .manager()
+            .metric_model_for(&request.inner.model)
+            .to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -1608,8 +1614,9 @@ async fn handler_responses(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    let raw_model = request.inner.model.clone().unwrap_or_default();
     let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone().unwrap_or_default(),
+        model: state.manager().metric_model_for(&raw_model).to_string(),
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };

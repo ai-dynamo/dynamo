@@ -150,7 +150,7 @@ async fn handler_anthropic_messages(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.stream;
     let cancellation_labels = CancellationLabels {
-        model: request.model.clone(),
+        model: state.manager().metric_model_for(&request.model).to_string(),
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
