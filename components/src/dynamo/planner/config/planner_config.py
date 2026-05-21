@@ -19,15 +19,24 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
+from urllib.parse import parse_qsl
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 
 logger = logging.getLogger(__name__)
+
+
+def _prometheus_ssl_verify_default() -> bool:
+    return os.environ.get("PROMETHEUS_SSL_VERIFY", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 class PlannerPreDeploymentSweepMode(str, Enum):
@@ -140,6 +149,73 @@ class PlannerConfig(BaseModel):
         ),
         exclude=True,
     )
+    metric_pulling_prometheus_token: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN"),
+        exclude=True,
+        description=(
+            "Optional bearer token sent as `Authorization: Bearer <token>` on "
+            "every PromQL request. Useful for hardened monitoring stacks "
+            "(OpenShift thanos-querier, OAuth-proxied Prometheus). Token is "
+            "read once at startup."
+        ),
+    )
+    metric_pulling_prometheus_token_file: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN_FILE"),
+        exclude=True,
+        description=(
+            "Optional path to a file containing a bearer token. When set, "
+            "the token is re-read before every PromQL request so rotated "
+            "tokens (Kubernetes projected ServiceAccount tokens, OpenShift "
+            "OAuth SA tokens) are picked up without restarting the planner."
+        ),
+    )
+    metric_pulling_prometheus_ssl_verify: bool = Field(
+        default_factory=_prometheus_ssl_verify_default,
+        exclude=True,
+        description=(
+            "Verify the upstream Prometheus TLS certificate. Default False "
+            "preserves the previous PrometheusConnect(disable_ssl=True) "
+            "behavior. Set True for hardened monitoring stacks; pair with "
+            "an injected CA bundle if the upstream uses a private CA."
+        ),
+    )
+    metric_pulling_prometheus_extra_query_params: Optional[Dict[str, str]] = Field(
+        default_factory=lambda: (
+            dict(
+                parse_qsl(
+                    os.environ.get("PROMETHEUS_EXTRA_QUERY_PARAMS", ""),
+                    strict_parsing=True,
+                )
+            )
+            or None
+        ),
+        exclude=True,
+        description=(
+            "Fixed key/value pairs appended as URL query parameters on every PromQL "
+            "request. Set via PROMETHEUS_EXTRA_QUERY_PARAMS as a URL query string, "
+            "e.g. `namespace=my-ns&tenant=foo`."
+        ),
+    )
+    metric_pulling_prometheus_ca_bundle: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_CA_BUNDLE"),
+        exclude=True,
+        validate_default=True,
+        description=(
+            "Path to a CA bundle for verifying the upstream Prometheus TLS certificate. "
+            "No-op unless ssl_verify is enabled."
+        ),
+    )
+
+    @field_validator("metric_pulling_prometheus_ca_bundle", mode="after")
+    @classmethod
+    def _validate_ca_bundle_path(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not Path(v).is_file():
+            raise ValueError(
+                f"metric_pulling_prometheus_ca_bundle path does not exist or is not a file: {v!r}. "
+                "Check that PROMETHEUS_CA_BUNDLE points to a valid CA bundle file."
+            )
+        return v
+
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )

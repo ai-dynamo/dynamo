@@ -1658,6 +1658,57 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 	g.Expect(decodeService.Spec.Selector[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
 }
 
+func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	desired := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}},
+					{Name: "new-worker", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 5}},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode-group", CliqueNames: []string{"decode"}, Replicas: ptr.To(int32(1))},
+					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(1))},
+					{Name: "new-group", Replicas: ptr.To(int32(7))},
+				},
+			},
+		},
+	}
+	existing := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}},
+					{Name: "prefill", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 4}},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "decode-group", CliqueNames: []string{"decode"}},
+					{Name: "prefill-group", CliqueNames: []string{"prefill"}, Replicas: ptr.To(int32(6))},
+				},
+			},
+		},
+	}
+
+	preserveGrovePodCliqueSetReplicas(desired, existing)
+
+	replicasByClique := map[string]int32{}
+	for _, clique := range desired.Spec.Template.Cliques {
+		replicasByClique[clique.Name] = clique.Spec.Replicas
+	}
+	g.Expect(replicasByClique).To(gomega.Equal(map[string]int32{
+		"frontend":   2,
+		"prefill":    1,
+		"new-worker": 5,
+	}))
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas).To(gomega.BeNil())
+	g.Expect(desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).NotTo(gomega.BeNil())
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[1].Replicas).To(gomega.Equal(int32(6)))
+	g.Expect(*desired.Spec.Template.PodCliqueScalingGroupConfigs[2].Replicas).To(gomega.Equal(int32(7)))
+}
+
 func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_KeepsNativeWorkerSelectors(t *testing.T) {
 	ctx := context.Background()
 	g := gomega.NewGomegaWithT(t)

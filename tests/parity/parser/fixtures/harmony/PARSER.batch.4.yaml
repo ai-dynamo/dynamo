@@ -6,7 +6,7 @@ mode: batch
 cases:
   PARSER.batch.4.a:
     description: Channel envelope with garbage body
-    ref: dynamo
+    ref: "OpenAI Harmony JSON-constrained function calls: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at all<|call|>
     tools:
     - &id001
@@ -17,32 +17,33 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|call|> harmony token (+2 more) in normal_text on malformed input (impl-defined recovery)"
-        calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json
-          at all<|call|>
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      dynamo: &d_4_a
+        calls:
+        - arguments: not json at all
+          name: get_weather
+        normal_text: ''
+      vllm: *d_4_a
       sglang:
         calls: []
         normal_text: ''
+        reason: "Less parser-complete behavior: the Harmony envelope is a valid '<|call|>'-terminated function call, so the parser should preserve the malformed raw payload for downstream validation rather than dropping the call."
   PARSER.batch.4.b:
     description: Unterminated JSON in message body
-    ref: dynamo
+    ref: "OpenAI Harmony JSON-constrained function calls: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
     tools:
     - *id001
     expected:
-      dynamo:
-        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|call|> harmony token (+2 more) in normal_text on malformed input (impl-defined recovery)"
-        calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      dynamo: &d_4_b
+        calls:
+        - arguments: '{"location":"NYC'
+          name: get_weather
+        normal_text: ''
+      vllm: *d_4_b
       sglang:
         calls: []
         normal_text: ''
+        reason: "Less parser-complete behavior: the Harmony envelope is a valid '<|call|>'-terminated function call, so the parser should preserve the malformed raw payload for downstream validation rather than dropping the call."
   PARSER.batch.4.c:
     description: No to=functions.X recipient
     ref: dynamo
@@ -50,12 +51,11 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id002
+      dynamo: &d_4_c
         calls: []
         normal_text: ''
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang: *id002
+      vllm: *d_4_c
+      sglang: *d_4_c
   PARSER.batch.4.d:
     description: Malformed variant 4.d — not applicable to this family
     reason: |-

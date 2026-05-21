@@ -142,7 +142,7 @@ pub fn try_tool_call_parse_gemma4(
     //     return empty — Dynamo intentionally diverges from vLLM's
     //     exception-fallback (which echoes raw bytes) so tool-call markup
     //     never leaks into normal_text on malformed / truncated / orphan-
-    //     close / no-body inputs. Cases flagged by the parity chart's `↯`:
+    //     close / no-body inputs. Cases flagged by the parity table's `↯`:
     //     PARSER.batch.{4.a, 4.b, 4.c, 4.d, 5.a, 5.b, 5.c, 6.c}.
     //   - Plain-text path (zero calls AND no markup): return the message
     //     as-is.
@@ -476,6 +476,7 @@ mod tests {
         );
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1 in tests/parity/parser/fixtures/gemma4/PARSER.batch.yaml.
     #[test] // PARSER.batch.1 — single string argument
     fn parse_single_string_argument() {
         let input = r#"<|tool_call>call:get_weather{location:<|"|>Tokyo<|"|>}<tool_call|>"#;
@@ -484,6 +485,7 @@ mod tests {
         assert_eq!(args["location"], "Tokyo");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.1, PARSER.batch.7.a in tests/parity/parser/fixtures/gemma4/PARSER.batch.7.yaml, tests/parity/parser/fixtures/gemma4/PARSER.batch.yaml.
     #[test] // PARSER.batch.1, PARSER.batch.7 — multiple typed arguments
     fn parse_multiple_typed_arguments() {
         let input = r#"<|tool_call>call:f{loc:<|"|>San Francisco, CA<|"|>,unit:<|"|>celsius<|"|>,count:42,flag:true,nope:null}<tool_call|>"#;
@@ -496,6 +498,7 @@ mod tests {
         assert_eq!(args["nope"], Value::Null);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.6.a in tests/parity/parser/fixtures/gemma4/PARSER.batch.6.yaml.
     #[test] // PARSER.batch.6 — empty argument object
     fn parse_no_arg_call() {
         let input = "<|tool_call>call:get_time{}<tool_call|>";
@@ -504,6 +507,7 @@ mod tests {
         assert!(args.as_object().unwrap().is_empty());
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.d in tests/parity/parser/fixtures/gemma4/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7 — nested object value
     fn parse_nested_object_value() {
         let input = r#"<|tool_call>call:f{cfg:{ssl:true,pool:{min:5,max:20}}}<tool_call|>"#;
@@ -513,6 +517,7 @@ mod tests {
         assert_eq!(args["cfg"]["pool"]["max"], 20);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/gemma4/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7 — array of strings
     fn parse_array_of_strings() {
         let input = r#"<|tool_call>call:f{tags:[<|"|>a<|"|>,<|"|>b<|"|>,<|"|>c<|"|>]}<tool_call|>"#;
@@ -520,6 +525,7 @@ mod tests {
         assert_eq!(args["tags"], serde_json::json!(["a", "b", "c"]));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/gemma4/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7 — array of mixed primitives
     fn parse_array_of_mixed_primitives() {
         let input = "<|tool_call>call:f{xs:[1,2,3.5,true,false,null]}<tool_call|>";
@@ -532,6 +538,7 @@ mod tests {
         assert_eq!(args["xs"][5], Value::Null);
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.2.b in tests/parity/parser/fixtures/gemma4/PARSER.batch.2.yaml.
     #[test] // PARSER.batch.2 — multiple parallel calls, zero spacing
     fn parse_multiple_parallel_calls() {
         let input = concat!(
@@ -562,6 +569,7 @@ mod tests {
         assert_eq!(normal, Some("just plain prose here".to_string()));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.c in tests/parity/parser/fixtures/gemma4/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.5 — complete prior call survives; truncated tail dropped (matches vLLM)
     fn truncated_tail_dropped_complete_prior_survives() {
         let input = concat!(
@@ -577,6 +585,7 @@ mod tests {
         assert_eq!(normal, Some(String::new()));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.4.a in tests/parity/parser/fixtures/gemma4/PARSER.batch.4.yaml.
     #[test] // PARSER.batch.4 — malformed args body falls back to empty object, call still emitted
     fn malformed_args_falls_back_to_empty_object() {
         let input = "<|tool_call>call:f{garbage no colons here}<tool_call|>";
@@ -609,6 +618,7 @@ mod tests {
         }
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/gemma4/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7 — angle brackets / HTML inside string values
     fn parse_html_in_string_value() {
         let input = r#"<|tool_call>call:render{html:<|"|><div class="x"><h1>Hi</h1></div><|"|>}<tool_call|>"#;
@@ -616,6 +626,7 @@ mod tests {
         assert_eq!(args["html"], "<div class=\"x\"><h1>Hi</h1></div>");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/gemma4/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7 — newlines inside string values
     fn parse_newlines_in_string_value() {
         let input = "<|tool_call>call:f{body:<|\"|>line1\nline2\nline3<|\"|>}<tool_call|>";
@@ -631,6 +642,7 @@ mod tests {
         assert_eq!(args["y"], "z");
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.a in tests/parity/parser/fixtures/gemma4/PARSER.batch.7.yaml.
     #[test] // PARSER.batch.7 — negative numbers and floats
     fn parse_signed_numbers_and_floats() {
         let input = "<|tool_call>call:f{a:-1,b:-2.5,c:0,d:0.0}<tool_call|>";
@@ -732,6 +744,7 @@ mod tests {
         let _ = parse_args_object("x:nullable").unwrap_err();
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.5.c in tests/parity/parser/fixtures/gemma4/PARSER.batch.5.yaml.
     #[test] // PARSER.batch.5 — missing end-marker, markup suppressed (no-leak contract)
     fn incomplete_tool_call_suppresses_markup() {
         let input = "<|tool_call>call:foo{x:1";
@@ -747,6 +760,7 @@ mod tests {
     #[test] // PARSER.batch.7 — `<tool_call|>` literal inside a string-typed argument
     // must not truncate the call. The extraction regex requires
     // `}<tool_call|>` adjacency, so a bare embedded marker is safe.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.7.b in tests/parity/parser/fixtures/gemma4/PARSER.batch.7.yaml.
     fn embedded_tool_call_marker_in_string_value() {
         let input = r#"<|tool_call>call:render{html:<|"|><tool_call|> example<|"|>}<tool_call|>"#;
         let (calls, _) = try_tool_call_parse_gemma4(input, None).unwrap();
@@ -768,6 +782,7 @@ mod tests {
     // (in production the reasoning parser runs first and strips `<|channel>`,
     // but the tool-call parser must remain correct if it sees the full
     // emission, e.g. when reasoning parsing is disabled).
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.8.a in tests/parity/parser/fixtures/gemma4/PARSER.batch.8.yaml.
     fn paired_reasoning_and_tool_call_in_same_emission() {
         let input = concat!(
             "<|channel>thought\nthinking about the request<channel|>",
@@ -783,6 +798,7 @@ mod tests {
         assert!(normal.unwrap().contains("<|channel>thought"));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/gemma4/PARSER.batch.yaml.
     #[test] // PARSER.batch.9 — empty input, no tool calls
     fn empty_input_yields_zero_calls_empty_content() {
         let (calls, normal) = try_tool_call_parse_gemma4("", None).unwrap();
@@ -790,6 +806,7 @@ mod tests {
         assert_eq!(normal, Some(String::new()));
     }
 
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.9 in tests/parity/parser/fixtures/gemma4/PARSER.batch.yaml.
     #[test] // PARSER.batch.9 — `null` argument values round-trip as JSON null
     fn null_argument_values_preserved() {
         let input = "<|tool_call>call:f{x:null,y:none,z:nil}<tool_call|>";
@@ -804,6 +821,7 @@ mod tests {
     #[test] // PARSER.batch.10 — duplicate calls to the same function name. Both must
     // appear with distinct IDs; client decides whether duplicate invocation
     // is intended.
+    // DEPRECATED(parser-fixture-duplicate): Duplicate of YAML fixture coverage: PARSER.batch.10 in tests/parity/parser/fixtures/gemma4/PARSER.batch.yaml.
     fn duplicate_tool_call_same_name() {
         let input = concat!(
             "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>",

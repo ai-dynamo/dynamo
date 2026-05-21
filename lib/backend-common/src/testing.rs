@@ -65,7 +65,9 @@ pub enum ConformanceFailure {
     NoTerminalChunk,
     StreamYieldedError(String),
     ConcurrentGenerateFailed(String),
-    CancellationNotObserved { after: Duration },
+    CancellationNotObserved {
+        after: Duration,
+    },
     CancellationIgnored,
     CleanupFailed(String),
     SecondCleanupFailed(String),
@@ -74,7 +76,18 @@ pub enum ConformanceFailure {
     KvEventSourcesNotIdempotent,
     MetricsSourcesFailed(String),
     MetricsSourcesNotIdempotent,
-    MetricsSnapshotTooSlow { took: Duration },
+    MetricsSnapshotTooSlow {
+        took: Duration,
+    },
+    /// The engine's terminal `completion_usage.completion_tokens` doesn't
+    /// match the sum of `chunk.token_ids.len()` it emitted across the
+    /// stream. The framework records `output_tokens` from the chunk-token
+    /// sum; a divergence means the engine's internal bookkeeping disagrees
+    /// with what it actually streamed.
+    CompletionTokensMismatch {
+        chunked: usize,
+        reported: u32,
+    },
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -125,6 +138,12 @@ impl std::fmt::Display for ConformanceFailure {
                 f,
                 "SnapshotSource.snapshot took {took:?} (must be a cheap field read, \
                  < 1 ms; an engine-internal call would land in the 10s of ms)"
+            ),
+            CompletionTokensMismatch { chunked, reported } => write!(
+                f,
+                "engine emitted {chunked} tokens across the stream but reported \
+                 completion_usage.completion_tokens = {reported} on the terminal \
+                 (engine bookkeeping diverges from streamed output)"
             ),
         }
     }
@@ -240,11 +259,25 @@ async fn check_single_generate<E: LLMEngine>(
             terminal_idx = Some(i);
         }
     }
-    match terminal_idx {
-        Some(i) if i == chunks.len() - 1 => Ok(()),
-        Some(_) => Err(ChunkAfterTerminal),
-        None => Err(NoTerminalChunk),
+    let terminal_idx = match terminal_idx {
+        Some(i) if i == chunks.len() - 1 => i,
+        Some(_) => return Err(ChunkAfterTerminal),
+        None => return Err(NoTerminalChunk),
+    };
+
+    // Engine bookkeeping self-consistency: if the engine reports its own
+    // completion_tokens count on the terminal chunk, it must agree with the
+    // tokens it actually emitted. Skip when the engine doesn't report.
+    if let Some(usage) = chunks[terminal_idx].completion_usage.as_ref() {
+        let chunked: usize = chunks.iter().map(|c| c.token_ids.len()).sum();
+        if chunked != usage.completion_tokens as usize {
+            return Err(CompletionTokensMismatch {
+                chunked,
+                reported: usage.completion_tokens,
+            });
+        }
     }
+    Ok(())
 }
 
 async fn check_concurrent_generates<E: LLMEngine>(
