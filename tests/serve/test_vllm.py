@@ -1006,12 +1006,15 @@ def test_embedding_multi_worker_same_model_load_balance(
         marks=[],  # markers at function level
         model=_EMBED_SAME_MODEL,
         timeout=420,
-        # Poll each DYN_SYSTEM_PORT*/health endpoint before sending
-        # traffic so we don't race the second worker's model
-        # registration with the frontend. Without this, the first burst
-        # can fire while only one worker has registered its model,
-        # which manifests as HTTP 404 on /v1/embeddings.
-        health_check_workers=True,
+        # Crude readiness gate: wait long enough for both Qwen3-Embedding
+        # workers to load + register before sending traffic. The
+        # framework's ``health_check_workers=True`` path polls
+        # ``/health`` on each ``DYN_SYSTEM_PORT*``, but the embedding
+        # worker handler in PR #9713 doesn't call
+        # ``set_health_status(True)`` so ``/health`` stays at 503
+        # indefinitely — using ``delayed_start`` instead. 90s is
+        # comfortably above the observed ~30s per-worker load time.
+        delayed_start=90,
         request_payloads=[
             _embedding_warmup_payload(_EMBED_SAME_MODEL),
             burst,
@@ -1083,13 +1086,12 @@ def test_embedding_multi_worker_multi_model_dispatch(
         # Qwen3-Embedding-0.6B happily accepts the lower cap.
         env={"MAX_MODEL_LEN": "512"},
         timeout=420,
-        # Poll each DYN_SYSTEM_PORT*/health endpoint before sending
-        # traffic. Qwen3-Embedding-0.6B (~600M params) loads ~25s
-        # slower than BGE-small (~33M); without the per-worker wait,
-        # the first burst can fire while only BGE's name is
-        # registered with the frontend, which manifests as HTTP 404
-        # for the Qwen3 model.
-        health_check_workers=True,
+        # Crude readiness gate. ``health_check_workers=True`` would race
+        # against ``/health`` which stays at HTTP 503 on the embedding
+        # worker (see same-model test for the rationale). 90s is enough
+        # for both Qwen3-Embedding-0.6B and BGE-small to load and
+        # register their model names with the frontend.
+        delayed_start=90,
         request_payloads=[
             _embedding_warmup_payload(_EMBED_MODEL_A),
             _embedding_warmup_payload(_EMBED_MODEL_B),
