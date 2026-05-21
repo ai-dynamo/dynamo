@@ -129,7 +129,9 @@ jobs:
           # Base version pinned in pyproject.toml at the source SHA. Same value
           # cargo and maturin stamp into the wheel filename / METADATA.
           BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' pyproject.toml)
-          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # Accept X.Y.Z or X.Y.Z + one PEP 440 suffix: .postN, .devN, aN, bN, rcN.
+          # The SEMVER_BASE sed below must stay in lockstep with this regex.
+          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+|\.dev[0-9]+|a[0-9]+|b[0-9]+|rc[0-9]+)?$ ]]; then
             echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
             exit 1
           fi
@@ -173,14 +175,33 @@ jobs:
             fi
           fi
 
-          # Normalize version for Helm SemVer: X.Y.Z.suffix → X.Y.Z-suffix
-          SEMVER_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
-          HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
+          # Convert PEP 440 suffix on BASE_VERSION to SemVer pre-release so the
+          # Helm chart and NGC tag stay valid SemVer. Mapping:
+          #   .postN → -post.N    .devN → -dev.N
+          #   aN     → -alpha.N   bN    → -beta.N    rcN → -rc.N
+          # The auto-incremented RC counter is appended as -rc.NEXT_RC even when
+          # BASE_VERSION already contains rcN — those stack (e.g. 1.2.0-rc.1-rc.0).
+          SEMVER_BASE=$(echo "${BASE_VERSION}" | sed -E \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)\.post([0-9]+)$/\1-post.\2/' \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)\.dev([0-9]+)$/\1-dev.\2/' \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)a([0-9]+)$/\1-alpha.\2/' \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)$/\1-beta.\2/' \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)$/\1-rc.\2/')
+
+          if [[ "${SEMVER_BASE}" == *-* ]]; then
+            # Suffixed base: dotted SemVer form, identical for Helm and NGC.
+            HELM_CHART_VERSION="${SEMVER_BASE}-rc.${NEXT_RC}"
+            NGC_VERSION_TAG="${SEMVER_BASE}-rc.${NEXT_RC}"
+          else
+            # Plain X.Y.Z: preserve the existing tag shape exactly.
+            HELM_CHART_VERSION="${SEMVER_BASE}-rc${NEXT_RC}"
+            NGC_VERSION_TAG="${VERSION}rc${NEXT_RC}"
+          fi
 
           WHEEL_VERSION="${BASE_VERSION}"
 
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
-          echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
           echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
           echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
           echo "RC number: ${NEXT_RC}"
@@ -328,9 +349,12 @@ jobs:
             copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
             # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
+            # post-merge tags the frontend ECR image as <sha>-dynamo-frontend
+            # (framework=dynamo, target=frontend → tag builder "dynamo-frontend"),
+            # NOT <sha>-frontend.
             echo ""
             echo "=== Frontend Image ==="
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-frontend"
             TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
             copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
 
