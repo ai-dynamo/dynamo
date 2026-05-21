@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -132,7 +133,7 @@ func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DockerSecretIndexer.GetSecrets() error = %v", err)
 	}
-	if got, want := secrets, []string{"secret-a", "secret-b"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	if got, want := secrets, []string{"secret-a", "secret-b"}; !slices.Equal(got, want) {
 		t.Fatalf("DockerSecretIndexer.GetSecrets() = %v, want %v", got, want)
 	}
 
@@ -141,7 +142,7 @@ func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DockerSecretIndexer.GetSecrets() error = %v", err)
 	}
-	if got, want := secrets, []string{"secret-a", "secret-b"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	if got, want := secrets, []string{"secret-a", "secret-b"}; !slices.Equal(got, want) {
 		t.Fatalf("DockerSecretIndexer.GetSecrets() after caller mutation = %v, want %v", got, want)
 	}
 }

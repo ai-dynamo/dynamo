@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -326,7 +327,7 @@ func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChan
 	if err != nil {
 		return SpecChangeResult{}, err
 	}
-	currentHash, err := GetSpecHash(current)
+	currentMatchesDesired, err := specContentEqualPreserveListOrder(current, desired)
 	if err != nil {
 		return SpecChangeResult{}, err
 	}
@@ -357,7 +358,7 @@ func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChan
 	// bookkeeping annotations. This avoids rewriting API-server-defaulted fields
 	// during upgrades.
 	if lastAppliedHash == "" {
-		if currentHash == desiredHash {
+		if currentMatchesDesired {
 			return annotationOnlyChange(), nil
 		}
 		return specChange(false), nil
@@ -365,7 +366,7 @@ func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChan
 
 	// Case 2: Hash different (spec changed)
 	if desiredHash != lastAppliedHash {
-		if currentHash == desiredHash {
+		if currentMatchesDesired {
 			return annotationOnlyChange(), nil
 		}
 		return specChange(false), nil
@@ -373,7 +374,7 @@ func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChan
 
 	// Case 3: Hash same, but generation annotation missing (upgrade scenario)
 	if lastAppliedGenStr == "" {
-		if currentHash == desiredHash {
+		if currentMatchesDesired {
 			return annotationOnlyChange(), nil
 		}
 		return specChange(false), nil
@@ -383,7 +384,7 @@ func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChan
 	lastAppliedGen, err := strconv.ParseInt(lastAppliedGenStr, 10, 64)
 	if err != nil {
 		// Corrupted annotation, force update to fix
-		if currentHash == desiredHash {
+		if currentMatchesDesired {
 			return annotationOnlyChange(), nil
 		}
 		return specChange(false), nil
@@ -392,7 +393,7 @@ func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChan
 	// Detect manual changes: if current generation > last applied generation,
 	// someone else modified the resource after our last update
 	if currentGen > 0 && currentGen > lastAppliedGen {
-		if currentHash == desiredHash {
+		if currentMatchesDesired {
 			return annotationOnlyChange(), nil
 		}
 		return specChange(true), nil
@@ -402,6 +403,18 @@ func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChan
 	return SpecChangeResult{
 		NeedsUpdate: false,
 	}, nil
+}
+
+func specContentEqualPreserveListOrder(current, desired client.Object) (bool, error) {
+	currentSpec, err := getSpec(current)
+	if err != nil {
+		return false, err
+	}
+	desiredSpec, err := getSpec(desired)
+	if err != nil {
+		return false, err
+	}
+	return equality.Semantic.DeepEqual(currentSpec, desiredSpec), nil
 }
 
 // getAnnotation safely retrieves an annotation value from an object

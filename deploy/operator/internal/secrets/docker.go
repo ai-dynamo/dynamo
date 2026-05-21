@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"sort"
 	"sync"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
@@ -33,11 +32,20 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 	if err := i.client.List(ctx, secrets); err != nil {
 		return fmt.Errorf("unable to list secrets: %w", err)
 	}
-	sort.Slice(secrets.Items, func(a, b int) bool {
-		if secrets.Items[a].Namespace != secrets.Items[b].Namespace {
-			return secrets.Items[a].Namespace < secrets.Items[b].Namespace
+	slices.SortFunc(secrets.Items, func(a, b corev1.Secret) int {
+		if a.Namespace != b.Namespace {
+			if a.Namespace < b.Namespace {
+				return -1
+			}
+			return 1
 		}
-		return secrets.Items[a].Name < secrets.Items[b].Name
+		if a.Name < b.Name {
+			return -1
+		}
+		if a.Name > b.Name {
+			return 1
+		}
+		return 0
 	})
 	tmpSecrets := make(map[string]map[string][]string)
 	for _, secret := range secrets.Items {
@@ -65,7 +73,7 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 	}
 	for namespace := range tmpSecrets {
 		for registry, secretNames := range tmpSecrets[namespace] {
-			sort.Strings(secretNames)
+			slices.Sort(secretNames)
 			tmpSecrets[namespace][registry] = slices.Compact(secretNames)
 		}
 	}

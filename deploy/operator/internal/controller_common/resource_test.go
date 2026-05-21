@@ -459,6 +459,55 @@ func TestGetSpecChangeResult_AnnotationOnlyForEquivalentSpec(t *testing.T) {
 	g.Expect(result.NewHash).ToNot(gomega.BeNil())
 }
 
+func TestGetSpecChangeResult_OrderOnlyManualDriftNeedsSpecUpdate(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	desired := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "worker",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"initContainers": []interface{}{
+							map[string]interface{}{"name": "setup", "image": "busybox"},
+							map[string]interface{}{"name": "migrate", "image": "busybox"},
+						},
+						"containers": []interface{}{
+							map[string]interface{}{"name": "main", "image": "worker:v1"},
+						},
+					},
+				},
+			},
+		},
+	}
+	current := desired.DeepCopy()
+	current.SetGeneration(6)
+	current.Object["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["initContainers"] = []interface{}{
+		map[string]interface{}{"name": "migrate", "image": "busybox"},
+		map[string]interface{}{"name": "setup", "image": "busybox"},
+	}
+	desiredHash, err := GetSpecHash(desired)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	currentHash, err := GetSpecHash(current)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(currentHash).To(gomega.Equal(desiredHash), "canonical hash must reproduce the historical blind spot")
+	current.SetAnnotations(map[string]string{
+		NvidiaAnnotationHashKey:       desiredHash,
+		NvidiaAnnotationGenerationKey: "5",
+	})
+
+	result, err := GetSpecChangeResult(current, desired)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(result.NeedsUpdate).To(gomega.BeTrue())
+	g.Expect(result.SpecNeedsUpdate).To(gomega.BeTrue())
+	g.Expect(result.ManualChangeDetected).To(gomega.BeTrue())
+	g.Expect(result.NewGeneration).To(gomega.Equal(int64(7)))
+}
+
 func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 	tests := []struct {
 		name                       string
