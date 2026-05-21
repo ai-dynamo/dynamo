@@ -724,9 +724,8 @@ class TestImageHandlerResponseFormats:
         assert len(results[0]["data"]) == 2
 
     @pytest.mark.asyncio
-    async def test_n_gt_1_no_longer_rejected(self):
-        """Pre-fix handler raised ValueError for n>1; the fix removes that
-        rejection so n=2 requests reach the engine and produce a response."""
+    async def test_n_gt_1_is_accepted(self):
+        """Requests with n > 1 are accepted and reach the engine."""
         handler = self._make_handler(
             engine_output_batch=2,
             default_num_images_per_prompt=1,
@@ -743,7 +742,6 @@ class TestImageHandlerResponseFormats:
             "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
             return_value=b"fake_image_bytes",
         ):
-            # The pre-fix handler raised ValueError("Requested 2 images, ...").
             async for _ in handler.generate(request, MagicMock()):
                 pass
 

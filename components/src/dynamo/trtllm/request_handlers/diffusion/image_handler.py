@@ -206,10 +206,8 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             assert (
                 images.ndim == 4 and images.shape[3] == 3
             ), f"Expected image shape (B, H, W, C), got {images.shape}"
-            # Bound the response to what the caller asked for. The engine
-            # separately warns when the pipeline's actual batch differs from
-            # num_images_per_prompt; the handler does not synthesize missing
-            # images and does not forward extras beyond the requested count.
+            # Engine warns on batch mismatch; here we clamp to the caller's
+            # requested count without padding or synthesizing.
             emit_count = min(images.shape[0], num_images_per_prompt)
             data_items: list[ImageData] = []
             for i in range(emit_count):

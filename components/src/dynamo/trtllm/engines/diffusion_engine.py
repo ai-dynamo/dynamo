@@ -314,8 +314,7 @@ class DiffusionEngine:
                 if actual_num_images != num_images_per_prompt:
                     logger.warning(
                         f"Pipeline returned {actual_num_images} image(s) but "
-                        f"{num_images_per_prompt} were requested; the caller will "
-                        f"receive the pipeline's actual output unchanged."
+                        f"{num_images_per_prompt} were requested."
                     )
 
         return output
