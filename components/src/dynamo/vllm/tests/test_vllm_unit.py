@@ -736,7 +736,10 @@ async def test_health_check_decode_opts_out_with_warning():
     from dynamo.vllm.llm_engine import VllmLLMEngine
 
     engine = VllmLLMEngine(
-        engine_args=None, disaggregation_mode=DisaggregationMode.DECODE
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.DECODE,
+        served_model_name="test",
+        component="backend",
     )
     with patch("dynamo.vllm.llm_engine.logger") as mock_logger:
         payload = await engine.health_check_payload()
@@ -753,7 +756,10 @@ async def test_health_check_aggregated_returns_canary():
     from dynamo.vllm.llm_engine import VllmLLMEngine
 
     engine = VllmLLMEngine(
-        engine_args=None, disaggregation_mode=DisaggregationMode.AGGREGATED
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        served_model_name="test",
+        component="backend",
     )
     payload = await engine.health_check_payload()
 
