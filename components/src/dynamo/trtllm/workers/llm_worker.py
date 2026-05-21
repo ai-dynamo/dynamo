@@ -8,6 +8,7 @@ LLM workers using TensorRT-LLM.
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -121,6 +122,74 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     raise ValueError(
         "--model-loader-extra-config must be a JSON object string or a dict"
     )
+
+
+# Fields that have historically been silently overwritten by Dynamo defaults.
+# See issue #9288 for regression history.
+_FRAGILE_FIELDS = (
+    "return_perf_metrics",
+    "enable_iter_perf_stats",
+    "backend",
+)
+
+_FRAGILE_KV_CACHE_FIELDS = (
+    "event_buffer_max_size",
+    "free_gpu_memory_fraction",
+    "cache_transceiver_config",
+)
+
+
+def _audit_user_config_preservation(final_args: dict, user_snapshot: dict) -> None:
+    """Warn when Dynamo defaults overwrite user-supplied values in arg_map.
+
+    Compares the final engine args against a snapshot taken after user
+    configuration (CLI + extra/override args) was applied. Emits warnings
+    for historically-fragile fields that were silently replaced.
+    """
+    for key in _FRAGILE_FIELDS:
+        if key in user_snapshot and key in final_args:
+            user_val = user_snapshot[key]
+            final_val = final_args[key]
+            if user_val != final_val:
+                logging.warning(
+                    "User-supplied engine arg %r was overwritten: %r -> %r. "
+                    "This may indicate a configuration bug. See issue #9288.",
+                    key,
+                    user_val,
+                    final_val,
+                )
+
+    # Check kv_cache_config sub-fields
+    user_kv = user_snapshot.get("kv_cache_config")
+    final_kv = final_args.get("kv_cache_config")
+    if user_kv is not None and final_kv is not None:
+        # Normalize to dict for comparison
+        user_kv_dict = (
+            user_kv.model_dump(exclude_none=True)
+            if hasattr(user_kv, "model_dump")
+            else user_kv
+            if isinstance(user_kv, dict)
+            else {}
+        )
+        final_kv_dict = (
+            final_kv.model_dump(exclude_none=True)
+            if hasattr(final_kv, "model_dump")
+            else final_kv
+            if isinstance(final_kv, dict)
+            else {}
+        )
+        for key in _FRAGILE_KV_CACHE_FIELDS:
+            if key in user_kv_dict and key in final_kv_dict:
+                user_val = user_kv_dict[key]
+                final_val = final_kv_dict[key]
+                if user_val != final_val:
+                    logging.warning(
+                        "User-supplied kv_cache_config.%s was overwritten: %r -> %r. "
+                        "This may indicate a configuration bug. See issue #9288.",
+                        key,
+                        user_val,
+                        final_val,
+                    )
 
 
 def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
@@ -297,6 +366,10 @@ async def init_llm_worker(
 
     _sync_config_from_engine_args(config, arg_map)
 
+    # Snapshot user-supplied arg_map after all user configuration (CLI, extra,
+    # override) has been applied. Used later to detect silent overwrites.
+    _user_arg_map_snapshot = copy.deepcopy(arg_map)
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
@@ -323,13 +396,23 @@ async def init_llm_worker(
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
             arg_map["backend"] = Backend.PYTORCH
-        elif arg_map["backend"] not in Backend:
-            logging.error(
-                "Only %s supported for now to publish events and metrics. Got: %s",
-                [b.value for b in Backend],
-                arg_map["backend"],
-            )
-            sys.exit(1)
+        else:
+            # Normalize string backend values to Backend enum (user overrides
+            # arrive as strings from JSON). Prevents TypeError on membership check.
+            backend_val = arg_map["backend"]
+            if isinstance(backend_val, str):
+                try:
+                    backend_val = Backend(backend_val)
+                    arg_map["backend"] = backend_val
+                except ValueError:
+                    pass
+            if backend_val not in Backend:
+                logging.error(
+                    "Only %s supported for now to publish events and metrics. Got: %s",
+                    [b.value for b in Backend],
+                    arg_map["backend"],
+                )
+                sys.exit(1)
 
     trtllm_zmq_bind_endpoint = None  # Endpoint for TensorRT-LLM to bind and publish
     consolidator_output_endpoint = (
@@ -366,6 +449,9 @@ async def init_llm_worker(
 
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
+
+    # Audit: detect if any user-supplied values were silently overwritten.
+    _audit_user_config_preservation(engine_args, _user_arg_map_snapshot)
 
     # Populate default sampling params from the model
     custom_tokenizer = arg_map.get("custom_tokenizer")
@@ -498,9 +584,8 @@ async def init_llm_worker(
             config.exclude_tools_when_tool_choice_none
         )
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
-        runtime_config.enable_local_indexer = (
-            config.enable_local_indexer
-            and config.disaggregation_mode != DisaggregationMode.DECODE
+        runtime_config.enable_local_indexer = config.enable_local_indexer and (
+            config.disaggregation_mode != DisaggregationMode.DECODE
         )
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks

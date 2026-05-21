@@ -20,6 +20,7 @@ if not torch.cuda.is_available():
 
 from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import Modality
+from dynamo.trtllm.engine import Backend
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import init_llm_worker
@@ -351,3 +352,205 @@ async def test_init_llm_worker_creates_multimodal_processor():
                 config=config,
                 shutdown_event=asyncio.Event(),
             )
+
+
+# ---- Regression tests for user-config preservation (issue #9288) ----
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_user_event_buffer_max_size_preserved(monkeypatch):
+    """User-specified event_buffer_max_size is not overwritten by default 1024."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-events",
+            "--override-engine-args",
+            '{"kv_cache_config": {"event_buffer_max_size": 4096}}',
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        kv_cfg = engine_args["kv_cache_config"]
+        if isinstance(kv_cfg, dict):
+            buf_size = kv_cfg.get("event_buffer_max_size")
+        else:
+            buf_size = getattr(kv_cfg, "event_buffer_max_size", None)
+        assert buf_size == 4096, (
+            f"User event_buffer_max_size=4096 was overwritten with {buf_size}. "
+            "See issue #9288."
+        )
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_return_perf_metrics_set_when_publish_events(monkeypatch):
+    """return_perf_metrics is present in engine_args when publish_events is True."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+
+    config = parse_args(["--model", "fake-model", "--publish-events"])
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        assert "return_perf_metrics" in engine_args, (
+            "return_perf_metrics missing from engine_args when publish_events=True. "
+            "See issue #9288."
+        )
+        assert engine_args["return_perf_metrics"] is True
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_user_free_gpu_memory_fraction_preserved(monkeypatch):
+    """User-specified free_gpu_memory_fraction survives arg_map mutations."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-events",
+            "--override-engine-args",
+            '{"kv_cache_config": {"free_gpu_memory_fraction": 0.7}}',
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        kv_cfg = engine_args["kv_cache_config"]
+        if isinstance(kv_cfg, dict):
+            fraction = kv_cfg.get("free_gpu_memory_fraction")
+        else:
+            fraction = getattr(kv_cfg, "free_gpu_memory_fraction", None)
+        assert fraction == 0.7, (
+            f"User free_gpu_memory_fraction=0.7 was overwritten with {fraction}. "
+            "See issue #9288."
+        )
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_enable_iter_perf_stats_set_when_publish_events(monkeypatch):
+    """enable_iter_perf_stats is present in engine_args when publish_events is True."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+
+    config = parse_args(["--model", "fake-model", "--publish-events"])
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        assert (
+            "enable_iter_perf_stats" in engine_args
+        ), "enable_iter_perf_stats missing from engine_args. See issue #9288."
+        assert engine_args["enable_iter_perf_stats"] is True
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_user_backend_not_overwritten(monkeypatch):
+    """User-specified backend via override is not silently replaced."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-events",
+            "--override-engine-args",
+            '{"backend": "pytorch"}',
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        # Backend should remain what the user specified
+        backend_val = engine_args["backend"]
+        is_pytorch = backend_val == Backend.PYTORCH or (
+            isinstance(backend_val, str) and backend_val.lower() == "pytorch"
+        )
+        assert (
+            is_pytorch
+        ), f"User backend was overwritten to {engine_args['backend']}. See issue #9288."
