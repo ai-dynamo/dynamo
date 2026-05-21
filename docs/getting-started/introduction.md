@@ -4,6 +4,11 @@
 sidebar-title: Introduction
 ---
 
+<!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
+<p align="left">
+  <a href="./introduction.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 # Introduction to Dynamo
 
 Dynamo is an open-source, high-throughput, low-latency inference framework, designed to serve generative AI workloads in distributed environments. This page gives an overview of Dynamo's design principles, performance benefits, and production-grade features.

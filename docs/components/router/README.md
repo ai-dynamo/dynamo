@@ -4,6 +4,11 @@
 title: Router
 ---
 
+<!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
+<p align="left">
+  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
 ## Quick Start
