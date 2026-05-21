@@ -619,13 +619,18 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(
-                14.7
-            ),  # actual peak at recommended token count
+                15.7
+            ),  # ~14.7 weights + ~1 GiB for 2048-token KV cache on deepseek-llm-7b
             pytest.mark.requested_sglang_kv_tokens(
-                64
-            ),  # KV cache cap (2x safety over min=32)
+                2048
+            ),  # >= prompt(~16) + max_tokens(1000) + scheduler reserve;
+            # SGLang 0.5.11 silently hangs when prompt+max_tokens nears
+            # max_total_tokens (bisected ~1040 for these payloads). Matches
+            # the "aggregated" config above.
             pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
-            pytest.mark.post_merge,
+            # TODO: revert to pytest.mark.post_merge after pre_merge validation
+            # on this PR (see .ai/ci-guidelines.md).
+            pytest.mark.pre_merge,
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
