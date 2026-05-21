@@ -10,8 +10,11 @@ These tests do NOT require visual_gen, torch, or GPU - they test logic only.
 """
 
 import asyncio
+import logging
+import sys
 import threading
 import time
+import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -387,7 +390,7 @@ class TestVideoHandlerConcurrency:
           one thread is ever inside generate() → ``max_concurrent == 1``.
     """
 
-    def _make_handler(self):
+    def _make_handler(self, tmp_path):
         """Create a ImageGenerationHandler with mock engine and config."""
         from dynamo.trtllm.request_handlers.diffusion.image_handler import (
             ImageGenerationHandler,
@@ -399,7 +402,7 @@ class TestVideoHandlerConcurrency:
         mock_engine.generate = tracker.generate
 
         config = DiffusionConfig(
-            media_output_fs_url="file:///tmp/test_media",
+            media_output_fs_url=(tmp_path / "test_media").as_uri(),
             default_fps=24,
             default_seconds=4,
         )
@@ -428,7 +431,7 @@ class TestVideoHandlerConcurrency:
             pass
 
     @pytest.mark.timeout(5)
-    def test_concurrent_requests_are_serialized(self):
+    def test_concurrent_requests_are_serialized(self, tmp_path):
         """Fires 3 concurrent requests and asserts only one thread enters
         engine.generate() at a time (max_concurrent == 1).
 
@@ -438,7 +441,7 @@ class TestVideoHandlerConcurrency:
         """
 
         async def run():
-            handler, tracker = self._make_handler()
+            handler, tracker = self._make_handler(tmp_path)
 
             requests = [self._make_request() for _ in range(3)]
 
@@ -471,26 +474,40 @@ class TestVideoHandlerConcurrency:
 class TestImageHandlerResponseFormats:
     """Tests for ImageGenerationHandler generate() response format branching."""
 
-    def _make_handler(self):
-        """Create a handler with mocked engine and fs."""
+    def _make_handler(self, tmp_path, engine_output_batch: int = 1, **config_overrides):
+        """Create a handler with mocked engine and fs.
+
+        Args:
+            tmp_path: pytest-provided per-test temporary directory used as the
+                handler's ``media_output_fs_url`` so tests stay hermetic and
+                parallel-safe.
+            engine_output_batch: First dim of the synthetic image tensor the mock
+                engine returns. Lets tests exercise the handler's batch-iteration
+                and clamping behavior without needing the real engine.
+            **config_overrides: Extra DiffusionConfig kwargs (e.g.,
+                ``default_num_images_per_prompt=2``) merged on top of the
+                default test config.
+        """
         from dynamo.trtllm.request_handlers.diffusion.image_handler import (
             ImageGenerationHandler,
         )
 
         mock_output = SimpleNamespace(
             video=None,
-            image=torch.zeros((1, 64, 64, 3), dtype=torch.uint8),
+            image=torch.zeros((engine_output_batch, 64, 64, 3), dtype=torch.uint8),
             audio=None,
         )
         mock_engine = MagicMock()
         mock_engine.generate = MagicMock(return_value=mock_output)
 
-        config = DiffusionConfig(
-            media_output_fs_url="file:///tmp/test_media",
+        config_kwargs = dict(
+            media_output_fs_url=(tmp_path / "test_media").as_uri(),
             media_output_http_url="https://cdn.example.com/media",
             default_fps=24,
             default_seconds=4,
         )
+        config_kwargs.update(config_overrides)
+        config = DiffusionConfig(**config_kwargs)
 
         with patch(
             "dynamo.trtllm.request_handlers.diffusion.image_handler.get_fs",
@@ -504,9 +521,9 @@ class TestImageHandlerResponseFormats:
         return handler
 
     @pytest.mark.asyncio
-    async def test_url_response_format(self):
+    async def test_url_response_format(self, tmp_path):
         """Test generate() with url response format calls upload_to_fs."""
-        handler = self._make_handler()
+        handler = self._make_handler(tmp_path)
 
         request = {
             "prompt": "a test image",
@@ -535,9 +552,9 @@ class TestImageHandlerResponseFormats:
         mock_upload.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_b64_response_format(self):
+    async def test_b64_response_format(self, tmp_path):
         """Test generate() with b64_json response format returns base64 encoded image."""
-        handler = self._make_handler()
+        handler = self._make_handler(tmp_path)
 
         request = {
             "prompt": "a test image",
@@ -566,9 +583,9 @@ class TestImageHandlerResponseFormats:
         assert decoded == b"fake_image_bytes"
 
     @pytest.mark.asyncio
-    async def test_default_response_format_is_url(self):
+    async def test_default_response_format_is_url(self, tmp_path):
         """Test that generate() defaults to url response format."""
-        handler = self._make_handler()
+        handler = self._make_handler(tmp_path)
 
         request = {
             "prompt": "a test image",
@@ -593,13 +610,13 @@ class TestImageHandlerResponseFormats:
         assert results[0]["data"][0]["url"] is not None
 
     @pytest.mark.asyncio
-    async def test_error_response_on_failure(self):
+    async def test_error_response_on_failure(self, tmp_path):
         """
         Test that generate() raises exception on engine failure. This is different from video generation.
         In video generation where the error is embedded in the response, but in image generation,
         the response doesn't contain the error, so the handler doesn't suppress it and let it propagate.
         """
-        handler = self._make_handler()
+        handler = self._make_handler(tmp_path)
         handler.engine.generate = MagicMock(side_effect=RuntimeError("GPU OOM"))
 
         request = {
@@ -612,3 +629,326 @@ class TestImageHandlerResponseFormats:
                 pass
 
         assert "GPU OOM" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_url_response_format_batch_n(self, tmp_path):
+        """Engine returns batch=2 with default_num_images_per_prompt=2 and no
+        request-level n -> response carries two ImageData entries, each from a
+        separate upload with a distinct storage path."""
+        handler = self._make_handler(
+            tmp_path,
+            engine_output_batch=2,
+            default_num_images_per_prompt=2,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "response_format": "url",
+        }
+
+        upload_urls = [
+            "https://cdn.example.com/media/images/test_0.png",
+            "https://cdn.example.com/media/images/test_1.png",
+        ]
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ), patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            side_effect=upload_urls,
+        ) as mock_upload:
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 2
+        assert mock_upload.call_count == 2
+
+        storage_paths = [call.args[1] for call in mock_upload.call_args_list]
+        assert (
+            len(set(storage_paths)) == 2
+        ), f"Expected distinct storage paths per image, got {storage_paths}"
+
+    @pytest.mark.asyncio
+    async def test_request_n_overrides_default(self, tmp_path):
+        """Per-request n takes precedence over config default. Default=1,
+        request n=2, engine returns batch=2 -> two entries."""
+        handler = self._make_handler(
+            tmp_path,
+            engine_output_batch=2,
+            default_num_images_per_prompt=1,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "b64_json",
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ):
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_n_gt_1_is_accepted(self, tmp_path):
+        """Requests with n > 1 are accepted and reach the engine."""
+        handler = self._make_handler(
+            tmp_path,
+            engine_output_batch=2,
+            default_num_images_per_prompt=1,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "b64_json",
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ):
+            async for _ in handler.generate(request, MagicMock()):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_handler_emits_fewer_when_engine_shortchanges(self, tmp_path):
+        """Engine returns batch=1 when request asks for n=2 -> response has 1
+        entry. The handler does not synthesize, pad, or error; it faithfully
+        reports what the engine produced."""
+        handler = self._make_handler(
+            tmp_path,
+            engine_output_batch=1,
+            default_num_images_per_prompt=1,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "url",
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ), patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            return_value="https://cdn.example.com/media/images/test_0.png",
+        ) as mock_upload:
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 1
+        assert mock_upload.call_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("n", [0, -1, 11, 100])
+    async def test_n_out_of_range_is_rejected(self, tmp_path, n):
+        """Requests with n < 1 or n > 10 (OpenAI's documented range) raise
+        ValueError before the engine is called."""
+        handler = self._make_handler(tmp_path, default_num_images_per_prompt=1)
+        handler.engine.generate = MagicMock()  # Should never be called.
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": n,
+        }
+
+        with pytest.raises(
+            ValueError, match=r"num_images_per_prompt must be in \[1, 10\]"
+        ):
+            async for _ in handler.generate(request, MagicMock()):
+                pass
+
+        handler.engine.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handler_clamps_when_engine_overproduces(self, tmp_path):
+        """Engine returns batch=3 when request asks for n=2 -> response is
+        truncated to 2 entries. Defensive: bounds the handler's iteration by
+        what the caller asked for, even if the pipeline ever over-produces."""
+        handler = self._make_handler(
+            tmp_path,
+            engine_output_batch=3,
+            default_num_images_per_prompt=1,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "url",
+        }
+
+        upload_urls = [
+            "https://cdn.example.com/media/images/test_0.png",
+            "https://cdn.example.com/media/images/test_1.png",
+        ]
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ), patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            side_effect=upload_urls,
+        ) as mock_upload:
+            results = []
+            async for result in handler.generate(request, MagicMock()):
+                results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 2
+        assert mock_upload.call_count == 2
+
+
+# =============================================================================
+# Part 7: DiffusionEngine Mismatch Warning Tests
+# =============================================================================
+
+
+_DIFFUSION_ENGINE_LOGGER = "dynamo.trtllm.engines.diffusion_engine"
+
+
+class _StubVisualGenParams:
+    """Minimal stand-in for tensorrt_llm.visual_gen.params.VisualGenParams.
+
+    Accepts the same keyword arguments DiffusionEngine.generate() passes and
+    exposes them as attributes, so the engine's `_merge_defaults` mirror code
+    can read/set them. extra_params defaults to None (matches real behavior).
+    """
+
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        if not hasattr(self, "extra_params"):
+            self.extra_params = None
+
+
+class _StubDiffusionRequest:
+    """Minimal stand-in for tensorrt_llm._torch.visual_gen.executor.DiffusionRequest."""
+
+    def __init__(self, request_id, prompt, params):
+        self.request_id = request_id
+        self.prompt = prompt
+        self.params = params
+
+
+@pytest.fixture
+def stub_trtllm_modules(monkeypatch):
+    """Install minimal tensorrt_llm stubs so DiffusionEngine.generate() can run
+    in unit tests without TRT-LLM installed.
+
+    DiffusionEngine.generate() does two lazy imports inside its body:
+        from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
+        from tensorrt_llm.visual_gen.params import VisualGenParams
+    The unit-test environment doesn't ship TRT-LLM (see this file's header
+    docstring), so we substitute minimal classes that match the surface the
+    engine uses.
+    """
+    params_mod = types.ModuleType("tensorrt_llm.visual_gen.params")
+    params_mod.VisualGenParams = _StubVisualGenParams
+
+    executor_mod = types.ModuleType("tensorrt_llm._torch.visual_gen.executor")
+    executor_mod.DiffusionRequest = _StubDiffusionRequest
+
+    parent_modules = [
+        "tensorrt_llm",
+        "tensorrt_llm._torch",
+        "tensorrt_llm._torch.visual_gen",
+        "tensorrt_llm.visual_gen",
+    ]
+    for name in parent_modules:
+        if name not in sys.modules:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(
+        sys.modules, "tensorrt_llm._torch.visual_gen.executor", executor_mod
+    )
+    monkeypatch.setitem(sys.modules, "tensorrt_llm.visual_gen.params", params_mod)
+
+
+class TestDiffusionEngineMismatchWarning:
+    """Tests for DiffusionEngine.generate()'s pipeline-output mismatch warning.
+
+    The underlying TRT-LLM Flux2Pipeline (and likely FluxPipeline) silently
+    returns batch=1 regardless of the requested num_images_per_prompt.
+    DiffusionEngine.generate() stays a thin pass-through over pipeline.infer()
+    but logs a WARNING when output.image.shape[0] != num_images_per_prompt so
+    operators can see the mismatch in production logs. The pipeline output is
+    not mutated, padded, or looped — the engine is observability, not workaround.
+    """
+
+    def _make_pipeline(self, returned_batch: int):
+        """Mock pipeline that returns an image tensor with the given batch size."""
+        pipeline = MagicMock()
+        pipeline.default_generation_params = {}
+        pipeline.extra_param_specs = {}
+        pipeline.infer = MagicMock(
+            return_value=SimpleNamespace(
+                video=None,
+                image=torch.zeros((returned_batch, 64, 64, 3), dtype=torch.uint8),
+                audio=None,
+            )
+        )
+        return pipeline
+
+    def _make_engine(self, pipeline, tmp_path):
+        """Construct a DiffusionEngine with the given mock pipeline already loaded."""
+        from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
+
+        config = DiffusionConfig(media_output_fs_url=(tmp_path / "test_media").as_uri())
+        engine = DiffusionEngine(config)
+        engine._initialized = True
+        engine._pipeline = pipeline
+        return engine
+
+    def _warning_records(self, caplog):
+        return [
+            r
+            for r in caplog.records
+            if r.name == _DIFFUSION_ENGINE_LOGGER and r.levelno >= logging.WARNING
+        ]
+
+    def test_warns_on_count_mismatch(self, tmp_path, caplog, stub_trtllm_modules):
+        """Pipeline returns 1 image when 2 were requested -> WARNING naming both values."""
+        engine = self._make_engine(self._make_pipeline(returned_batch=1), tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
+            engine.generate(prompt="a test prompt", num_images_per_prompt=2)
+
+        warnings = self._warning_records(caplog)
+        assert len(warnings) == 1, (
+            f"Expected exactly one WARNING for the 2-vs-1 mismatch, "
+            f"got {[r.getMessage() for r in warnings]}"
+        )
+        msg = warnings[0].getMessage()
+        assert "2" in msg and "1" in msg, (
+            f"WARNING message should name both requested (2) and actual (1) "
+            f"counts; got: {msg!r}"
+        )
+
+    def test_silent_when_count_matches(self, tmp_path, caplog, stub_trtllm_modules):
+        """Pipeline returns 2 images when 2 were requested -> no WARNING."""
+        engine = self._make_engine(self._make_pipeline(returned_batch=2), tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger=_DIFFUSION_ENGINE_LOGGER):
+            engine.generate(prompt="a test prompt", num_images_per_prompt=2)
+
+        warnings = self._warning_records(caplog)
+        assert warnings == [], (
+            f"Expected no WARNING when pipeline returns the requested batch size, "
+            f"got {[r.getMessage() for r in warnings]}"
+        )
