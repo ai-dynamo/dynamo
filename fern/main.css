@@ -1126,18 +1126,22 @@ svg.card-icon{
 .dynamo-config-value {
     display: inline-flex;
     align-items: center;
-    min-height: 32px;
-    padding: 7px 10px;
-    border: 1px solid var(--border, var(--grayscale-a5));
-    border-radius: var(--rounded);
-    background: var(--nv-color-bg-default);
+    min-height: 0;
+    padding: 2px 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
     color: var(--pst-color-text-base);
     font-weight: 700;
-    line-height: 1;
+    line-height: 1.35;
+    cursor: default;
 }
 
-.dark .dynamo-config-value {
-    background: var(--nv-dark-grey-2);
+.dynamo-config-value:not(:last-child)::after {
+    content: ",";
+    margin-right: 2px;
+    color: var(--pst-color-text-muted);
+    font-weight: 400;
 }
 
 .dynamo-filter-row {
