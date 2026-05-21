@@ -72,14 +72,18 @@ pytestmark = [
 
 
 class _FakeContext:
-    """Duck-typed ``dynamo._core.Context``.  ``VllmLLMEngine`` only calls
-    ``context.id()``."""
+    """Duck-typed ``dynamo._core.Context``. ``VllmLLMEngine`` calls
+    ``context.id()`` plus ``context.trace_headers()``; the latter returns
+    ``None`` here so propagation is a no-op."""
 
     def __init__(self, request_id: str = "unit-test-req") -> None:
         self._id = request_id
 
     def id(self) -> str:
         return self._id
+
+    def trace_headers(self) -> dict[str, str] | None:
+        return None
 
     def is_stopped(self) -> bool:
         return False

@@ -25,6 +25,7 @@ import (
 	"maps"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -1754,8 +1755,77 @@ func applyDGDTemplateDefaults(
 		main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
 	}
 
+	// Bake KV transfer policy env vars into worker pod templates so they
+	// survive DGD → DCD materialization (the DCD controller lacks the parent DGD).
+	// Workers publish these in their MDC so the router reads policy per-worker.
+	if shouldApplyKvTransferPolicyEnvVarsToWorkerComponent(component, dynamoDeployment) {
+		applyKvTransferPolicyEnvVarsToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
+	}
+
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
+}
+
+func shouldApplyKvTransferPolicyEnvVarsToWorkerComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+) bool {
+	return component != nil &&
+		dynamoDeployment != nil &&
+		dynamoDeployment.Spec.Experimental != nil &&
+		dynamoDeployment.Spec.Experimental.KvTransferPolicy != nil &&
+		IsWorkerComponent(string(component.ComponentType))
+}
+
+func applyKvTransferPolicyEnvVarsToWorkerComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	kvt *v1beta1.KvTransferPolicy,
+) {
+	if component == nil || kvt == nil {
+		return
+	}
+	podTemplate := ensurePodTemplate(component)
+	main := ensureMainContainer(podTemplate)
+	enforcement := string(kvt.Enforcement)
+	if enforcement == "" {
+		enforcement = string(v1beta1.KvTransferEnforcementRequired)
+	}
+	policyEnvs := []corev1.EnvVar{
+		{Name: commonconsts.EnvKvTransferDomain, Value: string(kvt.Domain)},
+		{Name: commonconsts.EnvKvTransferEnforcement, Value: enforcement},
+	}
+	if kvt.PreferredWeight != nil {
+		policyEnvs = append(policyEnvs, corev1.EnvVar{
+			Name:  commonconsts.EnvKvTransferPreferredWeight,
+			Value: strconv.FormatFloat(float64(*kvt.PreferredWeight), 'f', -1, 32),
+		})
+	}
+	main.Env = MergeEnvs(removeKvTransferPolicyEnvVars(main.Env), policyEnvs)
+}
+
+func removeKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
+	if len(envs) == 0 {
+		return envs
+	}
+	filtered := make([]corev1.EnvVar, 0, len(envs))
+	for _, env := range envs {
+		if isKvTransferPolicyEnvVar(env.Name) {
+			continue
+		}
+		filtered = append(filtered, env)
+	}
+	return filtered
+}
+
+func isKvTransferPolicyEnvVar(name string) bool {
+	switch name {
+	case commonconsts.EnvKvTransferDomain,
+		commonconsts.EnvKvTransferEnforcement,
+		commonconsts.EnvKvTransferPreferredWeight:
+		return true
+	default:
+		return false
+	}
 }
 
 // dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated

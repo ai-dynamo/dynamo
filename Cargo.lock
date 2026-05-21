@@ -2340,11 +2340,14 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "opentelemetry",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

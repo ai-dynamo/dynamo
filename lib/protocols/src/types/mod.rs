@@ -10,6 +10,7 @@
 pub mod anthropic;
 mod chat;
 mod completion;
+pub mod realtime;
 pub mod responses;
 
 // --- Local type re-exports ---

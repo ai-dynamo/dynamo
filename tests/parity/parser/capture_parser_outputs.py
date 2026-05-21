@@ -12,10 +12,11 @@ Default — DRIFT CHECK (read-only):
     python3 -m tests.parity.parser.capture_parser_outputs --impl dynamo
     python3 -m tests.parity.parser.capture_parser_outputs --impl vllm
     python3 -m tests.parity.parser.capture_parser_outputs --impl sglang
+    python3 -m tests.parity.parser.capture_parser_outputs --impl sglang --mode stream
 
   Compares the parser's live output against the recorded `expected.<impl>`
   block. Exits non-zero on any drift. Use this as a CI gate / pre-flight
-  after a `model_text` edit or an upstream parser bump.
+  after a `model_text` / `chunks` edit or an upstream parser bump.
 
 `--merge` — POPULATE FIXTURES (destructive):
     python3 -m tests.parity.parser.capture_parser_outputs --impl dynamo --merge
@@ -41,6 +42,7 @@ Default — DRIFT CHECK (read-only):
 
 Run inside a container where the target impl is installed.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -76,6 +78,11 @@ _ap.add_argument(
     ),
 )
 _ap.add_argument(
+    "--mode",
+    choices=("batch", "stream"),
+    help="Limit capture to fixture mode. Default checks both batch and stream fixtures.",
+)
+_ap.add_argument(
     "--merge",
     action="store_true",
     help=(
@@ -105,6 +112,7 @@ IMPL = _args.impl
 MERGE_MODE = _args.merge
 OVERWRITE = _args.overwrite_if_exists
 FAMILY_FILTER = set(_args.family or [])
+MODE_FILTER = _args.mode
 
 if OVERWRITE and not MERGE_MODE:
     _ap.error("--overwrite-if-exists requires --merge")
@@ -159,10 +167,28 @@ def is_na_stub(case: dict[str, Any]) -> bool:
     )
 
 
-def run_parser(family: str, case: dict) -> dict:
+def run_parser(family: str, mode: str, case: dict) -> dict:
     """Run the parser wrapper. Returns {calls, normal_text, error}."""
     try:
-        got = wrapper.parse(family, case["model_text"], case.get("tools"))
+        if mode == "stream":
+            parse_tool_calls_stream = getattr(wrapper, "parse_tool_calls_stream", None)
+            if parse_tool_calls_stream is None:
+                return {
+                    "calls": None,
+                    "normal_text": None,
+                    "error": f"UNAVAILABLE: {IMPL} wrapper has no parse_tool_calls_stream",
+                }
+            got = parse_tool_calls_stream(family, case["chunks"], case.get("tools"))
+        elif mode == "batch":
+            got = wrapper.parse_tool_calls_batch(
+                family, case["model_text"], case.get("tools")
+            )
+        else:
+            return {
+                "calls": None,
+                "normal_text": None,
+                "error": f"PYTHON_EXC: unsupported parser mode {mode!r}",
+            }
         return {
             "calls": [serialize(c) for c in (got.calls or [])],
             "normal_text": got.normal_text,
@@ -295,6 +321,16 @@ def _emit_yaml(fp: Path, doc: dict[str, Any]) -> None:
     fp.write_text(header + "\n" + body, encoding="utf-8")
 
 
+def _build_output_block(got: dict) -> dict | None:
+    """Translate one parser output into a standalone YAML expected block."""
+    err = got.get("error")
+    if err and err.startswith("UNAVAILABLE:"):
+        return {"unavailable": err[len("UNAVAILABLE:") :].strip()}
+    if err:
+        return None
+    return normalize_output(got)
+
+
 def _build_merged_block(got: dict, dyn: dict) -> dict | None:
     """Translate parser output into a YAML-ready expected.<impl> block.
 
@@ -303,11 +339,11 @@ def _build_merged_block(got: dict, dyn: dict) -> dict | None:
     `{error: <substring>}` block; auto-generating one would bake a
     fragile substring into the fixture).
     """
-    err = got.get("error")
-    if err and err.startswith("UNAVAILABLE:"):
-        return {"unavailable": err[len("UNAVAILABLE:") :].strip()}
-    if err:
+    block = _build_output_block(got)
+    if block is None:
         return None
+    if "unavailable" in block:
+        return block
     n_got = normalize_output(got)
     n_dyn = normalize_output(dyn)
     if n_got == n_dyn:
@@ -330,6 +366,8 @@ def merge_into_fixtures(
         family = doc["family"]
         if FAMILY_FILTER and family not in FAMILY_FILTER:
             continue
+        if MODE_FILTER and doc.get("mode") != MODE_FILTER:
+            continue
         cases = doc.get("cases") or {}
         changed = False
         for case_id, case in cases.items():
@@ -342,17 +380,20 @@ def merge_into_fixtures(
             existing = (
                 case.get("expected") if isinstance(case.get("expected"), dict) else {}
             )
+            if IMPL in existing and not overwrite:
+                n_skipped_existing += 1
+                continue
             dyn = existing.get("dynamo")
-            if not isinstance(dyn, dict):
+            if IMPL == "dynamo":
+                block = _build_output_block(got)
+            elif isinstance(dyn, dict):
+                block = _build_merged_block(got, dyn)
+            else:
                 print(
                     f"  SKIP {key}: no `expected.dynamo` to compare against",
                     file=sys.stderr,
                 )
                 continue
-            if IMPL in existing and not overwrite:
-                n_skipped_existing += 1
-                continue
-            block = _build_merged_block(got, dyn)
             if block is None:
                 print(
                     f"  SKIP {key}: parser errored — record "
@@ -387,13 +428,15 @@ def main() -> int:
         family = doc["family"]
         if FAMILY_FILTER and family not in FAMILY_FILTER:
             continue
+        if MODE_FILTER and doc.get("mode") != MODE_FILTER:
+            continue
         for case_id, case in doc["cases"].items():
             key = f"{family}/{case_id}"
             if is_na_stub(case):
                 n_skipped_na += 1
                 continue
             n_total += 1
-            got = run_parser(family, case)
+            got = run_parser(family, doc["mode"], case)
             all_outputs[key] = got
             if got["error"]:
                 if got["error"].startswith("PYTHON_EXC:"):
@@ -408,8 +451,11 @@ def main() -> int:
                     drift.append((key, d))
 
     if FAMILY_FILTER and n_total == 0:
+        scope = f"family={', '.join(sorted(FAMILY_FILTER))}"
+        if MODE_FILTER:
+            scope += f" mode={MODE_FILTER}"
         print(
-            f"ERROR: --family matched no cases: {', '.join(sorted(FAMILY_FILTER))}",
+            f"ERROR: filter matched no cases: {scope}",
             file=sys.stderr,
         )
         return 2

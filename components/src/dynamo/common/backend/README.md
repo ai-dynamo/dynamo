@@ -296,6 +296,76 @@ directly: `enforce_prefill_max_tokens(request)`,
 are free to inline the logic when their generate path is shaped
 differently.
 
+## Telemetry
+
+> **Requires `DYN_LOGGING_JSONL=1` + `OTEL_EXPORT_ENABLED=1`** for engine
+> telemetry to record anything. In any other configuration the calls
+> silently no-op; one process-level `WARN` fires on first such call so the
+> misconfiguration is visible at default log levels. Trace propagation
+> (`context.trace_headers()`) and the auto-recorded `engine.generate`
+> attributes are NOT subject to this gate — they work regardless.
+
+The framework opens an `engine.generate` span around every `generate()` call
+(see the Rust backend-common README for the full attribute table). Engine
+code reaches the recording surface through the
+`dynamo.common.backend.telemetry` facade, which mirrors the OpenTelemetry
+`Span` API — no Dynamo-specific vocabulary:
+
+```python
+from dynamo.common.backend import telemetry
+
+async def generate(self, request, context):
+    # Trace headers for the downstream inference engine (W3C traceparent).
+    trace_headers = context.trace_headers()
+    ...
+
+    # Handle on the framework's engine.generate span. Use it to add
+    # attributes, events, or set status. Any attribute key is accepted.
+    span = telemetry.current_span(context)
+    span.set_attribute("kv_cache_hit_blocks", 8)
+    span.add_event("nixl_transfer_complete", {"bytes": 1048576})
+
+    # Open a child span with a dynamic name (real OTel span — renders as
+    # a distinct node in Tempo / Jaeger flame charts).
+    with telemetry.start_span(context, "tokenize", batch_size=8) as s:
+        tokens = self.tokenizer.encode(prompt)
+        s.add_event("encoder_warmup_complete")
+        s.set_attribute("token_count", len(tokens))
+
+    # On error paths, mark the auto-span as failed (Tempo/Jaeger render
+    # this natively).
+    if failed:
+        span.set_status("error", "kv_transfer_timeout")
+```
+
+Two entry points, one `SpanProxy` returned by both:
+
+- `telemetry.current_span(context)` — handle on the auto-span. Not a context
+  manager (the framework owns lifecycle). Use freely.
+- `telemetry.start_span(context, name, **attrs)` — opens a child span; use
+  with `with` so the span ends on exit.
+
+`SpanProxy` methods: `set_attribute(key, value)`, `add_event(name, attrs)`,
+`set_status(status, description)`, `close()`.
+
+**Bridge dependency.** The recording surface needs the
+`tracing-opentelemetry` layer installed, which today happens only when
+`DYN_LOGGING_JSONL=1` AND `OTEL_EXPORT_ENABLED=1`. Without the bridge:
+
+- `current_span(...)` returns a no-op `SpanProxy` (all method calls silent).
+- `start_span(...)` returns a no-op `SpanProxy`.
+- A `tracing::warn!` fires once per process the first time any of these
+  hit the missing-bridge path, so operators can discover the missing
+  configuration. Subsequent no-ops in the same process are silent.
+
+Trace propagation (`context.trace_headers()`) and the `Context` cancellation
+/ identity surface do NOT depend on the bridge — those work regardless of
+mode.
+
+Performance note: attribute values are rendered via Python `repr()` for
+non-primitive types. Don't pass large objects per-token inside hot loops;
+record summary attributes instead.
+
 ## File Index
 
 ```text
