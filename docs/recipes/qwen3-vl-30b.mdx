@@ -27,9 +27,9 @@ subtitle: Serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 with vLLM embedding cache on 
   </div>
 
   <div className="dynamo-recommendation-card">
-    <span>Recommended recipe</span>
-    <strong>Aggregated + embedding cache</strong>
-    <p>1 vLLM worker, TP1, 10 GiB multimodal embedding cache.</p>
+    <span>Recipe comparison</span>
+    <strong>Embedding cache on/off</strong>
+    <p>Same 1x GB200 deployment shape, comparing 10 GiB cache against a cache-off baseline.</p>
     <div className="dynamo-recommendation-facts">
       <div>
         <span>Runtime</span>
@@ -47,102 +47,43 @@ subtitle: Serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 with vLLM embedding cache on 
   </div>
 </div>
 
-## Configure
+## Choose a Recipe
 
-<form className="dynamo-recipe-detail-shell">
-  <input className="dynamo-filter-input" type="radio" name="qwenvl-cache" id="qwenvl-cache-on" defaultChecked />
-  <input className="dynamo-filter-input" type="radio" name="qwenvl-cache" id="qwenvl-cache-off" />
-
-<div className="dynamo-recipe-browser" aria-label="Qwen3-VL-30B recipe selectors">
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Hardware</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">GB200</span>
-        <span className="dynamo-config-value">1 GPU</span>
-      </div>
-      <p className="dynamo-unvalidated-note">The source README reports results on a single aggregated replica of GB200 with the vLLM backend.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Runtime</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">vLLM</span>
-      </div>
-      <p className="dynamo-unvalidated-note">The deployment uses vLLM multimodal mode with prefix caching and embedding transfer enabled.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Cache mode</span>
-    <div className="dynamo-filter-options">
-      <label className="dynamo-recipe-chip" htmlFor="qwenvl-cache-on">Embedding cache ON</label>
-      <label className="dynamo-recipe-chip" htmlFor="qwenvl-cache-off">Cache OFF baseline</label>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Traffic facts</span>
-    <div className="dynamo-traffic-facts">
-      <div>
-        <span>Requests</span>
-        <strong>1,000 multimodal requests</strong>
-        <p>Single-turn AIPerf run with constant request-rate mode.</p>
-      </div>
-      <div>
-        <span>Image reuse</span>
-        <strong>80% duplicate images</strong>
-        <p>1 image per request from a 200-image pool.</p>
-      </div>
-      <div>
-        <span>Text / output</span>
-        <strong>400 text tokens / 150 max output</strong>
-        <p>Dataset generation fixes user text length; benchmark fixes output tokens.</p>
-      </div>
-    </div>
-  </div>
+<div className="dynamo-variant-table-wrap">
+  <table className="dynamo-variant-table">
+    <thead>
+      <tr>
+        <th>Variant</th>
+        <th>Runtime</th>
+        <th>Hardware</th>
+        <th>Traffic</th>
+        <th>Evidence</th>
+        <th>Decision signal</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="recommended">
+        <td><strong>Aggregated + embedding cache ON</strong><em>Recommended</em><span>10 GiB multimodal embedding cache</span></td>
+        <td>vLLM</td>
+        <td>1x GB200</td>
+        <td>1,000 multimodal requests, 80% image reuse</td>
+        <td><mark>perf.yaml</mark></td>
+        <td>Higher output TPS and lower TTFT when images repeat often enough to stay in cache.</td>
+        <td><a href="#deploy-cache-on">Deploy</a></td>
+      </tr>
+      <tr>
+        <td><strong>Aggregated cache OFF baseline</strong><span>Same deployment with cache capacity set to 0</span></td>
+        <td>vLLM</td>
+        <td>1x GB200</td>
+        <td>Same generated JSONL</td>
+        <td><mark>perf.yaml</mark></td>
+        <td>Control run for measuring embedding-cache impact before changing the dataset or cache size.</td>
+        <td><a href="#deploy-cache-off-baseline">Deploy</a></td>
+      </tr>
+    </tbody>
+  </table>
 </div>
-
-<div className="dynamo-selected-facts dynamo-technique-panel qwenvl-cache-on">
-  <div>
-    <span>Selected recipe</span>
-    <strong>Embedding cache ON</strong>
-  </div>
-  <div>
-    <span>Cache capacity</span>
-    <strong>10 GiB</strong>
-  </div>
-  <div>
-    <span>Output TPS</span>
-    <strong>3,575.6 tok/s</strong>
-  </div>
-  <div>
-    <span>TTFT avg</span>
-    <strong>526.0 ms</strong>
-  </div>
-</div>
-
-<div className="dynamo-selected-facts dynamo-technique-panel qwenvl-cache-off">
-  <div>
-    <span>Selected recipe</span>
-    <strong>Cache OFF baseline</strong>
-  </div>
-  <div>
-    <span>Cache capacity</span>
-    <strong>0 GiB</strong>
-  </div>
-  <div>
-    <span>Output TPS</span>
-    <strong>3,072.3 tok/s</strong>
-  </div>
-  <div>
-    <span>TTFT avg</span>
-    <strong>727.5 ms</strong>
-  </div>
-</div>
-</form>
 
 ## When to Use
 
@@ -160,25 +101,6 @@ image reuse.
 | TTFT p50 | 356.8 ms | 510.8 ms | -30.1% |
 | ITL avg | 14.1 ms | 15.5 ms | -8.8% |
 | Request latency avg | 2,630.0 ms | 3,035.7 ms | -13.4% |
-
-## Variants
-
-<div className="dynamo-variant-list">
-  <div className="dynamo-variant-row active">
-    <div>
-      <h4>Aggregated + embedding cache ON</h4>
-      <p>Recommended path for image-reuse traffic; `DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10`.</p>
-    </div>
-    <span>Recommended</span>
-  </div>
-  <div className="dynamo-variant-row">
-    <div>
-      <h4>Aggregated cache OFF baseline</h4>
-      <p>Baseline comparison using the same deployment shape with cache capacity set to zero.</p>
-    </div>
-    <span>Baseline</span>
-  </div>
-</div>
 
 ## Before You Run
 
@@ -260,39 +182,38 @@ kubectl wait --for=condition=Complete job/qwen3-vl-30b-generate-datasets \
 ```
 </CodeBlocks>
 
-<Tabs>
-  <Tab title="Cache ON" language="cache-on">
-    ```bash
-    # deploy.yaml defaults to DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10
-    kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml \
-      -n ${NAMESPACE}
+<h3 id="deploy-cache-on">Cache ON</h3>
 
-    kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg \
-      -n ${NAMESPACE} \
-      --timeout=900s
-    ```
-  </Tab>
-  <Tab title="Cache OFF baseline" language="cache-off">
-    ```bash
-    awk -v cache_gb="0" '
-      /name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB/ {
-        print
-        getline
-        print "              value: \"" cache_gb "\""
-        next
-      }
-      { print }
-    ' recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml | \
-      kubectl apply -f - -n ${NAMESPACE}
+```bash
+# deploy.yaml defaults to DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10
+kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml \
+  -n ${NAMESPACE}
 
-    kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg \
-      -n ${NAMESPACE} \
-      --timeout=900s
-    ```
-  </Tab>
-</Tabs>
+kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg \
+  -n ${NAMESPACE} \
+  --timeout=900s
+```
 
-The checked-in manifest defaults to cache ON. The cache-off tab mirrors the repository helper
+<h3 id="deploy-cache-off-baseline">Cache OFF baseline</h3>
+
+```bash
+awk -v cache_gb="0" '
+  /name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB/ {
+    print
+    getline
+    print "              value: \"" cache_gb "\""
+    next
+  }
+  { print }
+' recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml | \
+  kubectl apply -f - -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg \
+  -n ${NAMESPACE} \
+  --timeout=900s
+```
+
+The checked-in manifest defaults to cache ON. The cache-off section mirrors the repository helper
 script's patching behavior without launching the benchmark pod yet.
 
 ## Verify

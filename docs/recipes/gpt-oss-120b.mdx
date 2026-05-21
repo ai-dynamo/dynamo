@@ -47,103 +47,43 @@ subtitle: Serve openai/gpt-oss-120b with TensorRT-LLM on Blackwell GPUs.
   </div>
 </div>
 
-## Configure
+## Choose a Recipe
 
-<form className="dynamo-recipe-detail-shell">
-  <input className="dynamo-filter-input" type="radio" name="gptoss-technique" id="gptoss-technique-agg" defaultChecked />
-  <input className="dynamo-filter-input" type="radio" name="gptoss-technique" id="gptoss-technique-disagg" />
-
-<div className="dynamo-recipe-browser" aria-label="GPT-OSS-120B recipe selectors">
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Hardware</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">GB200 / Blackwell</span>
-        <span className="dynamo-config-value">ARM64 runtime target</span>
-      </div>
-      <p className="dynamo-unvalidated-note">The aggregated path targets GB200. The disaggregated path is written for Blackwell nodes and allows GB200 or B200.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Runtime</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">TensorRT-LLM</span>
-        <span className="dynamo-config-value">tensorrtllm-runtime:1.1.1</span>
-      </div>
-      <p className="dynamo-unvalidated-note">The recipe uses the public Dynamo TensorRT-LLM runtime image and a 100 Gi shared model-cache PVC.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Technique</span>
-    <div className="dynamo-filter-options">
-      <label className="dynamo-recipe-chip" htmlFor="gptoss-technique-agg">Aggregated baseline</label>
-      <label className="dynamo-recipe-chip" htmlFor="gptoss-technique-disagg">Disaggregated P/D</label>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Traffic facts</span>
-    <div className="dynamo-traffic-facts">
-      <div>
-        <span>Aggregated</span>
-        <strong>128 ISL / 1K OSL</strong>
-        <p>High-concurrency short-prompt generation.</p>
-      </div>
-      <div>
-        <span>Disaggregated</span>
-        <strong>8K ISL / 1K OSL</strong>
-        <p>Long-prefill static generation shape.</p>
-      </div>
-      <div>
-        <span>Request count</span>
-        <strong>10x concurrency</strong>
-        <p>Both benchmark jobs send `10 * total_concurrency` requests.</p>
-      </div>
-    </div>
-  </div>
+<div className="dynamo-variant-table-wrap">
+  <table className="dynamo-variant-table">
+    <thead>
+      <tr>
+        <th>Variant</th>
+        <th>Runtime</th>
+        <th>Hardware</th>
+        <th>Traffic</th>
+        <th>Evidence</th>
+        <th>Decision signal</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Aggregated TensorRT-LLM</strong><span>One 4-GPU worker, TP4/EP4</span></td>
+        <td>TRT-LLM</td>
+        <td>4x GB200 / Blackwell</td>
+        <td>128 ISL / 1K OSL, 3,600 concurrency</td>
+        <td><mark>perf.yaml</mark></td>
+        <td>Simpler high-throughput baseline for short-prompt generation on Blackwell.</td>
+        <td><a href="#deploy-aggregated-baseline">Deploy</a></td>
+      </tr>
+      <tr>
+        <td><strong>Disaggregated P/D</strong><span>1 prefill GPU plus 4 decode GPUs</span></td>
+        <td>TRT-LLM</td>
+        <td>5 deploy GPUs</td>
+        <td>8K ISL / 1K OSL, 1,536 concurrency</td>
+        <td><mark>perf.yaml</mark></td>
+        <td>Use when the serving question is whether long-prefill work should be separated from decode.</td>
+        <td><a href="#deploy-disaggregated-pd">Deploy</a></td>
+      </tr>
+    </tbody>
+  </table>
 </div>
-
-<div className="dynamo-selected-facts dynamo-technique-panel gptoss-technique-agg">
-  <div>
-    <span>Selected recipe</span>
-    <strong>Aggregated baseline</strong>
-  </div>
-  <div>
-    <span>Topology</span>
-    <strong>1 worker, TP4/EP4</strong>
-  </div>
-  <div>
-    <span>Benchmark</span>
-    <strong>3,600 concurrency</strong>
-  </div>
-  <div>
-    <span>Traffic</span>
-    <strong>128 / 1,000 tokens</strong>
-  </div>
-</div>
-
-<div className="dynamo-selected-facts dynamo-technique-panel gptoss-technique-disagg">
-  <div>
-    <span>Selected recipe</span>
-    <strong>Disaggregated P/D</strong>
-  </div>
-  <div>
-    <span>Topology</span>
-    <strong>1P + 1D, 5 deploy GPUs</strong>
-  </div>
-  <div>
-    <span>Benchmark</span>
-    <strong>1,536 concurrency</strong>
-  </div>
-  <div>
-    <span>Traffic</span>
-    <strong>8,192 / 1,024 tokens</strong>
-  </div>
-</div>
-</form>
 
 ## When to Use
 
@@ -151,25 +91,6 @@ Use the aggregated recipe as the simpler Blackwell baseline for short prompts an
 the disaggregated recipe when prefill work is large enough that separating prefill and decode is the
 serving question you need to answer. Keep the two benchmark shapes separate: the aggregated job is a
 128-token input run, while the disaggregated job is an 8K-token input run.
-
-## Variants
-
-<div className="dynamo-variant-list">
-  <div className="dynamo-variant-row active">
-    <div>
-      <h4>Aggregated TensorRT-LLM</h4>
-      <p>One 4-GPU worker, TP4/EP4, round-robin frontend, and static 128 input / 1,000 output benchmark.</p>
-    </div>
-    <span>Baseline</span>
-  </div>
-  <div className="dynamo-variant-row">
-    <div>
-      <h4>Disaggregated prefill/decode</h4>
-      <p>One 1-GPU prefill worker plus one 4-GPU decode worker, UCX KV transfer, and static 8K input / 1K output benchmark.</p>
-    </div>
-    <span>P/D split</span>
-  </div>
-</div>
 
 ## Before You Run
 
@@ -234,63 +155,61 @@ kubectl wait --for=condition=Complete job/model-download \
 ```
 </CodeBlocks>
 
-<Tabs>
-  <Tab title="Aggregated baseline" language="agg">
-    ```bash
-    kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/deploy.yaml \
-      -n ${NAMESPACE}
+<h3 id="deploy-aggregated-baseline">Aggregated baseline</h3>
 
-    kubectl wait --for=condition=Ready pod \
-      -l nvidia.com/dynamo-graph-deployment-name=gpt-oss-agg \
-      -n ${NAMESPACE} \
-      --timeout=3600s
-    ```
-  </Tab>
-  <Tab title="Disaggregated P/D" language="disagg">
-    ```bash
-    kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml \
-      -n ${NAMESPACE}
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/deploy.yaml \
+  -n ${NAMESPACE}
 
-    kubectl wait --for=condition=Ready pod \
-      -l nvidia.com/dynamo-graph-deployment-name=gpt-oss-disagg \
-      -n ${NAMESPACE} \
-      --timeout=3600s
-    ```
-  </Tab>
-</Tabs>
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=gpt-oss-agg \
+  -n ${NAMESPACE} \
+  --timeout=3600s
+```
+
+<h3 id="deploy-disaggregated-pd">Disaggregated P/D</h3>
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml \
+  -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=gpt-oss-disagg \
+  -n ${NAMESPACE} \
+  --timeout=3600s
+```
 
 ## Verify
 
-<Tabs>
-  <Tab title="Aggregated baseline" language="agg">
-    ```bash
-    kubectl port-forward svc/gpt-oss-agg-frontend 8000:8000 \
-      -n ${NAMESPACE}
+<h3 id="verify-aggregated-baseline">Aggregated baseline</h3>
 
-    curl http://localhost:8000/v1/chat/completions \
-      -H "Content-Type: application/json" \
-      -d '{
-        "model": "openai/gpt-oss-120b",
-        "messages": [{"role": "user", "content": "Hello!"}],
-        "max_tokens": 50
-      }'
-    ```
-  </Tab>
-  <Tab title="Disaggregated P/D" language="disagg">
-    ```bash
-    kubectl port-forward svc/gpt-oss-disagg-frontend 8000:8000 \
-      -n ${NAMESPACE}
+```bash
+kubectl port-forward svc/gpt-oss-agg-frontend 8000:8000 \
+  -n ${NAMESPACE}
 
-    curl http://localhost:8000/v1/chat/completions \
-      -H "Content-Type: application/json" \
-      -d '{
-        "model": "openai/gpt-oss-120b",
-        "messages": [{"role": "user", "content": "Hello!"}],
-        "max_tokens": 50
-      }'
-    ```
-  </Tab>
-</Tabs>
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-120b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
+```
+
+<h3 id="verify-disaggregated-pd">Disaggregated P/D</h3>
+
+```bash
+kubectl port-forward svc/gpt-oss-disagg-frontend 8000:8000 \
+  -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-120b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
+```
 
 ## Benchmark Evidence
 
@@ -327,26 +246,25 @@ kubectl wait --for=condition=Complete job/model-download \
   </div>
 </div>
 
-<Tabs>
-  <Tab title="Aggregated benchmark" language="agg">
-    ```bash
-    kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/perf.yaml \
-      -n ${NAMESPACE}
+<h3 id="benchmark-aggregated-baseline">Aggregated benchmark</h3>
 
-    kubectl logs -f -l job-name=gpt-oss-120b-bench \
-      -n ${NAMESPACE}
-    ```
-  </Tab>
-  <Tab title="Disaggregated benchmark" language="disagg">
-    ```bash
-    kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/perf.yaml \
-      -n ${NAMESPACE}
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/perf.yaml \
+  -n ${NAMESPACE}
 
-    kubectl logs -f -l job-name=gpt-oss-120b-disagg-bench \
-      -n ${NAMESPACE}
-    ```
-  </Tab>
-</Tabs>
+kubectl logs -f -l job-name=gpt-oss-120b-bench \
+  -n ${NAMESPACE}
+```
+
+<h3 id="benchmark-disaggregated-pd">Disaggregated benchmark</h3>
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/perf.yaml \
+  -n ${NAMESPACE}
+
+kubectl logs -f -l job-name=gpt-oss-120b-disagg-bench \
+  -n ${NAMESPACE}
+```
 
 ## Operate
 

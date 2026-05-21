@@ -27,7 +27,7 @@ subtitle: Serve nvidia/GLM-5-NVFP4 with SGLang disaggregated prefill/decode on G
   </div>
 
   <div className="dynamo-recommendation-card">
-    <span>Recommended recipe</span>
+    <span>Verified recipe</span>
     <strong>SGLang disaggregated P/D</strong>
     <p>4-node decode rank group plus a 1-node prefill worker inside an MNNVL domain.</p>
     <div className="dynamo-recommendation-facts">
@@ -47,85 +47,33 @@ subtitle: Serve nvidia/GLM-5-NVFP4 with SGLang disaggregated prefill/decode on G
   </div>
 </div>
 
-## Configure
+## Recipe
 
-<div className="dynamo-recipe-detail-shell">
-<div className="dynamo-recipe-browser" aria-label="GLM-5 NVFP4 recipe configuration">
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Hardware</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">GB200</span>
-        <span className="dynamo-config-value">5 nodes</span>
-        <span className="dynamo-config-value">20 GPUs</span>
-      </div>
-      <p className="dynamo-unvalidated-note">The recipe expects 5 4xGB200 nodes in an NVL36 or NVL72 domain with DRA/ComputeDomain support for MNNVL placement.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Runtime</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">SGLang</span>
-        <span className="dynamo-config-value">sglang-runtime:1.1.1-cuda13</span>
-      </div>
-      <p className="dynamo-unvalidated-note">This page covers the published Dynamo SGLang runtime path only.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Technique</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">Disaggregated prefill/decode</span>
-        <span className="dynamo-config-value">EAGLE speculative decoding</span>
-        <span className="dynamo-config-value">NIXL / UCX transfer</span>
-      </div>
-      <p className="dynamo-unvalidated-note">No alternate GLM-5 runtime or topology is checked in yet, so these are facts rather than selectable alternatives.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Traffic facts</span>
-    <div className="dynamo-traffic-facts">
-      <div>
-        <span>Input / output</span>
-        <strong>1K ISL / 8K OSL</strong>
-        <p>Synthetic static-token benchmark for long-output generation.</p>
-      </div>
-      <div>
-        <span>Concurrency</span>
-        <strong>512</strong>
-        <p>32 requests per decode GPU across 16 decode GPUs.</p>
-      </div>
-      <div>
-        <span>Requests</span>
-        <strong>1,536</strong>
-        <p>The perf job sends 3x concurrency after 16 warmup requests.</p>
-      </div>
-    </div>
-  </div>
-</div>
-
-<div className="dynamo-selected-facts">
-  <div>
-    <span>Selected recipe</span>
-    <strong>SGLang disaggregated</strong>
-  </div>
-  <div>
-    <span>Decode</span>
-    <strong>4 nodes, TP16/DP16/EP16</strong>
-  </div>
-  <div>
-    <span>Prefill</span>
-    <strong>1 node, TP4</strong>
-  </div>
-  <div>
-    <span>Output throughput</span>
-    <strong>16,824 tok/s</strong>
-  </div>
-</div>
+<div className="dynamo-variant-table-wrap">
+  <table className="dynamo-variant-table">
+    <thead>
+      <tr>
+        <th>Variant</th>
+        <th>Runtime</th>
+        <th>Hardware</th>
+        <th>Traffic</th>
+        <th>Evidence</th>
+        <th>Decision signal</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>SGLang disaggregated prefill/decode</strong><em>Verified</em><span>4 decode nodes, 1 prefill node, EAGLE, FP8 KV cache</span></td>
+        <td>SGLang</td>
+        <td>20x GB200</td>
+        <td>1K ISL / 8K OSL static-token benchmark</td>
+        <td><mark>perf.yaml</mark></td>
+        <td>Only checked-in GLM-5 path; use it when long-output decode throughput is the target.</td>
+        <td><a href="#deploy">Deploy</a></td>
+      </tr>
+    </tbody>
+  </table>
 </div>
 
 ## When to Use
@@ -152,18 +100,6 @@ Reference run: 1,536 requests, 0 errors, and 747.87 seconds of benchmark duratio
 The benchmark is a concurrency burst at 512 users, so TTFT includes queueing. Re-run the provided
 `perf.yaml` on your own cluster before using these numbers for sizing.
 </Note>
-
-## Variants
-
-<div className="dynamo-variant-list">
-  <div className="dynamo-variant-row active">
-    <div>
-      <h4>SGLang disaggregated prefill/decode</h4>
-      <p>Single benchmark-backed GLM-5 variant: 16 decode GPUs across four nodes and 4 prefill GPUs on one node.</p>
-    </div>
-    <span>Verified</span>
-  </div>
-</div>
 
 ## Before You Run
 

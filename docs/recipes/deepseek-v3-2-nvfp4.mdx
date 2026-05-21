@@ -27,9 +27,9 @@ subtitle: Serve nvidia/DeepSeek-V3.2-NVFP4 with TensorRT-LLM on 32x GB200.
   </div>
 
   <div className="dynamo-recommendation-card">
-    <span>Recommended recipe</span>
-    <strong>Disagg + KV router + WideEP</strong>
-    <p>2 prefill workers and 2 decode workers, each using DEP8.</p>
+    <span>Recipe family</span>
+    <strong>TRT-LLM WideEP variants</strong>
+    <p>Two benchmark-backed 32x GB200 variants on the same long-context coding trace.</p>
     <div className="dynamo-recommendation-facts">
       <div>
         <span>Runtime</span>
@@ -47,102 +47,43 @@ subtitle: Serve nvidia/DeepSeek-V3.2-NVFP4 with TensorRT-LLM on 32x GB200.
   </div>
 </div>
 
-## Configure
+## Choose a Recipe
 
-<form className="dynamo-recipe-detail-shell">
-  <input className="dynamo-filter-input" type="radio" name="dsv32-technique" id="dsv32-technique-disagg" defaultChecked />
-  <input className="dynamo-filter-input" type="radio" name="dsv32-technique" id="dsv32-technique-agg" />
-
-<div className="dynamo-recipe-browser" aria-label="DeepSeek V3.2 NVFP4 recipe selectors">
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Hardware</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">GB200 NVL72</span>
-        <span className="dynamo-config-value">32 GPUs / 8 nodes</span>
-      </div>
-      <p className="dynamo-unvalidated-note">The manifests rely on a ComputeDomain so DRA can place workers on MNNVL-connected nodes.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Runtime</span>
-    <div>
-      <div className="dynamo-filter-options">
-        <span className="dynamo-config-value">TensorRT-LLM</span>
-      </div>
-      <p className="dynamo-unvalidated-note">This page covers the NVIDIA NVFP4 checkpoint path only.</p>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Technique</span>
-    <div className="dynamo-filter-options">
-      <label className="dynamo-recipe-chip" htmlFor="dsv32-technique-disagg">Disagg + KV router + WideEP</label>
-      <label className="dynamo-recipe-chip" htmlFor="dsv32-technique-agg">Aggregated round-robin</label>
-    </div>
-  </div>
-
-  <div className="dynamo-filter-row">
-    <span className="dynamo-recipe-label">Traffic facts</span>
-    <div className="dynamo-traffic-facts">
-      <div>
-        <span>Requests</span>
-        <strong>10,000 trace requests</strong>
-        <p>Fixed-schedule replay of a coding-oriented synthetic trace.</p>
-      </div>
-      <div>
-        <span>Input length</span>
-        <strong>39K avg ISL</strong>
-        <p>Long-context requests up to about 109K input tokens.</p>
-      </div>
-      <div>
-        <span>Prefix reuse</span>
-        <strong>44% token hit rate</strong>
-        <p>About 57% of input tokens are shared-context prefixes.</p>
-      </div>
-    </div>
-  </div>
+<div className="dynamo-variant-table-wrap">
+  <table className="dynamo-variant-table">
+    <thead>
+      <tr>
+        <th>Variant</th>
+        <th>Runtime</th>
+        <th>Hardware</th>
+        <th>Traffic</th>
+        <th>Evidence</th>
+        <th>Decision signal</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr className="recommended">
+        <td><strong>Disagg + KV router + WideEP</strong><em>Recommended</em><span>2P + 2D, DEP8</span></td>
+        <td>TRT-LLM</td>
+        <td>32x GB200</td>
+        <td>39K avg ISL coding trace</td>
+        <td><mark>perf.yaml</mark></td>
+        <td>Candidate path for testing KV-aware routing, P/D separation, and WideEP together.</td>
+        <td><a href="#deploy-disagg-kv-router">Deploy</a></td>
+      </tr>
+      <tr>
+        <td><strong>Aggregated round-robin</strong><span>4 DEP8 workers</span></td>
+        <td>TRT-LLM</td>
+        <td>32x GB200</td>
+        <td>Same fixed-schedule trace</td>
+        <td><mark>perf.yaml</mark></td>
+        <td>Control run that keeps DEP8 and hardware constant while removing the P/D split.</td>
+        <td><a href="#deploy-aggregated-baseline">Deploy</a></td>
+      </tr>
+    </tbody>
+  </table>
 </div>
-
-<div className="dynamo-selected-facts dynamo-technique-panel dsv32-technique-disagg">
-  <div>
-    <span>Selected recipe</span>
-    <strong>Disagg + KV router + WideEP</strong>
-  </div>
-  <div>
-    <span>Topology</span>
-    <strong>2P + 2D, DEP8</strong>
-  </div>
-  <div>
-    <span>Workload</span>
-    <strong>Synthetic coding trace</strong>
-  </div>
-  <div>
-    <span>Goodput SLA</span>
-    <strong>TTFT 20s / ITL 50ms</strong>
-  </div>
-</div>
-
-<div className="dynamo-selected-facts dynamo-technique-panel dsv32-technique-agg">
-  <div>
-    <span>Selected recipe</span>
-    <strong>Aggregated round-robin</strong>
-  </div>
-  <div>
-    <span>Topology</span>
-    <strong>4 DEP8 workers</strong>
-  </div>
-  <div>
-    <span>Workload</span>
-    <strong>Synthetic coding trace</strong>
-  </div>
-  <div>
-    <span>Goodput SLA</span>
-    <strong>TTFT 20s / ITL 50ms</strong>
-  </div>
-</div>
-</form>
 
 ## When to Use
 
@@ -150,25 +91,6 @@ Use this recipe when the model is `nvidia/DeepSeek-V3.2-NVFP4`, the target hardw
 and the traffic has long coding prompts with repeated context. The disaggregated variant is the
 candidate serving path; the aggregated round-robin variant is the control run for measuring the
 effect of KV-aware routing, prefill/decode separation, and WideEP.
-
-## Variants
-
-<div className="dynamo-variant-list">
-  <div className="dynamo-variant-row active">
-    <div>
-      <h4>Disagg + KV router + WideEP</h4>
-      <p>Recommended path for long-context prefix-reuse traffic on 32x GB200.</p>
-    </div>
-    <span>Recommended</span>
-  </div>
-  <div className="dynamo-variant-row">
-    <div>
-      <h4>Aggregated round-robin</h4>
-      <p>Baseline deployment using four DEP8 workers without the P/D split.</p>
-    </div>
-    <span>Baseline</span>
-  </div>
-</div>
 
 ## Before You Run
 
@@ -245,51 +167,49 @@ kubectl cp <local_trace.jsonl> \
 ```
 </CodeBlocks>
 
-<Tabs>
-  <Tab title="Disagg + KV router" language="disagg-kv-router">
-    ```bash
-    kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml \
-      -n ${NAMESPACE}
+<h3 id="deploy-disagg-kv-router">Disagg + KV router + WideEP</h3>
 
-    kubectl wait --for=condition=ready pod \
-      -l nvidia.com/dynamo-graph-deployment-name=disagg-kv-dsv32-nvfp4 \
-      -n ${NAMESPACE} \
-      --timeout=1200s
-    ```
-  </Tab>
-  <Tab title="Aggregated baseline" language="agg-round-robin">
-    ```bash
-    kubectl apply -f recipes/deepseek-v32-fp4/trtllm/agg-round-robin/deploy.yaml \
-      -n ${NAMESPACE}
+```bash
+kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml \
+  -n ${NAMESPACE}
 
-    kubectl wait --for=condition=ready pod \
-      -l nvidia.com/dynamo-graph-deployment-name=agg-round-robin-dsv32-nvfp4 \
-      -n ${NAMESPACE} \
-      --timeout=1200s
-    ```
-  </Tab>
-</Tabs>
+kubectl wait --for=condition=ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=disagg-kv-dsv32-nvfp4 \
+  -n ${NAMESPACE} \
+  --timeout=1200s
+```
+
+<h3 id="deploy-aggregated-baseline">Aggregated round-robin baseline</h3>
+
+```bash
+kubectl apply -f recipes/deepseek-v32-fp4/trtllm/agg-round-robin/deploy.yaml \
+  -n ${NAMESPACE}
+
+kubectl wait --for=condition=ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=agg-round-robin-dsv32-nvfp4 \
+  -n ${NAMESPACE} \
+  --timeout=1200s
+```
 
 ## Verify
 
-<Tabs>
-  <Tab title="Disagg + KV router" language="disagg-kv-router">
-    ```bash
-    kubectl port-forward svc/disagg-kv-dsv32-nvfp4-frontend 8000:8000 \
-      -n ${NAMESPACE}
+<h3 id="verify-disagg-kv-router">Disagg + KV router + WideEP</h3>
 
-    curl http://localhost:8000/v1/models
-    ```
-  </Tab>
-  <Tab title="Aggregated baseline" language="agg-round-robin">
-    ```bash
-    kubectl port-forward svc/agg-round-robin-dsv32-nvfp4-frontend 8000:8000 \
-      -n ${NAMESPACE}
+```bash
+kubectl port-forward svc/disagg-kv-dsv32-nvfp4-frontend 8000:8000 \
+  -n ${NAMESPACE}
 
-    curl http://localhost:8000/v1/models
-    ```
-  </Tab>
-</Tabs>
+curl http://localhost:8000/v1/models
+```
+
+<h3 id="verify-aggregated-baseline">Aggregated round-robin baseline</h3>
+
+```bash
+kubectl port-forward svc/agg-round-robin-dsv32-nvfp4-frontend 8000:8000 \
+  -n ${NAMESPACE}
+
+curl http://localhost:8000/v1/models
+```
 
 ## Benchmark Evidence
 

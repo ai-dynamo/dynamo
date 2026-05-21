@@ -64,9 +64,6 @@ navigation:
           - page: GPT-OSS-120B
             slug: gpt-oss-120b
             path: recipes/gpt-oss-120b.mdx
-          - page: Variant UX Prototypes
-            slug: variant-ux-prototypes
-            path: recipes/variant-ux-prototypes.mdx
       - page: Glossary
         path: reference/glossary.md
 
