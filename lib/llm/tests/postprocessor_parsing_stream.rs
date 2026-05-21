@@ -80,7 +80,7 @@ fn get_text(content: &ChatCompletionMessageContent) -> &str {
 }
 
 /// Accumulates streamed tool call deltas into complete tool calls for assertion.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct MergedToolCall {
     id: Option<String>,
     r#type: Option<String>,
@@ -337,6 +337,45 @@ fn mock_multi_choice_content_chunk(
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
+        nvext: None,
+    }
+}
+
+/// Construct a chunk that carries only `reasoning_content` (no text delta).
+/// Mirrors what upstream `parse_reasoning_content_from_stream` emits while the
+/// model is still inside `<think>...</think>` — used by the DIS-2061 matrix
+/// to exercise the jail's `Immediate` mode initialization when the first
+/// chunk for a choice has `delta.content=None`.
+fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        Role,
+    };
+    #[allow(deprecated)]
+    let choice = ChatChoiceStream {
+        index: 0,
+        delta: ChatCompletionStreamResponseDelta {
+            role: Some(Role::Assistant),
+            content: None,
+            tool_calls: None,
+            function_call: None,
+            refusal: None,
+            reasoning_content: Some(reasoning.to_string()),
+        },
+        finish_reason: None,
+        logprobs: None,
+    };
+    NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices: vec![choice],
             created: 0,
             model: "test-model".to_string(),
             system_fingerprint: None,
@@ -1154,4 +1193,325 @@ async fn postprocessor_parsing_stream_minimax_named_bare_parameters() {
         args,
         serde_json::json!({"location": "Paris", "unit": "celsius"})
     );
+}
+
+// ===== DIS-2061 matrix tests =====
+//
+// Cross-cuts guided tool-choice × reasoning-parser family × prompt injection
+// × backend output shape. See the PR review for the matrix design. Each row
+// asserts: (a) tool_calls extracted with the expected arguments, (b) raw
+// JSON / `<think>` markers don't leak into client-visible `content`, and
+// (c) `reasoning_content` contains only the reasoning text (or is empty
+// when no reasoning is expected).
+
+/// Tools list used by all matrix rows. Single `get_weather(location)` tool
+/// so we can vary inputs without redefining the schema each time.
+fn matrix_tools() -> Vec<dynamo_protocols::types::ChatCompletionTool> {
+    serde_json::from_value(serde_json::json!([{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City name"}
+                },
+                "required": ["location"]
+            }
+        }
+    }]))
+    .unwrap()
+}
+
+/// Build a minimal streaming request preconfigured with tools and
+/// `tool_choice`. Used by every matrix row.
+fn matrix_request(
+    tool_choice: ChatCompletionToolChoiceOption,
+) -> NvCreateChatCompletionRequest {
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "What's the weather in San Francisco?"}],
+        "stream": true,
+        "temperature": 0.0
+    }))
+    .unwrap();
+    request.inner.tools = Some(matrix_tools());
+    request.inner.tool_choice = Some(tool_choice);
+    request
+}
+
+/// Drain a postprocessed stream into `(reasoning, content, tool_calls,
+/// finish_reasons)`. The matrix rows assert against these four buckets.
+async fn drain_stream(
+    output_stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
+) -> (String, String, Vec<MergedToolCall>, Vec<FinishReason>) {
+    let output_chunks: Vec<_> = Box::pin(output_stream).collect().await;
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    let mut merged: BTreeMap<u32, MergedToolCall> = BTreeMap::new();
+    let mut finish_reasons = Vec::new();
+
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    merged.entry(tc.index).or_default().merge_from(tc);
+                }
+            }
+            if let Some(fr) = choice.finish_reason {
+                finish_reasons.push(fr);
+            }
+        }
+    }
+    let tool_calls: Vec<MergedToolCall> = merged.values().cloned().collect();
+    (reasoning, content, tool_calls, finish_reasons)
+}
+
+/// Assert the standard "tool call extracted, nothing leaks" success shape
+/// shared by every matrix row that expects a successful extraction.
+fn assert_clean_tool_call(
+    case: &str,
+    content: &str,
+    tool_calls: &[MergedToolCall],
+    expected_location: &str,
+) {
+    assert!(
+        !content.contains("get_weather"),
+        "{case}: tool-call JSON must not leak into content, got: {content:?}"
+    );
+    assert!(
+        !content.contains("<think>") && !content.contains("</think>"),
+        "{case}: think markers must not leak into content, got: {content:?}"
+    );
+    assert_eq!(tool_calls.len(), 1, "{case}: expected one tool call");
+    assert_eq!(
+        tool_calls[0].name.as_deref(),
+        Some("get_weather"),
+        "{case}: wrong tool name"
+    );
+    let args: Value = serde_json::from_str(&tool_calls[0].arguments)
+        .unwrap_or_else(|e| panic!("{case}: arguments not valid JSON: {e}"));
+    assert_eq!(
+        args,
+        serde_json::json!({"location": expected_location}),
+        "{case}: wrong arguments"
+    );
+}
+
+/// CASE 1a + 1b — force-reasoning parser + tool_choice=required + bare JSON,
+/// with both `prompt_injected_reasoning` values. The gate skips the reasoning
+/// parser regardless, so the bare JSON reaches the jail unmolested.
+#[tokio::test]
+async fn dis2061_matrix_force_reasoning_required_bare_json() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+
+    for (case, prompt_injected) in [
+        ("1a: force-reasoning + required + prompt_injected=false", false),
+        ("1b: force-reasoning + required + prompt_injected=true", true),
+    ] {
+        let preprocessor = build_preprocessor(Some("nemotron_nano"), Some("nemotron_nano"));
+        let request = matrix_request(ChatCompletionToolChoiceOption::Required);
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(bare_json), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, prompt_injected)
+            .expect("postprocessor_parsing_stream should build");
+        let (reasoning, content, tool_calls, finish_reasons) = drain_stream(output_stream).await;
+
+        assert!(
+            reasoning.is_empty(),
+            "{case}: reasoning_content must be empty when parser is skipped, got: {reasoning:?}"
+        );
+        assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+        );
+    }
+}
+
+/// CASE 2 — force-reasoning parser + tool_choice=named + bare JSON.
+/// Same skip-the-parser logic as `Required`, exercised through the `Named`
+/// arm of the gate.
+#[tokio::test]
+async fn dis2061_matrix_force_reasoning_named_bare_json() {
+    use dynamo_protocols::types::{ChatCompletionNamedToolChoice, FunctionName};
+
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("nemotron_nano"), Some("nemotron_nano"));
+    let request = matrix_request(ChatCompletionToolChoiceOption::Named(
+        ChatCompletionNamedToolChoice {
+            r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            function: FunctionName {
+                name: "get_weather".to_string(),
+            },
+        },
+    ));
+
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true)
+        .expect("postprocessor_parsing_stream should build");
+    let (reasoning, content, tool_calls, _) = drain_stream(output_stream).await;
+
+    let case = "2: force-reasoning + named + bare JSON";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: reasoning_content must be empty, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+}
+
+/// CASE 3 — non-force parser + required + `prompt_injected_reasoning=false`
+/// + bare JSON. Parser runs but stays in non-reasoning mode (no `<think>`
+/// start token in the stream), so the bare JSON flows through as
+/// `normal_text` and reaches the jail intact.
+#[tokio::test]
+async fn dis2061_matrix_non_force_required_no_injection_bare_json() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
+    let request = matrix_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+    let (reasoning, content, tool_calls, _) = drain_stream(output_stream).await;
+
+    let case = "3: non-force + required + prompt_injected=false + bare JSON";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: parser must not produce reasoning when no <think> seen, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+}
+
+/// CASE 4 — non-force parser + required + `prompt_injected_reasoning=true`
+/// + `<reasoning></think>[json]` (the Qwen3.x production shape). Parser
+/// strips the reasoning prefix into `reasoning_content`; the JSON after
+/// `</think>` reaches the jail. Verified end-to-end against
+/// Qwen3.6-35B-A3B-FP8 — this is the case DIS-2061 set out to fix.
+#[tokio::test]
+async fn dis2061_matrix_non_force_required_prompt_injected_with_close_marker() {
+    let stream_text = r#"Let me check.</think>[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
+    let request = matrix_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(stream_text), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true)
+        .expect("postprocessor_parsing_stream should build");
+    let (reasoning, content, tool_calls, _) = drain_stream(output_stream).await;
+
+    let case = "4: non-force + required + prompt_injected=true + reasoning</think>JSON";
+    assert_eq!(
+        reasoning.trim(),
+        "Let me check.",
+        "{case}: reasoning_content should hold only the pre-</think> text, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+}
+
+/// CASE 5 — non-force parser + required + `prompt_injected_reasoning=true`
+/// + bare JSON (no `</think>`). Documents the **backend contract** rather
+/// than asserting recovery: when `--dyn-reasoning-parser X` is set, vLLM's
+/// auto-forward in `components/src/dynamo/vllm/main.py:506-507` instantiates
+/// a reasoner whose `should_fill_bitmask` gate (vLLM
+/// `v1/structured_output/__init__.py:301`) keeps the xgrammar bitmask off
+/// until `</think>` appears in the output. Consequently any "bare guided
+/// JSON" emitted before `</think>` was never grammar-constrained — it's a
+/// backend-bug shape, not a normal production output.
+///
+/// This test pins the current behavior so future regressions are loud: if
+/// we later add an EOF fallback to `BasicReasoningParser` to flush
+/// accumulated reasoning as content, this assertion needs to flip.
+#[tokio::test]
+async fn dis2061_matrix_non_force_required_prompt_injected_bare_json_contract() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
+    let request = matrix_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true)
+        .expect("postprocessor_parsing_stream should build");
+    let (reasoning, content, tool_calls, _) = drain_stream(output_stream).await;
+
+    let case = "5 (contract): non-force + required + prompt_injected=true + bare JSON";
+    // Backend contract: this shape shouldn't happen with a properly configured
+    // vLLM reasoner. If it does, the parser consumes the bare JSON as reasoning,
+    // tool_calls comes out empty, and content is empty. Pinning this so an EOF
+    // fallback (future) consciously updates the expectations.
+    assert!(
+        tool_calls.is_empty(),
+        "{case}: contract case currently extracts no tool_calls (backend bug shape), got: {tool_calls:?}"
+    );
+    assert!(
+        content.is_empty(),
+        "{case}: content must remain empty (no leak), got: {content:?}"
+    );
+    assert!(
+        reasoning.contains("get_weather"),
+        "{case}: parser pins the JSON in reasoning_content under the broken contract, got: {reasoning:?}"
+    );
+}
+
+/// CASE 6 — Immediate jail mode + first chunk has only `reasoning_content`
+/// (no text delta) + JSON arrives in a later chunk. Regression for the
+/// `jail.rs:678` fix: before the fix, the else branch hardcoded
+/// `starts_jailed=false`, silently disabling Immediate mode whenever the
+/// first chunk for a choice initialized through the no-content path. After
+/// the fix, the state respects `JailMode::Immediate` and the JSON in the
+/// later chunk is captured by the jail.
+#[tokio::test]
+async fn dis2061_matrix_immediate_jail_reasoning_only_first_chunk() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
+    let request = matrix_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![
+            mock_reasoning_only_chunk("thinking briefly"),
+            mock_content_chunk(bare_json),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false)
+        .expect("postprocessor_parsing_stream should build");
+    let (reasoning, content, tool_calls, _) = drain_stream(output_stream).await;
+
+    let case = "6: Immediate jail + reasoning-only first chunk + JSON later";
+    assert!(
+        reasoning.contains("thinking briefly"),
+        "{case}: reasoning_content from the first chunk must reach the client, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
 }
