@@ -23,32 +23,35 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
 
-pynvml = pytest.importorskip("pynvml")
+from .conftest import HAS_GMS, HAS_PYNVML
 
-try:
-    from gpu_memory_service.client import memory_manager as client_memory_manager
-    from gpu_memory_service.client.memory_manager import (
-        GMSClientMemoryManager,
-        StaleMemoryLayoutError,
-    )
-    from gpu_memory_service.client.rpc import _GMSRPCTransport
-    from gpu_memory_service.client.session import _GMSClientSession
-    from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-    from gpu_memory_service.common.protocol.messages import (
-        GetEventHistoryRequest,
-        GetEventHistoryResponse,
-        GetRuntimeStateRequest,
-        GetRuntimeStateResponse,
-    )
-    from gpu_memory_service.server import allocations as server_allocations
-    from gpu_memory_service.server.allocations import GMSAllocationManager
-    from gpu_memory_service.server.fsm import ServerState
-    from gpu_memory_service.server.rpc import GMSRPCServer
-except ModuleNotFoundError:
+if not HAS_GMS:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
         allow_module_level=True,
     )
+
+if HAS_PYNVML:
+    import pynvml
+
+from gpu_memory_service.client import memory_manager as client_memory_manager
+from gpu_memory_service.client.memory_manager import (
+    GMSClientMemoryManager,
+    StaleMemoryLayoutError,
+)
+from gpu_memory_service.client.rpc import _GMSRPCTransport
+from gpu_memory_service.client.session import _GMSClientSession
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.protocol.messages import (
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
+    GetRuntimeStateRequest,
+    GetRuntimeStateResponse,
+)
+from gpu_memory_service.server import allocations as server_allocations
+from gpu_memory_service.server.allocations import GMSAllocationManager
+from gpu_memory_service.server.fsm import ServerState
+from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -894,6 +897,7 @@ async def test_allocation_manager_caches_exported_fd(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
+@pytest.mark.skipif(not HAS_PYNVML, reason="pynvml is not available")
 async def test_large_allocation_unblocks_after_export_fd_holder_dies(
     tmp_path,
 ):

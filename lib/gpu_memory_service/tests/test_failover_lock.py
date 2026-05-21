@@ -16,13 +16,15 @@ import time
 
 import pytest
 
-try:
-    from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-except ModuleNotFoundError:
+from .conftest import HAS_GMS
+
+if not HAS_GMS:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
         allow_module_level=True,
     )
+
+from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 
 pytestmark = [
     pytest.mark.pre_merge,

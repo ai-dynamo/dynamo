@@ -12,6 +12,15 @@ import os
 from types import SimpleNamespace
 
 import pytest
+
+from .conftest import HAS_GMS, HAS_TORCH
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
 from gpu_memory_service.integrations.vllm.utils import configure_mx_ports
 
 pytestmark = [
@@ -54,7 +63,9 @@ class TestConfigureMxPorts:
 
 
 # torch is required to import model_loader.py (top-level `import torch`)
-torch = pytest.importorskip("torch", reason="torch required for model_loader")
+if not HAS_TORCH:
+    pytest.skip("torch required for model_loader", allow_module_level=True)
+
 from gpu_memory_service.integrations.vllm.model_loader import (  # noqa: E402
     get_mx_load_context,
 )
