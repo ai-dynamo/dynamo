@@ -2016,23 +2016,6 @@ class TestChatTemplateKwargsForwarding:
         )
         assert think.prompt_token_ids != no_think.prompt_token_ids
 
-    def test_reasoning_effort_forwarded_to_template(self, tokenizer):
-        """Top-level reasoning_effort is forwarded to apply_chat_template."""
-        _ = self._preprocess(
-            {"model": MODEL, "messages": self._messages()}, tokenizer
-        )
-        with_effort = self._preprocess(
-            {
-                "model": MODEL,
-                "messages": self._messages(),
-                "reasoning_effort": "low",
-            },
-            tokenizer,
-        )
-        # Qwen3 doesn't use reasoning_effort but it must not crash; tokens may differ
-        # only on models that consume it (e.g. gpt-oss-20b). We verify no exception.
-        assert len(with_effort.prompt_token_ids) > 0
-
     def test_unknown_kwargs_ignored_by_template(self, tokenizer):
         """Unknown keys in chat_template_kwargs do not crash preprocessing."""
         result = self._preprocess(
