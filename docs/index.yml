@@ -55,6 +55,9 @@ navigation:
           - page: Qwen3-VL-30B
             slug: qwen3-vl-30b
             path: recipes/qwen3-vl-30b.mdx
+          - page: Kimi-K2.5 NVFP4
+            slug: kimi-k2-5
+            path: recipes/kimi-k2-5.mdx
       - page: Glossary
         path: reference/glossary.md
 

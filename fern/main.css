@@ -919,7 +919,12 @@ svg.card-icon{
 #dsv32-technique-disagg:checked ~ .dynamo-recipe-browser label[for="dsv32-technique-disagg"],
 #dsv32-technique-agg:checked ~ .dynamo-recipe-browser label[for="dsv32-technique-agg"],
 #qwenvl-cache-on:checked ~ .dynamo-recipe-browser label[for="qwenvl-cache-on"],
-#qwenvl-cache-off:checked ~ .dynamo-recipe-browser label[for="qwenvl-cache-off"] {
+#qwenvl-cache-off:checked ~ .dynamo-recipe-browser label[for="qwenvl-cache-off"],
+#kimi-technique-disagg:checked ~ .dynamo-recipe-browser label[for="kimi-technique-disagg"],
+#kimi-technique-agg-kv:checked ~ .dynamo-recipe-browser label[for="kimi-technique-agg-kv"],
+#kimi-technique-agg-rr-eagle:checked ~ .dynamo-recipe-browser label[for="kimi-technique-agg-rr-eagle"],
+#kimi-technique-agg-rr:checked ~ .dynamo-recipe-browser label[for="kimi-technique-agg-rr"],
+#kimi-technique-tokenspeed:checked ~ .dynamo-recipe-browser label[for="kimi-technique-tokenspeed"] {
     border-color: var(--nv-color-green);
     box-shadow: 0 0 0 1px var(--nv-color-green);
     font-weight: 700;
@@ -1478,7 +1483,12 @@ svg.card-icon{
 #dsv32-technique-disagg:checked ~ .dsv32-technique-disagg,
 #dsv32-technique-agg:checked ~ .dsv32-technique-agg,
 #qwenvl-cache-on:checked ~ .qwenvl-cache-on,
-#qwenvl-cache-off:checked ~ .qwenvl-cache-off {
+#qwenvl-cache-off:checked ~ .qwenvl-cache-off,
+#kimi-technique-disagg:checked ~ .kimi-technique-disagg,
+#kimi-technique-agg-kv:checked ~ .kimi-technique-agg-kv,
+#kimi-technique-agg-rr-eagle:checked ~ .kimi-technique-agg-rr-eagle,
+#kimi-technique-agg-rr:checked ~ .kimi-technique-agg-rr,
+#kimi-technique-tokenspeed:checked ~ .kimi-technique-tokenspeed {
     display: grid;
 }
 

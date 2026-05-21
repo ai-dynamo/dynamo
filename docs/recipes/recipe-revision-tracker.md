@@ -84,13 +84,13 @@ explicit eviction decision before the revised Recipes section is real.
 | --- | --- | --- | --- |
 | todo | Monitoring, logs, artifact retrieval, cleanup | Benchmark-heavy READMEs, especially Qwen3-32B and DeepSeek V3.2 | Add `Operate` section to detail pages; keep generic cleanup in setup/troubleshooting docs. |
 | todo | Container/image build flows | DeepSeek V4 container, Nemotron Omni, Kimi TokenSpeed | Create shared image guide, then add short image provenance notes per recipe. |
-| draft | Dataset generation and trace preparation | Qwen3-VL, Kimi K2.5, Qwen3.6 | Qwen3-VL now has a `Dataset` section; Kimi and Qwen3.6 still need first-class homes. |
+| draft | Dataset generation and trace preparation | Qwen3-VL, Kimi K2.5, Qwen3.6 | Qwen3-VL and Kimi now have `Dataset` sections; Qwen3.6 still needs a first-class home. |
 | todo | Cluster-specific networking and fabric setup | DeepSeek V4 Pro, DeepSeek-R1, GLM-5 | Keep recipe-specific required settings in `Configuration Notes`; link generic platform setup. |
 | todo | GAIE accessory manifests | Llama 3.3 70B | Move to optional integration note; do not count as a separate recipe variant. |
 | todo | Script-driven benchmark workflows | Qwen3.6 | Give the detail page a `Run Scripts` section instead of forcing it into deploy-command tabs. |
 | todo | Maintainer authoring rules and repo layout | Root `recipes/README.md` | Move to contributor/maintainer docs; evict from customer-facing recipe pages. |
 | todo | Compatibility notes for older Dynamo releases | Nemotron Super, backend-specific READMEs | Verify against current branch; keep only if still relevant. |
-| todo | Raw result images and benchmark artifacts | Kimi, DeepSeek V3.2, Qwen3-VL | Link from `Benchmark Evidence`; avoid embedding stale screenshots without date/source. |
+| draft | Raw result images and benchmark artifacts | Kimi, DeepSeek V3.2, Qwen3-VL | Kimi ports the expected metrics table and links source evidence, but does not embed the README result image without dated artifacts. |
 
 ## Recipe Family Tracker
 
@@ -102,7 +102,7 @@ explicit eviction decision before the revised Recipes section is real.
 | todo | `deepseek-v4-pro.mdx` | `recipes/deepseek-v4/deepseek-v4-pro/README.md`, SGLang disagg B200/GB200 READMEs | vLLM B200 agg, vLLM GB200 agg, vLLM GB200 disagg, SGLang agg, SGLang disagg B200, SGLang disagg GB200 | Variant table, Day-0 status, GB200 ComputeDomain, RDMA/GKE/AWS/IB notes, perf for vLLM GB200 disagg, reasoning/tool verification | Duplicated setup | Need reconcile top-level SGLang agg plus nested SGLang disagg pages without overwhelming customers. |
 | todo | `glm-5-nvfp4.mdx` | `recipes/glm-5-nvfp4/README.md` | SGLang disagg | Topology, published runtime image, EAGLE MTP, KV cache, NIXL/UCX, recovery/rollouts, 1K/8K benchmark result | Generic storage/HF setup | Need preserve performance number with caveat if not in artifact. |
 | todo | `gpt-oss-120b.mdx` | `recipes/gpt-oss-120b/README.md`, `recipes/gpt-oss-120b/trtllm/disagg/README.md` | TRT-LLM agg, TRT-LLM disagg | Available configs, P/D topology, engine config differences, KV transfer, quantization, benchmark optional | Repeated top-level quickstart | GPU count ambiguity: README says 5 Blackwell for family, CSV inferred 6 from benchmark env. Verify. |
-| todo | `kimi-k2-5.mdx` | `recipes/kimi-k2.5/README.md`, TokenSpeed README | TRT-LLM agg Eagle KV router, agg Eagle round-robin, agg round-robin, disagg Eagle KV router, TokenSpeed experimental agg | Agentic coding workload, result plot, expected metrics, Eagle/KV/offload comparison, trace copy requirement, TokenSpeed caveats | Generic setup | Decide whether TokenSpeed is a variant on same page or separate experimental subpage. |
+| draft | `kimi-k2-5.mdx` | `recipes/kimi-k2.5/README.md`, TokenSpeed README | TRT-LLM agg Eagle KV router, agg Eagle round-robin, agg round-robin, disagg Eagle KV router, TokenSpeed experimental agg | Agentic coding workload, expected metrics, Eagle/KV/offload comparison, trace copy requirement, TokenSpeed caveats, benchmark/operate commands | Generic setup | TokenSpeed is represented as an experimental deploy-only variant on the same page; still needs final visual review. |
 | todo | `llama-3-3-70b.mdx` | `recipes/llama-3-70b/README.md` | vLLM agg, vLLM disagg single-node, vLLM disagg multi-node, GAIE accessory | Basic config table, FP8 model details, GAIE note, static 8K/1K perf rows | Simple duplicated quickstart | Needs richer "why choose each variant"; README is thin. |
 | todo | `nemotron-3-nano-omni.mdx` | `recipes/nemotron-3-nano-omni/README.md` | vLLM agg | Custom container build, multimodal smoke tests, prefix-hash routing, tool/reasoning parsers, optional no-NATS | Benchmark section, because no `perf.yaml` | Since build is required, page needs an Image section or it will mislead. |
 | todo | `nemotron-3-super-fp8.mdx` | `recipes/nemotron-3-super-fp8/README.md` | vLLM agg, TRT-LLM disagg, SGLang agg, SGLang disagg | Parser config, routing, backend notes, Dynamo 0.9.1 compatibility if still needed | Old compatibility if no longer supported | Need verify whether compatibility notes belong in current docs. |
@@ -141,11 +141,11 @@ or moved to a separate operational/build guide.
 | todo | GLM-5 NVFP4 SGLang disagg | `recipes/glm-5-nvfp4/sglang/disagg` | Yes | Yes | Create detail page. |
 | todo | GPT-OSS-120B TRT-LLM agg | `recipes/gpt-oss-120b/trtllm/agg` | Yes | Family only | Add benchmark-backed variant. |
 | todo | GPT-OSS-120B TRT-LLM disagg | `recipes/gpt-oss-120b/trtllm/disagg` | Yes | Family only | Add benchmark-backed variant and key config notes. |
-| todo | Kimi-K2.5 TRT-LLM agg Eagle KV router | `recipes/kimi-k2.5/trtllm/agg-eagle-kv-router` | Yes | Family only | Add variant to Kimi detail page. |
-| todo | Kimi-K2.5 TRT-LLM agg Eagle round-robin | `recipes/kimi-k2.5/trtllm/agg-eagle-round-robin` | Yes | Family only | Add variant to isolate routing effect. |
-| todo | Kimi-K2.5 TRT-LLM agg round-robin | `recipes/kimi-k2.5/trtllm/agg-round-robin` | Yes | Family only | Add baseline variant. |
-| todo | Kimi-K2.5 TRT-LLM disagg Eagle KV router | `recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router` | Yes | Family only | Add recommended variant. |
-| todo | Kimi-K2.5 TokenSpeed agg | `recipes/kimi-k2.5/tokenspeed/agg/nvidia` | No | Not explicit | Decide separate experimental subpage vs Kimi variant. |
+| draft | Kimi-K2.5 TRT-LLM agg Eagle KV router | `recipes/kimi-k2.5/trtllm/agg-eagle-kv-router` | Yes | Yes | Represented with selector, deploy, verify, benchmark, expected metrics, and cleanup. |
+| draft | Kimi-K2.5 TRT-LLM agg Eagle round-robin | `recipes/kimi-k2.5/trtllm/agg-eagle-round-robin` | Yes | Yes | Represented with selector, deploy, verify, benchmark, expected metrics, and cleanup. |
+| draft | Kimi-K2.5 TRT-LLM agg round-robin | `recipes/kimi-k2.5/trtllm/agg-round-robin` | Yes | Yes | Represented with selector, deploy, verify, benchmark, expected metrics, and cleanup. |
+| draft | Kimi-K2.5 TRT-LLM disagg Eagle KV router | `recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router` | Yes | Yes | Represented as the recommended variant with selector, deploy, verify, benchmark, expected metrics, and cleanup. |
+| draft | Kimi-K2.5 TokenSpeed agg | `recipes/kimi-k2.5/tokenspeed/agg/nvidia` | No | Yes | Represented as an experimental deploy-only variant on the Kimi page. |
 | todo | Llama-3.3-70B vLLM agg | `recipes/llama-3-70b/vllm/agg` | Yes | Family only | Add benchmark-backed variant. |
 | todo | Llama-3.3-70B vLLM disagg single-node | `recipes/llama-3-70b/vllm/disagg-single-node` | Yes | Family only | Add benchmark-backed variant. |
 | todo | Llama-3.3-70B vLLM disagg multi-node | `recipes/llama-3-70b/vllm/disagg-multi-node` | Yes | Family only | Add benchmark-backed variant. |
