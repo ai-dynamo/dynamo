@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="621" viewBox="0 0 1900 621" role="img" aria-label="Dynamo vLLM cold start serial critical path Gantt chart">
-<rect width="1900" height="621" fill="#FFFFFF"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="674" viewBox="0 0 1900 674" role="img" aria-label="Dynamo vLLM cold start serial critical path Gantt chart">
+<rect width="1900" height="674" fill="#FFFFFF"/>
 <style>
   text { font-family: Inter, Arial, Helvetica, sans-serif; letter-spacing: 0; fill: #0F172A; }
   .title { font-size: 50px; font-weight: 800; }
@@ -10,162 +10,159 @@
   .legend, .legend-label { font-size: 22px; font-weight: 700; fill: #1E293B; }
   .bar-label { font-size: 19px; font-weight: 800; fill: #0F172A; }
 </style>
-<text x="220" y="70" class="title">Dynamo vLLM Cold Start</text>
-<text x="220" y="118" class="subtitle">Single-GPU (1xB200); excludes base container startup</text>
-<rect x="220" y="144" width="23" height="23" rx="3" fill="#F28E2B"/>
-<text x="253" y="165" class="legend">Python/Dynamo boot</text>
-<rect x="635.5" y="144" width="23" height="23" rx="3" fill="#B07AA1"/>
-<text x="668.5" y="165" class="legend">vLLM config + inspect</text>
-<rect x="1051" y="144" width="23" height="23" rx="3" fill="#D4A6C8"/>
-<text x="1084" y="165" class="legend">EngineCore setup</text>
-<rect x="1466.5" y="144" width="23" height="23" rx="3" fill="#9C755F"/>
-<text x="1499.5" y="165" class="legend">Model load</text>
-<rect x="220" y="186" width="23" height="23" rx="3" fill="#CC3311"/>
-<text x="253" y="207" class="legend">torch.compile</text>
-<rect x="635.5" y="186" width="23" height="23" rx="3" fill="#A0CBE8"/>
-<text x="668.5" y="207" class="legend">Profile/KV sizing</text>
-<rect x="1051" y="186" width="23" height="23" rx="3" fill="#7F3C8D"/>
-<text x="1084" y="207" class="legend">Kernel warmup</text>
-<rect x="1466.5" y="186" width="23" height="23" rx="3" fill="#0072B2"/>
-<text x="1499.5" y="207" class="legend">CUDA graph capture</text>
-<line x1="220.0" y1="247" x2="220.0" y2="525" stroke="#E2E8F0" stroke-width="1"/>
-<text x="220.0" y="237" class="axis" text-anchor="middle">0.0s</text>
-<text x="220.0" y="549" class="axis" text-anchor="middle">0.0s</text>
-<line x1="593.9" y1="247" x2="593.9" y2="525" stroke="#E2E8F0" stroke-width="1"/>
-<text x="593.9" y="237" class="axis" text-anchor="middle">20s</text>
-<text x="593.9" y="549" class="axis" text-anchor="middle">20s</text>
-<line x1="967.9" y1="247" x2="967.9" y2="525" stroke="#E2E8F0" stroke-width="1"/>
-<text x="967.9" y="237" class="axis" text-anchor="middle">40s</text>
-<text x="967.9" y="549" class="axis" text-anchor="middle">40s</text>
-<line x1="1341.8" y1="247" x2="1341.8" y2="525" stroke="#E2E8F0" stroke-width="1"/>
-<text x="1341.8" y="237" class="axis" text-anchor="middle">1m</text>
-<text x="1341.8" y="549" class="axis" text-anchor="middle">1m</text>
-<line x1="1715.7" y1="247" x2="1715.7" y2="525" stroke="#E2E8F0" stroke-width="1"/>
-<text x="1715.7" y="237" class="axis" text-anchor="middle">1m20s</text>
-<text x="1715.7" y="549" class="axis" text-anchor="middle">1m20s</text>
-<line x1="220" y1="247" x2="1882" y2="247" stroke="#CBD5E1" stroke-width="1.2"/>
-<line x1="220" y1="525" x2="1882" y2="525" stroke="#CBD5E1" stroke-width="1.2"/>
-<text x="1882" y="583" class="axis" text-anchor="end">seconds</text>
-<line x1="220" y1="320" x2="1882" y2="320" stroke="#F1F5F9" stroke-width="1"/>
-<text x="206" y="278" class="model" text-anchor="end">Qwen3 0.6B</text>
-<rect x="220.0" y="247" width="187.5" height="46" rx="3" fill="#F28E2B" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<text x="220" y="64" class="title">Dynamo vLLM Cold Start</text>
+<text x="220" y="110" class="subtitle">Single-GPU (1xB200); excludes base container startup</text>
+<rect x="220" y="133" width="23" height="23" rx="3" fill="#F28E2B"/>
+<text x="253" y="154" class="legend">Python/Dynamo boot</text>
+<rect x="622.5" y="133" width="23" height="23" rx="3" fill="#B07AA1"/>
+<text x="655.5" y="154" class="legend">vLLM config + inspect</text>
+<rect x="1025" y="133" width="23" height="23" rx="3" fill="#D4A6C8"/>
+<text x="1058" y="154" class="legend">EngineCore setup</text>
+<rect x="1427.5" y="133" width="23" height="23" rx="3" fill="#9C755F"/>
+<text x="1460.5" y="154" class="legend">Model load</text>
+<rect x="220" y="175" width="23" height="23" rx="3" fill="#CC3311"/>
+<text x="253" y="196" class="legend">torch.compile</text>
+<rect x="622.5" y="175" width="23" height="23" rx="3" fill="#A0CBE8"/>
+<text x="655.5" y="196" class="legend">Profile/KV sizing</text>
+<rect x="1025" y="175" width="23" height="23" rx="3" fill="#7F3C8D"/>
+<text x="1058" y="196" class="legend">Kernel warmup</text>
+<rect x="1427.5" y="175" width="23" height="23" rx="3" fill="#0072B2"/>
+<text x="1460.5" y="196" class="legend">CUDA graph capture</text>
+<line x1="220.0" y1="250" x2="220.0" y2="504" stroke="#E2E8F0" stroke-width="1"/>
+<text x="220.0" y="240" class="axis" text-anchor="middle">0.0s</text>
+<text x="220.0" y="528" class="axis" text-anchor="middle">0.0s</text>
+<line x1="582.2" y1="250" x2="582.2" y2="504" stroke="#E2E8F0" stroke-width="1"/>
+<text x="582.2" y="240" class="axis" text-anchor="middle">20s</text>
+<text x="582.2" y="528" class="axis" text-anchor="middle">20s</text>
+<line x1="944.5" y1="250" x2="944.5" y2="504" stroke="#E2E8F0" stroke-width="1"/>
+<text x="944.5" y="240" class="axis" text-anchor="middle">40s</text>
+<text x="944.5" y="528" class="axis" text-anchor="middle">40s</text>
+<line x1="1306.7" y1="250" x2="1306.7" y2="504" stroke="#E2E8F0" stroke-width="1"/>
+<text x="1306.7" y="240" class="axis" text-anchor="middle">1m</text>
+<text x="1306.7" y="528" class="axis" text-anchor="middle">1m</text>
+<line x1="1669.0" y1="250" x2="1669.0" y2="504" stroke="#E2E8F0" stroke-width="1"/>
+<text x="1669.0" y="240" class="axis" text-anchor="middle">1m20s</text>
+<text x="1669.0" y="528" class="axis" text-anchor="middle">1m20s</text>
+<line x1="220" y1="250" x2="1830" y2="250" stroke="#CBD5E1" stroke-width="1.2"/>
+<line x1="220" y1="504" x2="1830" y2="504" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="1830" y="562" class="axis" text-anchor="end">seconds</text>
+<line x1="220" y1="315" x2="1830" y2="315" stroke="#F1F5F9" stroke-width="1"/>
+<text x="206" y="280" class="model" text-anchor="end">Qwen3 0.6B</text>
+<rect x="220.0" y="250" width="181.6" height="44" rx="3" fill="#F28E2B" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B Python/Dynamo boot: 10.028s (0.000s -&gt; 10.028s); raw=Container startup excluded; Python/Dynamo boot starts at first Python/vLLM log</title>
 </rect>
-<rect x="288.2" y="254.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="313.7" y="277.0" class="bar-label" text-anchor="middle">10s</text>
-<rect x="407.8" y="247" width="305.9" height="46" rx="3" fill="#B07AA1" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="285.3" y="256.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="310.8" y="279.0" class="bar-label" text-anchor="middle">10s</text>
+<rect x="401.9" y="250" width="296.3" height="44" rx="3" fill="#B07AA1" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B vLLM config + inspect: 16.359s (10.043s -&gt; 26.402s); raw=vLLM model-class inspection; engine config/tokenizer/renderer/child spawn</title>
 </rect>
-<rect x="535.2" y="254.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="560.7" y="277.0" class="bar-label" text-anchor="middle">16s</text>
-<rect x="713.6" y="247" width="72.7" height="46" rx="3" fill="#D4A6C8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="524.5" y="256.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="550.0" y="279.0" class="bar-label" text-anchor="middle">16s</text>
+<rect x="698.2" y="250" width="70.4" height="44" rx="3" fill="#D4A6C8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B EngineCore setup: 3.888s (26.402s -&gt; 30.290s); raw=EngineCore child Python/bootstrap; EngineCore pre-load setup</title>
 </rect>
-<rect x="719.0" y="254.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="750.0" y="277.0" class="bar-label" text-anchor="middle">3.9s</text>
-<rect x="786.3" y="247" width="20.0" height="46" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="702.4" y="256.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="733.4" y="279.0" class="bar-label" text-anchor="middle">3.9s</text>
+<rect x="768.6" y="250" width="19.3" height="44" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B Model load: 1.068s (30.290s -&gt; 31.358s); raw=Model load total</title>
 </rect>
-<rect x="806.3" y="247" width="2.7" height="46" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="788.0" y="250" width="2.6" height="44" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B Profile/KV sizing: 0.142s (31.359s -&gt; 31.501s); raw=Determine available memory before torch.compile</title>
 </rect>
-<rect x="809.0" y="247" width="311.7" height="46" rx="3" fill="#CC3311" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="790.5" y="250" width="301.9" height="44" rx="3" fill="#CC3311" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B torch.compile: 16.670s (31.501s -&gt; 48.171s); raw=torch.compile</title>
 </rect>
-<rect x="939.3" y="254.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="964.8" y="277.0" class="bar-label" text-anchor="middle">17s</text>
-<rect x="1120.6" y="247" width="28.0" height="46" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="916.0" y="256.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="941.5" y="279.0" class="bar-label" text-anchor="middle">17s</text>
+<rect x="1092.5" y="250" width="27.2" height="44" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B Profile/KV sizing: 1.500s (48.171s -&gt; 49.671s); raw=Determine available memory after torch.compile</title>
 </rect>
-<rect x="1149.1" y="247" width="1.8" height="46" rx="3" fill="#7F3C8D" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1120.1" y="250" width="1.7" height="44" rx="3" fill="#7F3C8D" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B Kernel warmup: 0.096s (49.695s -&gt; 49.791s); raw=Kernel warmup</title>
 </rect>
-<rect x="1150.9" y="247" width="54.1" height="46" rx="3" fill="#0072B2" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1121.8" y="250" width="52.4" height="44" rx="3" fill="#0072B2" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 0.6B CUDA graph capture: 2.895s (49.791s -&gt; 52.686s); raw=CUDA graph capture</title>
 </rect>
-<rect x="220" y="322" width="1662" height="82" fill="#F8FAFC"/>
-<line x1="220" y1="402" x2="1882" y2="402" stroke="#F1F5F9" stroke-width="1"/>
-<text x="206" y="360" class="model" text-anchor="end">Qwen3 8B</text>
-<rect x="220.0" y="329" width="187.2" height="46" rx="3" fill="#F28E2B" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="220" y="317" width="1610" height="74" fill="#F8FAFC"/>
+<line x1="220" y1="389" x2="1830" y2="389" stroke="#F1F5F9" stroke-width="1"/>
+<text x="206" y="354" class="model" text-anchor="end">Qwen3 8B</text>
+<rect x="220.0" y="324" width="181.4" height="44" rx="3" fill="#F28E2B" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B Python/Dynamo boot: 10.013s (0.000s -&gt; 10.013s); raw=Container startup excluded; Python/Dynamo boot starts at first Python/vLLM log</title>
 </rect>
-<rect x="288.1" y="336.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="313.6" y="359.0" class="bar-label" text-anchor="middle">10s</text>
-<rect x="407.5" y="329" width="301.2" height="46" rx="3" fill="#B07AA1" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="285.2" y="330.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="310.7" y="353.0" class="bar-label" text-anchor="middle">10s</text>
+<rect x="401.6" y="324" width="291.7" height="44" rx="3" fill="#B07AA1" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B vLLM config + inspect: 16.107s (10.029s -&gt; 26.136s); raw=vLLM model-class inspection; engine config/tokenizer/renderer/child spawn</title>
 </rect>
-<rect x="532.6" y="336.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="558.1" y="359.0" class="bar-label" text-anchor="middle">16s</text>
-<rect x="708.7" y="329" width="70.7" height="46" rx="3" fill="#D4A6C8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="522.0" y="330.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="547.5" y="353.0" class="bar-label" text-anchor="middle">16s</text>
+<rect x="693.4" y="324" width="68.5" height="44" rx="3" fill="#D4A6C8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B EngineCore setup: 3.783s (26.136s -&gt; 29.919s); raw=EngineCore child Python/bootstrap; EngineCore pre-load setup</title>
 </rect>
-<rect x="713.0" y="336.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="744.0" y="359.0" class="bar-label" text-anchor="middle">3.8s</text>
-<rect x="779.4" y="329" width="70.7" height="46" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="761.9" y="324" width="68.5" height="44" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B Model load: 3.784s (29.919s -&gt; 33.703s); raw=Model load total</title>
 </rect>
-<rect x="783.8" y="336.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="814.8" y="359.0" class="bar-label" text-anchor="middle">3.8s</text>
-<rect x="850.2" y="329" width="2.3" height="46" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="830.4" y="324" width="2.2" height="44" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B Profile/KV sizing: 0.122s (33.704s -&gt; 33.826s); raw=Determine available memory before torch.compile</title>
 </rect>
-<rect x="852.4" y="329" width="354.3" height="46" rx="3" fill="#CC3311" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="832.7" y="324" width="343.2" height="44" rx="3" fill="#CC3311" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B torch.compile: 18.950s (33.826s -&gt; 52.776s); raw=torch.compile</title>
 </rect>
-<rect x="1004.1" y="336.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="1029.6" y="359.0" class="bar-label" text-anchor="middle">19s</text>
-<rect x="1206.7" y="329" width="31.2" height="46" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="978.8" y="330.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="1004.3" y="353.0" class="bar-label" text-anchor="middle">19s</text>
+<rect x="1175.9" y="324" width="30.2" height="44" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B Profile/KV sizing: 1.667s (52.776s -&gt; 54.443s); raw=Determine available memory after torch.compile</title>
 </rect>
-<rect x="1238.4" y="329" width="2.9" height="46" rx="3" fill="#7F3C8D" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1206.5" y="324" width="2.8" height="44" rx="3" fill="#7F3C8D" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B Kernel warmup: 0.153s (54.467s -&gt; 54.620s); raw=Kernel warmup</title>
 </rect>
-<rect x="1241.2" y="329" width="75.6" height="46" rx="3" fill="#0072B2" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1209.3" y="324" width="73.2" height="44" rx="3" fill="#0072B2" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>Qwen3 8B CUDA graph capture: 4.044s (54.620s -&gt; 58.664s); raw=CUDA graph capture</title>
 </rect>
-<rect x="1248.0" y="336.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="1279.0" y="359.0" class="bar-label" text-anchor="middle">4.0s</text>
-<line x1="220" y1="484" x2="1882" y2="484" stroke="#F1F5F9" stroke-width="1"/>
-<text x="206" y="442" class="model" text-anchor="end">gpt-oss-120b</text>
-<rect x="220.0" y="411" width="187.7" height="46" rx="3" fill="#F28E2B" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1214.9" y="330.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="1245.9" y="353.0" class="bar-label" text-anchor="middle">4.0s</text>
+<line x1="220" y1="463" x2="1830" y2="463" stroke="#F1F5F9" stroke-width="1"/>
+<text x="206" y="428" class="model" text-anchor="end">gpt-oss-120b</text>
+<rect x="220.0" y="398" width="181.8" height="44" rx="3" fill="#F28E2B" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b Python/Dynamo boot: 10.038s (0.000s -&gt; 10.038s); raw=Container startup excluded; Python/Dynamo boot starts at first Python/vLLM log</title>
 </rect>
-<rect x="288.3" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="313.8" y="441.0" class="bar-label" text-anchor="middle">10s</text>
-<rect x="408.2" y="411" width="321.2" height="46" rx="3" fill="#B07AA1" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="285.4" y="404.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="310.9" y="427.0" class="bar-label" text-anchor="middle">10s</text>
+<rect x="402.3" y="398" width="311.2" height="44" rx="3" fill="#B07AA1" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b vLLM config + inspect: 17.181s (10.066s -&gt; 27.247s); raw=vLLM model-class inspection; engine config/tokenizer/renderer/child spawn</title>
 </rect>
-<rect x="543.3" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="568.8" y="441.0" class="bar-label" text-anchor="middle">17s</text>
-<rect x="729.4" y="411" width="70.9" height="46" rx="3" fill="#D4A6C8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="532.4" y="404.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="557.9" y="427.0" class="bar-label" text-anchor="middle">17s</text>
+<rect x="713.5" y="398" width="68.7" height="44" rx="3" fill="#D4A6C8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b EngineCore setup: 3.791s (27.247s -&gt; 31.038s); raw=EngineCore child Python/bootstrap; EngineCore pre-load setup</title>
 </rect>
-<rect x="733.9" y="418.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="764.9" y="441.0" class="bar-label" text-anchor="middle">3.8s</text>
-<rect x="800.3" y="411" width="253.8" height="46" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="782.2" y="398" width="245.8" height="44" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b Model load: 13.573s (31.038s -&gt; 44.611s); raw=Model load total</title>
 </rect>
-<rect x="901.7" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="927.2" y="441.0" class="bar-label" text-anchor="middle">14s</text>
-<rect x="1054.1" y="411" width="2.4" height="46" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="879.6" y="404.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="905.1" y="427.0" class="bar-label" text-anchor="middle">14s</text>
+<rect x="1028.0" y="398" width="2.3" height="44" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b Profile/KV sizing: 0.128s (44.612s -&gt; 44.740s); raw=Determine available memory before torch.compile</title>
 </rect>
-<rect x="1056.5" y="411" width="293.0" height="46" rx="3" fill="#CC3311" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1030.3" y="398" width="283.8" height="44" rx="3" fill="#CC3311" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b torch.compile: 15.670s (44.740s -&gt; 60.410s); raw=torch.compile</title>
 </rect>
-<rect x="1177.5" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="1203.0" y="441.0" class="bar-label" text-anchor="middle">16s</text>
-<rect x="1349.5" y="411" width="44.8" height="46" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1146.7" y="404.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="1172.2" y="427.0" class="bar-label" text-anchor="middle">16s</text>
+<rect x="1314.1" y="398" width="43.4" height="44" rx="3" fill="#A0CBE8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b Profile/KV sizing: 2.395s (60.410s -&gt; 62.805s); raw=Determine available memory after torch.compile</title>
 </rect>
-<rect x="1394.6" y="411" width="179.9" height="46" rx="3" fill="#7F3C8D" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1357.8" y="398" width="174.3" height="44" rx="3" fill="#7F3C8D" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b Kernel warmup: 9.621s (62.822s -&gt; 72.443s); raw=Kernel warmup</title>
 </rect>
-<rect x="1453.5" y="418.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="1484.5" y="441.0" class="bar-label" text-anchor="middle">9.6s</text>
-<rect x="1574.5" y="411" width="243.6" height="46" rx="3" fill="#0072B2" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
+<rect x="1414.0" y="404.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="1445.0" y="427.0" class="bar-label" text-anchor="middle">9.6s</text>
+<rect x="1532.1" y="398" width="236.0" height="44" rx="3" fill="#0072B2" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
 <title>gpt-oss-120b CUDA graph capture: 13.030s (72.443s -&gt; 85.473s); raw=CUDA graph capture</title>
 </rect>
-<rect x="1670.8" y="418.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="1696.3" y="441.0" class="bar-label" text-anchor="middle">13s</text>
+<rect x="1624.6" y="404.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
+<text x="1650.1" y="427.0" class="bar-label" text-anchor="middle">13s</text>
+<rect x="220" y="576" width="1610" height="74" rx="6" fill="#F8FAFC" stroke="#E2E8F0"/>
+<text x="244" y="606" style="font-size:20px;font-weight:800;fill:#0F172A">Takeaway</text>
+<text x="244" y="633" style="font-size:20px;font-weight:600;fill:#334155">With high-bandwidth network storage, small-model startup is mostly engine initialization, not weight load; cached compile/warmup artifacts trim only part of the path.</text>
 </svg>

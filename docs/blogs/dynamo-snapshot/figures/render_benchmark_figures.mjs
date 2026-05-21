@@ -118,22 +118,23 @@ function renderCold(def, rows) {
   const models = groupByModel(rows);
   const width = 1900;
   const left = 220;
-  const right = 18;
-  const top = 247;
-  const rowHeight = 82;
-  const barHeight = 46;
+  const right = 70;
+  const top = 250;
+  const rowHeight = 74;
+  const barHeight = 44;
   const plotWidth = width - left - right;
   const axisBottom = top + models.length * rowHeight + 32;
-  const height = axisBottom + 96;
+  const noteTop = axisBottom + 72;
+  const height = noteTop + 98;
   const maxEnd = Math.max(...rows.map((row) => row.end_s));
   const maxScale = maxEnd * 1.04;
   const x = (value) => left + (value / maxScale) * plotWidth;
   const tickStep = niceStep(maxEnd, 6);
 
   const svg = baseSvg(width, height, "Dynamo vLLM cold start serial critical path Gantt chart");
-  svg.push(`<text x="${left}" y="70" class="title">Dynamo vLLM Cold Start</text>`);
-  svg.push(`<text x="${left}" y="118" class="subtitle">${esc(def.subtitle)}</text>`);
-  renderLegend(svg, def.phaseOrder, rows, left, 164, width - right);
+  svg.push(`<text x="${left}" y="64" class="title">Dynamo vLLM Cold Start</text>`);
+  svg.push(`<text x="${left}" y="110" class="subtitle">${esc(def.subtitle)}</text>`);
+  renderLegend(svg, def.phaseOrder, rows, left, 153, width - right);
   renderColdAxis(svg, left, right, top, axisBottom, width, tickStep, maxScale, x);
 
   models.forEach((model, index) => {
@@ -149,6 +150,7 @@ function renderCold(def, rows) {
     }
   });
 
+  renderColdNote(svg, left, noteTop, plotWidth);
   svg.push(`</svg>`);
   return `${svg.join("\n")}\n`;
 }
@@ -313,6 +315,12 @@ function renderColdAxis(svg, left, right, top, axisBottom, width, tickStep, maxS
   svg.push(`<line x1="${left}" y1="${top}" x2="${width - right}" y2="${top}" stroke="#CBD5E1" stroke-width="1.2"/>`);
   svg.push(`<line x1="${left}" y1="${axisBottom}" x2="${width - right}" y2="${axisBottom}" stroke="#CBD5E1" stroke-width="1.2"/>`);
   svg.push(`<text x="${width - right}" y="${axisBottom + 58}" class="axis" text-anchor="end">seconds</text>`);
+}
+
+function renderColdNote(svg, left, top, width) {
+  svg.push(`<rect x="${left}" y="${top}" width="${width}" height="74" rx="6" fill="#F8FAFC" stroke="#E2E8F0"/>`);
+  svg.push(`<text x="${left + 24}" y="${top + 30}" style="font-size:20px;font-weight:800;fill:#0F172A">Takeaway</text>`);
+  svg.push(`<text x="${left + 24}" y="${top + 57}" style="font-size:20px;font-weight:600;fill:#334155">With high-bandwidth network storage, small-model startup is mostly engine initialization, not weight load; cached compile/warmup artifacts trim only part of the path.</text>`);
 }
 
 function renderBar(svg, row, x, y, height) {

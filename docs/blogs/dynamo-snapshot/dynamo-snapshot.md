@@ -25,8 +25,6 @@ Here is a breakdown of the cold start time of various models for a single-GPU wo
 
 ![Cold start time breakdown across model sizes on a single B200 GPU, excluding base container startup.](./figures/cold_start_bench.svg)
 
-In our setup, weights are loaded from high-bandwidth network-attached storage. For smaller models, the majority of cold-start time is consumed by initialization overhead rather than weight loading itself; with lower-bandwidth storage, the weight-loading contribution grows and dominates. Even under "warm start" conditions — where artifacts from torch.compile, kernel warmup etc are cached — the observed reduction in startup time is modest.
-
 Driving cold-start time down means chasing every contributor across the stack and getting them to cooperate, and keeping it down is an uphill battle as each inference engine adds features and has to be optimized individually.
 
 The well-known alternative is *process-level* checkpoint/restore, which reduces the optimization surface to the checkpoint image size and storage bandwidth. Operating at the OS process level also keeps these optimizations *generic*, so they transfer across workloads.
