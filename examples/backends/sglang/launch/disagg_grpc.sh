@@ -10,16 +10,20 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Qwen/Qwen3-0.6B"
-DISAGG_BOOTSTRAP_PORT=8998
-PREFILL_GRPC_PORT=40000
-DECODE_GRPC_PORT=40001
-PREFILL_HTTP_PORT=30000
-DECODE_HTTP_PORT=30001
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+DISAGG_BOOTSTRAP_PORT="${DISAGG_BOOTSTRAP_PORT:-8998}"
+PREFILL_GRPC_PORT="${PREFILL_GRPC_PORT:-40000}"
+DECODE_GRPC_PORT="${DECODE_GRPC_PORT:-40001}"
+PREFILL_HTTP_PORT="${PREFILL_HTTP_PORT:-30000}"
+DECODE_HTTP_PORT="${DECODE_HTTP_PORT:-30001}"
+PREFILL_SYSTEM_PORT="${PREFILL_SYSTEM_PORT:-8081}"
+DECODE_SYSTEM_PORT="${DECODE_SYSTEM_PORT:-8082}"
 
-print_launch_banner "Launching Disaggregated Serving (gRPC bridge, 2 GPUs)" "$MODEL" 8000
+print_launch_banner "Launching Disaggregated Serving (gRPC bridge, 2 GPUs)" "$MODEL" "$HTTP_PORT"
 
 FRONTEND_MODEL_PATH="$(resolve_local_model_dir "$MODEL")"
 
@@ -54,11 +58,11 @@ for port in "$PREFILL_GRPC_PORT" "$DECODE_GRPC_PORT"; do
         || { echo "ERROR: SGLang gRPC :$port did not open within 600s" >&2; exit 1; }
 done
 
-DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT="$PREFILL_SYSTEM_PORT" \
 python3 -m dynamo.sglang_grpc \
     --sglang-grpc-endpoint "http://127.0.0.1:$PREFILL_GRPC_PORT" &
 
-DYN_SYSTEM_PORT=8082 \
+DYN_SYSTEM_PORT="$DECODE_SYSTEM_PORT" \
 python3 -m dynamo.sglang_grpc \
     --sglang-grpc-endpoint "http://127.0.0.1:$DECODE_GRPC_PORT" &
 

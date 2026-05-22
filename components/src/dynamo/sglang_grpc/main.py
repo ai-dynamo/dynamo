@@ -4,14 +4,14 @@
 
 import sys
 
-from dynamo._core import run_sglang_bridge_worker
+from dynamo._core import run_sglang_bridge
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging(service_name="dynamo.sglang_grpc")
 
 
 def main() -> None:
-    run_sglang_bridge_worker(sys.argv[1:])
+    run_sglang_bridge(sys.argv[1:])
 
 
 if __name__ == "__main__":

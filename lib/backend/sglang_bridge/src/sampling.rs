@@ -79,11 +79,16 @@ fn regex_escape(s: &str) -> String {
     out
 }
 
+/// SGLang emits exactly three `finish_reason.type` values from `schedule_batch`
+/// (stop / length / abort). An absent/empty value on a `finished=true` chunk
+/// indicates the gRPC error path (empty meta_info), so we surface it as an
+/// error rather than silently calling it "stop".
 pub fn parse_finish_reason(raw: &str) -> FinishReason {
     match raw {
-        "stop" | "" => FinishReason::Stop,
+        "stop" => FinishReason::Stop,
         "length" => FinishReason::Length,
         "abort" => FinishReason::Cancelled,
+        "" => FinishReason::Error("missing finish_reason on terminal chunk".to_string()),
         other => FinishReason::Error(format!("unknown sglang finish_reason: {other}")),
     }
 }
@@ -95,9 +100,9 @@ mod tests {
     #[test]
     fn parses_known_finish_reasons() {
         assert!(matches!(parse_finish_reason("stop"), FinishReason::Stop));
-        assert!(matches!(parse_finish_reason(""), FinishReason::Stop));
         assert!(matches!(parse_finish_reason("length"), FinishReason::Length));
         assert!(matches!(parse_finish_reason("abort"), FinishReason::Cancelled));
+        assert!(matches!(parse_finish_reason(""), FinishReason::Error(_)));
         match parse_finish_reason("???") {
             FinishReason::Error(msg) => assert!(msg.contains("???")),
             other => panic!("expected Error, got {other:?}"),

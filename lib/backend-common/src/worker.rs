@@ -138,11 +138,10 @@ pub struct WorkerConfig {
     pub runtime: RuntimeConfig,
 }
 
-/// Resolve the effective disaggregation mode for a worker: the engine's
-/// `disaggregation_mode_override` (set in `start()`) wins; otherwise fall back
-/// to the operator-supplied `WorkerConfig.disaggregation_mode`.
-fn effective_disagg_mode(worker: &WorkerConfig, engine: &EngineConfig) -> DisaggregationMode {
-    engine.disaggregation_mode_override.unwrap_or(worker.disaggregation_mode)
+/// Engine-reported mode (from `start()`) wins; else operator's
+/// `WorkerConfig.disaggregation_mode`.
+fn resolve_disagg_mode(worker: &WorkerConfig, engine: &EngineConfig) -> DisaggregationMode {
+    engine.engine_disaggregation_mode.unwrap_or(worker.disaggregation_mode)
 }
 
 impl Default for WorkerConfig {
@@ -415,7 +414,7 @@ impl Worker {
             );
             return Ok(());
         }
-        let mode = effective_disagg_mode(&self.config, engine_config);
+        let mode = resolve_disagg_mode(&self.config, engine_config);
         let enable_local_indexer = self.config.enable_local_indexer && !mode.is_decode();
         tracing::debug!(
             kv_sources = kv_sources.len(),
@@ -512,7 +511,7 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
-        let mode = effective_disagg_mode(&self.config, engine_config);
+        let mode = resolve_disagg_mode(&self.config, engine_config);
         let model_type = resolve_model_type(mode, &self.config.endpoint_types)?;
 
         let mut local_model = build_local_model(&self.config, engine_config, mode).await?;
@@ -1036,10 +1035,6 @@ mod tests {
         let local_model = build_local_model(&config, &engine_config, DisaggregationMode::Aggregated).await.unwrap();
         assert!(local_model.runtime_config().disaggregated_endpoint.is_none());
     }
-
-    // -------------------------------------------------------------------
-    // Lifecycle state machine tests
-    // -------------------------------------------------------------------
 
     use crate::engine::PreprocessedRequest;
     use async_trait::async_trait;

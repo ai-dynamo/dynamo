@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Fetch `sglang.runtime.v1` proto into proto/sglang/runtime/v1/. Invoked
-# automatically by build.rs when the proto is missing; can also be run
-# manually to pick up upstream proto changes.
+# Fetch `sglang.runtime.v1` proto into proto/sglang/runtime/v1/. The
+# committed proto file is the source of truth; build.rs only runs this as
+# a fallback when the file is missing. Re-run manually to pick up
+# upstream changes — the resolved commit SHA is captured in the vendored
+# proto header so the version is always traceable from the file itself.
 #
 # Default source carries our pending `DisaggregatedParams` /
 # `SubscribeKvEvents` additions. Switch to sgl-project/sglang + a pinned

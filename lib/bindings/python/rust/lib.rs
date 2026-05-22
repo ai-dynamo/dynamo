@@ -169,7 +169,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
-    m.add_function(wrap_pyfunction!(sglang_bridge::run_sglang_bridge_worker, m)?)?;
+    m.add_function(wrap_pyfunction!(sglang_bridge::run_sglang_bridge, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<Endpoint>()?;

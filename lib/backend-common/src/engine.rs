@@ -112,16 +112,11 @@ impl Deref for GenerateContext {
 /// can leave `kv_cache_block_size` and `total_kv_blocks` unset.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
-    /// Canonical model identifier (e.g. HF repo name). When non-empty and
-    /// `WorkerConfig.model_name` is empty, `Worker` resolves this as the
-    /// tokenizer source (local path or HF fetch).
+    /// Canonical model identifier (e.g. HF repo name).
     pub model: String,
-    /// Disaggregation mode reported by the engine (typically read from an
-    /// external runtime in `start()`). When `Some`, overrides
-    /// `WorkerConfig.disaggregation_mode`. `None` means "use the operator's
-    /// CLI value." Lets engines that connect to upstream runtimes (e.g.
-    /// `sglang_bridge`) discover the mode instead of trusting a CLI flag.
-    pub disaggregation_mode_override: Option<DisaggregationMode>,
+    /// Disaggregation mode discovered by the engine in `start()`. When
+    /// `Some`, takes precedence over `WorkerConfig.disaggregation_mode`.
+    pub engine_disaggregation_mode: Option<DisaggregationMode>,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
     /// Maximum context length the engine supports, in tokens.

@@ -10,13 +10,15 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Qwen/Qwen3-0.6B"
-SGLANG_GRPC_PORT=40000
-SGLANG_HTTP_PORT=30000
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-40000}"
+SGLANG_HTTP_PORT="${SGLANG_HTTP_PORT:-30000}"
 
-print_launch_banner "Launching Aggregated Serving (gRPC bridge)" "$MODEL" 8000
+print_launch_banner "Launching Aggregated Serving (gRPC bridge)" "$MODEL" "$HTTP_PORT"
 
 # dynamo.frontend's preprocessor needs a local dir to load the tokenizer from.
 FRONTEND_MODEL_PATH="$(resolve_local_model_dir "$MODEL")"
@@ -40,6 +42,7 @@ echo "Waiting for SGLang gRPC (:$SGLANG_GRPC_PORT)..."
 wait_for_port "$SGLANG_GRPC_PORT" 600 \
     || { echo "ERROR: SGLang gRPC :$SGLANG_GRPC_PORT did not open within 600s" >&2; exit 1; }
 
+DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
 python3 -m dynamo.sglang_grpc \
     --sglang-grpc-endpoint "http://127.0.0.1:$SGLANG_GRPC_PORT" &
 

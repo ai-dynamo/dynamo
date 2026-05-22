@@ -29,7 +29,13 @@ use crate::proto::v1::{
 use crate::sampling::{build_sampling_params, parse_finish_reason};
 use crate::server_info::parse_server_info;
 
+/// Initial gRPC dial timeout. The port binds early — before the scheduler
+/// finishes loading weights — so the connect itself is fast; this just
+/// guards against a misconfigured endpoint.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound on how long `start()` waits for SGLang's `HealthCheck` to flip
+/// from `Starting` to healthy. Weight load + CUDA graph capture for a
+/// 70B model on H100 typically lands around 60-90s; 120s leaves headroom.
 const SCHEDULER_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct SglangBridge {
@@ -86,6 +92,7 @@ impl LLMEngine for SglangBridge {
             .map_err(|e| backend_error(format!("connect {}: {e}", self.grpc_endpoint)))?;
         let mut client = SglangServiceClient::new(channel);
 
+        let started = tokio::time::Instant::now();
         let mut backoff = Duration::from_millis(500);
         loop {
             if client
@@ -97,8 +104,11 @@ impl LLMEngine for SglangBridge {
             {
                 break;
             }
-            if backoff > SCHEDULER_READY_TIMEOUT {
-                return Err(backend_error("SGLang HealthCheck unhealthy for 120s"));
+            if started.elapsed() > SCHEDULER_READY_TIMEOUT {
+                return Err(backend_error(format!(
+                    "SGLang HealthCheck unhealthy for {}s",
+                    SCHEDULER_READY_TIMEOUT.as_secs()
+                )));
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(5));
@@ -169,7 +179,7 @@ impl LLMEngine for SglangBridge {
         Ok(EngineConfig {
             model: model_path,
             served_model_name: Some(served_model_name),
-            disaggregation_mode_override: Some(mode),
+            engine_disaggregation_mode: Some(mode),
             context_length,
             kv_cache_block_size: info.page_size,
             total_kv_blocks,

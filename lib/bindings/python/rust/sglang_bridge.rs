@@ -9,7 +9,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 #[pyfunction]
-pub fn run_sglang_bridge_worker(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
+pub fn run_sglang_bridge(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push("python -m dynamo.sglang_grpc".to_string());
     argv.extend(args);
