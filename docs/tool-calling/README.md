@@ -31,12 +31,10 @@ to the engine's frontend server. Dynamo provides its own OpenAI-compatible
 frontend and connects to engines below that layer, so the default path cannot
 rely on those engine frontends.
 
-Dynamo therefore implements tool-call parsing in its frontend as a
+Dynamo implements tool-call parsing and reasoning parsing in its frontend as a
 framework-agnostic Rust layer. This gives Dynamo one tested OpenAI-compatible
-contract across vLLM, SGLang, TRTLLM, and other workers, while keeping the hot
-path highly concurrent and scalable and avoiding Python GIL overhead. Use
-engine fallback only when Dynamo does not yet ship a parser for the model, or
-when exact framework parity is required.
+contract across vLLM, SGLang, TRTLLM, and other workers, while keeping the serving 
+hot path highly concurrent and scalable, avoiding Python GIL bottlenecks. 
 
 ## Troubleshooting
 
