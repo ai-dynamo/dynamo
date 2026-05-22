@@ -251,6 +251,8 @@ def test_unified_vllm_router_decisions_dp(
 @pytest.mark.gpu_1
 @pytest.mark.sglang
 @pytest.mark.model(SGLANG_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(360)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_unified_sglang_kv_router_basic(
@@ -279,6 +281,8 @@ def test_unified_sglang_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.sglang
 @pytest.mark.model(SGLANG_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(360)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_unified_sglang_router_decisions_multiple_workers(
@@ -357,6 +361,8 @@ def test_unified_sglang_router_decisions_dp(
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
 @pytest.mark.model(TRTLLM_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_unified_trtllm_kv_router_basic(
@@ -386,6 +392,8 @@ def test_unified_trtllm_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
 @pytest.mark.model(TRTLLM_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_unified_trtllm_router_decisions_multiple_workers(

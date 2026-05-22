@@ -254,3 +254,11 @@ class LLMEngine(ABC):
         Only invoked when :meth:`component_metrics_dp_ranks` returns
         non-empty. Default is no-op so engines that opt out don't need
         to override."""
+
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        """Canary payload the runtime sends through :meth:`generate` when
+        the endpoint is idle. Return ``None`` (default) to disable active
+        probing. ``Worker`` calls this once after :meth:`start` and resolves
+        ``DYN_HEALTH_CHECK_PAYLOAD`` / ``--health-check-payload`` overrides
+        on top."""
+        return None

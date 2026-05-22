@@ -1367,7 +1367,7 @@ class ModelInput:
 
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos, Realtime or Prefill"""
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
@@ -1376,6 +1376,7 @@ class ModelType:
     Images: ModelType
     Audios: ModelType
     Videos: ModelType
+    Realtime: ModelType
 
     def __or__(self, other: ModelType) -> ModelType:
         ...
@@ -2692,6 +2693,7 @@ class backend:
             metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
+            health_check_payload: Optional[Dict[str, Any]] = None,
         ) -> None: ...
 
     class Worker:

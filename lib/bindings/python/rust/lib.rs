@@ -601,6 +601,10 @@ impl ModelType {
     const Videos: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Videos,
     };
+    #[classattr]
+    const Realtime: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Realtime,
+    };
 
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()

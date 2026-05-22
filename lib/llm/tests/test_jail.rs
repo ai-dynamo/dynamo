@@ -1874,8 +1874,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_harmony_parser() {
-        // With only the Harmony tool parser configured, analysis is unhandled by
-        // a reasoning parser and must be preserved as normal content.
+        // With only the Harmony tool parser configured, analysis is internal
+        // reasoning and must not be exposed as normal content.
         let chunks = vec![
             create_mock_response_chunk(
                 "<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|>"
@@ -1903,13 +1903,8 @@ mod tests {
         // Should have at least one output containing the parsed tool call.
         assert!(!results.is_empty());
 
-        // Verify analysis text is preserved as content when no reasoning parser
-        // is configured.
         let content = test_utils::reconstruct_content(&results);
-        assert!(
-            content.contains("Need to use function get_current_weather."),
-            "Should preserve Harmony analysis text as content: {content:?}"
-        );
+        assert_eq!(content, "");
 
         // Verify a tool call was parsed with expected name and args
         let tool_call_idx = results
@@ -1924,7 +1919,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_jailed_stream_harmony_analysis_only_emits_stripped_content() {
+    async fn test_jailed_stream_harmony_analysis_only_drops_content() {
         let chunks = vec![create_mock_response_chunk(
             "<|channel|>analysis<|message|>Need to inspect the request.<|end|>".to_string(),
             0,
@@ -1935,13 +1930,13 @@ mod tests {
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         let content = test_utils::reconstruct_content(&results);
-        assert_eq!(content, "Need to inspect the request.");
+        assert_eq!(content, "");
         assert!(!content.contains("<|channel|>"));
         assert!(!results.iter().any(test_utils::has_tool_call));
     }
 
     #[tokio::test]
-    async fn test_jailed_stream_harmony_truncated_call_keeps_analysis_without_marker_leak() {
+    async fn test_jailed_stream_harmony_truncated_call_drops_analysis_without_marker_leak() {
         let chunks = vec![create_mock_response_chunk(
             r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#.to_string(),
             0,
@@ -1952,8 +1947,9 @@ mod tests {
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
         let content = test_utils::reconstruct_content(&results);
-        assert_eq!(content, "Need current weather.");
+        assert_eq!(content, "");
         assert!(!content.contains("<|channel|>"));
+        assert!(!content.contains("Need current weather."));
         assert!(!content.contains("Hidden City"));
         assert!(!results.iter().any(test_utils::has_tool_call));
     }
