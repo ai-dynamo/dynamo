@@ -16,8 +16,9 @@
 #
 # The `--kv-transfer-config` blob is RENDERED by `kvbmctl` from the live hub
 # (block_size / max_model_len / block_layout / leader.hub all come from the hub
-# aggregate); only free fields (tokio workers, nixl backends, control.metrics)
-# are passed as `--kvbm` overrides here.
+# aggregate). Common free fields (tokio workers, nixl backends, control.metrics)
+# are seeded into the hub's base_config via KVBM_HUB_KVBM in start-hub.sh;
+# no per-launcher --kvbm overrides are needed here.
 #
 # Usage:
 #   KVBM_INSTANCE_PORT=8000 bash launch-instance.sh   # FOREGROUND; background from caller
@@ -51,17 +52,11 @@ GMU=${KVBM_GPU_MEMORY_UTILIZATION:-0.15}
 # Render the vLLM connector args from the live hub via the shared helper
 # (kvbm_hub_render_vllm checks the binary exists). kvbmctl emits
 # `--block-size <N> --max-model-len <M> --kv-transfer-config '{…}'`; the hub is
-# the source of truth for those. Free fields are supplied as overrides:
-#   - leader/worker tokio worker_threads (smoke keeps these small)
-#   - leader.control.metrics (expose the control-plane metrics module)
-#   - worker.nixl backends (UCX + POSIX, as the worker transport)
+# the source of truth for those. Common free fields (tokio workers, nixl
+# backends, control.metrics) are seeded into the hub's base_config via
+# KVBM_HUB_KVBM in start-hub.sh, so no per-launcher --kvbm overrides are needed.
 KV_RENDERED=$(kvbm_hub_render_vllm "$KVBMCTL" "$HUB_URL" indexer \
-    --kv-connector-module-path "$KVBM_CONNECTOR_MODULE_PATH" \
-    --kvbm leader.tokio.worker_threads=2 \
-    --kvbm worker.tokio.worker_threads=2 \
-    --kvbm leader.control.metrics=true \
-    --kvbm 'worker.nixl.backends.UCX={}' \
-    --kvbm 'worker.nixl.backends.POSIX={}') \
+    --kv-connector-module-path "$KVBM_CONNECTOR_MODULE_PATH") \
   || { echo "kvbmctl render failed (is the hub up at $HUB_URL?)" >&2; exit 1; }
 
 # kvbmctl shell-quotes the (space-free) JSON; eval re-parses the quotes so the

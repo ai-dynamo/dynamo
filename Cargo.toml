@@ -23,6 +23,7 @@ members = [
     "lib/kvbm-observability",
     "lib/kvbm-physical",
     "lib/kvbm-protocols",
+    "lib/kvbm-runtime",
     "lib/protocols",
     "lib/parsers",
     "lib/bench",
@@ -72,6 +73,7 @@ kvbm-logical = { path = "lib/kvbm-logical", version = "1.2.0" }
 kvbm-observability = { path = "lib/kvbm-observability", version = "1.2.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.0" }
 kvbm-protocols = { path = "lib/kvbm-protocols", version = "1.2.0" }
+kvbm-runtime = { path = "lib/kvbm-runtime", version = "1.2.0" }
 
 # velo — pinned to versions matching the local clone (`~/repos/velo`)
 # overridden via the workspace `[patch.crates-io]` block below. The

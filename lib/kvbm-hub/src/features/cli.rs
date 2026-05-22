@@ -61,5 +61,8 @@ pub fn hub_arg() -> Arg {
 
 /// Registry of every feature CLI `kvbmctl` exposes. Add new features here.
 pub fn feature_clis() -> Vec<Box<dyn FeatureCli>> {
-    vec![Box::new(super::indexer::cli::IndexerCli)]
+    vec![
+        Box::new(super::indexer::cli::IndexerCli),
+        Box::new(super::disagg::cli::DisaggCli),
+    ]
 }

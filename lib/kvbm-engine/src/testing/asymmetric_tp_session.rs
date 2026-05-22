@@ -52,9 +52,9 @@ use kvbm_physical::transfer::{NixlAgent, StorageKind};
 use velo::Transport;
 use velo::transports::tcp::TcpTransportBuilder;
 
-use crate::p2p::session::VeloSessionFactory;
 use crate::leader::InstanceLeader;
 use crate::leader::parallelism::ParallelismTemplate;
+use crate::p2p::session::VeloSessionFactory;
 use crate::worker::{DirectWorker, Worker};
 use crate::{G2, G3, InstanceId};
 

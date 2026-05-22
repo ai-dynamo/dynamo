@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use kvbm_engine::p2p::session::{PeerResolver as EnginePeerResolver, SessionFactory};
 use kvbm_engine::leader::InstanceLeader;
+use kvbm_engine::p2p::session::{PeerResolver as EnginePeerResolver, SessionFactory};
 use kvbm_hub::protocol::LayoutCompatPayload;
 use kvbm_hub::{Feature, HubClient, IndexerFeatureConfig, P2pConfig};
 use velo::{InstanceId, Velo};

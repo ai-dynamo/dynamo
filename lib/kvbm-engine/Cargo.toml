@@ -18,6 +18,7 @@ kvbm-logical = { workspace = true }
 kvbm-observability = { workspace = true }
 kvbm-physical = { workspace = true }
 kvbm-protocols = { workspace = true }
+kvbm-runtime = { workspace = true }
 prometheus = { workspace = true }
 velo = { workspace = true }
 

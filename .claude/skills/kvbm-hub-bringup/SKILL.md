@@ -39,6 +39,13 @@ Key env (all optional; see the script header for the full list + defaults):
 - `KVBM_HUB_G2_MEMORY_GIB` / `KVBM_HUB_G2_BLOCKS` — advisory G2 sizing the hub
   seeds into the rendered connector `cache.host` (the hub has no G2 itself).
 - `KVBM_HUB_PREFILL_VLLM_URL` + `_MODEL` — enable the CD prefill dispatcher.
+- `KVBM_HUB_KVBM` — newline-separated `KEY.PATH=VALUE` entries; each becomes a
+  `--kvbm` flag on the hub binary. Use this to seed common free-field overrides
+  (e.g. tokio worker counts, nixl backends) into `base_config` so all connectors
+  inherit them without each launcher repeating the same flags.
+- `KVBM_HUB_KVBM_CONFIG` — JSON blob → `--kvbm-config`; applied before
+  `KVBM_HUB_KVBM` entries. Authoritative hub fields (`block_layout`,
+  `leader.hub.*`, `leader.disagg.role`) cannot be clobbered by either.
 - Ports: `KVBM_HUB_{DISCOVERY,CONTROL,VELO}_PORT`.
 
 ## hub-lib.sh
@@ -52,8 +59,7 @@ kvbm_hub_wait_health "$CTRL_PORT" 300 "$HUB_PID" "$HUB_LOG"
 # Render vLLM connector args from the live hub, then consume with eval-array so
 # the shell-quoted compact JSON stays a single argv element:
 RENDERED=$(kvbm_hub_render_vllm "$KVBMCTL" "$HUB_URL" indexer \
-    --kvbm leader.tokio.worker_threads=2 \
-    --kvbm 'worker.nixl.backends.UCX={}') || exit 1
+    --kv-connector-module-path "$MODULE_PATH") || exit 1
 eval "KV_ARGS=( $RENDERED )"
 exec python -m vllm.entrypoints.openai.api_server ... "${KV_ARGS[@]}"
 ```
@@ -66,7 +72,11 @@ free fields. Authoritative fields can't be clobbered by `--kvbm` overrides.
 
 ## Consumers
 
-- `kvindex-smoke` — `start-hub.sh` wrapper sets `KVBM_HUB_FEATURES=indexer`
-  + profile sizing; `launch-instance.sh` renders via `kvbm_hub_render_vllm`.
-- (future) `disagg-bringup`, `p2p-smoke` — migrate onto this skill so there is
-  one hub launcher and one render path.
+- `kvindex-smoke` — `start-hub.sh` wrapper sets `KVBM_HUB_FEATURES=indexer`,
+  profile sizing, and `KVBM_HUB_KVBM` common overrides; `launch-instance.sh`
+  renders via `kvbm_hub_render_vllm` with no per-launcher `--kvbm` flags.
+- `disagg-bringup` — `start-hub.sh` wrapper sets `KVBM_HUB_FEATURES=disagg`,
+  sizing, CD dispatcher URL/model, and the full `KVBM_HUB_KVBM` deployment-wide
+  set (tokio workers, nixl backends, control dev+metrics, onboard mode);
+  `launch-prefill.sh` / `launch-decode.sh` render via `kvbm_hub_render_vllm`
+  passing only the per-instance `--role prefill|decode`.

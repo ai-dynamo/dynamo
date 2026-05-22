@@ -157,11 +157,11 @@ impl KvbmRuntimeBuilder {
             }
             (None, Some(m)) => (m, None),
             (None, None) => {
-                let velo = self
-                    .config
-                    .messenger
-                    .build_velo_with_discovery(self.discovery_override)
-                    .await?;
+                let velo = kvbm_runtime::build_velo_with_discovery(
+                    &self.config.messenger,
+                    self.discovery_override,
+                )
+                .await?;
                 let messenger = velo.messenger().clone();
                 (messenger, Some(velo))
             }
@@ -175,7 +175,7 @@ impl KvbmRuntimeBuilder {
             None => match &self.config.nixl {
                 Some(nixl_config) => {
                     let agent_name = format!("nixl-{}", messenger.instance_id());
-                    let backend_config = nixl_config.clone().into();
+                    let backend_config = kvbm_runtime::nixl_backend_config(nixl_config);
                     Some(NixlAgent::from_nixl_backend_config(
                         &agent_name,
                         backend_config,

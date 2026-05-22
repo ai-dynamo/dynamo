@@ -6,12 +6,13 @@
 # Same as launch-prefill.sh but `--role decode` and port 8001.
 #
 # The `--kv-transfer-config` blob is RENDERED by kvbmctl from the live hub
-# (`--features disagg --role decode`). block_layout is hub-authoritative (set
-# via the hub's --layout / KVBM_HUB_LAYOUT), not a launcher knob.
+# (`--features disagg --role decode`). All deployment-wide config (tokio
+# workers, nixl backends, control dev+metrics, onboard mode, block_layout) is
+# hub-authoritative (seeded at start-hub); only the per-instance disagg role
+# (--role decode) is supplied here.
 #
 # Env vars:
 #   KVBM_VENV / KVBM_HARDWARE_PROFILE / KVBM_HUB_URL / KVBM_KVBMCTL_BIN
-#   KVBM_ONBOARD_MODE  (default: inter) — inter | intra (free field)
 #   KVBM_CONNECTOR_MODULE_PATH (default: kvbm.v2.vllm.connector)
 set -eu
 
@@ -25,22 +26,10 @@ KVBM_VENV=${KVBM_VENV:-$REPO/.sandbox}
 KVBM_CONNECTOR_MODULE_PATH=${KVBM_CONNECTOR_MODULE_PATH:-kvbm.v2.vllm.connector}
 KVBMCTL=${KVBM_KVBMCTL_BIN:-$REPO/target/debug/kvbmctl}
 HUB_URL=${KVBM_HUB_URL:-http://127.0.0.1:1337}
-KVBM_ONBOARD_MODE=${KVBM_ONBOARD_MODE:-inter}
-case "$KVBM_ONBOARD_MODE" in
-  inter|intra) ;;
-  *) echo "KVBM_ONBOARD_MODE must be 'inter' or 'intra', got: '$KVBM_ONBOARD_MODE'" >&2; exit 1 ;;
-esac
 
 KV_RENDERED=$(kvbm_hub_render_vllm "$KVBMCTL" "$HUB_URL" disagg \
     --role decode \
-    --kv-connector-module-path "$KVBM_CONNECTOR_MODULE_PATH" \
-    --kvbm leader.onboard.mode="$KVBM_ONBOARD_MODE" \
-    --kvbm leader.tokio.worker_threads=2 \
-    --kvbm worker.tokio.worker_threads=2 \
-    --kvbm leader.control.dev=true \
-    --kvbm leader.control.metrics=true \
-    --kvbm 'worker.nixl.backends.UCX={}' \
-    --kvbm 'worker.nixl.backends.POSIX={}') \
+    --kv-connector-module-path "$KVBM_CONNECTOR_MODULE_PATH") \
   || { echo "kvbmctl render failed (is the hub up at $HUB_URL with --features disagg?)" >&2; exit 1; }
 eval "KV_ARGS=( $KV_RENDERED )"
 

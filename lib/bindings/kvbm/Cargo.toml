@@ -40,6 +40,7 @@ anyhow = { version = "1" }
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
 tracing = { version = "0" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)

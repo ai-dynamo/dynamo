@@ -14,7 +14,7 @@ use kvbm_engine::leader::{EventSource, FindMatchesOptions, Leader, StagingMode};
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
 use kvbm_engine::worker::VeloWorkerClient;
-use kvbm_hub::{ConditionalDisaggClient, HubClient};
+use kvbm_hub::{ConditionalDisaggClient, HubClient, IndexerLookupClient};
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_observability::CacheStatsTracker;
 
@@ -96,6 +96,10 @@ pub struct ConnectorLeader {
     /// (RAII `DELETE` on drop). Populated only on the p2p-without-CD path; the
     /// CD path holds its registration via `disagg_client`.
     p2p_hub_client: OnceLock<Arc<HubClient>>,
+    /// Remote-search lookup client, captured in `initialize_async` when
+    /// `config.remote_search` is set and the hub's `indexer` feature is
+    /// effective. Consuming it in the match path is a follow-up task.
+    remote_search_client: OnceLock<Arc<IndexerLookupClient>>,
     /// CD-role dispatcher (`Arc<ConditionalDisaggLeader>`) installed by
     /// `initialize_async` when `config.disagg` is present. Bindings route
     /// `ConnectorLeaderApi` methods through this when set so role-specific
@@ -183,6 +187,7 @@ impl ConnectorLeader {
             indexer_publisher: OnceLock::new(),
             indexer_hub_client: OnceLock::new(),
             p2p_hub_client: OnceLock::new(),
+            remote_search_client: OnceLock::new(),
             cd_api: OnceLock::new(),
         }
     }
@@ -232,6 +237,38 @@ impl ConnectorLeader {
     /// `disagg` and `initialize_async` has completed.
     pub fn disagg_client(&self) -> Option<&Arc<ConditionalDisaggClient>> {
         self.disagg_client.get()
+    }
+
+    /// Store the remote-search lookup client. Called once from
+    /// `initialize_async` when `config.remote_search` is set and the hub's
+    /// indexer feature is effective.
+    pub(crate) fn set_remote_search_client(&self, client: Arc<IndexerLookupClient>) -> Result<()> {
+        self.remote_search_client
+            .set(client)
+            .map_err(|_| anyhow!("remote_search_client already set"))
+    }
+
+    /// Remote-search lookup client, if `config.remote_search` was set against an
+    /// indexer-enabled hub and `initialize_async` has completed.
+    pub fn remote_search_client(&self) -> Option<&Arc<IndexerLookupClient>> {
+        self.remote_search_client.get()
+    }
+
+    /// Whichever [`HubClient`] this leader registered with, regardless of which
+    /// feature path ran. The three registration paths stash it differently
+    /// (kv-index-only, standalone-P2P, or folded into the CD client), so this
+    /// reaches into each in turn. `None` before any hub registration completes.
+    fn registered_hub_client(&self) -> Option<Arc<HubClient>> {
+        if let Some(h) = self.indexer_hub_client.get() {
+            return Some(Arc::clone(h));
+        }
+        if let Some(h) = self.p2p_hub_client.get() {
+            return Some(Arc::clone(h));
+        }
+        if let Some(c) = self.disagg_client.get() {
+            return Some(Arc::clone(c.hub()));
+        }
+        None
     }
 
     /// Get the current onboard mode.

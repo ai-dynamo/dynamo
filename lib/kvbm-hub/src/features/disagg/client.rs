@@ -14,10 +14,11 @@ use velo::queue::NextOptions;
 use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConfig};
 use velo_ext::{InstanceId, PeerInfo};
 
+use super::protocol::ConditionalDisaggInstancesResponse;
 use crate::client::HubClient;
 use crate::protocol::{
-    self, ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole,
-    Feature, LayoutCompatPayload, P2pConfig, PrefillRequest, RuntimeConfigSummary,
+    self, ConditionalDisaggConfig, ConditionalDisaggRole, Feature, LayoutCompatPayload, P2pConfig,
+    PrefillRequest, RuntimeConfigSummary,
 };
 
 /// Thin wrapper that registers an instance under the ConditionalDisagg
@@ -157,7 +158,11 @@ impl ConditionalDisaggClient {
             .hub
             .config()
             .discovery_url
-            .join(protocol::paths::CD_INSTANCES)
+            .join(&format!(
+                "/v1/features/{}{}",
+                super::protocol::ROUTE_PREFIX,
+                super::protocol::paths::INSTANCES
+            ))
             .context("joining CD list path")?;
         let resp = reqwest::get(url)
             .await

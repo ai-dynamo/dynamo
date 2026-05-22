@@ -36,7 +36,9 @@ mod nixl;
 mod object;
 mod offload;
 mod onboard;
+pub mod overrides;
 mod rayon;
+mod remote_search;
 mod tokio;
 mod v1_compat;
 
@@ -59,6 +61,7 @@ pub use offload::{
 };
 pub use onboard::{OnboardConfig, OnboardMode};
 pub use rayon::RayonConfig;
+pub use remote_search::RemoteSearch;
 pub use tokio::TokioConfig;
 pub use v1_compat::V1EnvCompat;
 
@@ -161,6 +164,14 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub disagg: Option<DisaggConfig>,
+
+    /// Remote-search configuration. `None` = disabled. When `Some`, the leader
+    /// captures a hub `IndexerLookupClient` at startup — which requires the hub
+    /// to be enabled AND offering the `indexer` feature, else startup fails
+    /// with an invalid-configuration error.
+    #[validate(nested)]
+    #[serde(default)]
+    pub remote_search: Option<RemoteSearch>,
 
     /// Leader control-plane module configuration. `core` + `transfer` are
     /// always on; `dev` / `test` are opt-in and both default to `false`.

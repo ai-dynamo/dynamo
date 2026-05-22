@@ -11,10 +11,18 @@
 
 use kvbm_logical::SequenceHash;
 use serde::{Deserialize, Serialize};
+use velo_ext::InstanceId;
 
 /// URL segment the server nests this feature's routers under
 /// (`/v1/features/indexer/...`).
 pub const ROUTE_PREFIX: &str = "indexer";
+
+/// Velo active-message handler name for the client → hub block lookup. The hub
+/// installs this handler on its own velo in
+/// [`IndexerManager::attach`](super::manager::IndexerManager); a
+/// [`IndexerLookupClient`](super::client::IndexerLookupClient) calls it. Follows
+/// the `kvbm_hub_*` convention shared with the heartbeat handler.
+pub const QUERY_HANDLER: &str = "kvbm_hub_indexer_query";
 
 /// Relative route paths (mounted under `/v1/features/indexer`).
 pub mod paths {
@@ -98,4 +106,20 @@ pub struct QueryRequest {
 pub struct QueryResponse {
     /// The deepest matching block, or `None` if nothing matched.
     pub hit: Option<IndexEntry>,
+}
+
+/// Typed result of the velo [`QUERY_HANDLER`] lookup.
+///
+/// Unlike the HTTP [`IndexEntry`] (which stringifies ids for jq-safety), this
+/// stays typed end-to-end over the velo plane: the matched [`SequenceHash`] and
+/// the holder [`InstanceId`]s feed straight into peer discovery. Paired so the
+/// matched hash and its holders cannot drift — a full miss is the `None` arm of
+/// the `Option<FindBlocksHit>` the handler and
+/// [`IndexerLookupClient`](super::client::IndexerLookupClient) return.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindBlocksHit {
+    /// Deepest candidate hash present in the index.
+    pub matched: SequenceHash,
+    /// Instances currently holding `matched`. Always non-empty.
+    pub candidates: Vec<InstanceId>,
 }

@@ -18,7 +18,7 @@
 # `None` even under `onboard_mode=intra`. Aggregated (single-instance)
 # mode bypasses the CD wrapper and the intra-pass-onboard path actually
 # fires. Set `KVBM_BLOCK_LAYOUT=universal` together with intra mode to
-# exercise the Phase-4b kernel-catalog + `layer_range` path end-to-end;
+# exercise the kernel-catalog + `layer_range` path end-to-end;
 # any stride regression in `dispatch_transform_kernel` surfaces as an
 # R2 panic or a checksum-equivalent failure mode.
 #
@@ -124,7 +124,7 @@ echo "  start lines:"
 grep -a "Starting layer-wise onboard from G2 to G1" "$ROOT/vllm.log" 2>/dev/null \
   | sed 's/\x1b\[[0-9;]*m//g' | head -5 | sed 's/^/    /' || true
 
-# Phase-4b regression guard: under Universal mode the per-layer onboard
+# Kernel-catalog regression guard: under Universal mode the per-layer onboard
 # routes through `dispatch_transform_kernel`; any FFI/kernel-launch failure
 # surfaces here. Under operational mode this same call goes through the
 # legacy CUDA executor and the grep below is informational.

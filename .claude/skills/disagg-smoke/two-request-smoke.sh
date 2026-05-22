@@ -129,7 +129,10 @@ until curl -fsS -m 5 http://127.0.0.1:8000/v1/models >/dev/null 2>&1 \
 done
 echo "BOTH UP $(date)"
 
-INSTS=$(curl -sS http://127.0.0.1:8337/v1/features/disagg/instances)
+# Discover the P/D split via kvbmctl (shares the feature's route const with the
+# server) instead of hand-rolling the HTTP path.
+KVBMCTL=${KVBM_KVBMCTL_BIN:-$DYNAMO/target/debug/kvbmctl}
+INSTS=$("$KVBMCTL" disagg instances --hub http://127.0.0.1:1337)
 PREFILL_ID=$(echo "$INSTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prefill"][0])')
 DECODE_ID=$(echo "$INSTS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["decode"][0])')
 echo "PREFILL_ID=$PREFILL_ID DECODE_ID=$DECODE_ID"
@@ -264,7 +267,7 @@ echo "  decode start lines:"
 grep -a "Starting layer-wise onboard from G2 to G1" "$ROOT/decode.log" 2>/dev/null \
   | sed 's/\x1b\[[0-9;]*m//g' | head -5 | sed 's/^/    /' || true
 
-# 4. Phase-4b regression guard: under Universal mode the per-layer onboard
+# 4. Kernel-catalog regression guard: under Universal mode the per-layer onboard
 #    must route through the kernel catalog (`dispatch_transform_kernel`).
 #    Any kernel-launch / FFI failure surfaces as an ERROR line — count
 #    those so a future stride regression turns into a loud failure, not

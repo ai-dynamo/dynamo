@@ -73,12 +73,6 @@ pub mod paths {
     /// `GET /v1/config` → [`super::HubConfigResponse`]
     pub const HUB_CONFIG: &str = "/v1/config";
 
-    /// List ConditionalDisagg instances, split by role.
-    ///
-    /// `GET /v1/features/disagg/instances`
-    /// → [`super::ConditionalDisaggInstancesResponse`]
-    pub const CD_INSTANCES: &str = "/v1/features/disagg/instances";
-
     /// `GET` connector health (one-shot velo probe + last-heartbeat info).
     pub const CONNECTOR_HEALTH: &str = "/v1/instances/{instance_id}/health";
 
@@ -375,6 +369,15 @@ pub struct HubConfigResponse {
     /// One entry per attached feature manager (the hub's advertised
     /// capability set).
     pub features: Vec<FeatureDescriptor>,
+    /// Operator-supplied default connector config: a sparse
+    /// `kv_connector_extra_config`-shaped object (the `default`/`leader`/`worker`
+    /// figment profiles) built from the hub's `--kvbm` / `--kvbm-config` flags
+    /// and validated at startup. Sits alongside `primary` (which stays the
+    /// source of truth for must-match fields); a consumer merges this as a base
+    /// layer beneath its own role profile + local overrides. `{}` when no
+    /// overrides were given.
+    #[serde(default)]
+    pub base_config: serde_json::Value,
 }
 
 /// Which [`PrimaryConfig`] must-match fields a feature requires a registrant to
@@ -466,15 +469,6 @@ pub enum ConditionalDisaggRole {
     Prefill,
     /// Decode instance.
     Decode,
-}
-
-/// Response body for `GET /v1/features/disagg/instances`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ConditionalDisaggInstancesResponse {
-    /// Instance ids currently registered in the Prefill role.
-    pub prefill: Vec<InstanceId>,
-    /// Instance ids currently registered in the Decode role.
-    pub decode: Vec<InstanceId>,
 }
 
 /// Response body for `POST /v1/instances`.
@@ -723,19 +717,6 @@ mod tests {
         let decode = serde_json::to_string(&ConditionalDisaggRole::Decode).unwrap();
         assert_eq!(prefill, "\"prefill\"");
         assert_eq!(decode, "\"decode\"");
-    }
-
-    #[test]
-    fn cd_instances_response_serde_round_trip() {
-        let a = InstanceId::new_v4();
-        let b = InstanceId::new_v4();
-        let orig = ConditionalDisaggInstancesResponse {
-            prefill: vec![a],
-            decode: vec![b],
-        };
-        let json = serde_json::to_string(&orig).unwrap();
-        let back: ConditionalDisaggInstancesResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, orig);
     }
 
     #[test]

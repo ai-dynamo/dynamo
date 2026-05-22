@@ -30,5 +30,15 @@ export KVBM_HUB_FEATURES=indexer
 export KVBM_HUB_BLOCK_SIZE=${KVBM_HUB_BLOCK_SIZE:-16}
 export KVBM_HUB_MAX_SEQ_LEN=${KVBM_HUB_MAX_SEQ_LEN:-$KVBM_MAX_MODEL_LEN}
 export KVBM_HUB_G2_MEMORY_GIB=${KVBM_HUB_G2_MEMORY_GIB:-$KVBM_CPU_CACHE_GB}
+# Common KvbmConfig overrides seeded into the hub's base_config so all connectors
+# inherit them without each launcher repeating the same flags.
+export KVBM_HUB_KVBM=${KVBM_HUB_KVBM:-"$(cat <<'EOF'
+leader.tokio.worker_threads=2
+worker.tokio.worker_threads=2
+leader.control.metrics=true
+worker.nixl.backends.UCX={}
+worker.nixl.backends.POSIX={}
+EOF
+)"}
 
 exec bash "$REPO/.claude/skills/kvbm-hub-bringup/start-hub.sh" "$LOG"

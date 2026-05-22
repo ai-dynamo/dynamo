@@ -178,6 +178,19 @@ impl FeatureManager for IndexerManager {
 
             let task = tokio::spawn(run_ingest_loop(sub, Arc::clone(&self.index), ctx.cancel));
             let _ = self.ingest_task.set(task);
+
+            // Expose the velo-plane block lookup (`QUERY_HANDLER`) when the hub
+            // runs with a transport. Discovery-only hubs skip it — clients fall
+            // back to the HTTP `POST /query` surface.
+            if let Some(velo) = ctx.velo.as_ref() {
+                velo.messenger()
+                    .register_handler(super::handlers::create_query_handler(Arc::clone(
+                        &self.index,
+                    )))
+                    .map_err(|e| {
+                        FeatureError::Other(anyhow::anyhow!("indexer query handler: {e}"))
+                    })?;
+            }
             Ok(())
         })
     }

@@ -16,11 +16,9 @@ use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConf
 use velo_ext::InstanceId;
 
 use super::dispatcher::{DispatchOutcome, PrefillRequestDispatcher};
+use super::protocol::ConditionalDisaggInstancesResponse;
 use crate::features::{FeatureError, FeatureManager, HubContext};
-use crate::protocol::{
-    self, ConditionalDisaggInstancesResponse, ConditionalDisaggRole, Feature, FeatureKey,
-    PrefillRequest,
-};
+use crate::protocol::{self, ConditionalDisaggRole, Feature, FeatureKey, PrefillRequest};
 
 /// Tracks which instances participate in ConditionalDisagg and under what role.
 ///
@@ -236,6 +234,13 @@ impl FeatureManager for ConditionalDisaggManager {
         }
     }
 
+    fn route_prefix(&self) -> Option<&'static str> {
+        // Own the `/v1/features/disagg` namespace (mirrors the indexer feature)
+        // — routes() mounts relative paths, the server nests them under the
+        // prefix.
+        Some(super::protocol::ROUTE_PREFIX)
+    }
+
     fn control_router(self: Arc<Self>) -> Router {
         routes(self)
     }
@@ -247,7 +252,7 @@ impl FeatureManager for ConditionalDisaggManager {
 
 fn routes(manager: Arc<ConditionalDisaggManager>) -> Router {
     Router::new()
-        .route(protocol::paths::CD_INSTANCES, get(list_instances))
+        .route(super::protocol::paths::INSTANCES, get(list_instances))
         .with_state(manager)
 }
 

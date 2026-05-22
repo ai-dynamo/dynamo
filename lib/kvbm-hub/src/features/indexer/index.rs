@@ -152,13 +152,16 @@ impl PositionalIndex {
         }
     }
 
-    /// Resolves a candidate block sequence to the deepest indexed block.
+    /// Resolves a candidate block sequence to the deepest indexed block's hash
+    /// and the (sorted) raw `u128` ids of the instances holding it.
     ///
-    /// Returns the entry with the greatest `position()` among supplied hashes
-    /// that are currently held by at least one instance. Input order does not
-    /// matter.
-    pub fn query(&self, hashes: &[SequenceHash]) -> Option<IndexEntry> {
-        let mut best: Option<IndexEntry> = None;
+    /// Returns the hash with the greatest `position()` among supplied hashes
+    /// that are currently held by at least one instance, paired with its holder
+    /// ids. Input order does not matter. This is the typed core shared by both
+    /// the HTTP [`query`](Self::query) path (which stringifies into an
+    /// [`IndexEntry`]) and the velo lookup handler (which keeps the types).
+    pub fn query_holders(&self, hashes: &[SequenceHash]) -> Option<(SequenceHash, Vec<u128>)> {
+        let mut best: Option<(SequenceHash, Vec<u128>)> = None;
         for hash in hashes {
             let pos = hash.position();
             let Some(bucket) = self.bucket(pos as usize) else {
@@ -170,11 +173,23 @@ impl PositionalIndex {
             if set.is_empty() {
                 continue;
             }
-            if best.as_ref().is_none_or(|b| pos > b.position) {
-                best = Some(entry_of(*hash, &set));
+            if best.as_ref().is_none_or(|(h, _)| pos > h.position()) {
+                let mut ids: Vec<u128> = set.iter().copied().collect();
+                ids.sort_unstable();
+                best = Some((*hash, ids));
             }
         }
         best
+    }
+
+    /// Resolves a candidate block sequence to the deepest indexed block.
+    ///
+    /// Returns the entry with the greatest `position()` among supplied hashes
+    /// that are currently held by at least one instance. Input order does not
+    /// matter.
+    pub fn query(&self, hashes: &[SequenceHash]) -> Option<IndexEntry> {
+        self.query_holders(hashes)
+            .map(|(hash, ids)| entry_of_ids(hash, ids))
     }
 
     /// Dumps the index bucket at `position`. Out-of-range positions yield an
@@ -196,6 +211,11 @@ impl PositionalIndex {
 fn entry_of(hash: SequenceHash, instances: &HashSet<u128>) -> IndexEntry {
     let mut ids: Vec<u128> = instances.iter().copied().collect();
     ids.sort_unstable();
+    entry_of_ids(hash, ids)
+}
+
+/// Builds a serializable [`IndexEntry`] from an already-sorted id list.
+fn entry_of_ids(hash: SequenceHash, ids: Vec<u128>) -> IndexEntry {
     IndexEntry {
         hash: format!("{hash}"),
         hash_u128: hash.as_u128().to_string(),
@@ -300,6 +320,27 @@ mod tests {
         let idx = PositionalIndex::new(16, 4).unwrap();
         let hashes = plhs(4, 2, 1);
         assert!(idx.query(&hashes).is_none());
+    }
+
+    #[test]
+    fn query_holders_returns_deepest_hash_and_sorted_ids() {
+        let idx = PositionalIndex::new(64, 4).unwrap();
+        let hashes = plhs(4, 3, 42);
+        // Two holders of the shared 3-deep sequence; insert ids out of order.
+        idx.apply(create(hashes.clone(), 9));
+        idx.apply(create(hashes.clone(), 2));
+
+        let (matched, ids) = idx.query_holders(&hashes).expect("hit");
+        assert_eq!(matched, hashes[2], "deepest candidate hash");
+        assert_eq!(ids, vec![2u128, 9u128], "holder ids, sorted");
+
+        // Mirrors `query()`: same deepest block, stringified.
+        let entry = idx.query(&hashes).expect("hit");
+        assert_eq!(entry.hash_u128, hashes[2].as_u128().to_string());
+        assert_eq!(entry.instances, vec!["2".to_string(), "9".to_string()]);
+
+        // Full miss.
+        assert!(idx.query_holders(&plhs(4, 2, 999)).is_none());
     }
 
     #[test]
