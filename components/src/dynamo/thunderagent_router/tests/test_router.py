@@ -93,8 +93,8 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
     assert router._table.programs["p1"].lifecycle == ProgramLifecycle.PAUSED
 
     waiter = asyncio.create_task(router.before_request("p1"))
-    await asyncio.sleep(0.02)
-    assert not waiter.done()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
 
     async with router._lock:
         router._resume_program(router._table.programs["p1"], target_worker_id=1)
@@ -140,8 +140,8 @@ async def test_new_program_queues_before_first_request_when_capacity_full():
     waiter = asyncio.create_task(
         router.before_request("new", estimated_prompt_tokens=100)
     )
-    await asyncio.sleep(0.02)
-    assert not waiter.done()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
     assert router._table.programs["new"].lifecycle == ProgramLifecycle.PAUSED
 
     async with router._lock:
