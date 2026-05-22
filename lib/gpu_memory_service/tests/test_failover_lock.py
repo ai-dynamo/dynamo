@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from .conftest import HAS_GMS
+from conftest import HAS_GMS
 
 if not HAS_GMS:
     pytest.skip(

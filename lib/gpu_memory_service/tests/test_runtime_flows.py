@@ -23,7 +23,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
 
-from .conftest import HAS_GMS, HAS_PYNVML
+from conftest import HAS_GMS, HAS_PYNVML
 
 if not HAS_GMS:
     pytest.skip(

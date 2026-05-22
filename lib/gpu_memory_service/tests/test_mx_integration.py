@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from .conftest import HAS_GMS, HAS_TORCH
+from conftest import HAS_GMS, HAS_TORCH
 
 if not HAS_GMS:
     pytest.skip(
