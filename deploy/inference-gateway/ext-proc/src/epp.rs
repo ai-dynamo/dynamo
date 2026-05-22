@@ -43,12 +43,8 @@ const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 pub struct Router {
     prefill_router: Arc<PrefillRouter>,
     decode_router: Arc<KvRouter>,
-    #[allow(dead_code)]
-    model_manager: Arc<ModelManager>,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
-    #[allow(dead_code)]
-    drt: DistributedRuntime,
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
 }
@@ -141,13 +137,18 @@ impl Router {
         // would silently match zero pods during/after a DGD rolling update.
         let (pod_store, pod_store_ready) = spawn_pod_reflector(namespace).await?;
 
+        // `model_manager` and `drt` are intentionally not stored on the
+        // Router. The KV chooser, prefill router, prefill discovery watcher,
+        // and pod reflector all clone whatever they need from these
+        // constructor-locals before this scope ends, so dropping them here
+        // does not tear down any background work. Keeping them on the
+        // struct as `#[allow(dead_code)]` keep-alive fields was only
+        // defensive boilerplate.
         Ok(Self {
             prefill_router,
             decode_router,
-            model_manager,
             preprocessor: bootstrap.preprocessor,
             runtime,
-            drt,
             pod_store,
             pod_store_ready,
         })
