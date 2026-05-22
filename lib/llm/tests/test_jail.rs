@@ -3553,16 +3553,26 @@ fahrenheit
                  <invoke name=\"get_weather\">\n\
                  <parameter name=\"location\">NYC</parameter>\n\
                  </invoke>",
+                "",
             ),
             (
                 "mid-call body truncation",
                 "<minimax:tool_call>\n\
                  <invoke name=\"get_weather\">\n\
                  <parameter name=\"location\">NY",
+                "",
+            ),
+            (
+                "pre-marker prose before truncated call",
+                "I will check that. <minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NYC</parameter>\n\
+                 </invoke>",
+                "I will check that. ",
             ),
         ];
 
-        for (label, partial_tool_call) in cases {
+        for (label, partial_tool_call, expected_content) in cases {
             let input_chunks = vec![
                 test_utils::create_mock_response_chunk(partial_tool_call.to_string(), 0),
                 test_utils::create_final_response_chunk(0),
@@ -3599,7 +3609,7 @@ fahrenheit
                 !content.contains("<minimax:tool_call>") && !content.contains("<invoke"),
                 "{label}: MiniMax protocol markup leaked into content: {content:?}"
             );
-            assert_eq!(content, "", "{label}: no pre-call prose should remain");
+            assert_eq!(content, expected_content, "{label}: unexpected residual content");
         }
     }
 

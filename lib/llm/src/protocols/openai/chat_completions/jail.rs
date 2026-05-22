@@ -1057,16 +1057,17 @@ impl JailedStream {
                         // stripping Harmony envelopes when no reasoning parser is configured.
                         // In zero-call Harmony marker cases, emit the stripped normal_text rather
                         // than accumulated_content, which still contains raw protocol markers.
-                        let content = if normal_text.as_deref() == Some("") {
-                            ""
-                        } else if is_finalize
+                        let content = if is_finalize
                             && self.tool_call_parser.as_deref() == Some("minimax_m2")
+                            && normal_text.as_deref() == Some("")
                         {
                             // MiniMax's reference parser is strict: missing paired fences means
                             // zero recovered calls. The raw `<minimax:tool_call>` envelope is
                             // still protocol markup, so keep only pre-call prose at stream end.
                             self.prefix_before_first_tool_call_marker(accumulated_content)
                                 .unwrap_or("")
+                        } else if normal_text.as_deref() == Some("") {
+                            ""
                         } else if is_harmony_parser(self.tool_call_parser.as_deref())
                             && contains_harmony_protocol(accumulated_content)
                         {
