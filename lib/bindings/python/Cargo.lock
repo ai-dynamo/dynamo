@@ -2037,11 +2037,15 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "opentelemetry",
+ "parking_lot",
+ "prometheus",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
@@ -2283,9 +2287,11 @@ dependencies = [
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-protocols",
  "dynamo-runtime",
  "futures",
  "once_cell",
+ "opentelemetry",
  "parking_lot",
  "pyo3",
  "pyo3-async-runtimes",
@@ -2298,6 +2304,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
 ]

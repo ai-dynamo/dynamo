@@ -9,14 +9,14 @@ use std::{
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    PrefillLoadEstimator, SharedKvCache,
+    KvSchedulerError, PrefillLoadEstimator, SharedKvCache,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
-        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint,
+        RouterBackpressureReason, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
+        TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{OverloadedWorkerProvider, TierOverlapBlocks},
 };
@@ -69,6 +69,20 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
 };
 
+pub enum FindBestMatchOutcome {
+    Routed {
+        worker: WorkerWithDpRank,
+        overlap_blocks: u32,
+        effective_overlap_blocks: f64,
+        cached_tokens: usize,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queued_isl_tokens: usize,
+        max_queued_isl_tokens: Option<usize>,
+    },
+}
+
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 
@@ -105,12 +119,6 @@ impl WorkerCacheHitEstimate {
 struct CacheHitEstimates {
     effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
     cached_tokens: HashMap<WorkerWithDpRank, usize>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BestMatchDetails {
-    pub worker: WorkerWithDpRank,
-    pub cache_hit: WorkerCacheHitEstimate,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -546,7 +554,7 @@ where
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn find_best_match_details(
+    pub async fn find_best_match_details(
         &self,
         context_id: Option<&str>,
         tokens: &[u32],
@@ -559,7 +567,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> anyhow::Result<BestMatchDetails> {
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -647,7 +655,7 @@ where
         let num_blocks = isl_tokens / self.block_size as usize;
         let sc_hits_for_metrics = shared_cache_hits.clone();
 
-        let response = self
+        let response = match self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
@@ -668,7 +676,21 @@ where
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
             .await
-            .map_err(map_scheduler_error)?;
+        {
+            Ok(response) => response,
+            Err(KvSchedulerError::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            }) => {
+                return Ok(FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queued_isl_tokens,
+                    max_queued_isl_tokens,
+                });
+            }
+            Err(error) => return Err(map_scheduler_error(error)),
+        };
         let total_elapsed = start.elapsed();
 
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
@@ -705,12 +727,11 @@ where
             "find_best_match completed"
         );
 
-        Ok(BestMatchDetails {
+        Ok(FindBestMatchOutcome::Routed {
             worker: response.best_worker,
-            cache_hit: WorkerCacheHitEstimate {
-                effective_overlap_blocks: response.effective_overlap_blocks,
-                cached_tokens: response.cached_tokens,
-            },
+            overlap_blocks: response.effective_overlap_blocks.round() as u32,
+            effective_overlap_blocks: response.effective_overlap_blocks,
+            cached_tokens: response.cached_tokens,
         })
     }
 
@@ -745,7 +766,20 @@ where
                 routing_constraints,
             )
             .await?;
-        Ok((result.worker, result.cache_hit.rounded_overlap_blocks()))
+        match result {
+            FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            FindBestMatchOutcome::Backpressure {
+                reason,
+                queued_isl_tokens,
+                max_queued_isl_tokens,
+            } => Err(anyhow::anyhow!(
+                "router backpressure: {reason:?} (queued_isl_tokens={queued_isl_tokens}, max_queued_isl_tokens={max_queued_isl_tokens:?})"
+            )),
+        }
     }
 
     /// Register externally-provided workers in the slot tracker.
@@ -1108,8 +1142,8 @@ where
                 block_mm_infos,
                 routing_constraints,
             } => {
-                let (best_worker, overlap_blocks) = self
-                    .find_best_match(
+                match self
+                    .find_best_match_details(
                         Some(&context_id),
                         &tokens,
                         block_mm_infos.as_deref(),
@@ -1119,14 +1153,30 @@ where
                         0.0,
                         None,
                         None,
+                        None,
                         routing_constraints,
                     )
-                    .await?;
-
-                RouterResponse::New {
-                    worker_id: best_worker.worker_id,
-                    dp_rank: best_worker.dp_rank,
-                    overlap_blocks,
+                    .await
+                {
+                    Ok(FindBestMatchOutcome::Routed {
+                        worker,
+                        overlap_blocks,
+                        ..
+                    }) => RouterResponse::New {
+                        worker_id: worker.worker_id,
+                        dp_rank: worker.dp_rank,
+                        overlap_blocks,
+                    },
+                    Ok(FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    }) => RouterResponse::Backpressure {
+                        reason,
+                        queued_isl_tokens,
+                        max_queued_isl_tokens,
+                    },
+                    Err(error) => return Err(error),
                 }
             }
             RouterRequest::MarkPrefill => RouterResponse::PrefillMarked {

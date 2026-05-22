@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: gpt_oss
+model_label: gpt-oss
+mode: stream
+cases:
+  REASONING.stream.1.a:
+    description: Empty stream chunk
+    ref: dynamo
+    chunks:
+    - ''
+    expected:
+      dynamo: &d_s0
+        reasoning_text: ''
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss stream reasoning needs token-level OpenAI parser wiring, not this text-only harness.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.stream.2.a:
+    description: Harmony analysis block across chunks
+    ref: dynamo
+    chunks:
+    - <|channel|>
+    - analysis<|message|>thinking
+    - <|end|><|start|>assistant<|channel|>final<|message|>
+    - answer
+    expected:
+      dynamo: &d_s1
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM gpt-oss stream reasoning needs token-level OpenAI parser wiring, not this text-only harness.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.stream.2.b:
+    description: Multiple Harmony analysis spans across chunks
+    dynamo_leak: true
+    ref: dynamo
+    chunks:
+    - <|channel|>analysis<|message|>first<|end|><|start|>assistant<|channel|>final<|message|>one
+    - <|channel|>analysis<|message|>second<|end|><|start|>assistant<|channel|>final<|message|>two
+    expected:
+      dynamo:
+        reasoning_text: first
+        normal_text: one<|channel|>analysis<|message|>secondtwo
+      vllm:
+        unavailable: vLLM gpt-oss stream reasoning needs token-level OpenAI parser wiring, not this text-only harness.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.stream.3.a:
+    description: Harmony start marker split across chunks
+    ref: dynamo
+    chunks:
+    - <|chan
+    - nel|>analysis<|message|>thinking<|end|><|start|>assistant<|channel|>final<|message|>answer
+    expected:
+      dynamo: &d_s2
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM gpt-oss stream reasoning needs token-level OpenAI parser wiring, not this text-only harness.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.stream.3.b:
+    description: Harmony end marker split across chunks
+    dynamo_leak: true
+    ref: dynamo
+    chunks:
+    - <|channel|>analysis<|message|>thinking<|e
+    - nd|><|start|>assistant<|channel|>final<|message|>answer
+    expected:
+      dynamo: &d_s3
+        reasoning_text: thinking<|end|><|start|>assistant<|channel|>final<|message|>answer
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss stream reasoning needs token-level OpenAI parser wiring, not this text-only harness.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.stream.3.c:
+    description: Partial Harmony channel marker prefix later becomes non-channel text
+    ref: dynamo
+    chunks:
+    - plain <|chan
+    - ce answer
+    expected:
+      dynamo:
+        reasoning_text: ''
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss stream reasoning needs token-level OpenAI parser wiring, not this text-only harness.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.stream.1.b:
+    description: Plain text without Harmony channel markers
+    ref: dynamo
+    chunks:
+    - plain
+    - ' answer'
+    expected:
+      dynamo: &d_s4
+        reasoning_text: ''
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss stream reasoning needs token-level OpenAI parser wiring, not this text-only harness.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'

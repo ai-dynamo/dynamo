@@ -1,8 +1,9 @@
 # Cross-impl parity test suite
 
 Shared test infrastructure for diffing parser / preprocess / postprocess
-behavior across Dynamo, vLLM, and SGLang. Today only the parser stage
-is populated (`parser/`); other stages slot in as siblings as they land.
+behavior across Dynamo, vLLM, and SGLang. Tool call parser parity lives
+in `parser/`; reasoning parser parity lives in `reasoning/`. Other stages
+slot in as siblings as they land.
 
 > **Triaging a tool-call issue from a user?** Before stepping into the
 > parity harness, point them at
@@ -21,11 +22,13 @@ tests/parity/
 ├── README.md                       (this file)
 ├── conftest.py                     ← session-scoped fixtures (server boots, etc.)
 ├── common.py                       ← ParseResult, canonical-JSON diff, decode_arguments
-└── parser/
+├── generate_parity_table.py        ← common table CLI: parser / reasoning
+├── parity_table.html.j2            ← shared HTML template
+├── parser/
     ├── fixtures/                   ← static YAML, generated from Dynamo as oracle
-    │   └── <family>/PARSER.batch.yaml         (and per-top-level-case files like PARSER.batch.8.yaml; see Fixture file schema)
+│   └── <family>/PARSER.batch.yaml         (and per-case files like PARSER.batch.4.yaml; see Fixture file schema)
     ├── capture_parser_outputs.py     ← drift-check (default) or merge any impl's output into `expected.{dynamo,vllm,sglang}`
-    ├── generate_parity_chart.py    ← print the parity-status table (run on demand; not checked in)
+    ├── table.py                    ← parser table adapter
     │
     ├── dynamo.py                   ← M2 in-process wrapper (PyO3 binding)
     ├── vllm.py                     ← M2 in-process wrapper (ToolParserManager)
@@ -35,7 +38,31 @@ tests/parity/
     ├── server.py                   ← M3 subprocess boot helper
     ├── client.py                   ← M3 HTTP client (vllm + sglang)
     └── test_parity_e2e.py          ← M3 harness (server-stack parity over HTTP)
+└── reasoning/
+    ├── fixtures/                   ← static YAML contracts for REASONING.batch.* and REASONING.stream.*
+    ├── table.py                    ← reasoning table adapter
+    ├── dynamo.py                   ← Dynamo Rust reasoning parser via PyO3 binding
+    ├── vllm.py                     ← vLLM reasoning parser wrapper
+    ├── sglang.py                   ← SGLang reasoning parser wrapper
+    └── test_parity_reasoning.py    ← M2 harness for reasoning parser parity
 ```
+
+## Reasoning parity status
+
+The initial reasoning harness uses the same contract shape as `parser/`:
+each `REASONING.*.yaml` fixture records `expected.dynamo`,
+`expected.vllm`, and `expected.sglang`. A peer block can anchor to Dynamo,
+document a divergence, mark an expected error, or say the peer parser is
+unavailable.
+
+Generate the reasoning table from repo root:
+
+```bash
+python3 tests/parity/generate_parity_table.py reasoning --html > tests/parity/reasoning/PARITY.html
+```
+
+`PARITY.html` is for local review, like the parser table. The YAML fixtures
+remain the source of truth.
 
 ## Three methods (M1, M2, M3) — what each one really means
 
@@ -66,8 +93,9 @@ which bug class each method can catch:
 
 ```python
 # Dynamo Rust side (via PyO3 binding)
-from dynamo._core import parse_tool_call
-result = await parse_tool_call("kimi_k2", text, tools_json)
+from dynamo._core import parse_tool_calls_batch, parse_tool_calls_stream
+batch_result = await parse_tool_calls_batch("kimi_k2", text, tools_json)
+stream_result = await parse_tool_calls_stream("kimi_k2", chunks_json, tools_json)
 
 # vLLM side (native Python class)
 from vllm.tool_parsers import ToolParserManager
@@ -82,6 +110,24 @@ result = KimiK2Detector().detect_and_parse(text, tools)
 **What it surfaces:** parser-logic divergences between Dynamo's Rust parser class and upstream's Python parser classes. The bug class isolated from everything else in the request lifecycle.
 
 **File:** `tests/parity/parser/test_parity_parser.py`.
+
+#### Batch vs stream mode inside M2
+
+Batch fixtures are one-shot: the fixture provides `model_text`, the wrapper calls the implementation's batch parser once, and the harness compares the final `ParseResult`:
+
+```text
+model_text -> parse_tool_calls_batch() -> final calls/text
+```
+
+Stream fixtures are stateful: the fixture provides ordered `chunks`, the wrapper feeds each chunk through the implementation's streaming API, the implementation keeps parser state between chunks, and the wrapper aggregates emitted deltas into the same final `ParseResult` shape used by batch tests:
+
+```text
+chunk N -> parser state -> maybe content/tool delta -> aggregate -> next chunk
+```
+
+That stateful middle is the thing stream parity is trying to test. Concatenating `chunks[*].delta_text` and calling the batch parser would miss boundary bugs: partial start markers, partial argument payloads, tool-call deltas split across chunks, finish-reason timing, and vLLM cases that require `delta_token_ids`.
+
+`tests/parity/common.py` deliberately stays at the final comparison boundary (`ParseResult`, argument decoding, canonical JSON). It can host small shared helpers for aggregating stream tool-call deltas, but it cannot replace the implementation-specific stream state machine. Dynamo stream parity enters Rust through the PyO3 binding; runtime-image pytest must not compile helper binaries with `cargo run`.
 
 ### Method 3 — end-to-end HTTP test *(upcoming, next step — sibling PR #9189)*
 
@@ -159,11 +205,11 @@ somewhere you can browse:
 
 ```bash
 # Markdown — paste into a PR description or browse in any editor.
-python3 tests/parity/parser/generate_parity_chart.py > PARITY.md
+python3 tests/parity/generate_parity_table.py parser > PARITY.md
 
-# HTML — clickable cells link to the source fixture YAML; hover over any
+# HTML table — clickable cells link to the source fixture YAML; hover over any
 # non-= cell to see the case description and the divergence reason.
-python3 tests/parity/parser/generate_parity_chart.py --html > PARITY.html
+python3 tests/parity/generate_parity_table.py parser --html > PARITY.html
 ```
 
 Run from the repo root so the HTML's relative `<a href=...>` links to
@@ -237,8 +283,9 @@ or by us standing up a Dynamo-side stub) would let the harness surface
 - `PARSER.batch.4` (malformed JSON) and `PARSER.batch.5` (missing
   end-token) — recovery is impl-defined per `PARSER_CASES.md`;
   divergences are documented rather than asserted-against.
-- `PARSER.batch.8` (interleaved normal text) — vLLM and SGLang both
-  drop the trailing text after the wrapper across XML-style families.
+- `PARSER.batch.1.{b,c,d}` / `PARSER.batch.2.e` (simple normal-text
+  placement) — vLLM and SGLang often drop trailing text after the
+  wrapper across XML-style families.
 - `harmony/sglang` — 8 of 10 cases divergent because SGLang's
   `GptOssDetector` requires the strict
   `<|start|>assistant<|channel|>commentary` envelope where Dynamo
@@ -269,10 +316,10 @@ to run (otherwise they skip cleanly).
 ... -k "kimi_k2"
 
 # One sub-case across every family + every impl
-... -k "PARSER.batch.8.b"
+... -k "PARSER.batch.1.c"
 
 # Exactly one (family, sub-case, impl)
-... "tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.8.b#vllm]"
+... "tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.1.c#vllm]"
 ```
 
 **From the host** (outside the container), wrap the command in
@@ -295,23 +342,24 @@ in the family's YAML fixture (concrete `calls` + `normal_text`, or
 `{error: <substring>}`, or `{unavailable: <reason>}`). Cells that
 match Dynamo are stored as anchor refs `*d_<case>` to the dynamo
 block. Goal: drive the non-`=` count toward zero by fixing whichever
-side is wrong. Worked example: `kimi_k2 / PARSER.batch.8.b → V`
+side is wrong. Worked example: `kimi_k2 / PARSER.batch.1.c → V`
 (vLLM drops trailing text after the wrapper).
 
 ### 1. Pick a cell
 
-Run `generate_parity_chart.py`; pick any `V` / `S` / `VS` cell from the
+Run `generate_parity_table.py`; pick any `V` / `S` / `VS` cell from the
 output.
 
 ### 2. Look up the side-by-side diff in the YAML
 
-Open `tests/parity/parser/fixtures/kimi_k2/PARSER.batch.8.yaml` and
-find the `PARSER.batch.8.b:` block. The `expected:` block carries all
+Open `tests/parity/parser/fixtures/kimi_k2/PARSER.batch.8.yaml`
+(legacy filename for the text-placement cases) and find the
+`PARSER.batch.1.c:` block. The `expected:` block carries all
 three engines' actual recorded output, so the diff is right there —
 **no harness run needed to read it.**
 
 ```yaml
-PARSER.batch.8.b:
+PARSER.batch.1.c:
   description: Narration after tool call only
   ref: originated from https://github.com/vllm-project/vllm/.../test_kimi_k2_tool_parser.py#L435
   model_text: |-
@@ -339,7 +387,7 @@ upstream vLLM/SGLang test the shape was derived from (useful context).
 
 ```bash
 PYTHONPATH=lib/bindings/python/src python3 -m pytest \
-  "tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.8.b#vllm]" \
+  "tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.1.c#vllm]" \
   -v --tb=short
 ```
 
@@ -450,7 +498,7 @@ but didn't re-capture peer outputs), the test fails with a diff
 pointing at the YAML edit needed:
 
 ```text
-FAILED tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.8.b#vllm]
+FAILED tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.1.c#vllm]
        expected: {'calls': [...], 'normal_text': ''}
        got:      {'calls': [...], 'normal_text': 'Let me know if you need more.'}
 ```
@@ -465,11 +513,11 @@ verbatim:
 
 ```yaml
 expected:
-  dynamo: &d_8_b
+  dynamo: &d_1_c
     calls: [...]
     normal_text: '...'
-  vllm: *d_8_b        # ← was a concrete `vllm:` block; now ref to dynamo
-  sglang: *d_8_b      # (same, if SGLang also now matches)
+  vllm: *d_1_c        # ← was a concrete `vllm:` block; now ref to dynamo
+  sglang: *d_1_c      # (same, if SGLang also now matches)
 ```
 
 Add a `spec_ref:` field directly to the case in its fixture YAML so
@@ -477,7 +525,7 @@ the paper trail survives — point at whatever made V/S right (spec
 section, model card, GH issue, upstream PR, or the team-decision doc):
 
 ```yaml
-PARSER.batch.8.b:
+PARSER.batch.1.c:
   description: Narration after tool call only
   ref: originated from https://github.com/vllm-project/vllm/.../test_kimi_k2_tool_parser.py#L435
   spec_ref: https://platform.moonshot.ai/docs/tool-call-spec#L42  # or GH issue / PR url
@@ -490,7 +538,7 @@ PARSER.batch.8.b:
 Then regenerate the table so the cell flips:
 
 ```bash
-python3 tests/parity/parser/generate_parity_chart.py > PARITY.md
+python3 tests/parity/generate_parity_table.py parser > PARITY.md
 ```
 
 Pytest should now be fully green; the table cell flips to `=`.
@@ -541,7 +589,7 @@ blocks when diverging):
 family: kimi_k2
 mode: batch
 cases:
-  PARSER.batch.1:
+  PARSER.batch.1.a:
     description: Single tool call (happy path)
     model_text: |-
       <|tool_calls_section_begin|>...
@@ -556,13 +604,13 @@ cases:
         normal_text: ''
       vllm: *d_1           # vLLM matches Dynamo
       sglang: *d_1         # SGLang matches Dynamo
-  PARSER.batch.8.a:        # sub-case keys also valid
+  PARSER.batch.1.b:        # sub-case keys also valid
     description: Narration before tool call only
     ref: originated from https://github.com/vllm-project/vllm/blob/<sha>/tests/tool_parsers/test_<family>_tool_parser.py#L<line>
     model_text: |-
       ...
     expected:
-      dynamo: &d_8_a
+      dynamo: &d_1_b
         calls: [...]
         normal_text: 'I will check the weather.'
       vllm:                # vLLM diverges — concrete output recorded
@@ -584,7 +632,7 @@ cases:
   Test skips with the message.
 
 The `ref` field is required on per-sub-case files
-(`PARSER.<mode>.<n>.yaml`) and takes one of two forms:
+(`PARSER.<mode>.<n>.yaml`) and takes one of three forms:
 
 - **`ref: originated from <url>`** — there's an upstream test exercising
   this same shape on this same family. The fixture's `model_text` may
@@ -595,8 +643,9 @@ The `ref` field is required on per-sub-case files
 - **`ref: dynamo`** — authored fresh in this repo, no upstream peer.
   Most sub-case taxonomy fillers (`.b` post-only, `.d` between-calls)
   land here because vLLM/SGLang don't test those shapes.
+- **`ref: derived from PARSER.<mode>.<n>[.<sub>]`** — authored in this repo by transforming an existing parity case into a new surface. Streaming fixtures commonly use this when the same `model_text` shape is split into `chunks` or truncated at a stream boundary.
 
-Every sub-case carries one of these two states; there's no "no
+Every sub-case carries one of these three states; there's no "no
 provenance" state. The legacy flat `PARSER.<mode>.yaml` (cases without
 sub-cases) does NOT carry `ref` — those entries predate the convention.
 
@@ -616,9 +665,9 @@ comment.
 
 Case keys are the full IDs from
 [`lib/parsers/PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md)
-(`PARSER.batch.1` … `PARSER.batch.10`, plus sub-cases like
-`PARSER.batch.8.a`). They match the pytest
-parametrize IDs directly, so a single `grep PARSER.batch.8.a` finds the
+(`PARSER.batch.1.a` … `PARSER.batch.31.b`, including sub-cases like
+`PARSER.batch.1.b`). They match the pytest
+parametrize IDs directly, so a single `grep PARSER.batch.1.b` finds the
 case across docs, fixtures, and Rust source comments.
 
 `model_text` uses YAML's literal block scalar (`|-`) so multi-line
@@ -653,7 +702,7 @@ Open any two family files side-by-side and the case shells look
 nearly identical: same `description` strings, same `tools` schemas,
 same case keys `"PARSER.batch.1"`–`"PARSER.batch.10"`. **That's by
 design** — `PARSER.batch.N` is the same logical scenario across every
-family (run `generate_parity_chart.py` for the full list).
+family (run `generate_parity_table.py` for the full list).
 
 So a reviewer can grep `PARSER.batch.4` across all 10 families and
 immediately see how each parser handles the same scenario. The
@@ -841,4 +890,4 @@ real value-add is the cross-impl half (vLLM and SGLang).
    rather than the full volatile message. Add a `reason:` field to
    intentional divergences so they show as `V`/`S` not `V?`/`S?` in the
    table.
-6. Regenerate the table: `python3 tests/parity/parser/generate_parity_chart.py > PARITY.md`.
+6. Regenerate the table: `python3 tests/parity/generate_parity_table.py parser > PARITY.md`.

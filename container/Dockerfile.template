@@ -49,10 +49,7 @@
 
 # --- TRTLLM Stages
 {% if framework == "trtllm" %}
-    {% include "templates/trtllm_framework.Dockerfile" %}
-    {% if target != "framework" %}
-        {% include "templates/trtllm_runtime.Dockerfile" %}
-    {% endif %}
+    {% include "templates/trtllm_runtime.Dockerfile" %}
 {% else %}
 # --- No TRTLLM stages included
 {% endif %}

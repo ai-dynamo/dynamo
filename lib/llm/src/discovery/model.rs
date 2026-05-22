@@ -17,6 +17,7 @@ use super::{KvWorkerMonitor, ModelManagerError};
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
+    RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
     openai::{
         audios::OpenAIAudiosStreamingEngine,
@@ -157,7 +158,32 @@ impl Model {
             .any(|entry| entry.value().has_audios_engine())
     }
 
+    /// Check if any WorkerSet has a realtime engine.
+    pub fn has_realtime_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_realtime_engine())
+    }
+
+    // -- Topology readiness --
+    //
+    // A *topology* is the set of WorkerSets in this Model that share the same
+    // `namespace` string and collectively serve traffic for one deployment.
+    // A worker's `needs` is in DNF: a list of alternative AND-sets of
+    // required peer worker types. The topology is ready when, for every
+    // WorkerSet in it, at least one alternative is fully covered by the
+    // worker types currently present in the topology (workers with
+    // worker_count > 0).
+    //
+    // The design target is that every worker registers an explicit
+    // `worker_type` and `needs`. A temporary shim in [`ws_role_and_needs`]
+    // reads `worker_type = None` as `Aggregated` with no `needs` so that the
+    // frontend can keep serving existing deployments while backends are
+    // being updated. The shim is removed once backend-side registration is
+    // strict; see `docs/proposals/health-disagg-readiness.md` (Phase 3).
+
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
+    /// Each namespace identifies one topology in the model.
     pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
         let mut ns: Vec<String> = self
             .worker_sets
@@ -257,6 +283,7 @@ impl Model {
                 || ws.has_tensor_engine()
                 || ws.has_videos_engine()
                 || ws.has_audios_engine()
+                || ws.has_realtime_engine()
         };
 
         let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
@@ -314,6 +341,11 @@ impl Model {
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
+    }
+
+    pub fn get_realtime_engine(&self) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.realtime_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -609,6 +641,32 @@ mod tests {
         assert!(model.get_embeddings_engine().is_err());
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
+        assert!(model.get_realtime_engine().is_err());
+    }
+
+    fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            "abc".to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn test_realtime_engine_round_trip() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.has_realtime_engine());
+        assert!(model.get_realtime_engine().is_ok());
+    }
+
+    #[test]
+    fn test_realtime_only_model_is_displayable() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.is_displayable());
     }
 
     #[test]
@@ -810,6 +868,14 @@ mod tests {
             "model must be hidden when only the dead prefill set remains"
         );
     }
+
+    // -- Topology readiness --
+    //
+    // These tests exercise the live-compute readiness methods on `Model`.
+    // They construct WorkerSets with specific `worker_type` / `needs` values
+    // on their cards and verify DNF readiness math, including the encode
+    // worker's two-alternative needs and the temporary missing-field shim
+    // in `ws_role_and_needs`.
 
     use crate::worker_type::WorkerType;
 

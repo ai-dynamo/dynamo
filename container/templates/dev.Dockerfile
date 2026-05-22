@@ -110,11 +110,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         libfontconfig-dev && \
     # Use system python explicitly: some runtime bases put a framework venv first on PATH.
-    PIP_BREAK_SYSTEM_PACKAGES="" && \
-    if /usr/bin/python3 -m pip install --help | grep -q -- "--break-system-packages"; then \
-        PIP_BREAK_SYSTEM_PACKAGES="--break-system-packages"; \
-    fi && \
-    /usr/bin/python3 -m pip install ${PIP_BREAK_SYSTEM_PACKAGES} --no-cache-dir yq && \
+    # PIP_BREAK_SYSTEM_PACKAGES env var works across pip versions: pip >=23 honours
+    # it; older pip silently ignores it but predates the PEP 668 EXTERNALLY-MANAGED
+    # marker (Ubuntu <23.04), so no override is needed there in the first place.
+    # pip >=26 made the --break-system-packages flag require a boolean argument,
+    # so the env-var form is the only portable spelling.
+    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
@@ -216,9 +217,15 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
-{% elif framework == "vllm" %}
-# Reuse the stable symlink created by the upstream vLLM runtime stage so dev
-# builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
+{% elif device == "cpu" %}
+# CPU uses lib/x86_64-linux-gnu subdirectory (matching runtime stage)
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
+{% elif framework == "vllm" or framework == "trtllm" %}
+# vllm/trtllm dev images inherit upstream containers that ship NIXL inside the
+# Python wheel; libnixl.so loads via the wheel's DT_RPATH, so these env vars
+# act only as a stable anchor that avoids hardcoding a CUDA-specific path.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
@@ -274,6 +281,7 @@ COPY --from=dynamo_tools /usr/bin/ /usr/bin/
 COPY --from=dynamo_tools /usr/sbin/ /usr/sbin/
 COPY --from=dynamo_tools /usr/lib/ /usr/lib/
 COPY --from=dynamo_tools /usr/libexec/ /usr/libexec/
+COPY --from=dynamo_tools /usr/include/ /usr/include/
 COPY --from=dynamo_tools /lib/ /lib/
 COPY --from=dynamo_tools /usr/share/ /usr/share/
 COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
@@ -299,7 +307,7 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     CONDA_DIR=/opt/miniforge3 \
     VIRTUAL_ENV=/opt/miniforge3/envs/sglang \
     PATH=/opt/miniforge3/envs/sglang/bin:/opt/miniforge3/bin:/usr/local/cargo/bin:$PATH
-{% else %}
+{% elif device == "cuda" or framework != "vllm" %}
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
     RUSTUP_HOME=/home/dynamo/.rustup \
@@ -307,6 +315,15 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     CARGO_TARGET_DIR=/workspace/target \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/usr/local/cargo/bin:$PATH
+{% else %}
+# CPU/XPU vLLM: Use runtime's /opt/venv
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/home/dynamo/.rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/cargo/bin:$PATH
 {% endif %}
 
 # Copy Rust/Cargo/Maturin from the concatenated framework stages.
@@ -337,11 +354,29 @@ RUN mkdir -p /opt/dynamo/venv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
 {% endif %}
-{% elif framework == "vllm" %}
-# vLLM inherits upstream's system Python solve; keep dev installs in our venv.
+{% elif framework == "vllm" or framework == "trtllm" %}
+# vllm/trtllm inherit upstream's system Python solve; keep dev installs in our venv.
+
+{% if device == "cuda" %}
+# CUDA: Runtime uses system Python, so --system-site-packages correctly inherits packages.
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
     ln -sf /usr/local/bin/uv /opt/dynamo/venv/bin/uv
+{% else %}
+# CPU/XPU: Runtime uses /opt/venv from upstream vLLM-CPU image. Reuse it directly
+# instead of creating /opt/dynamo/venv, since --system-site-packages points to UV Python
+# and won't inherit /opt/venv packages (nixl, vllm, etc.).
+
+# Make /opt/venv writable by dynamo user for development (maturin develop, pip install)
+# Point /usr/local/bin/python to /opt/venv so scripts using 'python' work correctly
+# Use a wrapper script instead of symlink to ensure Python recognizes the venv context
+RUN chown -R dynamo:0 /opt/venv && \
+    ln -sf /usr/local/bin/uv /opt/venv/bin/uv && \
+    rm -f /usr/local/bin/python && \
+    echo '#!/bin/bash' > /usr/local/bin/python && \
+    echo 'exec /opt/venv/bin/python "$@"' >> /usr/local/bin/python && \
+    chmod +x /usr/local/bin/python
+{% endif %}
 {% elif framework == "dynamo" %}
 # framework=none: Create venv if runtime stage didn't already provide one
 RUN if [ ! -d /opt/dynamo/venv ]; then \
@@ -439,7 +474,7 @@ RUN printf '%s\n' \
     '    echo ""' \
     'fi' >> /etc/bash.bashrc
 
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 {% else %}

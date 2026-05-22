@@ -21,8 +21,9 @@ import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
-import pynvml
 import pytest
+
+pynvml = pytest.importorskip("pynvml")
 
 try:
     from gpu_memory_service.client import memory_manager as client_memory_manager

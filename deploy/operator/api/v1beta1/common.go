@@ -341,10 +341,71 @@ type TopologyConstraint struct {
 }
 
 // TopologyDomain is a free-form topology level identifier.
-// Domain names are defined by the cluster admin in the ClusterTopology CR.
 // Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
+// When used with a ClusterTopology CR, domain names are defined in the CR's
+// hierarchy; when used with `spec.experimental.kvTransferPolicy.labelKey`
+// alone, the value is a user-chosen logical name for the topology level.
 // +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 type TopologyDomain string
+
+// KvTransferEnforcement controls how the selected prefill worker's topology is
+// applied to decode routing.
+// +kubebuilder:validation:Enum=required;preferred
+type KvTransferEnforcement string
+
+const (
+	// KvTransferEnforcementRequired enforces same-domain decode worker
+	// selection.
+	KvTransferEnforcementRequired KvTransferEnforcement = "required"
+	// KvTransferEnforcementPreferred biases decode worker selection toward the
+	// same domain.
+	KvTransferEnforcementPreferred KvTransferEnforcement = "preferred"
+)
+
+// KvTransferPolicy configures topology-aware routing for KV-cache transfers
+// between prefill and decode workers. This is a graph-wide concern placed
+// under `spec.experimental` while the API is incubating.
+// +kubebuilder:validation:XValidation:rule="has(self.labelKey)",message="labelKey is required until alternate topology sources are supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.enforcement) || self.enforcement != 'preferred' || has(self.preferredWeight)",message="preferredWeight is required when enforcement is preferred"
+// +kubebuilder:validation:XValidation:rule="!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == 'preferred')",message="preferredWeight may only be set when enforcement is preferred"
+type KvTransferPolicy struct {
+	// labelKey is a Kubernetes node label key (e.g.
+	// "topology.kubernetes.io/zone") whose value identifies the topology
+	// domain for each worker. The operator copies the node label onto worker
+	// pods so the runtime can publish it as worker metadata. The label
+	// should correspond to the topology level named in `domain`.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=317
+	// +kubebuilder:validation:Pattern=`^(([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$`
+	// +kubebuilder:validation:XValidation:rule="!self.contains('/') || self.split('/')[0].size() <= 253",message="labelKey prefix must be 253 characters or less"
+	LabelKey string `json:"labelKey,omitempty"`
+
+	// domain is the logical name for the topology level to enforce
+	// (e.g. "zone", "rack"). The router uses this to match workers that
+	// share the same value for the label identified by `labelKey`.
+	Domain TopologyDomain `json:"domain"`
+
+	// enforcement controls how the selected prefill worker's topology is
+	// applied to decode routing. "required" only allows decode workers in the
+	// same topology domain as the selected prefill worker. "preferred" keeps
+	// all decode workers eligible, but biases selection toward workers in the
+	// same topology domain. Defaults to "required".
+	// +optional
+	// +kubebuilder:default=required
+	Enforcement KvTransferEnforcement `json:"enforcement,omitempty"`
+
+	// preferredWeight is required and used only when enforcement is
+	// "preferred". Higher values create a stronger same-domain routing
+	// preference, but do not guarantee same-domain selection. The value is not
+	// a probability; worker selection still depends on load and other routing
+	// inputs. A value of 0 disables the topology preference; 1 is the strongest
+	// supported preference.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	PreferredWeight *float32 `json:"preferredWeight,omitempty"`
+}
 
 // ComponentKind represents the type of underlying Kubernetes resource backing a DGD component.
 // +kubebuilder:validation:Enum=PodClique;PodCliqueScalingGroup;Deployment;LeaderWorkerSet
