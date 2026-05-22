@@ -17,13 +17,7 @@
 //! cargo run -p dynamo-memory --bin validate_numa_placement -- --gpus 0,2  # specific GPUs
 //! ```
 
-#[cfg(target_os = "linux")]
 use std::process;
-
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    eprintln!("validate_numa_placement is only supported on Linux");
-}
 
 /// Query the NUMA node of each page in a memory region using `move_pages(2)`.
 ///
@@ -31,7 +25,6 @@ fn main() {
 /// with the current NUMA node of each page without moving anything.
 ///
 /// Returns a Vec of NUMA node IDs (one per page), or negative error codes.
-#[cfg(target_os = "linux")]
 fn query_page_nodes(ptr: *const u8, size: usize) -> Vec<i32> {
     let page_size = unsafe {
         let ps = libc::sysconf(libc::_SC_PAGESIZE);
@@ -71,7 +64,6 @@ fn query_page_nodes(ptr: *const u8, size: usize) -> Vec<i32> {
     status
 }
 
-#[cfg(target_os = "linux")]
 fn main() {
     // Parse args
     let args: Vec<String> = std::env::args().collect();
