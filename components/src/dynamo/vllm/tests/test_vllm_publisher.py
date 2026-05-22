@@ -26,6 +26,7 @@ from dynamo.vllm.publisher import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
