@@ -363,12 +363,12 @@ async def test_user_kv_cache_config_preserved_with_publish_events(monkeypatch):
 
     kv = exc_info.value.engine_args["kv_cache_config"]
     assert isinstance(kv, dict), f"Expected kv_cache_config dict, got {type(kv)}"
-    assert kv["event_buffer_max_size"] == 8192, (
-        f"User-supplied event_buffer_max_size=8192 was clobbered; got {kv.get('event_buffer_max_size')}"
-    )
-    assert kv.get("free_gpu_memory_fraction") == 0.9, (
-        f"User-supplied free_gpu_memory_fraction=0.9 was clobbered; got {kv.get('free_gpu_memory_fraction')}"
-    )
+    assert (
+        kv["event_buffer_max_size"] == 8192
+    ), f"User-supplied event_buffer_max_size=8192 was clobbered; got {kv.get('event_buffer_max_size')}"
+    assert (
+        kv.get("free_gpu_memory_fraction") == 0.9
+    ), f"User-supplied free_gpu_memory_fraction=0.9 was clobbered; got {kv.get('free_gpu_memory_fraction')}"
 
 
 @pytest.mark.asyncio
@@ -411,9 +411,9 @@ async def test_user_kv_cache_config_preserved_without_publish_events(monkeypatch
     # deep_update replaces the KvCacheConfig object with the user-supplied dict
     # when publish_events=False (no model_dump conversion).
     assert isinstance(kv, dict), f"Expected kv_cache_config dict, got {type(kv)}"
-    assert kv.get("free_gpu_memory_fraction") == 0.75, (
-        f"User-supplied free_gpu_memory_fraction=0.75 was clobbered; got {kv.get('free_gpu_memory_fraction')}"
-    )
+    assert (
+        kv.get("free_gpu_memory_fraction") == 0.75
+    ), f"User-supplied free_gpu_memory_fraction=0.75 was clobbered; got {kv.get('free_gpu_memory_fraction')}"
 
 
 class MultimodalProcessorInstantiated(Exception):
