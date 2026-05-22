@@ -119,11 +119,7 @@ impl Decoder for TikTokenTokenizer {
     }
 }
 
-impl Tokenizer for TikTokenTokenizer {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
+impl Tokenizer for TikTokenTokenizer {}
 
 /// Parse a tiktoken model file (base64-encoded token + rank per line).
 fn parse_tiktoken_file(path: &str) -> Result<FxHashMap<Vec<u8>, u32>> {

@@ -51,7 +51,7 @@ mod l1;
 
 use std::sync::Arc;
 
-pub use l1::{L1Cache, L1CacheStats};
+pub use l1::{CacheEventFn, L1Cache, L1CacheStats};
 
 use crate::{
     Encoding, Result, TokenIdType,
@@ -87,6 +87,14 @@ impl CachedTokenizer {
             l1: L1Cache::new(max_memory_bytes),
             special_tokens,
         }
+    }
+
+    /// Install hit/miss callbacks so each L1 lookup pushes an event into the
+    /// supplied closures (e.g. `Prometheus::Counter::inc`). Replaces any
+    /// previously-set observer.
+    pub fn with_observer(mut self, on_hit: CacheEventFn, on_miss: CacheEventFn) -> Self {
+        self.l1.set_observer(on_hit, on_miss);
+        self
     }
 
     /// Snapshot of L1 cache statistics (cumulative hits/misses/entries/memory).
@@ -147,11 +155,7 @@ impl Decoder for CachedTokenizer {
     }
 }
 
-impl Tokenizer for CachedTokenizer {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
+impl Tokenizer for CachedTokenizer {}
 
 #[cfg(test)]
 mod tests {

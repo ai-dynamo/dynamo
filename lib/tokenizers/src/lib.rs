@@ -132,11 +132,6 @@ pub mod traits {
     pub trait Tokenizer: Encoder + Decoder {
         // fn get_vocab_size(&self) -> usize;
         // fn make_unique_clone(&self) -> Box<dyn Tokenizer>;
-
-        /// Enable downcasting from `dyn Tokenizer` to a concrete type (e.g. to reach
-        /// `CachedTokenizer::cache_stats` for metrics sampling). Implementations should
-        /// simply return `self`.
-        fn as_any(&self) -> &dyn std::any::Any;
     }
 }
 

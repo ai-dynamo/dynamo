@@ -73,6 +73,11 @@ struct CachedPrefix {
     size_bytes: usize,
 }
 
+/// Optional per-event observer. `on_hit` runs after each cache hit, `on_miss`
+/// after each miss — wired by `CachedTokenizer::with_observer` to push events
+/// straight into Prometheus counters without a periodic sampling step.
+pub type CacheEventFn = Arc<dyn Fn() + Send + Sync>;
+
 /// L1 cache: prefix matching at special-token boundaries.
 pub struct L1Cache {
     /// Sharded maps for concurrent access. Key: Blake3 hash of `input[0..boundary]`.
@@ -83,6 +88,8 @@ pub struct L1Cache {
     misses: AtomicU64,
     /// Monotonic counter for LRU timestamps.
     access_counter: AtomicU64,
+    on_hit: Option<CacheEventFn>,
+    on_miss: Option<CacheEventFn>,
 }
 
 impl L1Cache {
@@ -96,7 +103,15 @@ impl L1Cache {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             access_counter: AtomicU64::new(0),
+            on_hit: None,
+            on_miss: None,
         }
+    }
+
+    /// Install hit/miss callbacks. Replaces any previously-set observers.
+    pub fn set_observer(&mut self, on_hit: CacheEventFn, on_miss: CacheEventFn) {
+        self.on_hit = Some(on_hit);
+        self.on_miss = Some(on_miss);
     }
 
     /// Try to find the longest prefix match at a special-token boundary.
@@ -112,6 +127,9 @@ impl L1Cache {
 
         if boundaries.is_empty() {
             self.misses.fetch_add(1, Ordering::Relaxed);
+            if let Some(cb) = &self.on_miss {
+                cb();
+            }
             return None;
         }
 
@@ -135,11 +153,17 @@ impl L1Cache {
                 entry.last_accessed.store(timestamp, Ordering::Relaxed);
 
                 self.hits.fetch_add(1, Ordering::Relaxed);
+                if let Some(cb) = &self.on_hit {
+                    cb();
+                }
                 return Some((entry.tokens.to_vec(), boundary_pos));
             }
         }
 
         self.misses.fetch_add(1, Ordering::Relaxed);
+        if let Some(cb) = &self.on_miss {
+            cb();
+        }
         None
     }
 

@@ -34,11 +34,9 @@ use std::time::{Duration, Instant};
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
-    StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS, TOKENIZER_CACHE_HITS_TOTAL,
-    TOKENIZER_CACHE_MISSES_TOTAL,
+    StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -220,13 +218,6 @@ pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
-    /// Previously-observed cumulative L1 tokenizer-cache hit count.
-    /// Used by `flush_tokenizer_cache_stats` to derive deltas to feed into
-    /// `TOKENIZER_CACHE_HITS_TOTAL`. Stays at zero when the tokenizer is not
-    /// a `CachedTokenizer`.
-    prev_cache_hits: AtomicU64,
-    /// Previously-observed cumulative L1 tokenizer-cache miss count.
-    prev_cache_misses: AtomicU64,
     model_info: Arc<dyn ModelInfo>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -479,8 +470,6 @@ impl OpenAIPreprocessor {
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
-            prev_cache_hits: AtomicU64::new(0),
-            prev_cache_misses: AtomicU64::new(0),
             model_info,
             mdcsum,
             lora_name,
@@ -496,37 +485,6 @@ impl OpenAIPreprocessor {
             #[cfg(feature = "lightseek-mm")]
             image_placeholder_template,
         }))
-    }
-
-    /// Sample the wrapped tokenizer's L1 cache stats (if any) and feed deltas into
-    /// the Prometheus counters. No-op when the tokenizer is not a `CachedTokenizer`.
-    ///
-    /// Uses `fetch_max` + `saturating_sub` to ensure concurrent samplers from
-    /// different requests don't double-count when their cache snapshots arrive
-    /// out of order.
-    fn flush_tokenizer_cache_stats(&self) {
-        let Some(cached) = self
-            .tokenizer
-            .as_any()
-            .downcast_ref::<crate::tokenizers::CachedTokenizer>()
-        else {
-            return;
-        };
-        let stats = cached.cache_stats();
-        let prev_h = self
-            .prev_cache_hits
-            .fetch_max(stats.hits, Ordering::Relaxed);
-        let prev_m = self
-            .prev_cache_misses
-            .fetch_max(stats.misses, Ordering::Relaxed);
-        let dh = stats.hits.saturating_sub(prev_h);
-        let dm = stats.misses.saturating_sub(prev_m);
-        if dh > 0 {
-            TOKENIZER_CACHE_HITS_TOTAL.inc_by(dh as f64);
-        }
-        if dm > 0 {
-            TOKENIZER_CACHE_MISSES_TOTAL.inc_by(dm as f64);
-        }
     }
 
     /// Encode a string to it's tokens
@@ -1633,7 +1591,6 @@ impl OpenAIPreprocessor {
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
-        self.flush_tokenizer_cache_stats();
         Ok(encoding)
     }
 

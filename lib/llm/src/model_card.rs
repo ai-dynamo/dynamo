@@ -1005,11 +1005,19 @@ impl ModelDeploymentCard {
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
-                    Arc::new(crate::tokenizers::CachedTokenizer::new(
-                        raw,
-                        specials,
-                        cache_bytes,
-                    ))
+                    Arc::new(
+                        crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
+                            .with_observer(
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
+                                        .inc();
+                                }),
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
+                                        .inc();
+                                }),
+                            ),
+                    )
                 } else {
                     raw
                 }
@@ -1034,11 +1042,19 @@ impl ModelDeploymentCard {
                         cache_bytes,
                         "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 will not hit until tiktoken special-token extraction is added)",
                     );
-                    Arc::new(crate::tokenizers::CachedTokenizer::new(
-                        raw,
-                        Vec::new(),
-                        cache_bytes,
-                    ))
+                    Arc::new(
+                        crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
+                            .with_observer(
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
+                                        .inc();
+                                }),
+                                Arc::new(|| {
+                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
+                                        .inc();
+                                }),
+                            ),
+                    )
                 } else {
                     raw
                 }
