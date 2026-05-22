@@ -281,6 +281,8 @@ markers = [
     "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
     "router: marks tests for router component",
     "planner: marks tests for planner component",
+    "power_agent: marks tests for the power-agent component",
+    "multi_dgd_live: multi-DGD live cluster scenario (opt-in via RUN_MULTI_DGD_LIVE=1)",
     "kvbm: marks tests for KV behavior and model determinism",
     "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
     "model: model id used by a test or parameter",

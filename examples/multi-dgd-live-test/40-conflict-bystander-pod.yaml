@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------
+# FAILED PROBE (2026-05-21, dpp-dev-env AKS).
+# This manifest pins the bystander to a specific GPU via
+# `NVIDIA_VISIBLE_DEVICES=GPU-<uuid>`. AKS in CDI device mode rejects
+# this and refuses to admit the pod with
+#   `unresolvable CDI devices management.nvidia.com/gpu=GPU-<uuid>`.
+# The Python equivalent in test_multi_dgd_live.py::TestMultiPodConflict
+# is therefore skipped as a class (see Finding #7 in this directory's
+# README.md). Re-enable both this file AND the test only after they're
+# rewritten to use the K8s device plugin's `nvidia.com/gpu: 1` claim
+# plus runtime UUID discovery from inside the agent pod
+# (`nvmlDeviceGetUUID(nvmlDeviceGetHandleByIndex(0))`).
+# Kept in tree for reference; not applied by 99-teardown.sh on Path B.
+# ---------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: power-conflict-bystander
+  namespace: kaim-dynamo-system
+  labels:
+    purpose: power-aware-multi-dgd-test
+    role: conflict-bystander
+  annotations:
+    dynamo.nvidia.com/gpu-power-limit: "200"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    power-test/node: kaim
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  runtimeClassName: nvidia
+  imagePullSecrets:
+    - name: nvcr-imagepullsecret
+  containers:
+    - name: bystander
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "GPU-bf70c96a-e37d-6949-07f8-eec8f315c14b"
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+      resources:
+        requests:
+          cpu: "200m"
+          memory: "1Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      command: ["python3", "-c"]
+      args:
+        - |
+          import torch, time
+          torch.cuda.init()
+          x = torch.zeros(1024, device='cuda:0')
+          print(f"bystander PID={__import__('os').getpid()} on {torch.cuda.get_device_name(0)}", flush=True)
+          while True:
+              x.add_(1)
+              time.sleep(0.1)

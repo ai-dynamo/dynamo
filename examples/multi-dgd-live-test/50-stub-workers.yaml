@@ -1,0 +1,275 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Stub worker pods that stand in for what the Dynamo operator + 3 DGDs WOULD
+# create once #9683 (planner-infra) lands. These five pods carry:
+#   1. The dynamo.nvidia.com/gpu-power-limit annotation values that the
+#      power-aware planner SHOULD emit (manually applied here as a stand-in).
+#   2. The dynamo-graph-deployment-name + dynamo-component-type +
+#      dynamo-sub-component-type labels the agent and the test fixtures look for.
+#
+# Note: dpp-dev AKS uses CDI device mode — NVIDIA_VISIBLE_DEVICES is NOT
+# honoured as a free-form index selector for non-"all" values (the runtime
+# attempts `management.nvidia.com/gpu=<id>` lookup which has no entry in the
+# CDI registry, and fails the pod with `unresolvable CDI devices`). So we go
+# through the device plugin's `nvidia.com/gpu: N` resource path; the plugin
+# allocates GPU indices sequentially on a clean test node, which is enough to
+# satisfy the _EXPECTED_CAP_PER_GPU assertion in `test_multi_dgd_live.py`. If
+# the indices drift (e.g. a previous pod still held a GPU when these
+# scheduled), the test failure message prints `observed vs expected` so we
+# can spot it immediately.
+
+# --- vllm-dgd-a prefill (TP=1, 1 GPU, 350 W) ---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-dgd-a-prefill
+  namespace: kaim-dynamo-system
+  labels:
+    purpose: power-aware-multi-dgd-test
+    nvidia.com/dynamo-graph-deployment-name: vllm-dgd-a
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-sub-component-type: prefill
+  annotations:
+    dynamo.nvidia.com/gpu-power-limit: "350"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    power-test/node: kaim
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  imagePullSecrets:
+    - name: nvcr-imagepullsecret
+  runtimeClassName: nvidia
+  containers:
+    - name: w
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+      env:
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+      resources:
+        requests:
+          nvidia.com/gpu: "1"
+        limits:
+          nvidia.com/gpu: "1"
+      command:
+        - python3
+        - -u
+        - -c
+        - |
+          import torch, time
+          torch.cuda.init()
+          n = torch.cuda.device_count()
+          print(f"CUDA ready, visible_count={n}", flush=True)
+          tensors = [torch.zeros(64, 64, device=f"cuda:{i}") for i in range(n)]
+          while True:
+              for t in tensors:
+                  t.add_(0.001)
+              torch.cuda.synchronize()
+              time.sleep(0.05)
+---
+# --- vllm-dgd-a decode (TP=1, 1 GPU, 325 W) ---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-dgd-a-decode
+  namespace: kaim-dynamo-system
+  labels:
+    purpose: power-aware-multi-dgd-test
+    nvidia.com/dynamo-graph-deployment-name: vllm-dgd-a
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-sub-component-type: decode
+  annotations:
+    dynamo.nvidia.com/gpu-power-limit: "325"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    power-test/node: kaim
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  imagePullSecrets:
+    - name: nvcr-imagepullsecret
+  runtimeClassName: nvidia
+  containers:
+    - name: w
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+      env:
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+      resources:
+        requests:
+          nvidia.com/gpu: "1"
+        limits:
+          nvidia.com/gpu: "1"
+      command:
+        - python3
+        - -u
+        - -c
+        - |
+          import torch, time
+          torch.cuda.init()
+          n = torch.cuda.device_count()
+          print(f"CUDA ready, visible_count={n}", flush=True)
+          tensors = [torch.zeros(64, 64, device=f"cuda:{i}") for i in range(n)]
+          while True:
+              for t in tensors:
+                  t.add_(0.001)
+              torch.cuda.synchronize()
+              time.sleep(0.05)
+---
+# --- vllm-dgd-b prefill (TP=2, 2 GPUs, 375 W) ---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-dgd-b-prefill
+  namespace: kaim-dynamo-system
+  labels:
+    purpose: power-aware-multi-dgd-test
+    nvidia.com/dynamo-graph-deployment-name: vllm-dgd-b
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-sub-component-type: prefill
+  annotations:
+    dynamo.nvidia.com/gpu-power-limit: "375"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    power-test/node: kaim
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  imagePullSecrets:
+    - name: nvcr-imagepullsecret
+  runtimeClassName: nvidia
+  containers:
+    - name: w
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+      env:
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+      resources:
+        requests:
+          nvidia.com/gpu: "2"
+        limits:
+          nvidia.com/gpu: "2"
+      command:
+        - python3
+        - -u
+        - -c
+        - |
+          import torch, time
+          torch.cuda.init()
+          n = torch.cuda.device_count()
+          print(f"CUDA ready, visible_count={n}", flush=True)
+          tensors = [torch.zeros(64, 64, device=f"cuda:{i}") for i in range(n)]
+          while True:
+              for t in tensors:
+                  t.add_(0.001)
+              torch.cuda.synchronize()
+              time.sleep(0.05)
+---
+# --- vllm-dgd-b decode (TP=2, 2 GPUs, 325 W) ---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-dgd-b-decode
+  namespace: kaim-dynamo-system
+  labels:
+    purpose: power-aware-multi-dgd-test
+    nvidia.com/dynamo-graph-deployment-name: vllm-dgd-b
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-sub-component-type: decode
+  annotations:
+    dynamo.nvidia.com/gpu-power-limit: "325"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    power-test/node: kaim
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  imagePullSecrets:
+    - name: nvcr-imagepullsecret
+  runtimeClassName: nvidia
+  containers:
+    - name: w
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+      env:
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+      resources:
+        requests:
+          nvidia.com/gpu: "2"
+        limits:
+          nvidia.com/gpu: "2"
+      command:
+        - python3
+        - -u
+        - -c
+        - |
+          import torch, time
+          torch.cuda.init()
+          n = torch.cuda.device_count()
+          print(f"CUDA ready, visible_count={n}", flush=True)
+          tensors = [torch.zeros(64, 64, device=f"cuda:{i}") for i in range(n)]
+          while True:
+              for t in tensors:
+                  t.add_(0.001)
+              torch.cuda.synchronize()
+              time.sleep(0.05)
+---
+# --- vllm-dgd-c agg (TP=2, 2 GPUs, 300 W) ---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-dgd-c-decode
+  namespace: kaim-dynamo-system
+  labels:
+    purpose: power-aware-multi-dgd-test
+    nvidia.com/dynamo-graph-deployment-name: vllm-dgd-c
+    nvidia.com/dynamo-component-type: worker
+    nvidia.com/dynamo-sub-component-type: decode
+  annotations:
+    dynamo.nvidia.com/gpu-power-limit: "300"
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    power-test/node: kaim
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  imagePullSecrets:
+    - name: nvcr-imagepullsecret
+  runtimeClassName: nvidia
+  containers:
+    - name: w
+      image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+      env:
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: "compute,utility"
+      resources:
+        requests:
+          nvidia.com/gpu: "2"
+        limits:
+          nvidia.com/gpu: "2"
+      command:
+        - python3
+        - -u
+        - -c
+        - |
+          import torch, time
+          torch.cuda.init()
+          n = torch.cuda.device_count()
+          print(f"CUDA ready, visible_count={n}", flush=True)
+          tensors = [torch.zeros(64, 64, device=f"cuda:{i}") for i in range(n)]
+          while True:
+              for t in tensors:
+                  t.add_(0.001)
+              torch.cuda.synchronize()
+              time.sleep(0.05)

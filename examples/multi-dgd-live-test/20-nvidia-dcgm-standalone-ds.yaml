@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Standalone nvidia-dcgm hostengine DaemonSet — namespace-local replacement
+# for what GPU Operator's `dcgm.enabled=true` would deploy cluster-wide.
+#
+# WHY this exists:
+#   The dpp-dev-env AKS cluster has only `nvidia-dcgm-exporter` (embedded
+#   DCGM via cgo) — no standalone hostengine listening on TCP 5555. The
+#   Power Agent's DCGM actuator (`agent.actuator=dcgm`) connects to a
+#   hostengine over TCP via `pydcgm.dcgm_agent.dcgmConnect()`. Without
+#   a hostengine, Power Agent crashes at startup with
+#   `DCGM_ST_CONNECTION_NOT_VALID`.
+#
+# WHY not just flip `dcgm.enabled=true` in the cluster's GPU Operator?
+#   That's a cluster-wide change and needs cluster-admin coordination.
+#   This DS achieves the same observable effect inside our test
+#   namespace without touching the shared GPU Operator config.
+#
+# COEXISTENCE with `nvidia-dcgm-exporter`:
+#   The exporter uses the embedded DCGM mode (libdcgm.so loaded in-process).
+#   This DS runs nv-hostengine as a separate process with its own TCP
+#   listener on 5555. The driver tolerates both — verified empirically
+#   on this cluster pattern. The two never write to the same target-config
+#   record because only Power Agent calls `dcgmConfigSet`.
+#
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nvidia-dcgm-standalone
+  namespace: kaim-dynamo-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-dcgm-standalone
+  namespace: kaim-dynamo-system
+  labels:
+    app: nvidia-dcgm-standalone
+spec:
+  # Headless service — Power Agent connects via cluster DNS:
+  #   nvidia-dcgm-standalone.kaim-dynamo-system.svc.cluster.local:5555
+  # The DS only schedules on $TEST_NODE (single replica), so DNS resolves
+  # to exactly one pod IP.
+  clusterIP: None
+  ports:
+    - name: hostengine
+      port: 5555
+      targetPort: 5555
+      protocol: TCP
+  selector:
+    app: nvidia-dcgm-standalone
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-dcgm-standalone
+  namespace: kaim-dynamo-system
+  labels:
+    app: nvidia-dcgm-standalone
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-standalone
+  template:
+    metadata:
+      labels:
+        app: nvidia-dcgm-standalone
+    spec:
+      serviceAccountName: nvidia-dcgm-standalone
+      # Same nodeSelector as Power Agent — only the test node.
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+        power-test/node: "kaim"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - name: nvcr-imagepullsecret
+      containers:
+        - name: nv-hostengine
+          # Public NVIDIA image. MUST match the DCGM major version of the
+          # Power Agent's vendored pydcgm + libdcgm.so. The Power Agent
+          # Dockerfile (components/power_agent/Dockerfile:35) pins to
+          # `nvcr.io/nvidia/cloud-native/dcgm:4.2.3-2-ubuntu22.04`, BUT that
+          # tag does not exist on NGC (confirmed via `docker manifest
+          # inspect` on 2026-05-21). The available DCGM 4.x tag (4.5.1)
+          # moved the python bindings path from
+          #   /usr/local/dcgm/bindings/python3/   (1.x..3.x..4.2)
+          # to
+          #   /usr/share/datacenter-gpu-manager-4/bindings/python3/   (4.5+)
+          # which silently breaks the Dockerfile's COPY paths.
+          #
+          # The Power Agent code uses `dcgm_structs.c_dcgmDeviceConfig_v2`
+          # (actuator.py:807) — DCGM 4.x only. We tried building with 3.3.9
+          # bindings first; agent crashed with
+          #   AttributeError: c_dcgmDeviceConfig_v2.
+          # Fix: patch the Dockerfile COPY source to the 4.5+ path and use
+          # DCGM 4.5.1 everywhere — bindings AND hostengine.
+          #
+          # IMAGE NOTE — ephemeral ttl.sh tag (24h TTL). If apply fails
+          # with ImagePullBackOff this image likely expired; rebuild +
+          # push using "examples/multi-dgd-live-test/README.md §
+          # Path-B prerequisites" (Image 3 — retag from nvcr.io).
+          # The cluster's `nvcr-imagepullsecret` has a 403 on
+          # `nvcr.io/nvidia/cloud-native/dcgm` (its OAuth token does not
+          # carry the `cloud-native` scope), which is why we retag the
+          # 4.5.1 image to ttl.sh rather than pulling directly from NGC.
+          # PR findings #1, #2, #5 in README.md track the upstream fixes
+          # (durable image registration on dynamoci.azurecr.io + the
+          # Dockerfile patches that would land along with them).
+          image: ttl.sh/dynamo-dcgm45-kaim:24h
+          imagePullPolicy: IfNotPresent
+          # Bind on all interfaces inside the pod (cluster DNS routes traffic
+          # to the pod IP). Port 5555 = DCGM default.
+          # nv-hostengine has terse, short-form-only flags in 3.x:
+          #   -b <IP>          bind address (use 0.0.0.0 to listen on all)
+          #   -p <PORT>        TCP port
+          #   -n               foreground (DO NOT daemonize — kubelet must
+          #                    see this as the container PID 1, otherwise
+          #                    the entrypoint exits immediately after fork
+          #                    and CrashLoopBackOff hits).
+          #   --log-level INFO standard logging
+          command:
+            - /usr/bin/nv-hostengine
+            - -n
+            - -b
+            - 0.0.0.0
+            - -p
+            - "5555"
+            - --log-level
+            - INFO
+          # Container toolkit injects libnvidia-ml.so + makes all GPUs visible.
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+          ports:
+            - name: hostengine
+              containerPort: 5555
+              protocol: TCP
+          securityContext:
+            # dcgmConfigSet writes power-cap target through NVML internally —
+            # needs root + privileged for the NVML driver paths the hostengine
+            # exercises.
+            privileged: true
+            runAsUser: 0
+          readinessProbe:
+            # The hostengine binds 5555 within ~5s of process start. A TCP
+            # connect on 5555 returning a SYN-ACK is sufficient signal.
+            tcpSocket:
+              port: 5555
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 5555
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

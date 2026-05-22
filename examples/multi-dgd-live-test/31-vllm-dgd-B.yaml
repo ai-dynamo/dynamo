@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# vllm-dgd-b — disagg TP=2.
+#   - 1 prefill worker pod, TP=2 → 2 GPUs (gpus 2, 3 on $TEST_NODE)
+#   - 1 decode  worker pod, TP=2 → 2 GPUs (gpus 4, 5 on $TEST_NODE)
+#   - 1 planner pod (DisaggPlanner) with power-awareness ON
+#
+# Exercises the multi-GPU-per-pod path:
+#   - One annotation on a pod with 2 PIDs (rank-main + helper)
+#   - Power Agent's `_reconcile_gpu` UID-dedup logic (commit ba3b5803a9
+#     on #9790) — multi_pod_gpu_total{disposition=agree} must NOT tick
+#     up despite the 2 PIDs per GPU
+#
+# Caps per §8.2: prefill 375W (heaviest), decode 325W (same value as DGD-A
+# decode — confirms identical cap values across different DGDs are fine).
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dgd-b-planner-profile-data
+data:
+  prefill_raw_data.json: |
+    {
+      "prefill_isl":          [128, 256, 512, 1024],
+      "prefill_ttft":         [12,  18,  30,  55],
+      "prefill_thpt_per_gpu": [9800, 8500, 6200, 3800]
+    }
+  decode_raw_data.json: |
+    {
+      "x_kv_usage":       [0.1, 0.3, 0.5, 0.7, 0.9],
+      "y_context_length": [512, 512, 512, 512, 512],
+      "z_itl":            [5, 6, 7, 8, 10],
+      "z_thpt_per_gpu":   [4500, 4200, 3800, 3400, 2800],
+      "max_kv_tokens": 32768
+    }
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-dgd-b
+  labels:
+    purpose: power-aware-multi-dgd-test
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+    Planner:
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1
+          command:
+            - python3
+            - -m
+            - dynamo.planner
+          args:
+            - --config
+            # `mode: disagg` required — see 30-vllm-dgd-A.yaml comment.
+            - >-
+              {"environment": "kubernetes",
+               "backend": "vllm",
+               "mode": "disagg",
+               "throughput_adjustment_interval_seconds": 60,
+               "profile_results_dir": "/workspace/profiling_results",
+               "enable_power_awareness": true,
+               "prefill_engine_gpu_power_limit": 375,
+               "decode_engine_gpu_power_limit": 325,
+               "total_gpu_power_limit": 1500,
+               "power_agent_safe_default_watts": 280}
+          volumeMounts:
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
+        volumes:
+          - name: planner-profile-data
+            configMap:
+              name: dgd-b-planner-profile-data
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      envFromSecret: hf-token-secret
+      replicas: 1
+      sharedMemory:
+        size: 16Gi
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      extraPodSpec:
+        nodeSelector:
+          power-test/node: kaim
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace/examples/backends/vllm
+          command: [/bin/sh, -c]
+          args:
+            - >-
+              python3 -m dynamo.vllm
+              --model Qwen/Qwen3-0.6B
+              --tensor-parallel-size 2
+              --disaggregation-mode prefill
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+              --gpu-memory-utilization 0.85
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      replicas: 1
+      sharedMemory:
+        size: 16Gi
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      extraPodSpec:
+        nodeSelector:
+          power-test/node: kaim
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          workingDir: /workspace/examples/backends/vllm
+          command: [/bin/sh, -c]
+          args:
+            - >-
+              python3 -m dynamo.vllm
+              --model Qwen/Qwen3-0.6B
+              --tensor-parallel-size 2
+              --disaggregation-mode decode
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+              --gpu-memory-utilization 0.85

@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Power Agent helm values override — NVML actuator pass.
+# Use with: helm upgrade --install power-agent deploy/helm/charts/power-agent \
+#               --namespace kaim-dynamo-system -f 10-power-agent-values-nvml.yaml
+
+image:
+  # IMAGE NOTE — ephemeral ttl.sh tag (24h TTL). If `helm install` fails
+  # with ImagePullBackOff this image likely expired; rebuild + push using
+  # "examples/multi-dgd-live-test/README.md § Path-B prerequisites".
+  # Production followup: switch to nvcr.io/nvidia/dynamo/power-agent:vX.Y.Z
+  # once the NGC build lands and Findings #1/#2/#5/#6 are addressed
+  # upstream (Dockerfile DCGM tag + bindings path + missing logger.py shim).
+  # This NVML-pass build used DCGM 3.3.9 bindings (no DCGM-mode in
+  # this pass, so the 3.3.9 vs 4.5+ struct gap is irrelevant here).
+  repository: ttl.sh/dynamo-pa-kaim-4c3c606
+  tag: "24h"
+  pullPolicy: IfNotPresent
+
+# ttl.sh is anonymous; no imagePullSecret needed.
+imagePullSecrets: []
+
+agent:
+  actuator: nvml
+  # A100 SXM4 (80 GB) recommended safe default per chart values.yaml.
+  # 70% of 400 W TDP. Used when:
+  #   - multi-pod conflict cannot agree on a cap (B5 path)
+  #   - a managed GPU has no annotation (B4 / cold-start path)
+  safeDefaultWatts: 280
+  prometheusPort: 9100
+
+# Standard NVIDIA Container Toolkit injection. Matches the chart default.
+runtimeClassName: nvidia
+env:
+  NVIDIA_VISIBLE_DEVICES: "all"
+  NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+
+nodeSelector:
+  # Pin to the test node ONLY (otherwise the DS schedules on every GPU
+  # node and clobbers other users' caps).
+  nvidia.com/gpu.present: "true"
+  power-test/node: "kaim"
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+rbac:
+  # FINDING (chart bug): with `namespaceRestricted: true`, the chart
+  # creates a namespace-scoped Role but does NOT pass `--namespace` to
+  # the agent. The agent then calls `list_pod_for_all_namespaces` and
+  # gets 403 Forbidden. Until the chart is fixed to wire
+  # `--namespace={{ .Release.Namespace }}` when namespaceRestricted=true,
+  # use cluster-scoped RBAC. See power_agent.py:798 (--namespace flag exists).
+  namespaceRestricted: false
+
+daemonset:
+  enabled: true
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+state:
+  hostPath: /var/lib/dynamo-power-agent-kaim-test
+
+# FINDING (chart default too tight for live testing): the chart default
+# limits.memory of 128 MiB is enough for the agent's steady-state reconcile
+# loop but NOT enough when we run repeated `kubectl exec -- python -c "..."`
+# probes alongside it — importing the kubernetes client library inside the
+# pod pushed the cgroup over the limit twice on 2026-05-21 and the kernel
+# OOM-killed the agent (lastState.terminated.reason=OOMKilled). Bumping
+# memory for the test pass; the chart's `values.yaml` default should likely
+# also be raised, but that's a separate PR-feedback finding.
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

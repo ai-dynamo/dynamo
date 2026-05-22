@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Power Agent helm values override — DCGM actuator pass.
+# Prerequisite: 20-nvidia-dcgm-standalone-ds.yaml has been applied AND the
+# DS has rolled out on the test node. Verify:
+#   kubectl exec -n kaim-dynamo-system <hostengine-pod> -- nv-hostengine --version
+#
+# Apply with:
+#   helm upgrade power-agent deploy/helm/charts/power-agent \
+#       --namespace kaim-dynamo-system -f 11-power-agent-values-dcgm.yaml
+
+image:
+  # IMAGE NOTE — ephemeral ttl.sh tag (24h TTL). If `helm install` fails
+  # with ImagePullBackOff this image likely expired; rebuild + push using
+  # "examples/multi-dgd-live-test/README.md § Path-B prerequisites" (Image 1).
+  # DCGM-4.5.1-bindings build (separate from the NVML pass image, which has
+  # 3.3.9 bindings). The Power Agent's actuator.py uses
+  # `dcgm_structs.c_dcgmDeviceConfig_v2` which only exists in DCGM 4.x —
+  # the NVML-pass image's 3.3.9 bindings crashed at the first reconcile
+  # with `AttributeError: c_dcgmDeviceConfig_v2`. Build patches the
+  # Dockerfile COPY source to /usr/share/datacenter-gpu-manager-4/
+  # bindings/python3 (Finding #2) and drops in a logger.py shim
+  # (Finding #6). See 20-nvidia-dcgm-standalone-ds.yaml for the
+  # matching hostengine image.
+  repository: ttl.sh/dynamo-pa-kaim-dcgm45-v2
+  tag: "24h"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+agent:
+  actuator: dcgm
+  safeDefaultWatts: 280
+  prometheusPort: 9100
+  dcgm:
+    # The standalone DS exposes a headless Service at this DNS name
+    # (see 20-nvidia-dcgm-standalone-ds.yaml). Default chart value points at
+    # gpu-operator's DCGM hostengine which is not deployed on this cluster.
+    host: nvidia-dcgm-standalone.kaim-dynamo-system.svc.cluster.local
+    port: 5555
+    # Register the cap as DCGM's target configuration so the hostengine
+    # re-applies it after GPU reset / driver reinit. Costs one extra RPC
+    # per GPU per reconcile but adds the "auto-reapply" property we want
+    # to assert in §8.6 step 3.
+    enforce: true
+
+runtimeClassName: nvidia
+env:
+  NVIDIA_VISIBLE_DEVICES: "all"
+  NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+
+nodeSelector:
+  nvidia.com/gpu.present: "true"
+  power-test/node: "kaim"
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+rbac:
+  # See 10-power-agent-values-nvml.yaml for the namespaceRestricted=false
+  # rationale (chart bug — agent needs --namespace flag when restricted).
+  namespaceRestricted: false
+
+daemonset:
+  enabled: true
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+state:
+  hostPath: /var/lib/dynamo-power-agent-kaim-test
+
+# See 10-power-agent-values-nvml.yaml — the chart's 128 MiB default is too
+# tight for live testing with repeated `kubectl exec -- python` probes.
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
