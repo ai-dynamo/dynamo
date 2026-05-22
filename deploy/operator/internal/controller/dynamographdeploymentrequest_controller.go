@@ -403,6 +403,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) GetRecorder() record.EventRecor
 	return r.Recorder
 }
 
+func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryEnabled() bool {
+	if r == nil || r.Config == nil || r.Config.GPU.DiscoveryEnabled == nil {
+		return true
+	}
+	return *r.Config.GPU.DiscoveryEnabled
+}
+
 // FinalizeResource implements commonController.Finalizer interface
 func (r *DynamoGraphDeploymentRequestReconciler) FinalizeResource(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
@@ -1273,7 +1280,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 	}
 
 	// Node-label fallback
-	if ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
+	if r.gpuDiscoveryEnabled() {
 		if _, err := gpu.DiscoverGPUs(ctx, r.APIReader); err == nil {
 			return nil
 		} else {
@@ -1769,7 +1776,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(c
 		reason := GetGPUDiscoveryFailureReason(err)
 		logger.Info("DCGM discovery failed, falling back to node-label discovery",
 			"reason", reason, "error", err.Error())
-		if !ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
+		if !r.gpuDiscoveryEnabled() {
 			if discoveryRequired {
 				return nil, fmt.Errorf("auto-discovery failed: %w", err)
 			}

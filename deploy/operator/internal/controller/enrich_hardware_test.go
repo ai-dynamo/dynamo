@@ -77,6 +77,21 @@ func dcgmPod(name, ip string) *corev1.Pod {
 	}
 }
 
+func TestGPUDiscoveryEnabledDefaults(t *testing.T) {
+	assert.True(t, (*DynamoGraphDeploymentRequestReconciler)(nil).gpuDiscoveryEnabled())
+	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{}).gpuDiscoveryEnabled())
+	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}).gpuDiscoveryEnabled())
+	assert.False(t, (&DynamoGraphDeploymentRequestReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{
+			GPU: configv1alpha1.GPUConfiguration{
+				DiscoveryEnabled: ptr.To(false),
+			},
+		},
+	}).gpuDiscoveryEnabled())
+}
+
 func TestEnrichHardwareFromDiscovery(t *testing.T) {
 	tests := []struct {
 		name string
