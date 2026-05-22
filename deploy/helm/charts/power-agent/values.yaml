@@ -70,7 +70,14 @@ serviceAccount:
 rbac:
   create: true
   # true  → Role + RoleBinding; agent only sees pods in {{ .Release.Namespace }}.
-  # false → ClusterRole + ClusterRoleBinding; agent sees all pods on its node.
+  #         The DaemonSet's command is also invoked with
+  #         `--namespace=$(POD_NAMESPACE)` (downward API → metadata.namespace)
+  #         so power_agent.py uses `list_namespaced_pod` instead of its
+  #         default `list_pod_for_all_namespaces`. Without that flag the
+  #         agent would 403 on every reconcile against the namespace-only
+  #         token. See templates/daemonset.yaml and power_agent.py:438-446.
+  # false → ClusterRole + ClusterRoleBinding; agent sees all pods on its
+  #         node across every namespace. `--namespace` is NOT passed.
   # Default matches today's raw-YAML behaviour (cluster-scoped). Dev mode
   # overrides this to true automatically — see dev.namespaceRestrictedOverride.
   namespaceRestricted: false

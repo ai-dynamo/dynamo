@@ -68,12 +68,27 @@ spec:
             - /app/power_agent.py
             - --safe-default-watts=$(SAFE_DEFAULT_WATTS)
             - --node-name=$(NODE_NAME)
+            {{- if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}
+            # Namespace-scoped RBAC is in effect (Role + RoleBinding instead of
+            # ClusterRole + ClusterRoleBinding — see role.yaml). The agent's
+            # default pod listing (`list_pod_for_all_namespaces`, power_agent.py:444)
+            # would 403 against the namespace-only token; pass --namespace so it
+            # uses `list_namespaced_pod` (:439) instead. Mirrors the dev-pod
+            # template's wiring (dev-pod.yaml:57).
+            - --namespace=$(POD_NAMESPACE)
+            {{- end }}
             - --prometheus-port={{ .Values.agent.prometheusPort }}
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
             - name: SAFE_DEFAULT_WATTS
               value: {{ .Values.agent.safeDefaultWatts | quote }}
             {{- range $k, $v := .Values.env }}
