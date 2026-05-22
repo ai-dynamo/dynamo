@@ -85,7 +85,7 @@ use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 /// buffer is base64-encoded with the standard alphabet.
 fn encode_floats_to_base64(floats: &[f32]) -> String {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let mut bytes = Vec::with_capacity(floats.len() * std::mem::size_of::<f32>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(floats));
     for f in floats {
         bytes.extend_from_slice(&f.to_le_bytes());
     }

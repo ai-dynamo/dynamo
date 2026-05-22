@@ -44,13 +44,19 @@ def test_encode_helper_matches_struct_pack():
 def test_encode_helper_matches_sglang_side():
     """vLLM and SGLang must emit the same bytes for the same float
     vector. Drift here would break clients that load-balance across
-    backends; the assertion is a cheap canary."""
-    from dynamo.sglang.request_handlers.embedding.embedding_handler import (
-        _encode_floats_to_base64 as _sgl_encode,
-    )
+    backends; the assertion is a cheap canary.
 
+    Skipped automatically when the sglang package isn't importable in
+    this CI image -- the vllm-runtime container ships vLLM only.
+    """
+    sglang_handler = pytest.importorskip(
+        "dynamo.sglang.request_handlers.embedding.embedding_handler",
+        reason="sglang not installed in this runtime image",
+    )
     floats = [0.123, -0.456, 0.789, 1.0, -1.0]
-    assert _encode_floats_to_base64(floats) == _sgl_encode(floats)
+    assert _encode_floats_to_base64(floats) == sglang_handler._encode_floats_to_base64(
+        floats
+    )
 
 
 def test_encode_helper_handles_empty_vector():
