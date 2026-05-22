@@ -216,6 +216,16 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
 
+    /// Multimodal encoder handoff payload, set by the frontend's
+    /// EncoderRouter on requests forwarded from an Encode worker to a
+    /// downstream Prefill/Aggregated peer. Engine-opaque JSON object;
+    /// the framework neither inspects nor mutates the contents. Object-
+    /// only by contract (see Python `require_encoder_result` and the
+    /// Rust `LLMEngineOutput::encode_terminal` constructor).
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Directional link to a predecessor worker's `engine.generate` span.
     /// Set by `PrefillRouter` on the decode side (prefill→decode handoff)
     /// and by the migration `RetryManager` on retry attempts. Framework-
@@ -398,5 +408,57 @@ mod tests {
         assert_eq!(req.token_ids, vec![1]);
         assert!(req.is_probe);
         assert_eq!(req.model, "");
+    }
+
+    /// `encoder_result` is the multimodal encoder handoff payload set by
+    /// the frontend's EncoderRouter on requests forwarded to a downstream
+    /// Prefill/Aggregated worker. The wire shape is engine-opaque -- the
+    /// framework must round-trip the value byte-identical without
+    /// inspecting or wrapping it.
+    #[test]
+    fn encoder_result_round_trips_through_serde() {
+        let payload = serde_json::json!({
+            "embedding_handle": {
+                "shape": [1, 1024],
+                "dtype": "fp16",
+                "uri": "nixl://encoder-0/embedding-42",
+            },
+            "processed_token_ids": [128_000_u32, 200_001_u32, 200_002_u32],
+        });
+        let req = PreprocessedRequest::builder()
+            .model("test/model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .encoder_result(Some(payload.clone()))
+            .build()
+            .unwrap();
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["encoder_result"], payload);
+
+        let back: PreprocessedRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.encoder_result, Some(payload));
+    }
+
+    /// `encoder_result` defaults to `None` and is absent from the
+    /// serialized payload when unset (via `skip_serializing_if`), matching
+    /// the convention used by sibling optional fields like `prefill_result`.
+    #[test]
+    fn encoder_result_is_absent_when_none() {
+        let req = PreprocessedRequest::builder()
+            .model("test/model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+        assert!(req.encoder_result.is_none());
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("encoder_result"),
+            "encoder_result must be absent from wire when None; got {json}"
+        );
     }
 }

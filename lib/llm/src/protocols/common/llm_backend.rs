@@ -111,6 +111,13 @@ pub struct BackendOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
+    /// Multimodal encoder handoff payload (object-only by contract).
+    /// Set by Encode workers on their terminal chunk; consumed by the
+    /// frontend's EncoderRouter and threaded onto the downstream
+    /// PreprocessedRequest. Engine-opaque; framework does not inspect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Framework-owned link to the prefill worker's span. Propagated
     /// alongside the engine's `disaggregated_params` so the decode worker
     /// can record an OTel `Link` on its `engine.generate` span. Engines
@@ -176,6 +183,14 @@ pub struct LLMEngineOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
+    /// Multimodal encoder handoff payload (object-only by contract).
+    /// Set by Encode workers on their terminal chunk via
+    /// `LLMEngineOutput::encode_terminal`; the post-processor copies it
+    /// through to `BackendOutput.encoder_result`. Engine-opaque payload;
+    /// framework does not inspect or mutate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Framework-owned link to the prefill worker's span (cross-process
     /// trace linking on disagg requests). Set by the framework on the
     /// prefill terminal chunk; consumed by the decode adapter. Engines
@@ -212,6 +227,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
@@ -233,6 +249,7 @@ impl LLMEngineOutput {
             top_logprobs: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
@@ -254,6 +271,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
@@ -275,6 +293,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,

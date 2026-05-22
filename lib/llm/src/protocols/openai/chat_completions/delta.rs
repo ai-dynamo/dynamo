@@ -458,6 +458,8 @@ mod tests {
                 "token_ids": [11, 22, 33],
                 "routed_experts": {"layer_0": [1, 3]}
             })),
+
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
         }
@@ -507,6 +509,7 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: Some(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
@@ -716,6 +719,7 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
         };
