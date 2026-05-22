@@ -353,12 +353,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let guard = CancelMonitorGuard { drop_token };
 
         #[cfg(debug_assertions)]
-        let chunks = crate::validate::wrap(chunks);
+        let chunks = crate::validate::wrap(chunks, self.mode);
 
         let stream_ctx = ctx.clone();
         let stream_span = span.clone();
         let should_record_attrs = is_otlp_export_enabled();
-        let is_prefill_mode = self.mode.is_prefill();
+        // Prefill and Encode both produce empty-token terminals carrying
+        // their handoff payload (disaggregated_params and encoder_result
+        // respectively), so both need the worker_trace_link stamped on
+        // the terminal even when the chunk has no tokens.
+        let is_handoff_terminal_mode = self.mode.is_prefill() || self.mode.is_encode();
         let finalizer_span = span.clone();
         let mapped = async_stream::stream! {
             let _guard = guard;
@@ -418,13 +422,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             stream_span.record("cancelled", stream_ctx.is_stopped());
                             record_itl_distribution(&stream_span, &mut itl_samples_ms);
                         }
-                        // Prefill-only: also stamp on the terminal chunk
-                        // (which may be the FIRST chunk for prefill, with
-                        // token_ids empty if the handoff is via
-                        // disaggregated_params). Belt-and-suspenders so the
-                        // decode peer always sees the link even when the
-                        // prefill terminal has no tokens.
-                        if is_prefill_mode
+                        // Prefill / Encode handoff terminals: also stamp
+                        // on the terminal chunk (which may be the FIRST
+                        // chunk for these modes, with token_ids empty
+                        // when the handoff is via disaggregated_params or
+                        // encoder_result). Belt-and-suspenders so the
+                        // downstream peer always sees the link even when
+                        // the terminal has no tokens.
+                        if is_handoff_terminal_mode
                             && is_terminal
                             && chunk.worker_trace_link.is_none()
                             && let Some(link) = &worker_trace_link
@@ -1543,6 +1548,44 @@ mod tests {
             .worker_trace_link
             .as_ref()
             .expect("prefill terminal with no tokens must be stamped via fallback");
+        assert_eq!(link.trace_id, trace_id);
+        assert_eq!(link.span_id, span_id);
+    }
+
+    /// Encode terminal with no token chunks (handoff via
+    /// `encoder_result`) must also get stamped via the handoff-mode
+    /// fallback so the downstream Prefill/Aggregated peer sees the
+    /// link. Mirrors the prefill test above with
+    /// `DisaggregationMode::Encode` and an `encode_terminal` chunk.
+    #[tokio::test]
+    async fn encode_mode_terminal_stamps_worker_trace_link() {
+        let (_guard, trace_id, span_id) = install_trace_context_injection();
+
+        let mut map = serde_json::Map::new();
+        map.insert("uri".into(), serde_json::Value::String("nixl://e/0".into()));
+        let (engine, _abort) = MockEngine::new(vec![LLMEngineOutput::encode_terminal(map)]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Encode);
+        let input = Context::new(make_request(vec![1, 2, 3]));
+        let stream = adapter.generate(input).await.unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+
+        assert_eq!(chunks.len(), 1);
+        let data = chunks[0]
+            .data
+            .as_ref()
+            .expect("terminal chunk should have data");
+        assert!(
+            data.token_ids.is_empty(),
+            "test precondition: encode terminal has no tokens"
+        );
+        assert!(
+            data.encoder_result.as_ref().is_some_and(|v| v.is_object()),
+            "encode terminal must carry encoder_result: Some(Object(_))"
+        );
+        let link = data
+            .worker_trace_link
+            .as_ref()
+            .expect("encode terminal with no tokens must be stamped via fallback");
         assert_eq!(link.trace_id, trace_id);
         assert_eq!(link.span_id, span_id);
     }
