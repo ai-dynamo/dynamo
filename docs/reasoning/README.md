@@ -7,18 +7,35 @@ subtitle: Separate reasoning content from assistant output for chain-of-thought 
 
 Some models emit reasoning or thinking content separately from their final
 response. Dynamo can split that output into `reasoning_content` and normal
-assistant content by configuring a reasoning parser. As with tool calling,
-there are two ways to do this to ensure wide coverage and day0 model support.
+assistant content by configuring a reasoning parser.
+
+There are two ways to parse reasoning in Dynamo, depending on whether the
+parser lives in Dynamo's own registry or in an upstream engine frontend
+(`vllm serve`, `sglang serve`, or `trtllm-serve`).
 
 ## Choose a parsing path
 
 | Path | When to use | Page |
 |------|-------------|------|
-| **Dynamo** | Dynamo ships a Rust parser for the model's reasoning format. Lowest latency, the default path. | [Reasoning Parsing (Dynamo)](dynamo.md) |
-| **Engine Fallback** | Use the framework's implementation (vLLM or SGLang) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Reasoning Parsing (Engine Fallback)](engine-fallback.md) |
+| **Dynamo** | Dynamo ships a framework-agnostic Rust parser for the model's reasoning format. Default path. | [Reasoning Parsing (Dynamo)](dynamo.md) |
+| **Engine Fallback** | Use the framework's parser implementation (vLLM or SGLang today; TRTLLM in progress) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Reasoning Parsing (Engine Fallback)](engine-fallback.md) |
 
 Start with the Dynamo path. Fall back to the engine path only when Dynamo's
 registry does not list a parser for your model.
+
+## Why Dynamo implements tool-call and reasoning parsers
+
+In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call parsing and
+reasoning parsing happens in the engine's frontend server, with subtle
+behavioral differences across each. Since Dynamo orchestrates efficient
+routing and tokenization, it connects directly to each engine and circumvents
+each engine's frontend server to avoid redundant work.
+
+Dynamo therefore implements tool-call parsing and reasoning parsing in its
+frontend as a framework-agnostic Rust layer. This gives Dynamo one tested
+OpenAI-compatible contract across vLLM, SGLang, TRTLLM, and other workers,
+while keeping the serving hot path highly concurrent and scalable, avoiding
+Python GIL bottlenecks.
 
 ## See Also
 
