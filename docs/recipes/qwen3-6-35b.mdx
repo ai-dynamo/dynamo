@@ -1,0 +1,228 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Qwen3.6-35B-A3B FP8
+subtitle: Run a script-driven three-way benchmark for vanilla vLLM, Dynamo frontend decoding, and embedding cache.
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">Qwen / vLLM / multimodal</p>
+<h2>Run a script-driven three-way benchmark for vanilla vLLM, Dynamo frontend decoding, and embedding cache.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>comparison set</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Comparison Set</span>
+<strong>Verified</strong>
+<p>How much do Dynamo frontend decoding and embedding cache change a single-GPU multimodal sliding-window benchmark versus vanilla vLLM serve?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>Qwen/Qwen3.6-35B-A3B-FP8</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>Sliding-window multimodal JSONL: 30 users, 8 turns, 5-image window, 8K text tokens, 240 requests</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>comparative recipe</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Comparison Set
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>How much do Dynamo frontend decoding and embedding cache change a single-GPU multimodal sliding-window benchmark versus vanilla vLLM serve?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Model, one-GPU hardware target selected by script, generated sliding-window dataset, request count, and shared perf.yaml template.</strong>
+</div>
+</div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>vanilla vLLM serve</strong><span>Plain vLLM baseline outside DynamoGraphDeployment.</span></td>
+<td><em className="role baseline">Baseline</em></td>
+<td>vLLM</td>
+<td>1x H100 or GB200</td>
+<td>Sliding-window multimodal JSONL</td>
+<td><mark>deploy YAML + shared perf.yaml</mark></td>
+<td><a href="#deploy-vanilla-vllm-serve">Deploy</a></td>
+</tr><tr>
+<td><strong>Dynamo frontend decoding</strong><span>Tests Dynamo frontend decoding with multimodal processing on and embedding cache off.</span></td>
+<td><em className="role treatment">Treatment</em></td>
+<td>Dynamo + vLLM</td>
+<td>1x H100 or GB200</td>
+<td>Same generated dataset</td>
+<td><mark>deploy YAML + shared perf.yaml</mark></td>
+<td><a href="#deploy-dynamo-frontend-decoding">Deploy</a></td>
+</tr><tr className="recommended">
+<td><strong>Dynamo FD + embedding cache</strong><span>Tests frontend decoding plus 8 GiB multimodal embedding cache.</span></td>
+<td><em className="role recommended">Recommended treatment</em></td>
+<td>Dynamo + vLLM</td>
+<td>1x H100 or GB200</td>
+<td>Same generated dataset</td>
+<td><mark>deploy YAML + shared perf.yaml</mark></td>
+<td><a href="#deploy-dynamo-fd--embedding-cache">Deploy</a></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+## When to Use
+
+Use this page when your deployment decision starts with `Qwen/Qwen3.6-35B-A3B-FP8` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
+
+## Results Placeholder
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark results are not checked in yet</strong>
+<p>The README explains how to retrieve profile_export_aiperf.json for each run, but it does not include expected numeric results. This page leaves a result placeholder and keeps the script-driven workflow explicit.</p>
+</div>
+
+| Placeholder | What should be filled in |
+| --- | --- |
+| vLLM baseline placeholder | Report throughput, TTFT, ITL, request latency, and errors for vllm-serve. |
+| Dynamo FD placeholder | Report the same metrics for Dynamo frontend decoding without embedding cache. |
+| Dynamo FD+EC placeholder | Report the same metrics for frontend decoding plus 8 GiB embedding cache. |
+
+## Before You Run
+
+<div className="dynamo-prereq-grid">
+<div>
+<span>Hardware</span>
+<strong>H100 or GB200 selected by --hw</strong>
+</div>
+<div>
+<span>Runtime</span>
+<strong>vLLM</strong>
+</div>
+<div>
+<span>Dataset</span>
+<strong>30 users x 8 turns, 5-image sliding window</strong>
+</div>
+<div>
+<span>Requests</span>
+<strong>240</strong>
+</div>
+<div>
+<span>Workflow</span>
+<strong>run-benchmark.sh / run-all-benchmarks.sh</strong>
+</div>
+<div>
+<span>AIPerf</span>
+<strong>Pinned source install in perf.yaml</strong>
+</div>
+</div>
+
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+</Warning>
+
+## Deploy
+
+<h3 id="deploy-vanilla-vllm-serve">Deploy: vanilla vLLM serve</h3>
+
+Plain vLLM baseline outside DynamoGraphDeployment.
+
+```bash
+export NAMESPACE=your-namespace
+export HW=gb200  # or h100
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3.6-35b`.
+kubectl apply -f recipes/qwen3.6-35b/deploy/vllm-serve.yaml -n ${NAMESPACE}
+# Or run this recipe's script-driven benchmark for the selected variant.
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config vllm-serve
+```
+
+<h3 id="deploy-dynamo-frontend-decoding">Deploy: Dynamo frontend decoding</h3>
+
+Tests Dynamo frontend decoding with multimodal processing on and embedding cache off.
+
+```bash
+export NAMESPACE=your-namespace
+export HW=gb200  # or h100
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3.6-35b`.
+kubectl apply -f recipes/qwen3.6-35b/deploy/dynamo-fd.yaml -n ${NAMESPACE}
+# Or run this recipe's script-driven benchmark for the selected variant.
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd
+```
+
+<h3 id="deploy-dynamo-fd--embedding-cache">Deploy: Dynamo FD + embedding cache</h3>
+
+Tests frontend decoding plus 8 GiB multimodal embedding cache.
+
+```bash
+export NAMESPACE=your-namespace
+export HW=gb200  # or h100
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3.6-35b`.
+kubectl apply -f recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml -n ${NAMESPACE}
+# Or run this recipe's script-driven benchmark for the selected variant.
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec
+```
+
+
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+
+<div className="dynamo-evidence-grid">
+<div>
+<span>Benchmark asset</span>
+<strong>At least one perf.yaml</strong>
+<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Placeholder required</strong>
+<p>Expected results should be added once benchmark artifacts are available.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Comparison Set</strong>
+<p>Rows are comparable only when the page says the workload is held constant.</p>
+</div>
+</div>
+
+## Notes
+
+- This recipe uses scripts intentionally because one shared perf.yaml is parameterized by BENCH_POD, BENCH_FRONTEND, and BENCH_RUN_LABEL.
+- Keep the script path visible rather than forcing it into simple kubectl-only instructions.
+
+## Source Assets
+
+- Source README: [recipes/qwen3.6-35b/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)

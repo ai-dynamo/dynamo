@@ -2,462 +2,268 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Kimi-K2.5 NVFP4
-subtitle: Serve nvidia/Kimi-K2.5-NVFP4 on an agentic coding trace with TensorRT-LLM.
+subtitle: Compare TensorRT-LLM deployment techniques on an agentic coding trace.
 ---
 
 <div className="dynamo-model-detail-hero">
-  <div className="dynamo-model-hero-copy">
-    <div className="dynamo-model-title-lockup">
-      <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
-      <div>
-        <p className="dynamo-recipe-eyebrow">Moonshot / NVIDIA checkpoint / TensorRT-LLM / GB200</p>
-        <h2>Serve Kimi-K2.5 NVFP4 for agentic coding</h2>
-      </div>
-    </div>
-    <p>
-      This recipe compares four TensorRT-LLM deployment modes for `nvidia/Kimi-K2.5-NVFP4` on a
-      long-context, KV-reuse-heavy agentic coding trace. The best benchmarked result uses
-      disaggregation, KV-aware routing, Eagle speculative decoding, and TensorRT-LLM host-memory KV
-      offload.
-    </p>
-    <div className="dynamo-hero-actions">
-      <a href="#deploy">Deploy</a>
-      <a href="#benchmark-evidence">Benchmark</a>
-      <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5">Source</a>
-    </div>
-  </div>
-
-  <div className="dynamo-recommendation-card">
-    <span>Recipe family</span>
-    <strong>TRT-LLM comparison set</strong>
-    <p>Four benchmarked TensorRT-LLM variants plus one TokenSpeed deploy-only example.</p>
-    <div className="dynamo-recommendation-facts">
-      <div>
-        <span>Runtime</span>
-        <strong>TRT-LLM / TokenSpeed</strong>
-      </div>
-      <div>
-        <span>Hardware</span>
-        <strong>GB200 / B200</strong>
-      </div>
-      <div>
-        <span>Evidence</span>
-        <strong>perf.yaml + deploy</strong>
-      </div>
-    </div>
-  </div>
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">Moonshot / NVIDIA checkpoint / TensorRT-LLM / GB200</p>
+<h2>Compare TensorRT-LLM deployment techniques on an agentic coding trace.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>comparison set</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5">Source</a>
+</div>
 </div>
 
-## Choose a Recipe
+<div className="dynamo-recommendation-card">
+<span>Comparison Set</span>
+<strong>Verified</strong>
+<p>How much do KV-aware routing, Eagle speculative decoding, disaggregation, and KV offload help on long-context agentic coding traffic?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>nvidia/Kimi-K2.5-NVFP4</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>Mooncake-format agentic coding trace / 1K sessions / about 200K context / one-hour benchmark</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>comparative recipe with deploy only sibling</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Comparison Set
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>How much do KV-aware routing, Eagle speculative decoding, disaggregation, and KV offload help on long-context agentic coding traffic?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Model, TensorRT-LLM runtime, 24x GB200 benchmark cluster, AIPerf agentic coding trace, and one-hour benchmark duration.</strong>
+</div>
+</div>
 
 <div className="dynamo-variant-table-wrap">
-  <table className="dynamo-variant-table">
-    <thead>
-      <tr>
-        <th>Variant</th>
-        <th>Runtime</th>
-        <th>Hardware</th>
-        <th>Traffic</th>
-        <th>Evidence</th>
-        <th>Decision signal</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr className="recommended">
-        <td><strong>Disagg + Eagle + KV router + offload</strong><em>Recommended</em><span>3 prefill + 3 decode workers, TP4/EP4</span></td>
-        <td>TRT-LLM</td>
-        <td>24x GB200</td>
-        <td>Agentic coding trace, 1 hour replay</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Best benchmarked point for throughput and interactivity on KV-reuse-heavy traffic.</td>
-        <td><a href="#deploy-disagg-eagle-kv-router">Deploy</a></td>
-      </tr>
-      <tr>
-        <td><strong>Agg + Eagle + KV router</strong><span>3 aggregate workers, TP8/EP8</span></td>
-        <td>TRT-LLM</td>
-        <td>24x GB200</td>
-        <td>Same agentic trace</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Keeps prefix-aware routing and Eagle while removing P/D split and KV offload.</td>
-        <td><a href="#deploy-agg-eagle-kv-router">Deploy</a></td>
-      </tr>
-      <tr>
-        <td><strong>Agg + Eagle + round-robin</strong><span>3 aggregate workers, TP8/EP8</span></td>
-        <td>TRT-LLM</td>
-        <td>24x GB200</td>
-        <td>Same agentic trace</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Isolates routing by keeping Eagle and switching from KV-aware to round-robin routing.</td>
-        <td><a href="#deploy-agg-eagle-round-robin">Deploy</a></td>
-      </tr>
-      <tr>
-        <td><strong>Agg + round-robin</strong><span>3 aggregate workers, TP8/EP8</span></td>
-        <td>TRT-LLM</td>
-        <td>24x GB200</td>
-        <td>Same agentic trace</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Base control without Eagle; compare against Eagle rows before choosing speculation.</td>
-        <td><a href="#deploy-agg-round-robin">Deploy</a></td>
-      </tr>
-      <tr className="deploy-only">
-        <td><strong>TokenSpeed agg</strong><span>Experimental local-image deployment</span></td>
-        <td>TokenSpeed</td>
-        <td>4x B200</td>
-        <td>Deploy-only validation</td>
-        <td><mark>no perf.yaml</mark></td>
-        <td>Useful example path, but not comparable to the benchmarked TRT-LLM rows.</td>
-        <td><a href="#deploy-tokenspeed-experimental">Deploy</a></td>
-      </tr>
-    </tbody>
-  </table>
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr className="recommended">
+<td><strong>Disagg + Eagle + KV router + offload</strong><span>Best benchmarked point for throughput and interactivity on KV-reuse-heavy traffic.</span></td>
+<td><em className="role recommended">Recommended treatment</em></td>
+<td>TRT-LLM</td>
+<td>24x GB200</td>
+<td>Agentic coding trace, 1 hour replay</td>
+<td><mark>deploy.yaml + perf.yaml + results</mark></td>
+<td><a href="#deploy-disagg--eagle--kv-router--offload">Deploy</a></td>
+</tr><tr>
+<td><strong>Agg + Eagle + KV router</strong><span>Keeps prefix-aware routing and Eagle while removing P/D split and KV offload.</span></td>
+<td><em className="role treatment">Treatment</em></td>
+<td>TRT-LLM</td>
+<td>24x GB200</td>
+<td>Same agentic trace</td>
+<td><mark>deploy.yaml + perf.yaml + results</mark></td>
+<td><a href="#deploy-agg--eagle--kv-router">Deploy</a></td>
+</tr><tr>
+<td><strong>Agg + Eagle + round-robin</strong><span>Keeps Eagle and switches routing from KV-aware to round-robin.</span></td>
+<td><em className="role control">Control</em></td>
+<td>TRT-LLM</td>
+<td>24x GB200</td>
+<td>Same agentic trace</td>
+<td><mark>deploy.yaml + perf.yaml + results</mark></td>
+<td><a href="#deploy-agg--eagle--round-robin">Deploy</a></td>
+</tr><tr>
+<td><strong>Agg + round-robin</strong><span>Base control without Eagle; compare against Eagle rows before choosing speculation.</span></td>
+<td><em className="role baseline">Baseline</em></td>
+<td>TRT-LLM</td>
+<td>24x GB200</td>
+<td>Same agentic trace</td>
+<td><mark>deploy.yaml + perf.yaml + results</mark></td>
+<td><a href="#deploy-agg--round-robin">Deploy</a></td>
+</tr><tr className="deploy-only">
+<td><strong>TokenSpeed agg</strong><span>Useful local-image path, but not comparable to benchmarked TRT-LLM rows.</span></td>
+<td><em className="role deploy-only">Deploy-only sibling</em></td>
+<td>TokenSpeed</td>
+<td>4x B200</td>
+<td>Deploy-only validation</td>
+<td><mark>deploy.yaml only</mark></td>
+<td><a href="#deploy-tokenspeed-agg">Deploy</a></td>
+</tr>
+</tbody>
+</table>
 </div>
 
 ## When to Use
 
-Use this recipe when Kimi-K2.5 traffic looks like agentic coding: long context windows, multi-turn
-sessions, repeated prefixes, and short decode bursts where both TTFT and decode smoothness matter.
-The four TensorRT-LLM variants are designed to isolate the effects of KV-aware routing,
-speculative decoding, disaggregation, and host-memory KV offload.
+Use this page when your deployment decision starts with `nvidia/Kimi-K2.5-NVFP4` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
 
 ## Results
 
-The disaggregated configuration with KV-aware routing, Eagle decoding, and KV offload is the best
-throughput and interactivity point in the benchmarked comparison.
+The source README includes expected metrics for the four benchmarked TensorRT-LLM arms. TokenSpeed is intentionally excluded from the comparison because it has deploy-only evidence.
 
-| Variant | tok/s/user avg | tok/s/GPU |
-| --- | ---: | ---: |
-| Disagg + Eagle + KV router + offload | ~130 | ~5,400 |
-| Agg + Eagle + KV router | ~85 | ~4,400 |
-| Agg + Eagle + round-robin | ~95 | ~4,000 |
-| Agg + round-robin | ~105 | ~1,700 |
-
-<Note>
-Treat these as reference metrics, then re-run the provided `perf.yaml` jobs on your own cluster
-before using the results for production sizing.
-</Note>
+| Variant | tok/s/user avg | tok/s/GPU | Decision signal |
+| --- | ---: | ---: | --- |
+| Disagg + Eagle + KV router + offload | ~130 tok/s/user avg | ~5,400 tok/s/GPU | Best throughput/interactivity |
+| Agg + Eagle + KV router | ~85 tok/s/user avg | ~4,400 tok/s/GPU | Keeps routing and Eagle |
+| Agg + Eagle + round-robin | ~95 tok/s/user avg | ~4,000 tok/s/GPU | Isolates routing |
+| Agg + round-robin | ~105 tok/s/user avg | ~1,700 tok/s/GPU | Base control |
 
 ## Before You Run
 
 <div className="dynamo-prereq-grid">
-  <div>
-    <span>Benchmarked cluster</span>
-    <strong>6x GB200 nodes / 24 GPUs</strong>
-  </div>
-  <div>
-    <span>Placement</span>
-    <strong>ComputeDomain for MNNVL</strong>
-  </div>
-  <div>
-    <span>Checkpoint</span>
-    <strong>Kimi-K2.5 NVFP4 plus Eagle3 head</strong>
-  </div>
-  <div>
-    <span>Storage</span>
-    <strong>800 Gi model-cache PVC</strong>
-  </div>
-  <div>
-    <span>Dataset</span>
-    <strong>AIPerf agentic coding trace</strong>
-  </div>
-  <div>
-    <span>Access</span>
-    <strong>Hugging Face token secret</strong>
-  </div>
+<div>
+<span>Hardware</span>
+<strong>6x GB200 nodes / 24 GPUs</strong>
+</div>
+<div>
+<span>Runtime</span>
+<strong>TensorRT-LLM</strong>
+</div>
+<div>
+<span>Dataset</span>
+<strong>AIPerf agentic coding trace</strong>
+</div>
+<div>
+<span>Benchmark</span>
+<strong>1 hour replay</strong>
+</div>
+<div>
+<span>Goodput target</span>
+<strong>TTFT 5s / ITL 10ms</strong>
+</div>
+<div>
+<span>Deploy-only sibling</span>
+<strong>TokenSpeed local image</strong>
+</div>
 </div>
 
 <Warning>
-Edit `storageClassName`, namespace, image tags, ComputeDomain names, resource claim template names,
-and Hugging Face secrets before applying these manifests. Copy the generated trace to
-`/model-cache/traces/agent_trace_data/dataset.jsonl` before running benchmark jobs.
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
 </Warning>
-
-## Dataset
-
-The benchmark uses AIPerf's agentic coding trace manifest for 1,000 sessions with an approximately
-      200K-token context window. The workload is Mooncake-style, long-context, multi-turn traffic
-      with restart splits and layered prefix-cache reuse.
-
-```bash
-# Generate the trace from the AIPerf dataset manifest, then copy it into the PVC.
-kubectl exec -n ${NAMESPACE} <helper-pod> -- \
-  mkdir -p /model-cache/traces/agent_trace_data
-
-kubectl cp <local_trace.jsonl> \
-  ${NAMESPACE}/<helper-pod>:/model-cache/traces/agent_trace_data/dataset.jsonl
-```
 
 ## Deploy
 
-<CodeBlocks>
-```bash title="Prepare storage, placement, and model"
+<h3 id="deploy-disagg--eagle--kv-router--offload">Deploy: Disagg + Eagle + KV router + offload</h3>
+
+Best benchmarked point for throughput and interactivity on KV-reuse-heavy traffic.
+
+```bash
 export NAMESPACE=your-namespace
 
-kubectl apply -f recipes/kimi-k2.5/model-cache/model-cache.yaml \
-  -n ${NAMESPACE}
 
-kubectl apply -f recipes/kimi-k2.5/model-cache/compute-domain.yaml \
-  -n ${NAMESPACE}
-
-kubectl apply -f recipes/kimi-k2.5/model-cache/model-download.yaml \
-  -n ${NAMESPACE}
-
-kubectl wait --for=condition=Complete job/model-download \
-  -n ${NAMESPACE} \
-  --timeout=3600s
+# Prepare shared storage and model assets using the setup manifests in `recipes/kimi-k2.5`.
+kubectl apply -f recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml -n ${NAMESPACE}
 ```
-</CodeBlocks>
 
-<h3 id="deploy-disagg-eagle-kv-router">Disagg + Eagle + KV router + offload</h3>
+<h3 id="deploy-agg--eagle--kv-router">Deploy: Agg + Eagle + KV router</h3>
+
+Keeps prefix-aware routing and Eagle while removing P/D split and KV offload.
 
 ```bash
-kubectl apply -f recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml \
-  -n ${NAMESPACE}
+export NAMESPACE=your-namespace
 
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=kimi-k25-disagg-kv-eagle \
-  -n ${NAMESPACE} \
-  --timeout=1800s
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/kimi-k2.5`.
+kubectl apply -f recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-agg-eagle-kv-router">Agg + Eagle + KV router</h3>
+<h3 id="deploy-agg--eagle--round-robin">Deploy: Agg + Eagle + round-robin</h3>
+
+Keeps Eagle and switches routing from KV-aware to round-robin.
 
 ```bash
-kubectl apply -f recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml \
-  -n ${NAMESPACE}
+export NAMESPACE=your-namespace
 
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=kimi-k25-agg-kv-eagle \
-  -n ${NAMESPACE} \
-  --timeout=1800s
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/kimi-k2.5`.
+kubectl apply -f recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/perf.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-agg-eagle-round-robin">Agg + Eagle + round-robin</h3>
+<h3 id="deploy-agg--round-robin">Deploy: Agg + round-robin</h3>
+
+Base control without Eagle; compare against Eagle rows before choosing speculation.
 
 ```bash
-kubectl apply -f recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/deploy.yaml \
-  -n ${NAMESPACE}
+export NAMESPACE=your-namespace
 
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=kimi-k25-agg-rr-eagle \
-  -n ${NAMESPACE} \
-  --timeout=1800s
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/kimi-k2.5`.
+kubectl apply -f recipes/kimi-k2.5/trtllm/agg-round-robin/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/kimi-k2.5/trtllm/agg-round-robin/perf.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-agg-round-robin">Agg + round-robin</h3>
+<h3 id="deploy-tokenspeed-agg">Deploy: TokenSpeed agg</h3>
+
+Useful local-image path, but not comparable to benchmarked TRT-LLM rows.
 
 ```bash
-kubectl apply -f recipes/kimi-k2.5/trtllm/agg-round-robin/deploy.yaml \
-  -n ${NAMESPACE}
+export NAMESPACE=your-namespace
 
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=kimi-k25-agg-rr \
-  -n ${NAMESPACE} \
-  --timeout=1800s
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/kimi-k2.5`.
+kubectl apply -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/deploy.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
 
-<h3 id="deploy-tokenspeed-experimental">TokenSpeed experimental</h3>
 
-```bash
-# First build and push recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile,
-# then replace both image fields in deploy.yaml with your registry tag.
-kubectl apply -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/deploy.yaml \
-  -n ${NAMESPACE}
-```
-
-## Verify
-
-<h3 id="verify-disagg-eagle-kv-router">Disagg + Eagle + KV router + offload</h3>
-
-```bash
-kubectl port-forward svc/kimi-k25-disagg-kv-eagle-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/models
-```
-
-<h3 id="verify-agg-eagle-kv-router">Agg + Eagle + KV router</h3>
-
-```bash
-kubectl port-forward svc/kimi-k25-agg-kv-eagle-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/models
-```
-
-<h3 id="verify-agg-eagle-round-robin">Agg + Eagle + round-robin</h3>
-
-```bash
-kubectl port-forward svc/kimi-k25-agg-rr-eagle-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/models
-```
-
-<h3 id="verify-agg-round-robin">Agg + round-robin</h3>
-
-```bash
-kubectl port-forward svc/kimi-k25-agg-rr-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/models
-```
-
-<h3 id="verify-tokenspeed-experimental">TokenSpeed experimental</h3>
-
-```bash
-kubectl port-forward svc/kimi-k25-tokenspeed-agg-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "kimi-k2.5",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 300,
-    "skip_special_tokens": false,
-    "chat_template_kwargs": {"thinking": true}
-  }'
-```
-
-## Benchmark Evidence
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
 
 <div className="dynamo-evidence-grid">
-  <div>
-    <span>Dataset</span>
-    <strong>Agentic coding trace</strong>
-    <p>Mooncake-format trace replay from the AIPerf agentic-code dataset.</p>
-  </div>
-  <div>
-    <span>Traffic shape</span>
-    <strong>~200K-token context</strong>
-    <p>Long-context multi-turn sessions with layered prefix-cache reuse.</p>
-  </div>
-  <div>
-    <span>Benchmark mode</span>
-    <strong>1 hour replay</strong>
-    <p>Each TensorRT-LLM perf job sets `BENCHMARK_DURATION=3600`.</p>
-  </div>
-  <div>
-    <span>Goodput target</span>
-    <strong>TTFT 5s / ITL 10ms</strong>
-    <p>The jobs pass these thresholds to AIPerf's goodput calculation.</p>
-  </div>
-  <div>
-    <span>Artifacts</span>
-    <strong>/model-cache/perf</strong>
-    <p>Each run writes under an epoch and job-name directory.</p>
-  </div>
-  <div>
-    <span>Tooling</span>
-    <strong>AIPerf 0.7.0</strong>
-    <p>The perf jobs install AIPerf and replay `mooncake_trace` inputs.</p>
-  </div>
+<div>
+<span>Benchmark asset</span>
+<strong>At least one perf.yaml</strong>
+<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Numeric README results</strong>
+<p>Source README includes result values that are reflected above.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Comparison Set</strong>
+<p>Rows are comparable only when the page says the workload is held constant.</p>
+</div>
 </div>
 
-<CodeBlocks>
-```bash title="Run recommended benchmark"
-kubectl apply -f recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml \
-  -n ${NAMESPACE}
+## Notes
 
-kubectl logs -f job/kimi-k25-disagg-kv-eagle-bench -n ${NAMESPACE}
-```
+- The TokenSpeed path requires a local image build and no public Dynamo+TokenSpeed image is cited in the README.
+- The four TensorRT-LLM arms should be run one at a time because the manifests are sized for the full 24 GPUs.
 
-```bash title="Run comparison benchmarks"
-kubectl apply -f recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml \
-  -n ${NAMESPACE}
+## Source Assets
 
-kubectl apply -f recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/perf.yaml \
-  -n ${NAMESPACE}
-
-kubectl apply -f recipes/kimi-k2.5/trtllm/agg-round-robin/perf.yaml \
-  -n ${NAMESPACE}
-```
-
-```text title="What to compare"
-Disagg + Eagle + KV router: 3 prefill + 3 decode workers, KV offload, concurrency 32
-Agg + Eagle + KV router:   3 aggregate workers, KV-aware routing, concurrency 24
-Agg + Eagle + round-robin: 3 aggregate workers, round-robin routing, concurrency 24
-Agg + round-robin:         3 aggregate workers, no Eagle, concurrency 8
-Primary metrics: tok/s/user, tok/s/GPU, TTFT, ITL, and goodput
-```
-</CodeBlocks>
-
-## Operate
-
-<CodeBlocks>
-```bash title="Find benchmark pods"
-kubectl get pods -n ${NAMESPACE} -l app=kimi-k25-disagg-kv-eagle-bench
-kubectl get pods -n ${NAMESPACE} -l app=kimi-k25-agg-kv-eagle-bench
-kubectl get pods -n ${NAMESPACE} -l app=kimi-k25-agg-rr-eagle-bench
-kubectl get pods -n ${NAMESPACE} -l app=kimi-k25-agg-rr-bench
-```
-
-```bash title="Retrieve benchmark artifacts"
-kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- \
-  find /model-cache/perf -maxdepth 3 -type f
-
-kubectl cp \
-  ${NAMESPACE}/<benchmark-pod-name>:/model-cache/perf \
-  ./kimi-k2-5-benchmark-results
-```
-
-```bash title="Clean up this recipe"
-kubectl delete job \
-  kimi-k25-disagg-kv-eagle-bench \
-  kimi-k25-agg-kv-eagle-bench \
-  kimi-k25-agg-rr-eagle-bench \
-  kimi-k25-agg-rr-bench \
-  -n ${NAMESPACE}
-
-kubectl delete dynamographdeployment \
-  kimi-k25-disagg-kv-eagle \
-  kimi-k25-agg-kv-eagle \
-  kimi-k25-agg-rr-eagle \
-  kimi-k25-agg-rr \
-  -n ${NAMESPACE}
-```
-</CodeBlocks>
-
-## Configuration Notes
-
-<Accordion title="Recommended TensorRT-LLM path">
-The recommended deployment runs the frontend in KV-router mode and separates prefill and decode.
-Prefill and decode workers use TP4/EP4. Prefill enables FP8 KV cache block reuse with a 100 GiB
-host-memory KV offload tier, while decode uses Eagle speculative decoding against
-`nvidia/Kimi-K2.5-Thinking-Eagle3`.
-</Accordion>
-
-<Accordion title="Aggregated comparison paths">
-The aggregated TensorRT-LLM deployments use three workers with TP8/EP8 across the same 24 GPUs. The
-two Eagle variants keep the speculative head and differ only by KV-aware versus round-robin routing.
-The no-Eagle baseline keeps round-robin routing and removes speculative decoding.
-</Accordion>
-
-<Accordion title="TokenSpeed deploy-only path">
-The TokenSpeed recipe is experimental and uses raw Kubernetes `Deployment` and `Service` resources,
-not `DynamoGraphDeployment`, because the operator backend enum does not yet admit `tokenspeed`. It
-requires a locally built Dynamo+TokenSpeed image and uses explicit `chat_template_kwargs` and
-`skip_special_tokens` settings for the Kimi-K2.5 reasoning parser contract.
-</Accordion>
-
-## Recipe Contract
-
-| Field | Value |
-| --- | --- |
-| Model | `nvidia/Kimi-K2.5-NVFP4` |
-| Speculative model | `nvidia/Kimi-K2.5-Thinking-Eagle3` |
-| Runtime | TensorRT-LLM for benchmarked variants; TokenSpeed experimental deploy-only variant |
-| Hardware | 24x GB200 for TensorRT-LLM benchmark comparison; 4x B200 for TokenSpeed deploy-only path |
-| Recommended technique | Disaggregated prefill/decode with KV-aware routing, Eagle speculative decoding, and host-memory KV offload |
-| Baseline techniques | Aggregated KV router, aggregated round-robin with Eagle, aggregated round-robin without Eagle |
-| Dataset | AIPerf agentic coding Mooncake-format trace |
-| Evidence | TensorRT-LLM deploy and perf manifests, TokenSpeed deployment notes, and top-level recipe notes |
-
-## References
-
-- [Source recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5)
-- [TokenSpeed Kimi-K2.5 deploy-only path](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5/tokenspeed/agg/nvidia)
-- [AIPerf agentic coding trace manifest](https://github.com/ai-dynamo/aiperf/blob/1ecc2eac988eedc0e3a79b4c2d1063bfc295a014/src/aiperf/dataset/agentic_code_gen/datasets/1k_sessions_200k_ctx/manifest.json)
-- [Kimi-K2.5 NVFP4 model card](https://huggingface.co/nvidia/Kimi-K2.5-NVFP4)
-- [Kimi-K2.5 Thinking Eagle3 model card](https://huggingface.co/nvidia/Kimi-K2.5-Thinking-Eagle3)
+- Source README: [recipes/kimi-k2.5/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)

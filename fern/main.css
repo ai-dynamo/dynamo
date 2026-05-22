@@ -1524,6 +1524,29 @@ svg.card-icon{
     line-height: 1;
 }
 
+.dynamo-variant-table td em.role {
+    margin: 0;
+    border-color: var(--border, var(--grayscale-a5));
+    background: var(--pst-color-surface);
+    color: var(--pst-color-text-muted);
+}
+
+.dynamo-variant-table td em.recommended,
+.dynamo-variant-table td em.recipe,
+.dynamo-variant-table td em.benchmark-backed {
+    border-color: color-mix(in srgb, var(--nv-color-green) 65%, var(--border, var(--grayscale-a5)));
+    color: var(--pst-color-text-base);
+}
+
+.dynamo-variant-table td em.control,
+.dynamo-variant-table td em.baseline {
+    border-color: color-mix(in srgb, #7c8a99 55%, var(--border, var(--grayscale-a5)));
+}
+
+.dynamo-variant-table td em.deploy-only {
+    border-style: dashed;
+}
+
 .dynamo-variant-table td mark {
     padding: 2px 6px;
     border-radius: var(--rounded);
@@ -1539,6 +1562,10 @@ svg.card-icon{
 
 .dynamo-variant-table tr.deploy-only {
     box-shadow: inset 3px 0 0 var(--pst-color-text-muted);
+}
+
+.dynamo-variant-table tr.recommended td:first-child strong {
+    color: var(--pst-color-text-base);
 }
 
 .dynamo-variant-table a {
@@ -1557,6 +1584,58 @@ svg.card-icon{
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
     margin: 20px 0;
+}
+
+.dynamo-comparison-brief {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+    gap: 12px;
+    margin: 16px 0 20px;
+}
+
+.dynamo-comparison-brief div,
+.dynamo-placeholder-note {
+    padding: 14px;
+    border: 1px solid var(--border, var(--grayscale-a5));
+    border-radius: 8px;
+    background: var(--pst-color-surface);
+}
+
+.dark .dynamo-comparison-brief div,
+.dark .dynamo-placeholder-note {
+    background: var(--nv-dark-grey-2);
+}
+
+.dynamo-comparison-brief span {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--pst-color-text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.dynamo-comparison-brief strong {
+    display: block;
+    color: var(--pst-color-text-base);
+    font-size: 15px;
+    line-height: 1.45;
+}
+
+.dynamo-placeholder-note {
+    margin: 16px 0;
+    box-shadow: inset 3px 0 0 var(--pst-color-text-muted);
+}
+
+.dynamo-placeholder-note strong {
+    display: block;
+    margin-bottom: 6px;
+}
+
+.dynamo-placeholder-note p {
+    margin: 0;
+    color: var(--pst-color-text-muted);
 }
 
 .dynamo-evidence-grid div {
@@ -1841,6 +1920,7 @@ svg.card-icon{
     .dynamo-traffic-facts,
     .dynamo-model-grid,
     .dynamo-selected-facts,
+    .dynamo-comparison-brief,
     .dynamo-evidence-grid {
         grid-template-columns: 1fr;
     }

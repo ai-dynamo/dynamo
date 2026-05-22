@@ -2,342 +2,205 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: GPT-OSS-120B
-subtitle: Serve openai/gpt-oss-120b with TensorRT-LLM on Blackwell GPUs.
+subtitle: Choose between TensorRT-LLM aggregate and disaggregated GPT-OSS-120B recipes for different traffic shapes.
 ---
 
 <div className="dynamo-model-detail-hero">
-  <div className="dynamo-model-hero-copy">
-    <div className="dynamo-model-title-lockup">
-      <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/openai.webp" alt="" />
-      <div>
-        <p className="dynamo-recipe-eyebrow">OpenAI / TensorRT-LLM / Blackwell</p>
-        <h2>Serve GPT-OSS-120B with Dynamo</h2>
-      </div>
-    </div>
-    <p>
-      This recipe family serves `openai/gpt-oss-120b` with TensorRT-LLM on Blackwell GPUs. Use the
-      aggregated recipe for a 4-GPU high-throughput baseline, or use the disaggregated recipe when
-      you want to separate long-prefill work from decode.
-    </p>
-    <div className="dynamo-hero-actions">
-      <a href="#deploy">Deploy</a>
-      <a href="#benchmark-evidence">Benchmark</a>
-      <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/gpt-oss-120b">Source</a>
-    </div>
-  </div>
-
-  <div className="dynamo-recommendation-card">
-    <span>Recipe family</span>
-    <strong>TRT-LLM aggregated or P/D</strong>
-    <p>Two benchmark-backed manifests: 4-GPU aggregated and prefill/decode split.</p>
-    <div className="dynamo-recommendation-facts">
-      <div>
-        <span>Runtime</span>
-        <strong>TRT-LLM</strong>
-      </div>
-      <div>
-        <span>Hardware</span>
-        <strong>Blackwell</strong>
-      </div>
-      <div>
-        <span>Evidence</span>
-        <strong>perf.yaml</strong>
-      </div>
-    </div>
-  </div>
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/openai.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">OpenAI / TensorRT-LLM / Blackwell</p>
+<h2>Choose between TensorRT-LLM aggregate and disaggregated GPT-OSS-120B recipes for different traffic shapes.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>alternative recipe set</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/gpt-oss-120b">Source</a>
+</div>
 </div>
 
-## Choose a Recipe
+<div className="dynamo-recommendation-card">
+<span>Alternative Recipe Set</span>
+<strong>Verified</strong>
+<p>Which TensorRT-LLM recipe matches the traffic shape: high-concurrency short prompts or long-context generation?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>openai/gpt-oss-120b</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>Alternative benchmark shapes: aggregate 128/1000 at 3,600 concurrency; disagg 8192/1024 at 1,536 concurrency</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>alternative recipe set</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Alternative Recipe Set
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>Which TensorRT-LLM recipe matches the traffic shape: high-concurrency short prompts or long-context generation?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Same model family and TensorRT-LLM backend, but benchmark traffic differs by variant. Do not treat this as an aggregated-vs-disaggregated result comparison.</strong>
+</div>
+</div>
 
 <div className="dynamo-variant-table-wrap">
-  <table className="dynamo-variant-table">
-    <thead>
-      <tr>
-        <th>Variant</th>
-        <th>Runtime</th>
-        <th>Hardware</th>
-        <th>Traffic</th>
-        <th>Evidence</th>
-        <th>Decision signal</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td><strong>Aggregated TensorRT-LLM</strong><span>One 4-GPU worker, TP4/EP4</span></td>
-        <td>TRT-LLM</td>
-        <td>4x GB200 / Blackwell</td>
-        <td>128 ISL / 1K OSL, 3,600 concurrency</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Simpler high-throughput baseline for short-prompt generation on Blackwell.</td>
-        <td><a href="#deploy-aggregated-baseline">Deploy</a></td>
-      </tr>
-      <tr>
-        <td><strong>Disaggregated P/D</strong><span>1 prefill GPU plus 4 decode GPUs</span></td>
-        <td>TRT-LLM</td>
-        <td>5 deploy GPUs</td>
-        <td>8K ISL / 1K OSL, 1,536 concurrency</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Use when the serving question is whether long-prefill work should be separated from decode.</td>
-        <td><a href="#deploy-disaggregated-pd">Deploy</a></td>
-      </tr>
-    </tbody>
-  </table>
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TensorRT-LLM aggregated</strong><span>Use for short-prompt, long-output, high-concurrency throughput testing.</span></td>
+<td><em className="role alternative">Alternative</em></td>
+<td>TRT-LLM</td>
+<td>4x GB200</td>
+<td>128 ISL / 1K OSL, 3,600 total concurrency</td>
+<td><mark>deploy.yaml + perf.yaml</mark></td>
+<td><a href="#deploy-tensorrt-llm-aggregated">Deploy</a></td>
+</tr><tr>
+<td><strong>TensorRT-LLM disaggregated</strong><span>Use for long-context generation where P/D separation is the target shape.</span></td>
+<td><em className="role alternative">Alternative</em></td>
+<td>TRT-LLM</td>
+<td>5 deploy GPUs / 6 benchmark GPUs</td>
+<td>8K ISL / 1K OSL, 1,536 total concurrency</td>
+<td><mark>deploy.yaml + perf.yaml</mark></td>
+<td><a href="#deploy-tensorrt-llm-disaggregated">Deploy</a></td>
+</tr>
+</tbody>
+</table>
 </div>
 
 ## When to Use
 
-Use the aggregated recipe as the simpler Blackwell baseline for short prompts and long outputs. Use
-the disaggregated recipe when prefill work is large enough that separating prefill and decode is the
-serving question you need to answer. Keep the two benchmark shapes separate: the aggregated job is a
-128-token input run, while the disaggregated job is an 8K-token input run.
+Use this page when your deployment decision starts with `openai/gpt-oss-120b` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
+
+## Results Placeholder
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark results are not checked in yet</strong>
+<p>Both variants have perf.yaml files, but the source README does not include expected benchmark results. Because traffic differs, results should be reported per recipe rather than ranked against each other.</p>
+</div>
+
+| Placeholder | What should be filled in |
+| --- | --- |
+| Aggregated result placeholder | Report output TPS, TTFT, ITL, and errors for 128 ISL / 1K OSL at high concurrency. |
+| Disaggregated result placeholder | Report output TPS, TTFT, ITL, and errors for 8K ISL / 1K OSL at lower concurrency. |
+| Selection guidance | Compare each result to its own workload, not to the other row as a controlled experiment. |
 
 ## Before You Run
 
 <div className="dynamo-prereq-grid">
-  <div>
-    <span>Hardware</span>
-    <strong>Blackwell GPUs</strong>
-  </div>
-  <div>
-    <span>Runtime</span>
-    <strong>TensorRT-LLM 1.1.1 image</strong>
-  </div>
-  <div>
-    <span>Model</span>
-    <strong>openai/gpt-oss-120b</strong>
-  </div>
-  <div>
-    <span>Storage</span>
-    <strong>100 Gi model-cache PVC</strong>
-  </div>
-  <div>
-    <span>Access</span>
-    <strong>Hugging Face token secret</strong>
-  </div>
-  <div>
-    <span>Architecture</span>
-    <strong>ARM64 for GB200</strong>
-  </div>
+<div>
+<span>Hardware</span>
+<strong>GB200 / Blackwell</strong>
+</div>
+<div>
+<span>Runtime</span>
+<strong>TensorRT-LLM</strong>
+</div>
+<div>
+<span>Aggregate traffic</span>
+<strong>128 ISL / 1K OSL</strong>
+</div>
+<div>
+<span>Disagg traffic</span>
+<strong>8K ISL / 1K OSL</strong>
+</div>
+<div>
+<span>Evidence</span>
+<strong>Two perf.yaml files</strong>
+</div>
+<div>
+<span>Caveat</span>
+<strong>Disagg deploy and benchmark GPU counts differ</strong>
+</div>
 </div>
 
 <Warning>
-Edit `storageClassName`, namespace, image tags, and secrets before applying these manifests. The
-aggregate path requires ARM64 GB200 nodes and will not run on x86 Hopper or Ampere hardware.
-Disaggregated startup can take roughly 15-30 minutes depending on storage speed.
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
 </Warning>
-
-<Note>
-The disaggregated deploy topology is 5 GPUs: 1 prefill GPU and 4 decode GPUs. Its benchmark YAML
-sets `DEPLOYMENT_GPU_COUNT=6`, which is what produces the 1,536 total concurrency value. Until that
-is reconciled in the source recipe, treat `DEPLOYMENT_GPU_COUNT` as the benchmark job's concurrency
-input rather than the deployment topology.
-</Note>
 
 ## Deploy
 
-<CodeBlocks>
-```bash title="Prepare namespace, token, and model"
+<h3 id="deploy-tensorrt-llm-aggregated">Deploy: TensorRT-LLM aggregated</h3>
+
+Use for short-prompt, long-output, high-concurrency throughput testing.
+
+```bash
 export NAMESPACE=your-namespace
 
-kubectl create namespace ${NAMESPACE}
 
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN=<your-hf-token> \
-  -n ${NAMESPACE}
-
-kubectl apply -f recipes/gpt-oss-120b/model-cache/ \
-  -n ${NAMESPACE}
-
-kubectl wait --for=condition=Complete job/model-download \
-  -n ${NAMESPACE} \
-  --timeout=3600s
+# Prepare shared storage and model assets using the setup manifests in `recipes/gpt-oss-120b`.
+kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/perf.yaml -n ${NAMESPACE}
 ```
-</CodeBlocks>
 
-<h3 id="deploy-aggregated-baseline">Aggregated baseline</h3>
+<h3 id="deploy-tensorrt-llm-disaggregated">Deploy: TensorRT-LLM disaggregated</h3>
+
+Use for long-context generation where P/D separation is the target shape.
 
 ```bash
-kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/deploy.yaml \
-  -n ${NAMESPACE}
+export NAMESPACE=your-namespace
 
-kubectl wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=gpt-oss-agg \
-  -n ${NAMESPACE} \
-  --timeout=3600s
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/gpt-oss-120b`.
+kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/perf.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-disaggregated-pd">Disaggregated P/D</h3>
 
-```bash
-kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml \
-  -n ${NAMESPACE}
-
-kubectl wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=gpt-oss-disagg \
-  -n ${NAMESPACE} \
-  --timeout=3600s
-```
-
-## Verify
-
-<h3 id="verify-aggregated-baseline">Aggregated baseline</h3>
-
-```bash
-kubectl port-forward svc/gpt-oss-agg-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "openai/gpt-oss-120b",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 50
-  }'
-```
-
-<h3 id="verify-disaggregated-pd">Disaggregated P/D</h3>
-
-```bash
-kubectl port-forward svc/gpt-oss-disagg-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "openai/gpt-oss-120b",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 50
-  }'
-```
-
-## Benchmark Evidence
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
 
 <div className="dynamo-evidence-grid">
-  <div>
-    <span>Aggregated shape</span>
-    <strong>128 ISL / 1K OSL</strong>
-    <p>3,600 total concurrency from 900 per GPU x 4 GPUs.</p>
-  </div>
-  <div>
-    <span>Disagg shape</span>
-    <strong>8K ISL / 1K OSL</strong>
-    <p>1,536 total concurrency from the benchmark YAML.</p>
-  </div>
-  <div>
-    <span>Request count</span>
-    <strong>10x concurrency</strong>
-    <p>Both jobs use `request-count = 10 * total_concurrency`.</p>
-  </div>
-  <div>
-    <span>Dataset entries</span>
-    <strong>12,800</strong>
-    <p>Both jobs use synthetic static-token inputs.</p>
-  </div>
-  <div>
-    <span>Artifacts</span>
-    <strong>/model-cache/perf</strong>
-    <p>Each job writes under epoch, job name, and concurrency directories.</p>
-  </div>
-  <div>
-    <span>Tooling</span>
-    <strong>AIPerf from git</strong>
-    <p>The aggregate and disaggregated jobs pin different AIPerf commits.</p>
-  </div>
+<div>
+<span>Benchmark asset</span>
+<strong>At least one perf.yaml</strong>
+<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Placeholder required</strong>
+<p>Expected results should be added once benchmark artifacts are available.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Alternative Recipe Set</strong>
+<p>Rows are alternatives; avoid ranking across different traffic or hardware shapes.</p>
+</div>
 </div>
 
-<h3 id="benchmark-aggregated-baseline">Aggregated benchmark</h3>
+## Notes
 
-```bash
-kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/perf.yaml \
-  -n ${NAMESPACE}
+- The disaggregated README describes a 5-GPU deployment family while perf.yaml sets DEPLOYMENT_GPU_COUNT=6; keep that caveat visible until reconciled.
+- This page is an alternative set, not a clean comparison set.
 
-kubectl logs -f -l job-name=gpt-oss-120b-bench \
-  -n ${NAMESPACE}
-```
+## Source Assets
 
-<h3 id="benchmark-disaggregated-pd">Disaggregated benchmark</h3>
-
-```bash
-kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/perf.yaml \
-  -n ${NAMESPACE}
-
-kubectl logs -f -l job-name=gpt-oss-120b-disagg-bench \
-  -n ${NAMESPACE}
-```
-
-## Operate
-
-<CodeBlocks>
-```bash title="Inspect deployments"
-kubectl get dynamographdeployment \
-  gpt-oss-agg \
-  gpt-oss-disagg \
-  -n ${NAMESPACE}
-```
-
-```bash title="Retrieve benchmark artifacts"
-kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- \
-  find /model-cache/perf -maxdepth 3 -type f
-
-kubectl cp \
-  ${NAMESPACE}/<benchmark-pod-name>:/model-cache/perf \
-  ./gpt-oss-120b-benchmark-results
-```
-
-```bash title="Clean up this recipe"
-kubectl delete job \
-  gpt-oss-120b-bench \
-  gpt-oss-120b-disagg-bench \
-  -n ${NAMESPACE}
-
-kubectl delete dynamographdeployment \
-  gpt-oss-agg \
-  gpt-oss-disagg \
-  -n ${NAMESPACE}
-```
-</CodeBlocks>
-
-## Configuration Notes
-
-<Accordion title="Aggregated TensorRT-LLM">
-The aggregate worker uses TP4/EP4, a round-robin frontend, `TRTLLM_ENABLE_PDL=1`,
-`TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL=True`, `max_batch_size=800`, and
-`free_gpu_memory_fraction=0.9`. The ConfigMap enables attention DP and uses the CUTLASS MoE backend.
-</Accordion>
-
-<Accordion title="Disaggregated prefill/decode">
-The disaggregated ConfigMap gives prefill and decode separate engine configs. Prefill uses TP1,
-`max_batch_size=64`, `free_gpu_memory_fraction=0.8`, and disables the overlap scheduler. Decode uses
-TP4, `max_batch_size=1280`, `free_gpu_memory_fraction=0.85`, and keeps the overlap scheduler enabled.
-</Accordion>
-
-<Accordion title="KV transfer">
-The disaggregated recipe uses the UCX cache transceiver with `max_tokens_in_buffer=9216` to transfer
-KV cache blocks between prefill and decode.
-</Accordion>
-
-<Accordion title="Quantization">
-The disaggregated deployment sets `OVERRIDE_QUANT_ALGO=W4A8_MXFP4_MXFP8`. Keep this override with
-the checked-in engine configs unless you are deliberately testing another quantization path.
-</Accordion>
-
-## Recipe Contract
-
-| Field | Value |
-| --- | --- |
-| Model | `openai/gpt-oss-120b` |
-| Runtime | TensorRT-LLM |
-| Runtime image | `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.1` |
-| Hardware | GB200 / Blackwell |
-| Aggregated topology | 1 worker, 4 GPUs, TP4 / EP4 |
-| Disaggregated topology | 1 prefill GPU plus 4 decode GPUs |
-| Aggregated benchmark | Synthetic 128 ISL / 1,000 OSL, 3,600 total concurrency |
-| Disaggregated benchmark | Synthetic 8,192 ISL / 1,024 OSL, 1,536 total concurrency from `perf.yaml` |
-| Evidence | Source recipe notes, deploy manifests, and perf manifests |
-
-## References
-
-- [Source recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/gpt-oss-120b)
-- [GPT-OSS-120B model card](https://huggingface.co/openai/gpt-oss-120b)
-- [TensorRT-LLM backend docs](../backends/trtllm/README.md)
+- Source README: [recipes/gpt-oss-120b/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/gpt-oss-120b)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)

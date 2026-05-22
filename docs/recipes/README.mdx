@@ -8,7 +8,7 @@ subtitle: Pick a model, choose a validated Dynamo serving technique, and run the
 ## Browse by Model
 
 Start with the model you want to deploy. Each card shows the runtime, hardware target, serving
-technique, workload shape, and benchmark status for the available Dynamo recipe.
+technique, workload shape, and evidence available for the Dynamo recipe.
 
 <form className="dynamo-recipe-catalog-shell">
   <input className="dynamo-filter-input" type="radio" name="provider-filter" id="provider-all" defaultChecked />
@@ -51,10 +51,10 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
       <h3>15 model families</h3>
-      <p>Filter benchmark-backed recipes by the model, serving technique, and traffic shape you need to run.</p>
+      <p>Filter recipes by the model, serving technique, and traffic shape you need to run.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>30</strong>
+      <strong>48</strong>
       <span>assessed variants</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -132,7 +132,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
     data-workload="long-context-reuse"
     data-search="qwen qwen3 32b vllm h200 mooncake trace kv router disaggregated aggregated"
   >
-    <a className="dynamo-model-card-link" href="/dynamo/dev/resources/recipes/qwen-3-32-b">
+    <a className="dynamo-model-card-link" href="/dynamo/dev/resources/recipes/qwen3-32b">
       <div className="dynamo-model-card-top">
         <img className="dynamo-model-logo" src="../assets/img/recipes/providers/qwen.webp" alt="" />
         <div>
@@ -237,7 +237,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-r1"
+    href="/dynamo/dev/resources/recipes/deepseek-r1"
     data-recipe-card
     data-provider="deepseek"
     data-runtime="trtllm vllm sglang"
@@ -265,7 +265,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro"
+    href="/dynamo/dev/resources/recipes/deepseek-v4-pro"
     data-recipe-card
     data-provider="deepseek"
     data-runtime="vllm sglang"
@@ -293,7 +293,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-flash"
+    href="/dynamo/dev/resources/recipes/deepseek-v4-flash"
     data-recipe-card
     data-provider="deepseek"
     data-runtime="vllm sglang"
@@ -349,7 +349,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b"
+    href="/dynamo/dev/resources/recipes/llama-3-3-70b"
     data-recipe-card
     data-provider="meta"
     data-runtime="vllm"
@@ -377,7 +377,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-super-fp8"
+    href="/dynamo/dev/resources/recipes/nemotron-3-super-fp8"
     data-recipe-card
     data-provider="nvidia"
     data-runtime="vllm trtllm sglang"
@@ -405,7 +405,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-nano-omni"
+    href="/dynamo/dev/resources/recipes/nemotron-3-nano-omni"
     data-recipe-card
     data-provider="nvidia"
     data-runtime="vllm"
@@ -433,7 +433,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-235b-a22b-fp8"
+    href="/dynamo/dev/resources/recipes/qwen3-235b-a22b-fp8"
     data-recipe-card
     data-provider="qwen"
     data-runtime="trtllm"
@@ -461,7 +461,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b-fp8"
+    href="/dynamo/dev/resources/recipes/qwen3-32b-fp8"
     data-recipe-card
     data-provider="qwen"
     data-runtime="vllm trtllm"
@@ -489,7 +489,7 @@ technique, workload shape, and benchmark status for the available Dynamo recipe.
 
   <a
     className="dynamo-model-card"
-    href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b"
+    href="/dynamo/dev/resources/recipes/qwen3-6-35b"
     data-recipe-card
     data-provider="qwen"
     data-runtime="vllm"

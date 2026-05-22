@@ -1,0 +1,246 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DeepSeek-R1
+subtitle: Choose a DeepSeek-R1 deployment across SGLang, TensorRT-LLM, and vLLM.
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">DeepSeek / multi-runtime / H200 and GB200</p>
+<h2>Choose a DeepSeek-R1 deployment across SGLang, TensorRT-LLM, and vLLM.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>alternative recipe set</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-r1">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Alternative Recipe Set</span>
+<strong>Preview</strong>
+<p>Which backend and hardware target should serve the 671B DeepSeek-R1 MoE model?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>deepseek-ai/DeepSeek-R1</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>TRT-LLM benchmark: ISL 1024 / OSL 1024 / 1,080 total concurrency; other variants deploy-only</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>alternative recipe set</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Alternative Recipe Set
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>Which backend and hardware target should serve the 671B DeepSeek-R1 MoE model?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Same DeepSeek-R1 model family, but variants differ by backend, hardware, and benchmark coverage.</strong>
+</div>
+</div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr className="deploy-only">
+<td><strong>SGLang disagg 8 GPU</strong><span>Single-node SGLang WideEP path with TP=8 per worker; add perf.yaml before making performance claims.</span></td>
+<td><em className="role deploy-only">Deploy-only alternative</em></td>
+<td>SGLang</td>
+<td>16x H200</td>
+<td>Deployment validation</td>
+<td><mark>deploy.yaml only</mark></td>
+<td><a href="#deploy-sglang-disagg-8-gpu">Deploy</a></td>
+</tr><tr className="deploy-only">
+<td><strong>SGLang disagg 16 GPU</strong><span>Multi-node SGLang WideEP path with TP=16 per worker.</span></td>
+<td><em className="role deploy-only">Deploy-only alternative</em></td>
+<td>SGLang</td>
+<td>32x H200</td>
+<td>Deployment validation</td>
+<td><mark>deploy.yaml only</mark></td>
+<td><a href="#deploy-sglang-disagg-16-gpu">Deploy</a></td>
+</tr><tr className="recommended">
+<td><strong>TRT-LLM WideEP GB200</strong><span>Only DeepSeek-R1 row with checked-in benchmark instructions today.</span></td>
+<td><em className="role benchmark-backed">Benchmark-backed alternative</em></td>
+<td>TRT-LLM</td>
+<td>36x GB200</td>
+<td>1K ISL / 1K OSL static benchmark</td>
+<td><mark>deploy.yaml + perf.yaml</mark></td>
+<td><a href="#deploy-trt-llm-wideep-gb200">Deploy</a></td>
+</tr><tr className="deploy-only">
+<td><strong>vLLM disagg</strong><span>vLLM DEP16 multi-node path; add perf.yaml before comparing with TRT-LLM.</span></td>
+<td><em className="role deploy-only">Deploy-only alternative</em></td>
+<td>vLLM</td>
+<td>32x H200</td>
+<td>Deployment validation</td>
+<td><mark>deploy_hopper_16gpu.yaml only</mark></td>
+<td><a href="#deploy-vllm-disagg">Deploy</a></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+## When to Use
+
+Use this page when your deployment decision starts with `deepseek-ai/DeepSeek-R1` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
+
+## Results Placeholder
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark results are not checked in yet</strong>
+<p>Only the TensorRT-LLM GB200 WideEP path has a perf.yaml. The other rows are deployment recipes and should not inherit benchmark claims.</p>
+</div>
+
+| Placeholder | What should be filled in |
+| --- | --- |
+| TRT-LLM WideEP result placeholder | Report output throughput, TTFT, ITL, tokens/user/sec, and errors for ISL=1024 / OSL=1024. |
+| Deploy-only validation placeholder | Record smoke-test status for SGLang and vLLM variants until perf.yaml files are added. |
+
+## Before You Run
+
+<div className="dynamo-prereq-grid">
+<div>
+<span>Model size</span>
+<strong>671B MoE, about 37B active</strong>
+</div>
+<div>
+<span>Storage</span>
+<strong>Large model cache; README notes 1-2 hour download</strong>
+</div>
+<div>
+<span>Hardware</span>
+<strong>H200 or GB200 depending on row</strong>
+</div>
+<div>
+<span>Networking</span>
+<strong>InfiniBand or RoCE for multi-node</strong>
+</div>
+<div>
+<span>Benchmark-backed row</span>
+<strong>TRT-LLM GB200 WideEP</strong>
+</div>
+<div>
+<span>Deploy-only rows</span>
+<strong>SGLang and vLLM</strong>
+</div>
+</div>
+
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+</Warning>
+
+## Deploy
+
+<h3 id="deploy-sglang-disagg-8-gpu">Deploy: SGLang disagg 8 GPU</h3>
+
+Single-node SGLang WideEP path with TP=8 per worker; add perf.yaml before making performance claims.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-r1`.
+kubectl apply -f recipes/deepseek-r1/sglang/disagg-8gpu/deploy.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
+```
+
+<h3 id="deploy-sglang-disagg-16-gpu">Deploy: SGLang disagg 16 GPU</h3>
+
+Multi-node SGLang WideEP path with TP=16 per worker.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-r1`.
+kubectl apply -f recipes/deepseek-r1/sglang/disagg-16gpu/deploy.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
+```
+
+<h3 id="deploy-trt-llm-wideep-gb200">Deploy: TRT-LLM WideEP GB200</h3>
+
+Only DeepSeek-R1 row with checked-in benchmark instructions today.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-r1`.
+kubectl apply -f recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/perf.yaml -n ${NAMESPACE}
+```
+
+<h3 id="deploy-vllm-disagg">Deploy: vLLM disagg</h3>
+
+vLLM DEP16 multi-node path; add perf.yaml before comparing with TRT-LLM.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-r1`.
+kubectl apply -f recipes/deepseek-r1/vllm/disagg/deploy_hopper_16gpu.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
+```
+
+
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+
+<div className="dynamo-evidence-grid">
+<div>
+<span>Benchmark asset</span>
+<strong>At least one perf.yaml</strong>
+<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Placeholder required</strong>
+<p>Expected results should be added once benchmark artifacts are available.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Alternative Recipe Set</strong>
+<p>Rows are alternatives; avoid ranking across different traffic or hardware shapes.</p>
+</div>
+</div>
+
+## Notes
+
+- Backend-specific READMEs are thin, so this page keeps source-path evidence visible and avoids overclaiming readiness.
+- The TRT-LLM row uses an FP4 checkpoint while the top-level README describes the broader DeepSeek-R1 family.
+
+## Source Assets
+
+- Source README: [recipes/deepseek-r1/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-r1)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)

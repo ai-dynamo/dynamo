@@ -2,388 +2,226 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Qwen3-32B
-subtitle: Serve Qwen/Qwen3-32B with a verified Dynamo recipe for vLLM on 16x H200.
+subtitle: Compare vLLM aggregated round-robin against disaggregated KV routing on 16x H200.
 ---
 
 <div className="dynamo-model-detail-hero">
-  <div className="dynamo-model-hero-copy">
-    <div className="dynamo-model-title-lockup">
-      <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div>
-        <p className="dynamo-recipe-eyebrow">Qwen / vLLM / H200</p>
-        <h2>Serve Qwen3-32B with Dynamo</h2>
-      </div>
-    </div>
-    <p>
-      The recommended path uses prefill/decode disaggregation with KV-aware routing on 16x H200.
-      The benchmark replays the Mooncake conversation trace so you can compare latency against an
-      aggregated round-robin baseline under a fixed request schedule.
-    </p>
-    <div className="dynamo-hero-actions">
-      <a href="#deploy">Deploy</a>
-      <a href="#benchmark-evidence">Benchmark</a>
-      <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b">Source</a>
-    </div>
-  </div>
-
-  <div className="dynamo-recommendation-card">
-    <span>Recipe family</span>
-    <strong>vLLM H200 variants</strong>
-    <p>Two benchmarked 16x H200 variants plus a single-GPU KVBM deployment example.</p>
-    <div className="dynamo-recommendation-facts">
-      <div>
-        <span>Runtime</span>
-        <strong>vLLM</strong>
-      </div>
-      <div>
-        <span>Hardware</span>
-        <strong>16x H200</strong>
-      </div>
-      <div>
-        <span>Evidence</span>
-        <strong>Trace replay</strong>
-      </div>
-    </div>
-  </div>
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">Qwen / vLLM / H200</p>
+<h2>Compare vLLM aggregated round-robin against disaggregated KV routing on 16x H200.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>comparison set</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b">Source</a>
+</div>
 </div>
 
-## Choose a Recipe
+<div className="dynamo-recommendation-card">
+<span>Comparison Set</span>
+<strong>Verified</strong>
+<p>Does disaggregated KV-aware routing reduce latency versus aggregated round-robin for a Mooncake conversation trace with repeated prefixes?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>Qwen/Qwen3-32B</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>12,035 avg ISL / 343 avg OSL / 36.64% cache efficiency</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>comparative recipe</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Comparison Set
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>Does disaggregated KV-aware routing reduce latency versus aggregated round-robin for a Mooncake conversation trace with repeated prefixes?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Model, vLLM runtime, 16x H200 hardware, Mooncake trace replay, and goodput target.</strong>
+</div>
+</div>
 
 <div className="dynamo-variant-table-wrap">
-  <table className="dynamo-variant-table">
-    <thead>
-      <tr>
-        <th>Variant</th>
-        <th>Runtime</th>
-        <th>Hardware</th>
-        <th>Traffic</th>
-        <th>Evidence</th>
-        <th>Decision signal</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr className="recommended">
-        <td><strong>Disagg + KV router</strong><em>Recommended</em><span>6P + 2D, TP2</span></td>
-        <td>vLLM</td>
-        <td>16x H200</td>
-        <td>12K avg ISL / 343 avg OSL trace</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Best candidate for long prompts, prefix reuse, and decode smoothness.</td>
-        <td><a href="#deploy-disagg-kv-router">Deploy</a></td>
-      </tr>
-      <tr>
-        <td><strong>Aggregated round-robin</strong><span>8 workers, TP2</span></td>
-        <td>vLLM</td>
-        <td>16x H200</td>
-        <td>Same Mooncake trace replay</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Control run for measuring the value of P/D and KV-aware routing.</td>
-        <td><a href="#deploy-aggregated-baseline">Deploy</a></td>
-      </tr>
-      <tr className="deploy-only">
-        <td><strong>Aggregated + KVBM</strong><span>1 GPU plus host-memory KV tier</span></td>
-        <td>vLLM</td>
-        <td>1x H200/B200</td>
-        <td>Deployment validation</td>
-        <td><mark>no perf.yaml</mark></td>
-        <td>Useful for testing KVBM mechanics; not comparable to the 16x H200 benchmark.</td>
-        <td><a href="#deploy-aggregated-kvbm">Deploy</a></td>
-      </tr>
-    </tbody>
-  </table>
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr className="recommended">
+<td><strong>Disagg + KV router</strong><span>Best candidate when prefix reuse is high enough for KV-aware routing to matter.</span></td>
+<td><em className="role recommended">Recommended treatment</em></td>
+<td>vLLM</td>
+<td>16x H200</td>
+<td>12K avg ISL conversation trace</td>
+<td><mark>deploy.yaml + perf.yaml</mark></td>
+<td><a href="#deploy-disagg--kv-router">Deploy</a></td>
+</tr><tr>
+<td><strong>Aggregated round-robin</strong><span>Control run that removes P/D split and KV-aware routing while holding model and traffic constant.</span></td>
+<td><em className="role control">Control</em></td>
+<td>vLLM</td>
+<td>16x H200</td>
+<td>Same fixed-schedule trace</td>
+<td><mark>deploy.yaml + perf.yaml</mark></td>
+<td><a href="#deploy-aggregated-round-robin">Deploy</a></td>
+</tr><tr className="deploy-only">
+<td><strong>Aggregated + KVBM</strong><span>Use for KVBM deployment mechanics; do not include in the trace comparison until a perf.yaml exists.</span></td>
+<td><em className="role deploy-only">Deploy-only sibling</em></td>
+<td>vLLM</td>
+<td>1x H200 or B200</td>
+<td>Functional deploy validation</td>
+<td><mark>deploy.yaml only</mark></td>
+<td><a href="#deploy-aggregated--kvbm">Deploy</a></td>
+</tr>
+</tbody>
+</table>
 </div>
 
 ## When to Use
 
-Use this recipe when requests have long prompts, repeated prefixes or session history, and shorter
-generated outputs. The KV router targets TTFT by routing compatible requests to workers with useful
-cached blocks; the prefill/decode split targets ITL by reducing decode interruption from long
-prefill work. Keep the aggregated round-robin variant as the control run for your own cluster.
+Use this page when your deployment decision starts with `Qwen/Qwen3-32B` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
+
+## Results Placeholder
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark results are not checked in yet</strong>
+<p>The README includes a result plot but no machine-readable numeric results table. Keep the comparison explicit and use the placeholder below until benchmark artifacts are checked in beside the recipe.</p>
+</div>
+
+| Placeholder | What should be filled in |
+| --- | --- |
+| TTFT | KV-aware routing should reduce prefill compute when cache-compatible requests land on the right worker. |
+| ITL | Prefill/decode separation should reduce decode interruption from long prompts. |
+| Total request latency | Combined signal for KV routing plus P/D separation on the trace. |
 
 ## Before You Run
 
 <div className="dynamo-prereq-grid">
-  <div>
-    <span>Benchmarked cluster</span>
-    <strong>16x H200 across 2 nodes</strong>
-  </div>
-  <div>
-    <span>KVBM node</span>
-    <strong>1x H200/B200 plus host memory</strong>
-  </div>
-  <div>
-    <span>Platform</span>
-    <strong>Dynamo Kubernetes deployment</strong>
-  </div>
-  <div>
-    <span>Access</span>
-    <strong>Hugging Face token secret</strong>
-  </div>
-  <div>
-    <span>Storage</span>
-    <strong>Model and compilation cache PVCs</strong>
-  </div>
-  <div>
-    <span>KVBM memory</span>
-    <strong>150 GiB request / 200 GiB limit</strong>
-  </div>
+<div>
+<span>Hardware</span>
+<strong>16x H200 across 2 nodes</strong>
+</div>
+<div>
+<span>Runtime</span>
+<strong>vLLM</strong>
+</div>
+<div>
+<span>Dataset</span>
+<strong>Mooncake conversation trace</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>12,031 requests over about 59 minutes</strong>
+</div>
+<div>
+<span>Goodput target</span>
+<strong>TTFT 2s / ITL 25ms</strong>
+</div>
+<div>
+<span>Deploy-only sibling</span>
+<strong>KVBM single-GPU example</strong>
+</div>
 </div>
 
 <Warning>
-Edit the recipe storage class, image tags, namespace, and secrets before applying these manifests.
-The benchmark pod downloads the Mooncake trace on first run and writes artifacts to the perf-cache PVC.
-For KVBM, the recipe reserves 100 GiB of CPU memory for offloaded KV blocks; raise the worker memory
-request and limit if you raise `DYN_KVBM_CPU_CACHE_GB`.
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
 </Warning>
 
 ## Deploy
 
-<h3 id="deploy-disagg-kv-router">Disagg + KV router</h3>
+<h3 id="deploy-disagg--kv-router">Deploy: Disagg + KV router</h3>
+
+Best candidate when prefix reuse is high enough for KV-aware routing to matter.
 
 ```bash
 export NAMESPACE=your-namespace
 
-kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
-kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download \
-  -n ${NAMESPACE} \
-  --timeout=600s
 
-kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml \
-  -n ${NAMESPACE}
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=disagg-router-6p-2d \
-  -n ${NAMESPACE} \
-  --timeout=1200s
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b`.
+kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-aggregated-baseline">Aggregated round-robin baseline</h3>
+<h3 id="deploy-aggregated-round-robin">Deploy: Aggregated round-robin</h3>
+
+Control run that removes P/D split and KV-aware routing while holding model and traffic constant.
 
 ```bash
 export NAMESPACE=your-namespace
 
-kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
-kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download \
-  -n ${NAMESPACE} \
-  --timeout=600s
 
-kubectl apply -f recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml \
-  -n ${NAMESPACE}
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=agg-8xtp2 \
-  -n ${NAMESPACE} \
-  --timeout=1200s
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b`.
+kubectl apply -f recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/qwen3-32b/vllm/agg-round-robin/perf.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-aggregated-kvbm">Aggregated + KVBM</h3>
+<h3 id="deploy-aggregated--kvbm">Deploy: Aggregated + KVBM</h3>
+
+Use for KVBM deployment mechanics; do not include in the trace comparison until a perf.yaml exists.
 
 ```bash
 export NAMESPACE=your-namespace
 
-kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
-kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download \
-  -n ${NAMESPACE} \
-  --timeout=600s
 
-kubectl apply -f recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml \
-  -n ${NAMESPACE}
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=agg-kvbm-qwen3-32b \
-  -n ${NAMESPACE} \
-  --timeout=1200s
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b`.
+kubectl apply -f recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
 ```
 
-## Verify
 
-<h3 id="verify-disagg-kv-router">Disagg + KV router</h3>
-
-```bash
-kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-32B",
-    "messages": [
-      {
-        "role": "user",
-        "content": "List three Dynamo recipe checks."
-      }
-    ],
-    "max_tokens": 128
-  }'
-```
-
-<h3 id="verify-aggregated-baseline">Aggregated round-robin baseline</h3>
-
-```bash
-kubectl port-forward svc/agg-8xtp2-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-32B",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Why run a baseline before tuning?"
-      }
-    ],
-    "max_tokens": 128
-  }'
-```
-
-<h3 id="verify-aggregated-kvbm">Aggregated + KVBM</h3>
-
-```bash
-kubectl port-forward svc/agg-kvbm-qwen3-32b-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-32B",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Hello!"
-      }
-    ],
-    "max_tokens": 64
-  }'
-```
-
-## Benchmark Evidence
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
 
 <div className="dynamo-evidence-grid">
-  <div>
-    <span>Dataset</span>
-    <strong>Mooncake conversation trace</strong>
-    <p>12,031 requests replayed over about 59 minutes.</p>
-  </div>
-  <div>
-    <span>Traffic shape</span>
-    <strong>12,035 ISL / 343 OSL average</strong>
-    <p>Long inputs, shorter outputs, significant prefix sharing.</p>
-  </div>
-  <div>
-    <span>Cache reuse</span>
-    <strong>36.64% cache efficiency</strong>
-    <p>Useful prefix sharing for KV-aware routing.</p>
-  </div>
-  <div>
-    <span>Benchmark mode</span>
-    <strong>Fixed-schedule replay</strong>
-    <p>Throughput is fixed by the trace; compare TTFT, ITL, and request latency.</p>
-  </div>
-  <div>
-    <span>Goodput target</span>
-    <strong>TTFT 2s / ITL 25ms</strong>
-    <p>The benchmark pod passes these thresholds to AIPerf for both compared variants.</p>
-  </div>
-  <div>
-    <span>Tooling</span>
-    <strong>AIPerf 0.6.0</strong>
-    <p>The perf pod installs AIPerf, downloads the trace, and runs the profile inside tmux.</p>
-  </div>
+<div>
+<span>Benchmark asset</span>
+<strong>At least one perf.yaml</strong>
+<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Placeholder required</strong>
+<p>Expected results should be added once benchmark artifacts are available.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Comparison Set</strong>
+<p>Rows are comparable only when the page says the workload is held constant.</p>
+</div>
 </div>
 
-<CodeBlocks>
-```bash title="Run recommended benchmark"
-kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
-kubectl get pods -n ${NAMESPACE} -l app=benchmark
-kubectl logs -f pod/disagg-router-6p-2d-benchmark -n ${NAMESPACE}
-```
+## Notes
 
-```bash title="Run baseline benchmark"
-kubectl apply -f recipes/qwen3-32b/vllm/agg-round-robin/perf.yaml -n ${NAMESPACE}
-kubectl get pods -n ${NAMESPACE} -l app=benchmark
-kubectl logs -f pod/agg-8xtp2-benchmark -n ${NAMESPACE}
-```
+- The KVBM sibling remains visible, but its role is explicitly deploy-only so it cannot be mistaken for a benchmark arm.
+- Benchmark results should be promoted from placeholder to numeric table when the trace artifacts are checked in.
 
-```text title="What to compare"
-Aggregated baseline: 8x TP2 workers with round-robin routing
-Recommended recipe: 6x prefill + 2x decode workers with KV-aware routing
-Primary metrics: TTFT, ITL, total request latency
-Throughput: fixed by trace replay schedule
-```
-</CodeBlocks>
+## Source Assets
 
-## Operate
-
-<CodeBlocks>
-```bash title="Watch benchmark progress"
-kubectl get pods -n ${NAMESPACE} -l app=benchmark
-
-kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- \
-  tmux a -t benchmark
-```
-
-```bash title="Retrieve benchmark artifacts"
-kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- \
-  ls -la /perf-cache/artifacts/
-
-kubectl cp \
-  ${NAMESPACE}/<benchmark-pod-name>:/perf-cache/artifacts \
-  ./qwen3-32b-benchmark-results
-```
-
-```bash title="Clean up this recipe"
-kubectl delete pod -l app=benchmark -n ${NAMESPACE}
-
-kubectl delete dynamographdeployment agg-8xtp2 -n ${NAMESPACE}
-kubectl delete dynamographdeployment disagg-router-6p-2d -n ${NAMESPACE}
-kubectl delete dynamographdeployment agg-kvbm-qwen3-32b -n ${NAMESPACE}
-```
-</CodeBlocks>
-
-The benchmark runs in a tmux session inside the pod so you can attach while it is running and detach
-without stopping the profile. Use `Ctrl+B`, then `D`, to detach from tmux.
-
-## Configuration Notes
-
-<Accordion title="Disagg + KV router">
-The frontend runs with KV routing enabled. Prefill and decode workers both use the NIXL KV connector,
-TP2, 64-token blocks, async scheduling, and a 131K max model length with YaRN rope scaling. Prefill
-workers publish KV cache events so the router can account for useful cached blocks. The manifest
-requests RDMA resources for both prefill and decode workers.
-</Accordion>
-
-<Accordion title="Aggregated round-robin">
-The aggregate baseline keeps the same model, TP2, block size, async scheduling, max model length, and
-YaRN rope scaling, but removes the prefill/decode split and KV-aware routing. Treat this as the
-control run when you compare Dynamo behavior on your own cluster.
-</Accordion>
-
-<Accordion title="Aggregated + KVBM">
-The KVBM variant uses the Dynamo KVBM connector through vLLM's `--kv-transfer-config` and sets
-`DYN_KVBM_CPU_CACHE_GB=100`. The worker asks for 1 GPU plus 150 GiB of host memory, with a 200 GiB
-limit. Metrics are off by default; enable `DYN_KVBM_METRICS=true` and expose port `6880` if you want
-Prometheus counters such as `kvbm_offload_blocks_d2h`, `kvbm_onboard_blocks_h2d`,
-`kvbm_matched_tokens`, and `kvbm_host_cache_hit_rate`.
-</Accordion>
-
-## Why This Recipe
-
-This workload has long input sequences, shorter outputs, and meaningful prefix reuse. KV-aware
-routing can send requests to workers that already hold matching KV blocks, reducing redundant
-prefill. Disaggregated serving separates prefill and decode workers, which helps avoid decode
-interruption from long prefill requests.
-
-## Recipe Contract
-
-| Field | Value |
-| --- | --- |
-| Model | `Qwen/Qwen3-32B` |
-| Runtime | vLLM |
-| Hardware | 16x H200 across 2 nodes |
-| Recommended technique | Disaggregated prefill/decode with KV-aware routing |
-| Baseline technique | Aggregated round-robin |
-| Deployment-only variant | Aggregated KVBM on 1x H200 or B200 |
-| Dataset | Mooncake conversation trace |
-| Evidence | `deploy.yaml`, `perf.yaml`, and recipe README |
+- Source README: [recipes/qwen3-32b/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)

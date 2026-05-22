@@ -1,14 +1,14 @@
 # Recipes Docs Revision Tracker
 
-This is the working tracker for turning the recipes prototype into a real
-replacement for the current `recipes/**/README.md` experience.
+## Current Progress — 2026-05-22
 
-Status key:
-
-- `todo`: not yet ported into Fern docs.
-- `draft`: represented by the current prototype, but still needs source review.
-- `blocked`: needs recipe owner or benchmark clarification before docs can be honest.
-- `done`: ported, reviewed against source README and manifests, and visually checked.
+| Status | Item | Notes |
+| --- | --- | --- |
+| done | Asset inventory CSV | `recipe-asset-inventory.csv` classifies every known recipe family and variant by asset type, variant role, traffic, evidence, and placeholders. |
+| done | Comparison-aware page pattern | Detail pages now distinguish comparison sets, alternative recipe sets, deployment recipes, and deploy-only sets. |
+| done | All known model pages created | 15 model-family pages are present in Fern navigation and linked from the catalog. |
+| in progress | Visual and click audit | Each page still needs the final JPEG/click pass after Fern check and local preview refresh. |
+| open | Numeric results gaps | Several benchmark-backed recipes have perf.yaml but no checked-in expected-results table; pages now show placeholders instead of inventing metrics. |
 
 ## Porting Rules
 

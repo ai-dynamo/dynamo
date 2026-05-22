@@ -2,97 +2,105 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Qwen3-VL-30B
-subtitle: Serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 with vLLM embedding cache on GB200.
+subtitle: Compare vLLM multimodal embedding cache on versus off for repeated-image traffic.
 ---
 
 <div className="dynamo-model-detail-hero">
-  <div className="dynamo-model-hero-copy">
-    <div className="dynamo-model-title-lockup">
-      <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
-      <div>
-        <p className="dynamo-recipe-eyebrow">Qwen / vLLM / GB200</p>
-        <h2>Serve Qwen3-VL-30B with embedding cache</h2>
-      </div>
-    </div>
-    <p>
-      This recipe serves `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` with a single aggregated vLLM worker
-      and compares multimodal embedding cache on versus off. The benchmark uses synthetic text plus
-      image requests with controlled image reuse.
-    </p>
-    <div className="dynamo-hero-actions">
-      <a href="#deploy">Deploy</a>
-      <a href="#benchmark-evidence">Benchmark</a>
-      <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b">Source</a>
-    </div>
-  </div>
-
-  <div className="dynamo-recommendation-card">
-    <span>Recipe comparison</span>
-    <strong>Embedding cache on/off</strong>
-    <p>Same 1x GB200 deployment shape, comparing 10 GiB cache against a cache-off baseline.</p>
-    <div className="dynamo-recommendation-facts">
-      <div>
-        <span>Runtime</span>
-        <strong>vLLM</strong>
-      </div>
-      <div>
-        <span>Hardware</span>
-        <strong>1x GB200</strong>
-      </div>
-      <div>
-        <span>Evidence</span>
-        <strong>Cache on/off</strong>
-      </div>
-    </div>
-  </div>
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">Qwen / vLLM / GB200</p>
+<h2>Compare vLLM multimodal embedding cache on versus off for repeated-image traffic.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>comparison set</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b">Source</a>
+</div>
 </div>
 
-## Choose a Recipe
+<div className="dynamo-recommendation-card">
+<span>Comparison Set</span>
+<strong>Verified</strong>
+<p>Does enabling the multimodal embedding cache improve repeated-image traffic on a single GB200 worker?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>Qwen/Qwen3-VL-30B-A3B-Instruct-FP8</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>1,000 multimodal requests / one image per request / image pool 200 / 80% reuse</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>comparative recipe</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Comparison Set
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>Does enabling the multimodal embedding cache improve repeated-image traffic on a single GB200 worker?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Model, vLLM runtime, 1x GB200 worker, generated JSONL dataset, and 1,000-request benchmark.</strong>
+</div>
+</div>
 
 <div className="dynamo-variant-table-wrap">
-  <table className="dynamo-variant-table">
-    <thead>
-      <tr>
-        <th>Variant</th>
-        <th>Runtime</th>
-        <th>Hardware</th>
-        <th>Traffic</th>
-        <th>Evidence</th>
-        <th>Decision signal</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr className="recommended">
-        <td><strong>Aggregated + embedding cache ON</strong><em>Recommended</em><span>10 GiB multimodal embedding cache</span></td>
-        <td>vLLM</td>
-        <td>1x GB200</td>
-        <td>1,000 multimodal requests, 80% image reuse</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Higher output TPS and lower TTFT when images repeat often enough to stay in cache.</td>
-        <td><a href="#deploy-cache-on">Deploy</a></td>
-      </tr>
-      <tr>
-        <td><strong>Aggregated cache OFF baseline</strong><span>Same deployment with cache capacity set to 0</span></td>
-        <td>vLLM</td>
-        <td>1x GB200</td>
-        <td>Same generated JSONL</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Control run for measuring embedding-cache impact before changing the dataset or cache size.</td>
-        <td><a href="#deploy-cache-off-baseline">Deploy</a></td>
-      </tr>
-    </tbody>
-  </table>
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr className="recommended">
+<td><strong>Aggregated + embedding cache ON</strong><span>Higher output TPS and lower TTFT when repeated images remain cacheable.</span></td>
+<td><em className="role recommended">Recommended treatment</em></td>
+<td>vLLM</td>
+<td>1x GB200</td>
+<td>1,000 requests, 80% image reuse</td>
+<td><mark>deploy.yaml + perf.yaml + results</mark></td>
+<td><a href="#deploy-aggregated--embedding-cache-on">Deploy</a></td>
+</tr><tr>
+<td><strong>Aggregated cache OFF baseline</strong><span>Control run for measuring cache impact before changing image pool, cache size, or request rate.</span></td>
+<td><em className="role control">Control</em></td>
+<td>vLLM</td>
+<td>1x GB200</td>
+<td>Same generated JSONL</td>
+<td><mark>same deploy/perf with cache env changes</mark></td>
+<td><a href="#deploy-aggregated-cache-off-baseline">Deploy</a></td>
+</tr>
+</tbody>
+</table>
 </div>
 
 ## When to Use
 
-Use this recipe when your multimodal traffic repeatedly references the same or similar images. The
-embedding cache stores multimodal embeddings so repeat image payloads can avoid recomputing the
-vision path. Keep the cache-off run as the baseline before changing cache capacity, request rate, or
-image reuse.
+Use this page when your deployment decision starts with `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
 
 ## Results
+
+The source README includes numeric cache-on/cache-off results, so this page treats cache ON as the recommended treatment and cache OFF as the control.
 
 | Metric | Cache ON | Cache OFF | Delta |
 | --- | ---: | ---: | ---: |
@@ -105,247 +113,97 @@ image reuse.
 ## Before You Run
 
 <div className="dynamo-prereq-grid">
-  <div>
-    <span>Hardware</span>
-    <strong>GB200</strong>
-  </div>
-  <div>
-    <span>Runtime</span>
-    <strong>vLLM 0.17+ EC connector</strong>
-  </div>
-  <div>
-    <span>Model</span>
-    <strong>Qwen3-VL FP8 checkpoint</strong>
-  </div>
-  <div>
-    <span>Dataset</span>
-    <strong>Generated image-reuse JSONL</strong>
-  </div>
-  <div>
-    <span>Storage</span>
-    <strong>model-cache and perf-cache PVCs</strong>
-  </div>
-  <div>
-    <span>Access</span>
-    <strong>Hugging Face token secret</strong>
-  </div>
+<div>
+<span>Hardware</span>
+<strong>1x GB200</strong>
+</div>
+<div>
+<span>Runtime</span>
+<strong>vLLM 0.17+ ECConnector</strong>
+</div>
+<div>
+<span>Dataset</span>
+<strong>Generated multimodal JSONL</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>1,000 requests, 80% image reuse</strong>
+</div>
+<div>
+<span>Cache ON</span>
+<strong>10 GiB embedding cache</strong>
+</div>
+<div>
+<span>Cache OFF</span>
+<strong>cache capacity set to 0</strong>
+</div>
 </div>
 
 <Warning>
-Edit `storageClassName`, image tags, namespace, and Hugging Face secrets before running. The
-benchmark dataset uses HTTP image URLs, so the deployment enables `DYN_MM_ALLOW_INTERNAL=1`.
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
 </Warning>
-
-## Dataset
-
-`data-gen/generate-datasets-job.yaml` creates 1,000 requests with 1 image per request, 400 user-text
-tokens, and an image pool of 200. The first 200 requests use unique images; the remaining requests
-reuse images from that pool.
-
-```bash
-export NAMESPACE=your-namespace
-
-kubectl apply -f recipes/qwen3-vl-30b/data-gen/generate-datasets-job.yaml \
-  -n ${NAMESPACE}
-
-kubectl wait --for=condition=Complete job/qwen3-vl-30b-generate-datasets \
-  -n ${NAMESPACE} \
-  --timeout=3600s
-
-kubectl logs job/qwen3-vl-30b-generate-datasets -n ${NAMESPACE}
-```
-
-Exact cache hit rates are not directly controlled by the dataset because cache eviction depends on
-runtime behavior. Smaller image pools and larger cache capacity increase the chance that reused
-images remain in cache.
 
 ## Deploy
 
-<CodeBlocks>
-```bash title="Prepare storage, model, and dataset"
+<h3 id="deploy-aggregated--embedding-cache-on">Deploy: Aggregated + embedding cache ON</h3>
+
+Higher output TPS and lower TTFT when repeated images remain cacheable.
+
+```bash
 export NAMESPACE=your-namespace
 
-kubectl apply -f recipes/qwen3-vl-30b/model-cache/model-cache.yaml \
-  -n ${NAMESPACE}
 
-kubectl apply -f recipes/qwen3-vl-30b/model-cache/model-download.yaml \
-  -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download \
-  -n ${NAMESPACE} \
-  --timeout=3600s
-
-kubectl apply -f recipes/qwen3-vl-30b/data-gen/generate-datasets-job.yaml \
-  -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/qwen3-vl-30b-generate-datasets \
-  -n ${NAMESPACE} \
-  --timeout=3600s
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-vl-30b`.
+kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml -n ${NAMESPACE}
 ```
-</CodeBlocks>
 
-<h3 id="deploy-cache-on">Cache ON</h3>
+<h3 id="deploy-aggregated-cache-off-baseline">Deploy: Aggregated cache OFF baseline</h3>
+
+Control run for measuring cache impact before changing image pool, cache size, or request rate.
 
 ```bash
-# deploy.yaml defaults to DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10
-kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml \
-  -n ${NAMESPACE}
+export NAMESPACE=your-namespace
 
-kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg \
-  -n ${NAMESPACE} \
-  --timeout=900s
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-vl-30b`.
+kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml -n ${NAMESPACE}
+# Cache-off comparison arm:
+# 1. Set DYN_MULTIMODAL_EMBEDDING_CACHE_GB=0 in the deploy manifest.
+# 2. Set CACHE_MODE=cache_off in the perf manifest.
+# 3. Apply the same deploy and perf files.
+kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml -n ${NAMESPACE}
 ```
 
-<h3 id="deploy-cache-off-baseline">Cache OFF baseline</h3>
 
-```bash
-awk -v cache_gb="0" '
-  /name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB/ {
-    print
-    getline
-    print "              value: \"" cache_gb "\""
-    next
-  }
-  { print }
-' recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml | \
-  kubectl apply -f - -n ${NAMESPACE}
-
-kubectl wait --for=condition=Ready dynamographdeployment/qwen3-vl-agg \
-  -n ${NAMESPACE} \
-  --timeout=900s
-```
-
-The checked-in manifest defaults to cache ON. The cache-off section mirrors the repository helper
-script's patching behavior without launching the benchmark pod yet.
-
-## Verify
-
-```bash
-kubectl port-forward svc/qwen3-vl-agg-frontend 8000:8000 \
-  -n ${NAMESPACE}
-
-curl http://localhost:8000/v1/models
-```
-
-## Benchmark Evidence
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
 
 <div className="dynamo-evidence-grid">
-  <div>
-    <span>Dataset</span>
-    <strong>Generated multimodal JSONL</strong>
-    <p>1,000 single-turn text + image requests.</p>
-  </div>
-  <div>
-    <span>Image reuse</span>
-    <strong>200-image pool</strong>
-    <p>80% of requests use images already seen in the run.</p>
-  </div>
-  <div>
-    <span>Concurrency</span>
-    <strong>64</strong>
-    <p>The perf pod uses constant request-rate mode and 3 warmup requests.</p>
-  </div>
-  <div>
-    <span>Max tokens</span>
-    <strong>150</strong>
-    <p>The benchmark sets both min and max output tokens to 150.</p>
-  </div>
-  <div>
-    <span>Artifacts</span>
-    <strong>/perf-cache/artifacts</strong>
-    <p>Runs are split into `cache_on` and `cache_off` directories.</p>
-  </div>
-  <div>
-    <span>Tooling</span>
-    <strong>AIPerf 0.6.0</strong>
-    <p>The perf pod installs AIPerf and uses `single_turn` custom dataset mode.</p>
-  </div>
+<div>
+<span>Benchmark asset</span>
+<strong>At least one perf.yaml</strong>
+<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Numeric README results</strong>
+<p>Source README includes result values that are reflected above.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Comparison Set</strong>
+<p>Rows are comparable only when the page says the workload is held constant.</p>
+</div>
 </div>
 
-<CodeBlocks>
-```bash title="Run cache ON benchmark"
-NAMESPACE=${NAMESPACE} \
-  recipes/qwen3-vl-30b/vllm/agg-embedding-cache/run-benchmark.sh on
+## Notes
 
-kubectl logs -f qwen3-vl-agg-benchmark -n ${NAMESPACE}
-```
+- Cache OFF is implemented by setting DYN_MULTIMODAL_EMBEDDING_CACHE_GB=0 and CACHE_MODE=cache_off before applying the manifests.
+- Exact hit rate still depends on runtime eviction behavior, not just image reuse in the generated JSONL.
 
-```bash title="Run cache OFF benchmark"
-NAMESPACE=${NAMESPACE} \
-  recipes/qwen3-vl-30b/vllm/agg-embedding-cache/run-benchmark.sh off
+## Source Assets
 
-kubectl logs -f qwen3-vl-agg-benchmark -n ${NAMESPACE}
-```
-
-```text title="What to compare"
-Cache ON:  DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10, CACHE_MODE=cache_on
-Cache OFF: DYN_MULTIMODAL_EMBEDDING_CACHE_GB=0,  CACHE_MODE=cache_off
-Primary metrics: output TPS, TTFT, ITL, request latency
-```
-</CodeBlocks>
-
-## Operate
-
-<CodeBlocks>
-```bash title="Monitor benchmark progress"
-kubectl get pods -n ${NAMESPACE} -l app=benchmark
-
-kubectl logs -f qwen3-vl-agg-benchmark -n ${NAMESPACE}
-
-kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
-  pod/qwen3-vl-agg-benchmark \
-  -n ${NAMESPACE} \
-  --timeout=7200s
-```
-
-```bash title="Retrieve benchmark artifacts"
-kubectl exec -it -n ${NAMESPACE} qwen3-vl-agg-benchmark -- \
-  find /perf-cache/artifacts/qwen3_vl_30b_embedding_cache/agg -maxdepth 3 -type f
-
-kubectl cp \
-  ${NAMESPACE}/qwen3-vl-agg-benchmark:/perf-cache/artifacts/qwen3_vl_30b_embedding_cache \
-  ./qwen3-vl-30b-benchmark-results
-```
-
-```bash title="Clean up this recipe"
-kubectl delete pod qwen3-vl-agg-benchmark -n ${NAMESPACE} --ignore-not-found
-kubectl delete job qwen3-vl-30b-generate-datasets -n ${NAMESPACE} --ignore-not-found
-kubectl delete dynamographdeployment qwen3-vl-agg -n ${NAMESPACE}
-```
-</CodeBlocks>
-
-## Configuration Notes
-
-<Accordion title="Embedding cache">
-The recipe uses vLLM's native multimodal embedding cache path. The deployment enables multimodal
-serving, prefix caching, `DYN_VLLM_EMBEDDING_TRANSFER_MODE=nixl-write`, and
-`--multimodal-embedding-cache-capacity-gb "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}"`.
-</Accordion>
-
-<Accordion title="Cache on/off comparison">
-The checked-in `deploy.yaml` defaults to cache ON with `DYN_MULTIMODAL_EMBEDDING_CACHE_GB=10`.
-For cache OFF, use `run-benchmark.sh off` or set the deployment env var to `0` and the benchmark
-`CACHE_MODE` to `cache_off` before applying the manifests.
-</Accordion>
-
-<Accordion title="Dataset generation">
-The dataset generator writes `qwen3_vl_1000req_1img_pool200.jsonl` under `/perf-cache/datasets`.
-It uses HTTP image mode and a 200-image pool, so the deployment permits the benchmark image URLs with
-`DYN_MM_ALLOW_INTERNAL=1`.
-</Accordion>
-
-## Recipe Contract
-
-| Field | Value |
-| --- | --- |
-| Model | `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` |
-| Runtime | vLLM |
-| Hardware | GB200, single aggregated worker |
-| Recommended technique | Aggregated serving with multimodal embedding cache |
-| Baseline technique | Same deployment with embedding cache capacity set to 0 |
-| Dataset | Generated 1,000-request text + image JSONL with 80% image reuse |
-| Evidence | `deploy.yaml`, `perf.yaml`, `run-benchmark.sh`, and recipe README |
-
-## References
-
-- [Source recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b)
-- [Multimodal JSONL generator](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/multimodal/jsonl)
-- [vLLM multimodal embedding cache](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md#embedding-cache)
+- Source README: [recipes/qwen3-vl-30b/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-vl-30b)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)

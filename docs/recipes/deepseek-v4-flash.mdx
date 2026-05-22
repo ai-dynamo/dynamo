@@ -1,0 +1,245 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DeepSeek-V4-Flash
+subtitle: Deploy DeepSeek-V4-Flash aggregate recipes across vLLM and SGLang.
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">DeepSeek / vLLM and SGLang / B200 and GB200</p>
+<h2>Deploy DeepSeek-V4-Flash aggregate recipes across vLLM and SGLang.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>deploy-only set</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark placeholder</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-flash">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Deploy-Only Set</span>
+<strong>Deploy only</strong>
+<p>Which aggregate DeepSeek-V4-Flash manifest matches the backend and Blackwell hardware target?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>deepseek-ai/DeepSeek-V4-Flash</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>No benchmark traffic captured in repo</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>deploy only set</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Deploy-Only Set
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>Which aggregate DeepSeek-V4-Flash manifest matches the backend and Blackwell hardware target?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Same V4-Flash model; all rows are single-replica, four-GPU aggregate deployments with no perf.yaml today.</strong>
+</div>
+</div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr className="deploy-only">
+<td><strong>vLLM agg B200</strong><span>DP=4 + expert parallel path for B200.</span></td>
+<td><em className="role deploy-only">Deploy-only alternative</em></td>
+<td>vLLM</td>
+<td>4x B200</td>
+<td>Deployment validation</td>
+<td><mark>deploy.yaml only</mark></td>
+<td><a href="#deploy-vllm-agg-b200">Deploy</a></td>
+</tr><tr className="deploy-only">
+<td><strong>vLLM agg GB200</strong><span>TP=4 + expert parallel path for one GB200 NVL4 tray.</span></td>
+<td><em className="role deploy-only">Deploy-only alternative</em></td>
+<td>vLLM</td>
+<td>4x GB200</td>
+<td>Deployment validation</td>
+<td><mark>deploy.yaml only</mark></td>
+<td><a href="#deploy-vllm-agg-gb200">Deploy</a></td>
+</tr><tr className="deploy-only">
+<td><strong>SGLang agg B200</strong><span>SGLang TP4 with MXFP4 MoE and EAGLE MTP.</span></td>
+<td><em className="role deploy-only">Deploy-only alternative</em></td>
+<td>SGLang</td>
+<td>4x B200</td>
+<td>Deployment validation</td>
+<td><mark>deploy.yaml only</mark></td>
+<td><a href="#deploy-sglang-agg-b200">Deploy</a></td>
+</tr><tr className="deploy-only">
+<td><strong>SGLang agg GB200</strong><span>Arm64 GB200 sibling for SGLang aggregate deployment.</span></td>
+<td><em className="role deploy-only">Deploy-only alternative</em></td>
+<td>SGLang</td>
+<td>4x GB200</td>
+<td>Deployment validation</td>
+<td><mark>deploy.yaml only</mark></td>
+<td><a href="#deploy-sglang-agg-gb200">Deploy</a></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+## When to Use
+
+Use this page when your deployment decision starts with `deepseek-ai/DeepSeek-V4-Flash` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
+
+## Results Placeholder
+
+<div className="dynamo-placeholder-note">
+<strong>No benchmark asset is checked in yet</strong>
+<p>No benchmark YAML or expected results are checked in for this family. The page keeps deployment and verification instructions only.</p>
+</div>
+
+| Placeholder | What should be filled in |
+| --- | --- |
+| Benchmark placeholder | Add perf.yaml per backend/hardware row before publishing throughput, TTFT, ITL, or goodput claims. |
+| Results placeholder | After benchmark jobs exist, report metrics separately for B200 and GB200 because topology differs. |
+
+## Before You Run
+
+<div className="dynamo-prereq-grid">
+<div>
+<span>Status</span>
+<strong>Experimental Day-0</strong>
+</div>
+<div>
+<span>Model size</span>
+<strong>~160 GB on disk</strong>
+</div>
+<div>
+<span>Hardware</span>
+<strong>4x B200 or 4x GB200</strong>
+</div>
+<div>
+<span>Runtime</span>
+<strong>vLLM or SGLang</strong>
+</div>
+<div>
+<span>Modality</span>
+<strong>Text only</strong>
+</div>
+<div>
+<span>Evidence</span>
+<strong>deploy.yaml only</strong>
+</div>
+</div>
+
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+</Warning>
+
+## Deploy
+
+<h3 id="deploy-vllm-agg-b200">Deploy: vLLM agg B200</h3>
+
+DP=4 + expert parallel path for B200.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-flash`.
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-flash/vllm/agg_b200/deploy.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
+```
+
+<h3 id="deploy-vllm-agg-gb200">Deploy: vLLM agg GB200</h3>
+
+TP=4 + expert parallel path for one GB200 NVL4 tray.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-flash`.
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-flash/vllm/agg_gb200/deploy.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
+```
+
+<h3 id="deploy-sglang-agg-b200">Deploy: SGLang agg B200</h3>
+
+SGLang TP4 with MXFP4 MoE and EAGLE MTP.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-flash`.
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-flash/sglang/agg/deploy.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
+```
+
+<h3 id="deploy-sglang-agg-gb200">Deploy: SGLang agg GB200</h3>
+
+Arm64 GB200 sibling for SGLang aggregate deployment.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/deepseek-v4/deepseek-v4-flash`.
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-flash/sglang/agg-gb200/deploy.yaml -n ${NAMESPACE}
+# Benchmark placeholder: no perf.yaml is checked in for this variant yet.
+```
+
+
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+
+<div className="dynamo-evidence-grid">
+<div>
+<span>Benchmark asset</span>
+<strong>No perf.yaml yet</strong>
+<p>This family is deploy-only until benchmark YAML is added.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Placeholder required</strong>
+<p>Expected results should be added once benchmark artifacts are available.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Deploy-Only Set</strong>
+<p>Rows are alternatives; avoid ranking across different traffic or hardware shapes.</p>
+</div>
+</div>
+
+## Notes
+
+- This page should not show a Benchmark action as if it is runnable; the benchmark section is an explicit placeholder.
+- Reasoning and tool-call verification are still real because parser flags are in the manifests.
+
+## Source Assets
+
+- Source README: [recipes/deepseek-v4/deepseek-v4-flash/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-flash)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)

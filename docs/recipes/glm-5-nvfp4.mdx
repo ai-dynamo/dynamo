@@ -2,90 +2,97 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: GLM-5 NVFP4
-subtitle: Serve nvidia/GLM-5-NVFP4 with SGLang disaggregated prefill/decode on GB200.
+subtitle: Serve GLM-5 NVFP4 with SGLang disaggregated prefill/decode on GB200.
 ---
 
 <div className="dynamo-model-detail-hero">
-  <div className="dynamo-model-hero-copy">
-    <div className="dynamo-model-title-lockup">
-      <img className="dynamo-model-logo large" src="../assets/img/recipes/providers/zai-org.webp" alt="" />
-      <div>
-        <p className="dynamo-recipe-eyebrow">NVIDIA / Z.AI / SGLang / GB200</p>
-        <h2>Serve GLM-5 NVFP4 with disaggregated SGLang</h2>
-      </div>
-    </div>
-    <p>
-      This recipe serves `nvidia/GLM-5-NVFP4` with SGLang, prefill/decode disaggregation,
-      EAGLE speculative decoding, FP8 KV cache, and NIXL/UCX KV transfer. It is tuned for
-      long-output traffic on 20x GB200 GPUs.
-    </p>
-    <div className="dynamo-hero-actions">
-      <a href="#deploy">Deploy</a>
-      <a href="#benchmark-evidence">Benchmark</a>
-      <a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5-nvfp4">Source</a>
-    </div>
-  </div>
-
-  <div className="dynamo-recommendation-card">
-    <span>Verified recipe</span>
-    <strong>SGLang disaggregated P/D</strong>
-    <p>4-node decode rank group plus a 1-node prefill worker inside an MNNVL domain.</p>
-    <div className="dynamo-recommendation-facts">
-      <div>
-        <span>Runtime</span>
-        <strong>SGLang</strong>
-      </div>
-      <div>
-        <span>Hardware</span>
-        <strong>20x GB200</strong>
-      </div>
-      <div>
-        <span>Evidence</span>
-        <strong>1K / 8K run</strong>
-      </div>
-    </div>
-  </div>
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/zai-org.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">NVIDIA / Z.AI / SGLang / GB200</p>
+<h2>Serve GLM-5 NVFP4 with SGLang disaggregated prefill/decode on GB200.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>deployment recipe</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5-nvfp4">Source</a>
+</div>
 </div>
 
-## Recipe
+<div className="dynamo-recommendation-card">
+<span>Deployment Recipe</span>
+<strong>Verified</strong>
+<p>What is the validated SGLang disaggregated recipe for long-output GLM-5 NVFP4 serving on GB200?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>zai-org/GLM-5-NVFP4</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>ISL 1,000 / OSL 8,192 / concurrency 512 / 1,536 requests</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>standalone recipe</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Deployment Recipe
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>What is the validated SGLang disaggregated recipe for long-output GLM-5 NVFP4 serving on GB200?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Single recipe path: SGLang P/D, GB200, EAGLE speculative decoding, and 1K/8K benchmark.</strong>
+</div>
+</div>
 
 <div className="dynamo-variant-table-wrap">
-  <table className="dynamo-variant-table">
-    <thead>
-      <tr>
-        <th>Variant</th>
-        <th>Runtime</th>
-        <th>Hardware</th>
-        <th>Traffic</th>
-        <th>Evidence</th>
-        <th>Decision signal</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td><strong>SGLang disaggregated prefill/decode</strong><em>Verified</em><span>4 decode nodes, 1 prefill node, EAGLE, FP8 KV cache</span></td>
-        <td>SGLang</td>
-        <td>20x GB200</td>
-        <td>1K ISL / 8K OSL static-token benchmark</td>
-        <td><mark>perf.yaml</mark></td>
-        <td>Only checked-in GLM-5 path; use it when long-output decode throughput is the target.</td>
-        <td><a href="#deploy">Deploy</a></td>
-      </tr>
-    </tbody>
-  </table>
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr className="recommended">
+<td><strong>SGLang disaggregated prefill/decode</strong><span>Use as the current benchmark-backed GLM-5 path; it stresses long output with a large decode rank group.</span></td>
+<td><em className="role recipe">Recipe</em></td>
+<td>SGLang</td>
+<td>20x GB200</td>
+<td>1K ISL / 8K OSL</td>
+<td><mark>deploy.yaml + perf.yaml + results</mark></td>
+<td><a href="#deploy-sglang-disaggregated-prefill-decode">Deploy</a></td>
+</tr>
+</tbody>
+</table>
 </div>
 
 ## When to Use
 
-Use this recipe when GLM-5 traffic is dominated by long generated outputs and you can dedicate a
-large decode rank group. The benchmark stresses 8K output tokens at 512 concurrent users, so TTFT
-includes queueing pressure; use it to evaluate decode throughput and interactivity under burst load,
-not as a low-concurrency latency estimate.
+Use this page when your deployment decision starts with `zai-org/GLM-5-NVFP4` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
 
 ## Results
 
-Reference run: 1,536 requests, 0 errors, and 747.87 seconds of benchmark duration.
+The README includes a reference AIPerf run for ISL=1K, OSL=8K, and concurrency=512.
 
 | Metric | Value |
 | --- | ---: |
@@ -93,232 +100,84 @@ Reference run: 1,536 requests, 0 errors, and 747.87 seconds of benchmark duratio
 | Request throughput | 2.05 requests/sec |
 | TTFT p50 | 15,423 ms |
 | ITL avg | 23.31 ms/token |
-| Tokens/user/sec avg | 43.39 |
 | Request errors | 0 |
-
-<Note>
-The benchmark is a concurrency burst at 512 users, so TTFT includes queueing. Re-run the provided
-`perf.yaml` on your own cluster before using these numbers for sizing.
-</Note>
 
 ## Before You Run
 
 <div className="dynamo-prereq-grid">
-  <div>
-    <span>Cluster</span>
-    <strong>5x 4-GPU GB200 nodes</strong>
-  </div>
-  <div>
-    <span>Placement</span>
-    <strong>DRA ComputeDomain</strong>
-  </div>
-  <div>
-    <span>Runtime image</span>
-    <strong>sglang-runtime:1.1.1-cuda13</strong>
-  </div>
-  <div>
-    <span>Storage</span>
-    <strong>400 Gi RWX model-cache PVC</strong>
-  </div>
-  <div>
-    <span>Model</span>
-    <strong>nvidia/GLM-5-NVFP4</strong>
-  </div>
-  <div>
-    <span>Access</span>
-    <strong>Hugging Face token secret</strong>
-  </div>
+<div>
+<span>Hardware</span>
+<strong>20x GB200</strong>
+</div>
+<div>
+<span>Runtime</span>
+<strong>SGLang</strong>
+</div>
+<div>
+<span>Technique</span>
+<strong>Disaggregated P/D + EAGLE</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>ISL 1K / OSL 8K</strong>
+</div>
+<div>
+<span>Concurrency</span>
+<strong>512</strong>
+</div>
+<div>
+<span>Artifacts</span>
+<strong>glm5-disagg-isl1k-osl8k</strong>
+</div>
 </div>
 
 <Warning>
-Edit `storageClassName`, namespace placeholders, node labels, tolerations, and the Hugging Face
-secret before applying these manifests. First cold starts can take up to about an hour while weights
-load and FlashInfer/DeepGEMM kernels are JIT-compiled.
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
 </Warning>
 
 ## Deploy
 
-<CodeBlocks>
-```bash title="Prepare namespace, storage, and model"
-export NAMESPACE=your-namespace
+<h3 id="deploy-sglang-disaggregated-prefill-decode">Deploy: SGLang disaggregated prefill/decode</h3>
 
-kubectl create namespace ${NAMESPACE}
-
-kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-cache.yaml \
-  -n ${NAMESPACE}
-
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN=<your-hf-token> \
-  -n ${NAMESPACE}
-
-kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-download.yaml \
-  -n ${NAMESPACE}
-
-kubectl wait --for=condition=complete job/model-download \
-  -n ${NAMESPACE} \
-  --timeout=3600s
-```
-
-```bash title="Deploy GLM-5"
-# Replace <your-namespace> in sglang/disagg/deploy.yaml before applying.
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
-
-kubectl wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=glm5-sglang \
-  -n ${NAMESPACE} \
-  --timeout=7200s
-```
-
-```bash title="Monitor startup"
-kubectl get pods \
-  -n ${NAMESPACE} \
-  -l app.kubernetes.io/part-of=glm5-sglang \
-  -w
-```
-</CodeBlocks>
-
-## Verify
+Use as the current benchmark-backed GLM-5 path; it stresses long output with a large decode rank group.
 
 ```bash
-kubectl port-forward svc/glm5-sglang-frontend 8000:8000 \
-  -n ${NAMESPACE}
+export NAMESPACE=your-namespace
 
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "nvidia/GLM-5-NVFP4",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 128
-  }'
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/glm-5-nvfp4`.
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/perf.yaml -n ${NAMESPACE}
 ```
 
-## Benchmark Evidence
+
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
 
 <div className="dynamo-evidence-grid">
-  <div>
-    <span>Dataset</span>
-    <strong>Synthetic static ISL/OSL</strong>
-    <p>1,000 input tokens and 8,192 output tokens.</p>
-  </div>
-  <div>
-    <span>Concurrency</span>
-    <strong>512</strong>
-    <p>32 requests per GPU across the 16-GPU decode group.</p>
-  </div>
-  <div>
-    <span>Request count</span>
-    <strong>1,536</strong>
-    <p>`request-count` is `CONCURRENCY * 3`.</p>
-  </div>
-  <div>
-    <span>Warmup</span>
-    <strong>16 requests</strong>
-    <p>The job warms the endpoint before the measured run.</p>
-  </div>
-  <div>
-    <span>Artifacts</span>
-    <strong>/model-store/perf</strong>
-    <p>Results write to `glm5-disagg-isl1k-osl8k`.</p>
-  </div>
-  <div>
-    <span>Tooling</span>
-    <strong>AIPerf 0.6.0</strong>
-    <p>The job pins Transformers v5.8.0 for the GLM tokenizer class.</p>
-  </div>
+<div>
+<span>Benchmark asset</span>
+<strong>At least one perf.yaml</strong>
+<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Numeric README results</strong>
+<p>Source README includes result values that are reflected above.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Deployment Recipe</strong>
+<p>Rows are alternatives; avoid ranking across different traffic or hardware shapes.</p>
+</div>
 </div>
 
-<CodeBlocks>
-```bash title="Run benchmark"
-# Replace <your-namespace> in sglang/disagg/perf.yaml before applying.
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/perf.yaml
+## Notes
 
-kubectl logs -f -l job-name=glm5-disagg-bench \
-  -n ${NAMESPACE}
-```
+- This is not a comparison page; the single row is a recipe, not a selectable experiment arm.
+- TTFT includes queueing because this is a concurrency-burst benchmark.
 
-```text title="What to compare"
-Model: nvidia/GLM-5-NVFP4
-Traffic: ISL=1000, OSL=8192
-Concurrency: 512
-Primary metrics: output throughput, TTFT, ITL, tokens/user/sec, request errors
-```
-</CodeBlocks>
+## Source Assets
 
-## Operate
-
-<CodeBlocks>
-```bash title="Inspect deployment"
-kubectl get dynamographdeployment glm5-sglang -n ${NAMESPACE}
-
-kubectl get pods \
-  -n ${NAMESPACE} \
-  -l app.kubernetes.io/part-of=glm5-sglang
-```
-
-```bash title="Retrieve benchmark artifacts"
-kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- \
-  find /model-store/perf/glm5-disagg-isl1k-osl8k -maxdepth 2 -type f
-
-kubectl cp \
-  ${NAMESPACE}/<benchmark-pod-name>:/model-store/perf/glm5-disagg-isl1k-osl8k \
-  ./glm5-disagg-isl1k-osl8k-results
-```
-
-```bash title="Clean up this recipe"
-kubectl delete job glm5-disagg-bench -n ${NAMESPACE}
-
-kubectl delete dynamographdeployment glm5-sglang -n ${NAMESPACE}
-kubectl delete computedomain glm5-compute-domain -n ${NAMESPACE}
-```
-</CodeBlocks>
-
-## Configuration Notes
-
-<Accordion title="EAGLE speculative decoding">
-The deployment enables SGLang's EAGLEWorkerV2 path with `SGLANG_ENABLE_SPEC_V2=1`.
-`SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE=1` quantizes the BF16 MTP layer to FP8 at load time so it matches
-the base model compute path. The recipe README reports roughly 85-95% speculative accept rate.
-</Accordion>
-
-<Accordion title="KV cache and long outputs">
-The worker uses `--kv-cache-dtype fp8_e4m3`, which cuts KV memory roughly in half compared with
-BF16 KV. This matters for the 8K-output benchmark and the large decode group.
-</Accordion>
-
-<Accordion title="NIXL / UCX transfer">
-Disaggregated KV transfer uses NIXL with UCX. The manifest sets
-`UCX_TLS=cuda_copy,cuda_ipc,tcp`: CUDA IPC/copy handles GPU memory movement, while TCP carries UCX
-active-message control traffic.
-</Accordion>
-
-<Accordion title="FlashInfer JIT cache">
-The runtime includes FlashInfer, but the recipe writes first-run JIT artifacts to the shared model
-PVC with `FLASHINFER_WORKSPACE_BASE=/model-store` so later pod starts can reuse them.
-</Accordion>
-
-<Accordion title="Recovery and rollouts">
-The decode side is one TP16 rank group spread across four GB200 nodes. Treat single decode-pod
-replacement as disruptive until your cluster has validated full-group recovery; the recipe notes
-that frontend and prefill replacement recovered in validation, while individual decode deletion
-kept the graph NotReady during repeated rank-group reinitialization attempts.
-</Accordion>
-
-## Recipe Contract
-
-| Field | Value |
-| --- | --- |
-| Model | `nvidia/GLM-5-NVFP4` |
-| Runtime | SGLang |
-| Runtime image | `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13` |
-| Hardware | 20x GB200 across 5 nodes |
-| Recommended technique | Disaggregated prefill/decode with EAGLE speculative decoding |
-| Decode topology | 4 nodes, 16 GPUs, TP16 / DP16 / EP16 |
-| Prefill topology | 1 node, 4 GPUs, TP4 |
-| Dataset | Synthetic static ISL/OSL, 1K input and 8K output |
-| Evidence | Deploy manifest, perf manifest, and reference run in recipe notes |
-
-## References
-
-- [Source recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5-nvfp4)
-- [GLM-5 NVFP4 model card](https://huggingface.co/nvidia/GLM-5-NVFP4)
-- [SGLang backend docs](../backends/sglang/README.md)
+- Source README: [recipes/glm-5-nvfp4/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/glm-5-nvfp4)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)

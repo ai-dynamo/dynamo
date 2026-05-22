@@ -1,0 +1,228 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Qwen3-32B FP8
+subtitle: Choose TensorRT-LLM or vLLM FP8 recipes for Qwen3-32B.
+---
+
+<div className="dynamo-model-detail-hero">
+<div className="dynamo-model-hero-copy">
+<div className="dynamo-model-title-lockup">
+<img className="dynamo-model-logo large" src="../assets/img/recipes/providers/qwen.webp" alt="" />
+<div>
+<p className="dynamo-recipe-eyebrow">Qwen / FP8 / TensorRT-LLM and vLLM</p>
+<h2>Choose TensorRT-LLM or vLLM FP8 recipes for Qwen3-32B.</h2>
+</div>
+</div>
+<p>
+This source recipe is a <strong>alternative recipe set</strong>. The table below shows each
+deployable variant, its role in the recipe set, and the benchmark evidence available today.
+</p>
+<div className="dynamo-hero-actions">
+<a href="#recipe-set">Recipe set</a>
+<a href="#benchmark-evidence">Benchmark</a>
+<a href="https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b-fp8">Source</a>
+</div>
+</div>
+
+<div className="dynamo-recommendation-card">
+<span>Alternative Recipe Set</span>
+<strong>Preview</strong>
+<p>Which FP8 backend and P/D shape should serve Qwen3-32B when a smaller quantized footprint matters?</p>
+<div className="dynamo-recommendation-facts">
+<div>
+<span>Model</span>
+<strong>Qwen/Qwen3-32B-FP8</strong>
+</div>
+<div>
+<span>Traffic</span>
+<strong>TRT-LLM rows: ISL 4000 / OSL 500; vLLM row: ISL 2000 / OSL 500</strong>
+</div>
+<div>
+<span>Shape</span>
+<strong>alternative recipe set</strong>
+</div>
+</div>
+</div>
+</div>
+
+## Alternative Recipe Set
+
+<div className="dynamo-comparison-brief" id="recipe-set">
+<div>
+<span>Question</span>
+<strong>Which FP8 backend and P/D shape should serve Qwen3-32B when a smaller quantized footprint matters?</strong>
+</div>
+<div>
+<span>Held constant</span>
+<strong>Same FP8 model family, but variants differ by backend, GPU count, and benchmark shape.</strong>
+</div>
+</div>
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr>
+<th>Variant</th>
+<th>Role</th>
+<th>Runtime</th>
+<th>Hardware</th>
+<th>Traffic</th>
+<th>Evidence</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr className="recommended">
+<td><strong>TRT-LLM aggregated</strong><span>Smallest checked-in FP8 deployment footprint; TP2 aggregate.</span></td>
+<td><em className="role smallest">Smallest FP8 path</em></td>
+<td>TRT-LLM</td>
+<td>2x GPU</td>
+<td>4K ISL / 500 OSL</td>
+<td><mark>deploy.yaml + perf.yaml</mark></td>
+<td><a href="#deploy-trt-llm-aggregated">Deploy</a></td>
+</tr><tr>
+<td><strong>TRT-LLM disaggregated</strong><span>P/D split for TensorRT-LLM FP8 serving.</span></td>
+<td><em className="role technique">Technique alternative</em></td>
+<td>TRT-LLM</td>
+<td>8x GPU</td>
+<td>4K ISL / 500 OSL</td>
+<td><mark>deploy.yaml + perf.yaml</mark></td>
+<td><a href="#deploy-trt-llm-disaggregated">Deploy</a></td>
+</tr><tr>
+<td><strong>vLLM disaggregated</strong><span>vLLM P/D split with NIXL connector; traffic shape differs from TRT rows.</span></td>
+<td><em className="role backend">Backend alternative</em></td>
+<td>vLLM</td>
+<td>8x GPU</td>
+<td>2K ISL / 500 OSL</td>
+<td><mark>deploy.yaml + perf.yaml</mark></td>
+<td><a href="#deploy-vllm-disaggregated">Deploy</a></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+## When to Use
+
+Use this page when your deployment decision starts with `Qwen/Qwen3-32B-FP8` and you need to understand which checked-in recipe asset matches your backend, hardware, and workload shape. The variant role column is part of the design: a control row, treatment row, alternative row, and deploy-only row should not be interpreted the same way.
+
+## Results Placeholder
+
+<div className="dynamo-placeholder-note">
+<strong>Benchmark results are not checked in yet</strong>
+<p>All three rows have perf.yaml files; no numeric expected results are checked in. Because the vLLM row uses a different ISL than the TensorRT-LLM rows, treat this as an alternative set rather than a strict comparison.</p>
+</div>
+
+| Placeholder | What should be filled in |
+| --- | --- |
+| TRT-LLM placeholders | Report aggregate and disaggregated results for ISL=4000 / OSL=500. |
+| vLLM placeholder | Report vLLM disaggregated results for ISL=2000 / OSL=500. |
+| Selection guidance | Do not rank across backend rows until traffic is normalized. |
+
+## Before You Run
+
+<div className="dynamo-prereq-grid">
+<div>
+<span>Hardware</span>
+<strong>H100/H200/A100</strong>
+</div>
+<div>
+<span>Runtime</span>
+<strong>TensorRT-LLM and vLLM</strong>
+</div>
+<div>
+<span>Quantization</span>
+<strong>FP8</strong>
+</div>
+<div>
+<span>TRT traffic</span>
+<strong>4K ISL / 500 OSL</strong>
+</div>
+<div>
+<span>vLLM traffic</span>
+<strong>2K ISL / 500 OSL</strong>
+</div>
+<div>
+<span>Compatibility</span>
+<strong>vLLM max model len set for A100 40 GB</strong>
+</div>
+</div>
+
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, and Hugging Face secrets for your cluster before applying these manifests. Where this page shows a placeholder, the source repo does not yet contain the corresponding deployment, benchmark, or results asset.
+</Warning>
+
+## Deploy
+
+<h3 id="deploy-trt-llm-aggregated">Deploy: TRT-LLM aggregated</h3>
+
+Smallest checked-in FP8 deployment footprint; TP2 aggregate.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b-fp8`.
+kubectl apply -f recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/qwen3-32b-fp8/trtllm/agg/perf.yaml -n ${NAMESPACE}
+```
+
+<h3 id="deploy-trt-llm-disaggregated">Deploy: TRT-LLM disaggregated</h3>
+
+P/D split for TensorRT-LLM FP8 serving.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b-fp8`.
+kubectl apply -f recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/qwen3-32b-fp8/trtllm/disagg/perf.yaml -n ${NAMESPACE}
+```
+
+<h3 id="deploy-vllm-disaggregated">Deploy: vLLM disaggregated</h3>
+
+vLLM P/D split with NIXL connector; traffic shape differs from TRT rows.
+
+```bash
+export NAMESPACE=your-namespace
+
+
+# Prepare shared storage and model assets using the setup manifests in `recipes/qwen3-32b-fp8`.
+kubectl apply -f recipes/qwen3-32b-fp8/vllm/disagg/deploy.yaml -n ${NAMESPACE}
+# Run the benchmark for this variant.
+kubectl apply -f recipes/qwen3-32b-fp8/vllm/disagg/perf.yaml -n ${NAMESPACE}
+```
+
+
+<h2 id="benchmark-evidence">Benchmark Evidence</h2>
+
+<div className="dynamo-evidence-grid">
+<div>
+<span>Benchmark asset</span>
+<strong>At least one perf.yaml</strong>
+<p>Run benchmark-backed variants from their row-specific perf.yaml files.</p>
+</div>
+<div>
+<span>Results asset</span>
+<strong>Placeholder required</strong>
+<p>Expected results should be added once benchmark artifacts are available.</p>
+</div>
+<div>
+<span>Comparison safety</span>
+<strong>Alternative Recipe Set</strong>
+<p>Rows are alternatives; avoid ranking across different traffic or hardware shapes.</p>
+</div>
+</div>
+
+## Notes
+
+- This page is the FP8 alternative to the BF16 Qwen3-32B comparison page.
+- Normalize traffic before making backend performance claims.
+
+## Source Assets
+
+- Source README: [recipes/qwen3-32b-fp8/README.md](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b-fp8)
+- Ground-truth inventory: [recipe-asset-inventory.csv](./recipe-asset-inventory.csv)
