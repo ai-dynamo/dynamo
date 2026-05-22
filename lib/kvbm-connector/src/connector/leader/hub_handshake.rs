@@ -56,24 +56,35 @@ impl HubHandshake {
 }
 
 /// Validate that remote search, if requested, can actually run against the
-/// resolved hub. Remote search consumes the hub's KV indexer over velo, so it
-/// requires the hub to be enabled (`handshake` is `Some`) **and** the `indexer`
-/// feature to be effective. Returns an invalid-configuration error otherwise.
+/// resolved hub. Remote search needs **both**:
+///   * the `indexer` feature — to discover which instance holds a block, and
+///   * the `p2p` feature — the transfer control plane it pulls over (and which
+///     installs the session factory + registers this instance as a
+///     hub-discoverable peer). Without P2P, discovery would succeed but
+///     `open_session` / `pull_from_session` would fail at request time with
+///     `NotInitialized` — so we reject the misconfiguration up front.
 ///
-/// `None` `remote_search` is always `Ok` (feature disabled).
+/// Both must be effective (and a hub must be configured, i.e. `handshake` is
+/// `Some`). Returns an invalid-configuration error otherwise.
+///
+/// A `None` or `enabled = false` `remote_search` is always `Ok` (feature off).
 pub fn validate_remote_search_availability(
     remote_search: Option<&RemoteSearch>,
     handshake: Option<&HubHandshake>,
 ) -> Result<()> {
-    if remote_search.is_none() {
+    if !remote_search.is_some_and(|r| r.enabled) {
         return Ok(());
     }
-    if handshake.is_some_and(|h| h.has(FeatureKey::Indexer)) {
+    let has_indexer = handshake.is_some_and(|h| h.has(FeatureKey::Indexer));
+    let has_p2p = handshake.is_some_and(|h| h.has(FeatureKey::P2P));
+    if has_indexer && has_p2p {
         return Ok(());
     }
     bail!(
-        "invalid configuration: remote_search is enabled but the hub's `indexer` feature \
-         is not available (no hub configured, or indexer not offered/effective)"
+        "invalid configuration: remote_search is enabled but the hub does not offer both \
+         required features (indexer effective: {has_indexer}, p2p effective: {has_p2p}). \
+         Remote search discovers holders via `indexer` and pulls over `p2p`; enable both \
+         on the hub (or disable remote_search)."
     )
 }
 
@@ -407,6 +418,12 @@ mod tests {
         assert!(validate_remote_search_availability(None, None).is_ok());
         assert!(
             validate_remote_search_availability(None, Some(&handshake_with(&[]))).is_ok(),
+            "absent remote_search must not error even without indexer"
+        );
+        // Present but disabled → Ok even without indexer.
+        let disabled = RemoteSearch::default();
+        assert!(
+            validate_remote_search_availability(Some(&disabled), Some(&handshake_with(&[]))).is_ok(),
             "disabled remote_search must not error even without indexer"
         );
     }
@@ -414,24 +431,31 @@ mod tests {
     #[test]
     fn remote_search_requires_a_hub() {
         let rs = RemoteSearch {
-            min_remote_tokens: 0,
+            enabled: true,
+            min_remote_tokens: None,
         };
         // Requested but no hub configured (handshake None) → invalid config.
         assert!(validate_remote_search_availability(Some(&rs), None).is_err());
     }
 
     #[test]
-    fn remote_search_requires_effective_indexer() {
+    fn remote_search_requires_indexer_and_p2p() {
         let rs = RemoteSearch {
-            min_remote_tokens: 0,
+            enabled: true,
+            min_remote_tokens: None,
         };
-        // Hub present but indexer not effective → invalid config.
-        let no_indexer = handshake_with(&[FeatureKey::P2P]);
-        assert!(validate_remote_search_availability(Some(&rs), Some(&no_indexer)).is_err());
+        // P2P but no indexer → invalid (can't discover holders).
+        let p2p_only = handshake_with(&[FeatureKey::P2P]);
+        assert!(validate_remote_search_availability(Some(&rs), Some(&p2p_only)).is_err());
 
-        // Indexer effective → Ok.
-        let with_indexer = handshake_with(&[FeatureKey::Indexer]);
-        assert!(validate_remote_search_availability(Some(&rs), Some(&with_indexer)).is_ok());
+        // Indexer but no p2p → invalid (can't pull; open/pull would fail at
+        // request time with NotInitialized).
+        let indexer_only = handshake_with(&[FeatureKey::Indexer]);
+        assert!(validate_remote_search_availability(Some(&rs), Some(&indexer_only)).is_err());
+
+        // Both effective → Ok.
+        let both = handshake_with(&[FeatureKey::Indexer, FeatureKey::P2P]);
+        assert!(validate_remote_search_availability(Some(&rs), Some(&both)).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

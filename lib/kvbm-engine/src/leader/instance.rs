@@ -8,6 +8,7 @@ use ::velo::Messenger;
 use anyhow::Result;
 use dashmap::DashMap;
 use tokio::sync::{Mutex, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use std::sync::{Arc, OnceLock};
@@ -52,7 +53,9 @@ use super::{
     StagingMode,
     accessor::{BlockAccessor, PolicyContext},
     consolidator::{ConsolidatorCell, ConsolidatorParams, new_cell, spawn_into_cell},
+    discovery::RemoteDiscoveryHandle,
     dispatch::{PullRef, WirePullOptions, plan_pull},
+    remote_search,
     parallelism::{ParallelismTemplate, stamp_parallelism_descriptors},
     session::{
         BlockHolder, ControlRole, ControllableSessionOptions, ControllableSessionResult,
@@ -231,6 +234,25 @@ pub struct InstanceLeader {
     /// (at which point the guard's `Drop` fires and shuts the background tasks
     /// down without blocking the caller).
     consolidator: ConsolidatorCell,
+
+    // ========================================================================
+    // Remote search (hub-indexer discovery + transfer-plane pull)
+    // ========================================================================
+    /// Optional remote-block discovery (the hub's KV indexer), injected
+    /// post-construction by the connector via [`Self::set_remote_discovery`]
+    /// — the indexer client/peer resolver only exist after hub registration,
+    /// which happens after the leader is built (same lifetime problem as
+    /// [`Self::set_session_factory`]). When set,
+    /// [`find_matches_with_options`](Self::find_matches_with_options) with
+    /// `search_remote` drives a transfer-plane remote pull for the
+    /// locally-uncached prefix; when unset, no remote search runs.
+    remote_discovery: Arc<OnceLock<RemoteDiscoveryHandle>>,
+
+    /// Block-count threshold for remote search: a search is issued only when
+    /// the number of remaining locally-uncached full blocks **exceeds** this
+    /// value. Derived from `RemoteSearch::min_remote_blocks(block_size)` at
+    /// build time.
+    min_remote_blocks: usize,
 }
 
 /// Builder for InstanceLeader.
@@ -251,6 +273,7 @@ pub struct InstanceLeaderBuilder {
     observability: Option<SharedKvbmObservability>,
     bypass_host: bool,
     block_layout_mode: kvbm_common::BlockLayoutMode,
+    min_remote_blocks: usize,
 }
 
 impl InstanceLeaderBuilder {
@@ -396,6 +419,13 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    /// Set the remote-search block-count threshold. A search is issued only
+    /// when the number of remaining locally-uncached full blocks exceeds this.
+    pub fn min_remote_blocks(mut self, n: usize) -> Self {
+        self.min_remote_blocks = n;
+        self
+    }
+
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
@@ -471,6 +501,8 @@ impl InstanceLeaderBuilder {
             observability: self.observability,
             bypass_host: self.bypass_host,
             consolidator: new_cell(),
+            remote_discovery: Arc::new(OnceLock::new()),
+            min_remote_blocks: self.min_remote_blocks,
         })
     }
 }
@@ -482,6 +514,11 @@ struct SessionState {
     matched_g2_blocks: Vec<ImmutableBlock<G2>>,
     matched_g3_blocks: Vec<ImmutableBlock<G3>>,
     status_tx: watch::Sender<OnboardingStatus>,
+    /// Cancellation for a background remote-search driver bound to this
+    /// session. `None` for sessions without a driver. [`release_session`]
+    /// fires it so a cancelled/preempted request tears the driver down
+    /// (and the driver dispatches the remote `close_session`).
+    cancel: Option<CancellationToken>,
 }
 
 /// Result of scanning for blocks across tiers.
@@ -621,6 +658,17 @@ impl InstanceLeader {
     /// connector init). Returns whether this call set the value.
     pub fn set_session_factory(&self, factory: Arc<dyn SessionFactory>) -> bool {
         self.session_factory.set(factory).is_ok()
+    }
+
+    /// Inject the remote-block discovery seam (the hub's KV indexer, wrapped by
+    /// the connector) once the hub registration that backs it has completed.
+    ///
+    /// Idempotent: first-write-wins. Returns whether this call set the value.
+    /// Enables the transfer-plane remote-search pull in
+    /// [`find_matches_with_options`](Self::find_matches_with_options) when
+    /// `search_remote` is requested.
+    pub fn set_remote_discovery(&self, discovery: RemoteDiscoveryHandle) -> bool {
+        self.remote_discovery.set(discovery).is_ok()
     }
 
     // ========================================================================
@@ -1191,7 +1239,13 @@ impl InstanceLeader {
     /// This is optional - sessions will naturally be cleaned up when the InstanceLeader
     /// is dropped. Call this explicitly if you need to release blocks earlier.
     pub fn release_session(&self, session_id: SessionId) {
-        self.session_states.remove(&session_id);
+        if let Some((_, state)) = self.session_states.remove(&session_id) {
+            // Tear down a bound remote-search driver, if any. The driver's
+            // cancel branch best-effort closes the remote transfer session.
+            if let Some(token) = &state.cancel {
+                token.cancel();
+            }
+        }
         self.sessions.remove(&session_id);
         self.session_sessions.remove(&session_id);
     }
@@ -2189,10 +2243,42 @@ impl Leader for InstanceLeader {
         //   - search_remote is true AND (has_remote_leaders OR has_object_client)
         let has_remote_leaders = !self.remote_leaders.read().unwrap().is_empty();
         let has_object_client = self.object_client.is_some();
+        let has_discovery = self.remote_discovery.get().is_some();
         let needs_remote_search =
-            options.search_remote && (has_remote_leaders || has_object_client);
+            options.search_remote && (has_remote_leaders || has_object_client || has_discovery);
         let local_g2_count = matched_g2_blocks.len();
         let local_g3_count = matched_g3_blocks.len();
+
+        // Hub-indexer remote search (the transfer-plane driver) takes the
+        // remote path only when discovery is injected AND there is no other
+        // remote source the InitiatorSession path would otherwise consult:
+        // no G3 hits to stage, no object (G4) client, and no statically
+        // registered remote leaders. If any of those are present we fall
+        // through to the InitiatorSession path so its G3-stage / G4-object /
+        // remote-leader search is not silently bypassed.
+        // Warm-cache short-circuit: if the synchronous local G2 prefix match
+        // already covers every queried hash, there is nothing remote to find or
+        // pull. Return `Ready` directly and skip the remote-search driver
+        // entirely — this is the path a request to the instance that already
+        // holds the blocks takes (it must not "remote search" itself).
+        let local_covers_all =
+            !sequence_hashes.is_empty() && matched_g2_blocks.len() == sequence_hashes.len();
+
+        let use_indexer_search = options.search_remote
+            && has_discovery
+            && matched_g3_blocks.is_empty()
+            && !has_object_client
+            && !has_remote_leaders
+            && !local_covers_all;
+        if options.search_remote && has_discovery && !use_indexer_search && !local_covers_all {
+            tracing::debug!(
+                has_object_client,
+                has_remote_leaders,
+                g3_hits = local_g3_count,
+                "remote-search discovery present but deferring to InitiatorSession path \
+                 (G3/G4/remote-leaders take precedence)"
+            );
+        }
 
         // Host-bypass short-circuit: when G2 is intentionally unconfigured we
         // never want to take the AsyncSession + stage_g3_to_g2 path. Return
@@ -2216,7 +2302,9 @@ impl Leader for InstanceLeader {
             )));
         }
 
-        let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
+        // `local_covers_all` forces Ready even with remote sources configured:
+        // a full local prefix means no staging/remote work is needed.
+        let is_ready = local_covers_all || (matched_g3_blocks.is_empty() && !needs_remote_search);
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)
@@ -2242,14 +2330,53 @@ impl Leader for InstanceLeader {
             object_blocks: 0,
         }));
 
+        // Cancellation token bound to this session, used only by the
+        // hub-indexer remote-search driver so `release_session` can tear it
+        // down on request cancellation/preemption.
+        let cancel_token = use_indexer_search.then(CancellationToken::new);
+
         // Store session state to keep blocks alive
         let state = SessionState {
             session_id,
             matched_g2_blocks,
             matched_g3_blocks,
             status_tx: status_tx.clone(),
+            cancel: cancel_token.clone(),
         };
         self.store_session_state(state);
+
+        // Hub-indexer remote search: spawn the transfer-plane driver. It
+        // re-matches local G2 (after pulling) to fill `all_g2_blocks` and sets
+        // the terminal `OnboardingStatus::Complete`. Any failure/timeout/cancel
+        // degrades to the local match so the shard never stays non-terminal.
+        if use_indexer_search {
+            let discovery = self
+                .remote_discovery
+                .get()
+                .cloned()
+                .expect("use_indexer_search implies remote_discovery is set");
+            let cancel = cancel_token.expect("use_indexer_search sets a cancel token");
+            let driver = remote_search::RemoteSearchDriver {
+                leader: Arc::new(self.clone()),
+                discovery,
+                sequence_hashes: sequence_hashes.to_vec(),
+                local_block_count: local_g2_count,
+                min_remote_blocks: self.min_remote_blocks,
+                status_tx: status_tx.clone(),
+                blocks: all_g2_blocks.clone(),
+                match_breakdown: match_breakdown.clone(),
+                session_id,
+                cancel,
+            };
+            self.runtime().spawn(driver.run());
+            return Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
+                session_id,
+                status_rx,
+                all_g2_blocks,
+                match_breakdown,
+                None,
+            )));
+        }
 
         // If no remote search, handle local-only staging
         if !options.search_remote {
@@ -2521,6 +2648,205 @@ mod tests {
         assert!(!leader.set_modules(vec![kvbm_protocols::control::ModuleId::Dev]));
         let d2 = leader.describe().await.expect("describe ok");
         assert_eq!(d2.modules, vec![kvbm_protocols::control::ModuleId::Core]);
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // Remote-search driver (transfer-plane, hub-indexer discovery)
+    // ------------------------------------------------------------------------
+
+    use crate::leader::discovery::{RemoteBlockDiscovery, RemoteCandidates};
+    use futures::future::BoxFuture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Mock discovery that records call count and returns a canned outcome.
+    struct MockDiscovery {
+        calls: Arc<AtomicUsize>,
+        outcome: Option<RemoteCandidates>,
+    }
+
+    impl RemoteBlockDiscovery for MockDiscovery {
+        fn discover(
+            &self,
+            _hashes: Vec<SequenceHash>,
+        ) -> BoxFuture<'static, Result<Option<RemoteCandidates>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = self.outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
+    }
+
+    async fn leader_for_remote_search(min_remote_blocks: usize) -> Result<Arc<InstanceLeader>> {
+        let messenger = create_messenger_tcp().await?;
+        let registry = BlockRegistry::builder().build();
+        let g2 = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(8)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+        let leader = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry(registry)
+            .g2_manager(g2)
+            .min_remote_blocks(min_remote_blocks)
+            .build()?;
+        Ok(Arc::new(leader))
+    }
+
+    fn some_hashes(n: usize) -> Vec<SequenceHash> {
+        // Distinct, deterministic PLHs; none are resident in the fresh G2, so
+        // the local prefix match is empty and the whole range is "remote".
+        (0..n as u64).map(|i| SequenceHash::new(i, None, i)).collect()
+    }
+
+    /// Below the block threshold, the driver must not consult discovery and
+    /// must still reach a terminal `Complete` (degrade to the local match).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_search_below_threshold_skips_discovery() -> Result<()> {
+        let leader = leader_for_remote_search(/* min_remote_blocks */ 10).await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        leader.set_remote_discovery(Arc::new(MockDiscovery {
+            calls: Arc::clone(&calls),
+            outcome: None,
+        }));
+
+        // 3 remaining blocks <= threshold(10) → no remote search.
+        let hashes = some_hashes(3);
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result.as_async().expect("discovery drives the async path");
+        async_session.wait_for_completion().await?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "discovery must be skipped");
+        assert!(
+            matches!(async_session.status(), OnboardingStatus::Complete { matched_blocks: 0 }),
+            "empty local G2 → Complete{{0}}, got {:?}",
+            async_session.status()
+        );
+        Ok(())
+    }
+
+    /// Above threshold with a discovery miss (`Ok(None)`): discovery is
+    /// consulted once and the driver degrades to the (empty) local match
+    /// rather than wedging non-terminal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_search_discovery_miss_degrades_to_local() -> Result<()> {
+        let leader = leader_for_remote_search(/* min_remote_blocks */ 1).await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        leader.set_remote_discovery(Arc::new(MockDiscovery {
+            calls: Arc::clone(&calls),
+            outcome: None,
+        }));
+
+        // 5 remaining blocks > threshold(1) → remote search attempted.
+        let hashes = some_hashes(5);
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result.as_async().expect("discovery drives the async path");
+        async_session.wait_for_completion().await?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "discovery consulted once");
+        assert!(
+            matches!(async_session.status(), OnboardingStatus::Complete { matched_blocks: 0 }),
+            "discovery miss degrades to local match, got {:?}",
+            async_session.status()
+        );
+        Ok(())
+    }
+
+    /// Discovery that parks forever after signalling it started — lets a test
+    /// catch the driver mid-flight and cancel it.
+    struct BlockingDiscovery {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl RemoteBlockDiscovery for BlockingDiscovery {
+        fn discover(
+            &self,
+            _hashes: Vec<SequenceHash>,
+        ) -> BoxFuture<'static, Result<Option<RemoteCandidates>>> {
+            let started = Arc::clone(&self.started);
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending::<()>().await;
+                unreachable!()
+            })
+        }
+    }
+
+    /// The architectural justification for an engine-owned driver: a
+    /// cancelled/preempted request (`release_session`) must tear the in-flight
+    /// remote search down and drive the session to a terminal state, not wedge
+    /// it at `Searching` forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_session_cancels_inflight_remote_search() -> Result<()> {
+        let leader = leader_for_remote_search(/* min_remote_blocks */ 1).await?;
+        let started = Arc::new(tokio::sync::Notify::new());
+        leader.set_remote_discovery(Arc::new(BlockingDiscovery {
+            started: Arc::clone(&started),
+        }));
+
+        let result = leader.find_matches_with_options(
+            &some_hashes(5),
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result.as_async().expect("discovery drives the async path");
+        let session_id = async_session.session_id();
+
+        // Wait until the driver is parked inside discovery, then cancel.
+        started.notified().await;
+        assert!(matches!(async_session.status(), OnboardingStatus::Searching));
+
+        leader.release_session(session_id);
+
+        // The driver's cancel branch must drive the session to terminal
+        // promptly — otherwise this times out.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async_session.wait_for_completion(),
+        )
+        .await
+        .expect("cancellation must reach a terminal state before the timeout")?;
+        assert!(matches!(
+            async_session.status(),
+            OnboardingStatus::Complete { .. }
+        ));
+        Ok(())
+    }
+
+    /// Without an injected discovery, `search_remote` does not take the
+    /// indexer path: with no remote leaders / object client the result is a
+    /// synchronous local `Ready`, not an async session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn search_remote_without_discovery_is_ready_local() -> Result<()> {
+        let leader = leader_for_remote_search(1).await?;
+        let hashes = some_hashes(5);
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        assert!(
+            result.is_ready(),
+            "no discovery + no remote leaders/object → local Ready"
+        );
         Ok(())
     }
 }
