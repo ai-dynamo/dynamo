@@ -63,8 +63,7 @@ use crate::protocols::{
     openai::{
         DeltaGeneratorExt,
         chat_completions::{
-            INTERNAL_PRESERVE_OMITTED_MAX_TOKENS, NvCreateChatCompletionRequest,
-            NvCreateChatCompletionStreamResponse, jail::JailedStream,
+            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse, jail::JailedStream,
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -207,6 +206,14 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
             .expect("dim-fetch http client construction failed")
     });
 
+pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
+    "dynamo.llm.preserve_omitted_max_tokens";
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PreprocessRequestOptions {
+    preserve_omitted_max_tokens: bool,
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -241,6 +248,17 @@ pub struct OpenAIPreprocessor {
 }
 
 impl OpenAIPreprocessor {
+    fn omitted_max_tokens_default(
+        prompt_len: usize,
+        context_length: u32,
+        options: PreprocessRequestOptions,
+    ) -> Option<u32> {
+        if context_length == 0 || options.preserve_omitted_max_tokens {
+            return None;
+        }
+        Some(context_length.saturating_sub(prompt_len as u32))
+    }
+
     fn nvext_passthrough_args<R: NvExtProvider>(
         request: &R,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -316,14 +334,6 @@ impl OpenAIPreprocessor {
         } else {
             Some(serde_json::Value::Object(extra_args))
         }
-    }
-
-    fn preserve_omitted_max_tokens<R: NvExtProvider>(request: &R) -> bool {
-        request
-            .unsupported_fields()
-            .and_then(|fields| fields.get(INTERNAL_PRESERVE_OMITTED_MAX_TOKENS))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
     }
 
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
@@ -502,6 +512,23 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        self.preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
+            .await
+    }
+
+    async fn preprocess_request_with_options<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider,
+    >(
+        &self,
+        request: &R,
+        tracker: Option<&RequestTracker>,
+        options: PreprocessRequestOptions,
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
@@ -563,12 +590,13 @@ impl OpenAIPreprocessor {
         // preserve omission so backend adapters can compute the dynamic cap from their
         // effective prompt length/tokenization.
         if preprocessed.stop_conditions.max_tokens.is_none()
-            && self.context_length > 0
-            && !Self::preserve_omitted_max_tokens(request)
+            && let Some(max_tokens) = Self::omitted_max_tokens_default(
+                preprocessed.token_ids.len(),
+                self.context_length,
+                options,
+            )
         {
-            let prompt_len = preprocessed.token_ids.len() as u32;
-            preprocessed.stop_conditions.max_tokens =
-                Some(self.context_length.saturating_sub(prompt_len));
+            preprocessed.stop_conditions.max_tokens = Some(max_tokens);
         }
 
         Ok((preprocessed, annotations, prompt_injected_reasoning))
@@ -2530,10 +2558,16 @@ impl
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
         let tracker = Some(response_generator.tracker());
+        let preprocess_options = PreprocessRequestOptions {
+            preserve_omitted_max_tokens: context
+                .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
+                .ok()
+                .is_some_and(|flag| *flag),
+        };
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning) = self
-            .preprocess_request(&request, tracker.as_deref())
+            .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
@@ -2983,24 +3017,33 @@ mod tests {
     }
 
     #[test]
-    fn test_internal_preserve_omitted_max_tokens_marker() {
-        let mut request: NvCreateChatCompletionRequest =
-            serde_json::from_value(serde_json::json!({
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "hi"}]
-            }))
-            .unwrap();
-
-        assert!(!OpenAIPreprocessor::preserve_omitted_max_tokens(&request));
-        assert!(OpenAIPreprocessor::backend_extra_args(&request).is_none());
-
-        request.unsupported_fields.insert(
-            INTERNAL_PRESERVE_OMITTED_MAX_TOKENS.to_string(),
-            serde_json::Value::Bool(true),
+    fn test_internal_preserve_omitted_max_tokens_option() {
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                100,
+                PreprocessRequestOptions::default()
+            ),
+            Some(90)
         );
-
-        assert!(OpenAIPreprocessor::preserve_omitted_max_tokens(&request));
-        assert!(OpenAIPreprocessor::backend_extra_args(&request).is_none());
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                100,
+                PreprocessRequestOptions {
+                    preserve_omitted_max_tokens: true,
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            OpenAIPreprocessor::omitted_max_tokens_default(
+                10,
+                0,
+                PreprocessRequestOptions::default()
+            ),
+            None
+        );
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.

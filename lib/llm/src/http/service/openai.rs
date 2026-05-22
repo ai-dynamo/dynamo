@@ -43,13 +43,14 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
+use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
-        INTERNAL_PRESERVE_OMITTED_MAX_TOKENS, NvCreateChatCompletionRequest,
-        NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
+        NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+        NvCreateChatCompletionStreamResponse,
     },
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
@@ -1758,12 +1759,6 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
-    if response_params.max_output_tokens.is_none() {
-        chat_request.unsupported_fields.insert(
-            INTERNAL_PRESERVE_OMITTED_MAX_TOKENS.to_string(),
-            serde_json::Value::Bool(true),
-        );
-    }
 
     // Always use internal streaming for aggregation.
     // Set stream_options.include_usage so the backend sends token counts in the final chunk.
@@ -1774,7 +1769,10 @@ async fn responses(
             continuous_usage_stats: false,
         });
 
-    let request = context.map(|mut _req| chat_request);
+    let mut request = context.map(|mut _req| chat_request);
+    if response_params.max_output_tokens.is_none() {
+        request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
+    }
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 

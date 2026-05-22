@@ -24,9 +24,6 @@ pub mod jail;
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
-pub(crate) const INTERNAL_PRESERVE_OMITTED_MAX_TOKENS: &str =
-    "__dynamo_internal_preserve_omitted_max_tokens";
-
 /// A request structure for creating a chat completion, extending OpenAI's
 /// `CreateChatCompletionRequest` with [`NvExt`] extensions and common fields.
 ///
