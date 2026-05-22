@@ -30,6 +30,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentReques
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     needs_profile_data,
+    resolve_model_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,9 +191,10 @@ def _run_autoscale_sim(
             "Throughput-based scaling enabled — only disagg mode is supported."
         )
 
+    local_or_hf_model = resolve_model_path(dgdr)
     task = TaskConfig(
         serving_mode="disagg",
-        model_path=model,
+        model_path=local_or_hf_model,
         system_name=system,
         backend_name=backend,
         total_gpus=total_gpus,
@@ -238,8 +240,9 @@ def _run_default_sim(
     picking_mode: str,
 ) -> dict:
     """Build default task_configs, apply load_match kwargs, run simulation, generate DGD."""
+    local_or_hf_model = resolve_model_path(dgdr)
     task_configs = build_default_task_configs(
-        model_path=model,
+        model_path=local_or_hf_model,
         total_gpus=total_gpus,
         system=system,
         backend=backend,
