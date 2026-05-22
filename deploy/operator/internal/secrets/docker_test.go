@@ -1,7 +1,6 @@
 package secrets
 
 import (
-	"context"
 	"slices"
 	"testing"
 
@@ -54,7 +53,7 @@ func TestDockerSecretIndexer_RefreshIndex(t *testing.T) {
 		Build()
 
 	i := NewDockerSecretIndexer(fakeClient, "")
-	if err := i.RefreshIndex(context.Background()); err != nil {
+	if err := i.RefreshIndex(t.Context()); err != nil {
 		t.Errorf("DockerSecretIndexer.RefreshIndex() error = %v, wantErr %v", err, nil)
 	}
 
@@ -125,7 +124,7 @@ func TestDockerSecretIndexer_DeterministicSecrets(t *testing.T) {
 		Build()
 
 	i := NewDockerSecretIndexer(fakeClient, "")
-	if err := i.RefreshIndex(context.Background()); err != nil {
+	if err := i.RefreshIndex(t.Context()); err != nil {
 		t.Fatalf("DockerSecretIndexer.RefreshIndex() error = %v", err)
 	}
 
@@ -177,7 +176,7 @@ func TestDockerSecretIndexer_RefreshIndexRespectsNamespaceScope(t *testing.T) {
 		Build()
 
 	i := NewDockerSecretIndexer(fakeClient, "target")
-	if err := i.RefreshIndex(context.Background()); err != nil {
+	if err := i.RefreshIndex(t.Context()); err != nil {
 		t.Fatalf("DockerSecretIndexer.RefreshIndex() error = %v", err)
 	}
 
