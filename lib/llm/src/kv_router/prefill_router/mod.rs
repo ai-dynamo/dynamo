@@ -139,17 +139,7 @@ impl
                 bootstrap_info,
             } => {
                 // Bootstrap optimization path: spawn prefill in background
-                // We successfully used the peeked worker, so we must now advance the router state
-                // to ensure the next request gets a different worker.
-                if !self.router_mode.is_kv_routing()
-                    && let Some(router) = self.prefill_router.get()
-                {
-                    router.select_next_worker();
-                }
-
-                let routing = prefill_req.routing_mut();
-                routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = dp_rank;
+                self.commit_selected_prefill_worker(&mut prefill_req, worker_id, dp_rank);
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 // NVBugs 5969206: Do NOT link prefill as child of engine context.
@@ -210,17 +200,11 @@ impl
                     worker_id = resolved_wid,
                     "Using original prefill path (no bootstrap endpoint), routing to resolved worker"
                 );
-                // SimpleRouter selection was peeked during resolve, so advance once
-                // before direct routing to preserve round-robin/random state semantics.
-                if !self.router_mode.is_kv_routing()
-                    && let Some(router) = self.prefill_router.get()
-                {
-                    router.select_next_worker();
-                }
-
-                let routing = prefill_req.routing_mut();
-                routing.prefill_worker_id = Some(resolved_wid);
-                routing.dp_rank = resolved_dp_rank;
+                self.commit_selected_prefill_worker(
+                    &mut prefill_req,
+                    resolved_wid,
+                    resolved_dp_rank,
+                );
 
                 drop(prefill_phase_barrier);
                 let prefill_context = Context::with_id_and_metadata(
@@ -371,6 +355,27 @@ impl
                 Err(anyhow::anyhow!(e))
             }
         }
+    }
+}
+
+impl PrefillRouter {
+    fn commit_selected_prefill_worker(
+        &self,
+        prefill_req: &mut PreprocessedRequest,
+        worker_id: u64,
+        dp_rank: Option<u32>,
+    ) {
+        // SimpleRouter selection was peeked during resolve_prefill_worker, so
+        // advance once before direct routing to preserve router state semantics.
+        if !self.router_mode.is_kv_routing()
+            && let Some(router) = self.prefill_router.get()
+        {
+            router.select_next_worker();
+        }
+
+        let routing = prefill_req.routing_mut();
+        routing.prefill_worker_id = Some(worker_id);
+        routing.dp_rank = dp_rank;
     }
 }
 
