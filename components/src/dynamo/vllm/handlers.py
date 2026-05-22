@@ -2904,7 +2904,7 @@ class EmbeddingWorkerHandler:
         prompts: list[Any] = _classify_embedding_input(input_field)
 
         dimensions = request.get("dimensions")
-        if dimensions is not None and not isinstance(dimensions, int):
+        if dimensions is not None and (not isinstance(dimensions, int) or isinstance(dimensions, bool)):
             raise TypeError(
                 f"Invalid 'dimensions' type {type(dimensions).__name__}; "
                 "expected int"
