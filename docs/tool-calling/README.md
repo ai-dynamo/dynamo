@@ -11,17 +11,32 @@ syntax out of raw model output and surfacing it as OpenAI-compatible
 and `tools` request parameters on the chat completions API.
 
 There are two ways to parse tool calls in Dynamo, depending on whether the
-parser lives in Dynamo's own registry or in the upstream engine (vLLM, SGLang).
+parser lives in Dynamo's own registry or in an upstream engine frontend
+(`vllm serve`, `sglang serve`, or `trtllm-serve`).
 
 ## Choose a parsing path
 
 | Path | When to use | Page |
 |------|-------------|------|
-| **Dynamo** | Dynamo ships a Rust parser for the model's tool-call format. Lowest latency, the default path. | [Tool Call Parsing (Dynamo)](dynamo.md) |
-| **Engine Fallback** | Use the framework's implementation (vLLM or SGLang) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Tool Call Parsing (Engine Fallback)](engine-fallback.md) |
+| **Dynamo** | Dynamo ships a framework-agnostic Rust parser for the model's tool-call format. Default path. | [Tool Call Parsing (Dynamo)](dynamo.md) |
+| **Engine Fallback** | Use the framework's frontend implementation (vLLM or SGLang today; TRTLLM in progress) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Tool Call Parsing (Engine Fallback)](engine-fallback.md) |
 
 Start with the Dynamo path. Fall back to the engine path only when Dynamo's
 registry does not list a parser for your model.
+
+## Why Dynamo implements tool-call parsers
+
+In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call parsing belongs
+to the engine's frontend server. Dynamo provides its own OpenAI-compatible
+frontend and connects to engines below that layer, so the default path cannot
+rely on those engine frontends.
+
+Dynamo therefore implements tool-call parsing in its frontend as a
+framework-agnostic Rust layer. This gives Dynamo one tested OpenAI-compatible
+contract across vLLM, SGLang, TRTLLM, and other workers, while keeping the hot
+path highly concurrent and scalable and avoiding Python GIL overhead. Use
+engine fallback only when Dynamo does not yet ship a parser for the model, or
+when exact framework parity is required.
 
 ## Troubleshooting
 
