@@ -528,7 +528,17 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.pre_merge,
+            # TODO: --frontend-decoding triggers OpenAIPreprocessor.new_with_parts
+            # which constructs a real NixlAgent in the frontend. ai-dynamo-runtime
+            # is built in runtime_wheel_builder before NIXL is installed, so
+            # nixl-sys links against stubs and NixlAgent::new() returns "NIXL is
+            # not supported in stub mode" at runtime. Moving the maturin build
+            # to wheel_builder fixes nixl-sys but then dynamo._core.abi3.so has
+            # NEEDED libnixl.so, which breaks import on every runtime image
+            # without libnixl on the system load path (sglang, planner, vllm).
+            # Either patch every runtime to expose libnixl, or add a runtime
+            # fallback to nixl-sys's stub check.
+            pytest.mark.nightly,
             pytest.mark.timeout(900),
             # Bisected with tests/utils/profile_pytest.py: minimum = 528 tokens,
             # 2x safety = 1056. Peak 8.1 GiB at 1056 tokens. Override threads

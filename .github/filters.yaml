@@ -67,6 +67,10 @@ ignore:
   - 'container/templates/aws.Dockerfile'
   - 'container/templates/local_dev.Dockerfile'
   - 'container/templates/dev.Dockerfile'
+  # Removed by trtllm upstream-base migration; claim here so changed-files
+  # validation passes on the deletion diff without triggering trtllm CI.
+  - 'container/build_trtllm_wheel.sh'
+  - 'container/deps/trtllm/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -159,10 +163,9 @@ sglang:
   - '!**/*.rst'
 
 trtllm:
-  - 'container/deps/trtllm/**'
+  - 'container/deps/requirements.trtllm.txt'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
-  - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
   - '!**/*.md'
   - '!**/*.rst'

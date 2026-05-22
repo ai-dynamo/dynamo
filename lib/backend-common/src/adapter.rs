@@ -143,6 +143,56 @@ impl EngineAdapter {
     }
 }
 
+/// JSON-shaped wrapper around [`EngineAdapter`] for the `local_endpoint_registry`.
+///
+/// The runtime's `HealthCheckManager` fires canary requests as
+/// `SingleIn<serde_json::Value>` against whatever engine is registered for
+/// the endpoint name. The unified backend's network ingress operates on the
+/// typed `PreprocessedRequest`, so we register this adapter alongside the
+/// network handler: it deserializes the JSON canary into `PreprocessedRequest`,
+/// hands it to the same `EngineAdapter`, and re-serializes the response.
+pub(crate) struct JsonProbeAdapter {
+    inner: Arc<EngineAdapter>,
+}
+
+impl JsonProbeAdapter {
+    pub(crate) fn new(inner: Arc<EngineAdapter>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
+    for JsonProbeAdapter
+{
+    async fn generate(
+        &self,
+        input: SingleIn<serde_json::Value>,
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        let (json, handle) = input.into_parts();
+        let request: PreprocessedRequest = serde_json::from_value(json)
+            .map_err(|e| anyhow::anyhow!("probe payload deserialization failed: {e}"))?;
+        let typed_input = handle.map(|_| request);
+
+        let typed_out = self.inner.generate(typed_input).await?;
+        let ctx = typed_out.context();
+        let mut inner_stream = typed_out;
+        let mapped = async_stream::stream! {
+            while let Some(ann) = inner_stream.next().await {
+                // HealthCheckManager only inspects `response.err()`; a chunk with
+                // `FinishReason::Error` would otherwise serialize as healthy data
+                // and mark the endpoint Ready on an engine failure.
+                if let Some(err) = ann.data.as_ref().and_then(|chunk| chunk.err()) {
+                    yield Annotated::<serde_json::Value>::from_err(err);
+                    continue;
+                }
+                yield ann.map_data(|chunk| serde_json::to_value(&chunk).map_err(|e| e.to_string()));
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(mapped), ctx))
+    }
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for EngineAdapter
@@ -897,6 +947,34 @@ mod tests {
 
         release.notify_one();
         while stream.next().await.is_some() {}
+    }
+
+    /// Engine `FinishReason::Error` terminals must surface through the probe
+    /// adapter as `Annotated::error` so `HealthCheckManager::response.err()`
+    /// detects them; otherwise the canary marks the endpoint Ready on a
+    /// failed run.
+    #[tokio::test]
+    async fn probe_surfaces_engine_error_terminal_as_annotated_error() {
+        let (engine, _) = MockEngine::new(vec![LLMEngineOutput::error("boom".to_string())]);
+        let inner = Arc::new(EngineAdapter::new(engine, DisaggregationMode::Aggregated));
+        let probe = JsonProbeAdapter::new(inner);
+
+        let payload = serde_json::json!({"token_ids": [1], "_HEALTH_CHECK": true});
+        let stream = probe.generate(Context::new(payload)).await.unwrap();
+        let collected: Vec<_> = stream.collect().await;
+
+        assert_eq!(collected.len(), 1);
+        assert!(
+            collected[0].is_error(),
+            "error terminal must surface as Annotated::error"
+        );
+        assert!(
+            collected[0]
+                .err()
+                .expect("typed err")
+                .to_string()
+                .contains("boom")
+        );
     }
 
     /// Stream drop before first-token must NOT fire abort. The monitor's

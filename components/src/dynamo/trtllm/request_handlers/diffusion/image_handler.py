@@ -155,13 +155,14 @@ class ImageGenerationHandler(BaseGenerativeHandler):
 
         # Parse parameters
         width, height = self._parse_size(req.size)
-        if req.n is not None and req.n > 1:
-            raise ValueError(
-                f"Requested {req.n} images, but this handler currently supports n=1 only."
-            )
         num_images_per_prompt = (
             req.n if req.n is not None else self.config.default_num_images_per_prompt
         )
+        if not 1 <= num_images_per_prompt <= 10:
+            raise ValueError(
+                f"num_images_per_prompt must be in [1, 10], got "
+                f"{num_images_per_prompt}."
+            )
         num_inference_steps = (
             nvext.num_inference_steps
             if nvext.num_inference_steps is not None
@@ -205,19 +206,37 @@ class ImageGenerationHandler(BaseGenerativeHandler):
 
         # Encode media based on what the pipeline returned
         if output.image is not None:
-            # MediaOutput.image is (B, H, W, C) uint8 since TRT-LLM rc9;
+            # MediaOutput.image is (B, H, W, C) uint8 since TRT-LLM rc9.
             images = output.image
             assert (
                 images.ndim == 4 and images.shape[3] == 3
             ), f"Expected image shape (B, H, W, C), got {images.shape}"
-            # [gluo FIXME] currently only take the first image but the protocol supports multiple images
-            # verify if TRT-LLM will generate multiple images, relax this constraint if that's the case
-            image_np = images[0].cpu().numpy()
-            logger.debug(
-                f"Request {request_id}: encoding image output "
-                f"(shape={image_np.shape}) to PNG"
+            # Engine warns on batch mismatch; here we clamp to the caller's
+            # requested count without padding or synthesizing.
+            emit_count = min(images.shape[0], num_images_per_prompt)
+
+            async def _encode_one(i: int) -> ImageData:
+                image_np = images[i].cpu().numpy()
+                logger.debug(
+                    f"Request {request_id}: encoding image {i + 1}/{emit_count} "
+                    f"(shape={image_np.shape}) to PNG"
+                )
+                image_bytes = await asyncio.to_thread(encode_to_png_bytes, image_np)
+                if response_format == "url":
+                    storage_path = f"images/{request_id}_{i}.png"
+                    image_url = await upload_to_fs(
+                        self.media_output_fs,
+                        storage_path,
+                        image_bytes,
+                        self.media_output_http_url,
+                    )
+                    return ImageData(url=image_url)
+                b64_image = base64.b64encode(image_bytes).decode("utf-8")
+                return ImageData(b64_json=b64_image)
+
+            data_items: list[ImageData] = list(
+                await asyncio.gather(*(_encode_one(i) for i in range(emit_count)))
             )
-            image_bytes = await asyncio.to_thread(encode_to_png_bytes, image_np)
 
         elif output.video is not None:
             raise RuntimeError(
@@ -239,25 +258,11 @@ class ImageGenerationHandler(BaseGenerativeHandler):
                 f"image={output.image is not None}, audio={output.audio is not None}"
             )
 
-        # Return media via URL or base64
-        if response_format == "url":
-            storage_path = f"images/{request_id}.png"
-            image_url = await upload_to_fs(
-                self.media_output_fs,
-                storage_path,
-                image_bytes,
-                self.media_output_http_url,
-            )
-            image_data = ImageData(url=image_url)
-        else:
-            b64_image = base64.b64encode(image_bytes).decode("utf-8")
-            image_data = ImageData(b64_json=b64_image)
-
         inference_time = time.time() - start_time
 
         response = NvImagesResponse(
             created=int(time.time()),
-            data=[image_data],
+            data=data_items,
         )
 
         logger.debug(f"Request {request_id} completed in {inference_time:.2f}s")

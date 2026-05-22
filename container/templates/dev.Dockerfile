@@ -110,11 +110,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         libfontconfig-dev && \
     # Use system python explicitly: some runtime bases put a framework venv first on PATH.
-    PIP_BREAK_SYSTEM_PACKAGES="" && \
-    if /usr/bin/python3 -m pip install --help | grep -q -- "--break-system-packages"; then \
-        PIP_BREAK_SYSTEM_PACKAGES="--break-system-packages"; \
-    fi && \
-    /usr/bin/python3 -m pip install ${PIP_BREAK_SYSTEM_PACKAGES} --no-cache-dir yq && \
+    # PIP_BREAK_SYSTEM_PACKAGES env var works across pip versions: pip >=23 honours
+    # it; older pip silently ignores it but predates the PEP 668 EXTERNALLY-MANAGED
+    # marker (Ubuntu <23.04), so no override is needed there in the first place.
+    # pip >=26 made the --break-system-packages flag require a boolean argument,
+    # so the env-var form is the only portable spelling.
+    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
@@ -221,9 +222,10 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
-{% elif framework == "vllm" %}
-# Reuse the stable symlink created by the upstream vLLM runtime stage so dev
-# builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
+{% elif framework == "vllm" or framework == "trtllm" %}
+# vllm/trtllm dev images inherit upstream containers that ship NIXL inside the
+# Python wheel; libnixl.so loads via the wheel's DT_RPATH, so these env vars
+# act only as a stable anchor that avoids hardcoding a CUDA-specific path.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
@@ -333,8 +335,8 @@ RUN mkdir -p /opt/dynamo/venv && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
-{% elif framework == "vllm" %}
-# vLLM inherits upstream's system Python solve; keep dev installs in our venv.
+{% elif framework == "vllm" or framework == "trtllm" %}
+# vllm/trtllm inherit upstream's system Python solve; keep dev installs in our venv.
 
 {% if device == "cuda" %}
 # CUDA: Runtime uses system Python, so --system-site-packages correctly inherits packages.

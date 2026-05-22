@@ -144,3 +144,6 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.7.f:
+    description: Numeric precision edge test 7.f — not yet authored for this family
+    reason: Numeric precision edge test 7.f not yet authored for nemotron_deci; Qwen3-Coder coverage is provided by qwen3_coder 7.f.

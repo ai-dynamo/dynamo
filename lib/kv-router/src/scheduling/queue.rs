@@ -3,11 +3,11 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-use tokio::sync::Mutex;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::config::RouterQueueDepthTiers;
@@ -25,6 +25,8 @@ use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRe
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
+
+const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
 
 /// Entry in the priority queue, ordered by key (higher key = higher priority).
 struct QueueEntry<K: Ord + Eq> {
@@ -52,6 +54,38 @@ impl<K: Ord + Eq> PartialOrd for QueueEntry<K> {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
+enum AdmissionCommand {
+    Enqueue {
+        request: SchedulingRequest,
+        ack_tx: oneshot::Sender<()>,
+    },
+    Update {
+        ack_tx: oneshot::Sender<()>,
+    },
+}
+
+struct SchedulerQueueActor<
+    P: SequencePublisher,
+    C: WorkerConfigLike,
+    S: SchedulingPolicy,
+    Sel: WorkerSelector<C>,
+> {
+    pending: BinaryHeap<QueueEntry<S::Key>>,
+    pending_count: Arc<AtomicUsize>,
+    pending_isl_tokens: Arc<AtomicUsize>,
+    slots: Arc<ActiveSequencesMultiWorker<P>>,
+    workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+    threshold_frac: Option<f64>,
+    queue_depth_tiers: RouterQueueDepthTiers,
+    start_time: Instant,
+    block_size: u32,
+    selector: Sel,
+    policy: S,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+}
+
 /// Queue that gates scheduling requests behind a capacity check.
 /// When all workers exceed `threshold_frac` utilisation the request is parked in `pending`.
 /// When capacity frees up (`update()`), pending requests are scheduled in priority order.
@@ -62,35 +96,25 @@ pub struct SchedulerQueue<
     S: SchedulingPolicy = FcfsPolicy,
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
 > {
-    pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
-    /// Serializes admission so worker selection always sees prior bookings.
-    admission_gate: Mutex<()>,
+    admission_tx: mpsc::Sender<AdmissionCommand>,
     /// Number of requests currently parked in the pending queue.
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
-    pending_count: AtomicUsize,
+    pending_count: Arc<AtomicUsize>,
     /// Sum of `isl_tokens` for requests currently parked in the pending queue.
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
-    pending_isl_tokens: AtomicUsize,
+    pending_isl_tokens: Arc<AtomicUsize>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
-    /// Per-tier pending ISL token caps keyed on cache-miss tokens.
-    queue_depth_tiers: RouterQueueDepthTiers,
-    /// Reference instant for computing arrival offsets.
-    start_time: Instant,
-    block_size: u32,
-    selector: Sel,
-    policy: S,
-    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    _marker: PhantomData<fn() -> (S, Sel)>,
 }
 
 impl<
     P: SequencePublisher + 'static,
-    C: WorkerConfigLike,
-    S: SchedulingPolicy,
-    Sel: WorkerSelector<C>,
+    C: WorkerConfigLike + Send + Sync + 'static,
+    S: SchedulingPolicy + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
 > SchedulerQueue<P, C, S, Sel>
 {
     #[allow(clippy::too_many_arguments)]
@@ -135,13 +159,15 @@ impl<
         if !queue_depth_tiers.is_unbounded() {
             tracing::info!("Router queue tiered by cache-miss: pending ISL token caps configured");
         }
-        Self {
-            pending: Mutex::new(BinaryHeap::new()),
-            admission_gate: Mutex::new(()),
-            pending_count: AtomicUsize::new(0),
-            pending_isl_tokens: AtomicUsize::new(0),
-            slots,
-            workers_with_configs,
+        let pending_count = Arc::new(AtomicUsize::new(0));
+        let pending_isl_tokens = Arc::new(AtomicUsize::new(0));
+        let (admission_tx, admission_rx) = mpsc::channel(ADMISSION_CHANNEL_CAPACITY);
+        let actor = SchedulerQueueActor {
+            pending: BinaryHeap::new(),
+            pending_count: Arc::clone(&pending_count),
+            pending_isl_tokens: Arc::clone(&pending_isl_tokens),
+            slots: Arc::clone(&slots),
+            workers_with_configs: workers_with_configs.clone(),
             threshold_frac,
             queue_depth_tiers,
             start_time: Instant::now(),
@@ -150,6 +176,16 @@ impl<
             policy,
             prefill_load_estimator,
             overloaded_worker_provider,
+        };
+        tokio::spawn(actor.run(admission_rx));
+        Self {
+            admission_tx,
+            pending_count,
+            pending_isl_tokens,
+            slots,
+            workers_with_configs,
+            threshold_frac,
+            _marker: PhantomData,
         }
     }
 
@@ -191,16 +227,94 @@ impl<
             return;
         }
 
-        let _admission = self.admission_gate.lock().await;
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let command = AdmissionCommand::Enqueue { request, ack_tx };
+
+        if let Err(error) = self.admission_tx.send(command).await {
+            let AdmissionCommand::Enqueue { mut request, .. } = error.0 else {
+                return;
+            };
+            request.respond(Err(KvSchedulerError::SubscriberShutdown));
+            return;
+        }
+
+        if ack_rx.await.is_err() {
+            tracing::warn!("scheduler queue actor dropped enqueue acknowledgement");
+        }
+    }
+
+    /// Called on prefill_complete/free. Drains pending requests while workers have capacity.
+    /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
+    /// sees fresh state on the next iteration.
+    pub async fn update(&self) {
+        if self.threshold_frac.is_none() {
+            return;
+        }
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self
+            .admission_tx
+            .send(AdmissionCommand::Update { ack_tx })
+            .await
+            .is_ok()
+        {
+            let _ = ack_rx.await;
+        }
+    }
+
+    /// Number of requests currently parked in the pending queue (lock-free).
+    pub fn pending_count(&self) -> usize {
+        self.pending_count.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Sum of `isl_tokens` for requests currently parked in the pending queue (lock-free).
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
+    }
+}
+
+impl<
+    P: SequencePublisher + 'static,
+    C: WorkerConfigLike + Send + Sync + 'static,
+    S: SchedulingPolicy + 'static,
+    Sel: WorkerSelector<C> + Send + 'static,
+> SchedulerQueueActor<P, C, S, Sel>
+{
+    async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
+        while let Some(command) = rx.recv().await {
+            match command {
+                AdmissionCommand::Enqueue { request, ack_tx } => {
+                    self.handle_enqueue(request);
+                    let _ = ack_tx.send(());
+                }
+                AdmissionCommand::Update { ack_tx } => {
+                    self.handle_update();
+                    let _ = ack_tx.send(());
+                }
+            }
+        }
+
+        while let Some(entry) = self.pending.pop() {
+            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+            self.pending_isl_tokens
+                .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
+
+            let mut request = entry.request;
+            request.respond(Err(KvSchedulerError::SubscriberShutdown));
+        }
+    }
+
+    fn handle_enqueue(&mut self, mut request: SchedulingRequest) {
+        let eligibility = request.eligibility();
         let decay_now = Instant::now();
 
         let Some(threshold) = self.threshold_frac else {
-            self.admit_one(request, decay_now).await;
+            self.admit_one(request, decay_now);
             return;
         };
 
         if eligibility.bypasses_capacity_check() {
-            self.admit_one(request, decay_now).await;
+            self.admit_one(request, decay_now);
             return;
         }
 
@@ -228,28 +342,25 @@ impl<
                     .enqueue_key(arrival_offset, SchedulingContext::new(&request, &workers))
             };
             let isl_tokens = request.isl_tokens;
-            self.pending.lock().await.push(QueueEntry { key, request });
+            self.pending.push(QueueEntry { key, request });
             self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
             self.pending_isl_tokens
                 .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
-        } else {
-            self.admit_one(request, decay_now).await;
+            return;
         }
+
+        self.admit_one(request, decay_now);
     }
 
-    /// Called on prefill_complete/free. Drains pending requests while workers have capacity.
-    /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
-    /// sees fresh state on the next iteration.
-    pub async fn update(&self) {
+    fn handle_update(&mut self) {
         let Some(threshold) = self.threshold_frac else {
             return;
         };
 
         if S::DYNAMIC {
             let now = self.start_time.elapsed();
-            let mut heap = self.pending.lock().await;
             let workers = self.workers_with_configs.borrow();
-            let rekeyed: Vec<_> = std::mem::take(&mut *heap)
+            let rekeyed: Vec<_> = std::mem::take(&mut self.pending)
                 .into_vec()
                 .into_iter()
                 .map(|e| QueueEntry {
@@ -261,14 +372,12 @@ impl<
                     request: e.request,
                 })
                 .collect();
-            *heap = BinaryHeap::from(rekeyed);
+            self.pending = BinaryHeap::from(rekeyed);
         }
 
         loop {
-            let _admission = self.admission_gate.lock().await;
             let decay_now = Instant::now();
-            let mut heap = self.pending.lock().await;
-            let Some(front) = heap.peek() else {
+            let Some(front) = self.pending.peek() else {
                 break;
             };
             // TODO: This preserves head-of-line blocking for now to keep queue
@@ -278,8 +387,7 @@ impl<
             if self.all_workers_prefill_busy(threshold, front.request.eligibility(), decay_now) {
                 break;
             }
-            let entry = heap.pop().expect("heap front vanished before pop");
-            drop(heap);
+            let entry = self.pending.pop().expect("heap front vanished before pop");
             let current_pending_count = self.pending_count.load(AtomicOrdering::Relaxed);
             debug_assert!(
                 current_pending_count > 0,
@@ -296,13 +404,13 @@ impl<
             self.pending_isl_tokens
                 .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
-            self.admit_one(entry.request, decay_now).await;
+            self.admit_one(entry.request, decay_now);
         }
     }
 
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
-    async fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
+    fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
         let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
             request.token_seq.as_deref(),
             &request.prefill_token_deltas(),
@@ -403,16 +511,6 @@ impl<
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
         })
-    }
-
-    /// Number of requests currently parked in the pending queue (lock-free).
-    pub fn pending_count(&self) -> usize {
-        self.pending_count.load(AtomicOrdering::Relaxed)
-    }
-
-    /// Sum of `isl_tokens` for requests currently parked in the pending queue (lock-free).
-    pub fn pending_isl_tokens(&self) -> usize {
-        self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
 
     /// Resolve the admission cap for `request` from the cache-miss tier table.
@@ -614,7 +712,7 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn make_queue_with_custom_selector<Sel: WorkerSelector<SimpleWorkerConfig>>(
+    fn make_queue_with_custom_selector<Sel: WorkerSelector<SimpleWorkerConfig> + Send + 'static>(
         num_workers: usize,
         block_size: u32,
         isl: usize,
@@ -941,6 +1039,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_pending_requests_receive_shutdown_on_queue_drop() {
+        let block_size = 16;
+        let isl = 512;
+        let (queue, _slots) = make_queue(1, block_size, isl, Some(0.0));
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        rx1.await
+            .expect("first response sender dropped")
+            .expect("first request should be scheduled");
+
+        let (req2, rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        drop(queue);
+
+        let response = tokio::time::timeout(Duration::from_secs(1), rx2)
+            .await
+            .expect("shutdown response timed out")
+            .expect("pending response sender dropped");
+        assert!(matches!(
+            response,
+            Err(KvSchedulerError::SubscriberShutdown)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_pending_count() {
         let block_size = 16;
         let isl = 512;
@@ -995,7 +1121,7 @@ mod tests {
         let block_size = 16;
         let isl = 512;
 
-        // Single tier at floor=0 with cap=512 ISL tokens — every request matches,
+        // Single tier at floor=0 with cap=512 ISL tokens: every request matches,
         // queue capped at 512 ISL tokens (1 request worth).
         let tiers = RouterQueueDepthTiers::try_from(vec![RouterQueueDepthByMissingIslTier {
             missing_cache_tokens_floor: 0,
@@ -1036,13 +1162,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_missing_isl_tiers_shed_expensive_first() {
         let block_size = 16;
-        let isl = 512; // every test request has 512 cache-miss tokens (no cache).
+        let isl = 512;
 
-        // Two tiers:
-        //   (floor=0,   cap=2048)  applies to cheap requests (4 requests worth)
-        //   (floor=256, cap=512)   applies to expensive (>=256 cache-miss) requests (1 request worth)
-        // All test requests are 512 cache-miss → they match the expensive tier
-        // and should backpressure once pending ISL tokens reaches 512.
+        // All test requests have 512 cache-miss tokens, so they match the
+        // expensive tier and should backpressure once one request is pending.
         let tiers = RouterQueueDepthTiers::try_from(vec![
             RouterQueueDepthByMissingIslTier {
                 missing_cache_tokens_floor: 0,
@@ -1061,7 +1184,6 @@ mod tests {
         queue.enqueue(req1).await;
         let _ = rx1.await.unwrap().unwrap();
 
-        // Second request fills the lone pending slot under the expensive tier.
         let (req2, _rx2) = make_request("req-2", isl);
         queue.enqueue(req2).await;
         assert_eq!(queue.pending_count(), 1);

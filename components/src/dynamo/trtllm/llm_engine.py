@@ -41,6 +41,10 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.health_check import (
+    bos_token_id_or,
+    build_health_check_payload,
+)
 from dynamo.common.backend.metrics import register_global_registry
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, PushSource
 from dynamo.common.backend.worker import WorkerConfig
@@ -773,6 +777,23 @@ class TrtllmLLMEngine(LLMEngine):
         # AdditionalMetricsCollector). Always on — the collectors emit
         # vendor metrics independent of KV-event publishing.
         register_global_registry(metrics, engine_prefix="trtllm_")
+
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            logger.warning(
+                "DECODE worker: health-check canary disabled — synthesizing a "
+                "prefill_result that survives DisaggregatedParamsCodec.decode "
+                "is non-trivial. Endpoint readiness will rely on real request traffic."
+            )
+            return None
+        tokenizer = None
+        if self._engine is not None and self._engine._llm is not None:
+            tokenizer = self._engine.llm.tokenizer
+        # priority=1.0 is TRT-LLM's max — keeps the canary off the starvation path.
+        return build_health_check_payload(
+            bos_token_id=bos_token_id_or(tokenizer),
+            extras={"priority": 1.0},
+        )
 
     async def drain(self) -> None:
         """Prefill-only: poll until in-flight requests finish so a
