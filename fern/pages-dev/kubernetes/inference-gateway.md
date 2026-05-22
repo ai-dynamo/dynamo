@@ -327,6 +327,118 @@ spec:
 
 If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually for each EPP service. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
 
+**Inference-gateway Istio sidecar exclusion**
+
+When namespace-level Istio sidecar injection is enabled (`istio-injection=enabled`), the agentgateway-proxy pod also receives an Istio sidecar. This sidecar intercepts the ext_proc gRPC connection from agentgateway-proxy to EPP (port 9002) and routes it through `PassthroughCluster`, which breaks the connection and causes all inference requests to return HTTP 500 with an empty body.
+
+The fix is to tell agentgateway to stamp `sidecar.istio.io/inject: "false"` on the proxy pod template so the Istio webhook skips that pod. EPP and worker pods still receive sidecars normally.
+
+You have two options depending on how you set up the gateway:
+
+***Option A: Per-gateway `AgentgatewayParameters` (recommended)***
+
+This is what `install_gaie_crd_agentgateway.sh` does automatically. It only affects the `inference-gateway` proxy pods and leaves any other agentgateway-managed gateways untouched.
+
+1. Create an `AgentgatewayParameters` resource in **the same namespace as the `inference-gateway` Gateway** (e.g. `dynamo-cloud`). It must be co-located with the `Gateway` because the Gateway API `spec.infrastructure.parametersRef` is a `LocalParametersReference` — it has no `namespace` field.
+
+   ```yaml
+   apiVersion: agentgateway.dev/v1alpha1
+   kind: AgentgatewayParameters
+   metadata:
+     name: inference-gateway-params
+     namespace: dynamo-cloud   # same as the Gateway
+   spec:
+     deployment:
+       spec:
+         template:
+           metadata:
+             annotations:
+               sidecar.istio.io/inject: "false"
+   ```
+
+   Apply it with server-side apply (recommended by agentgateway):
+
+   ```bash
+   kubectl apply --server-side -n dynamo-cloud -f agentgateway-params.yaml
+   ```
+
+2. Wire the existing `Gateway` to use it. If the Gateway already exists, patch it in place:
+
+   ```bash
+   kubectl patch gateway inference-gateway -n dynamo-cloud --type='merge' -p '{
+     "spec": {
+       "infrastructure": {
+         "parametersRef": {
+           "group": "agentgateway.dev",
+           "kind":  "AgentgatewayParameters",
+           "name":  "inference-gateway-params"
+         }
+       }
+     }
+   }'
+   ```
+
+   Or include the `infrastructure` block directly in your `Gateway` manifest:
+
+   ```yaml
+   apiVersion: gateway.networking.k8s.io/v1
+   kind: Gateway
+   metadata:
+     name: inference-gateway
+     namespace: dynamo-cloud
+   spec:
+     gatewayClassName: agentgateway
+     infrastructure:
+       parametersRef:
+         group: agentgateway.dev
+         kind: AgentgatewayParameters
+         name: inference-gateway-params
+     listeners:
+       - name: http
+         port: 80
+         protocol: HTTP
+   ```
+
+3. agentgateway will roll the proxy pod. Verify the new pod no longer has an `istio-proxy` container:
+
+   ```bash
+   kubectl get pod -l gateway.networking.k8s.io/gateway-name=inference-gateway \
+     -n dynamo-cloud \
+     -o jsonpath='{.items[0].spec.containers[*].name}{"\n"}'
+   # Expect: agentgateway   (NOT "agentgateway istio-proxy")
+   ```
+
+***Option B: Patch the default `AgentgatewayParameters` CR (cluster-wide)***
+
+The agentgateway controller creates a default `AgentgatewayParameters` resource named `agentgateway` in `agentgateway-system`. Any `Gateway` that does not set `spec.infrastructure.parametersRef` inherits this default. Patching it affects **all** agentgateway-managed proxies in the cluster.
+
+```bash
+kubectl patch agentgatewayparameters agentgateway -n agentgateway-system \
+  --type='merge' -p '{
+  "spec": {
+    "deployment": {
+      "spec": {
+        "template": {
+          "metadata": {
+            "annotations": {
+              "sidecar.istio.io/inject": "false"
+            }
+          }
+        }
+      }
+    }
+  }
+}'
+```
+
+Use Option A instead if you have multiple agentgateway-managed gateways in the cluster and only want the `inference-gateway` proxy to skip injection.
+
+The annotation is a no-op on clusters where Istio is not installed, so it is safe to set unconditionally.
+
+<Note>
+With both the `DestinationRule` (for EPP) and the `AgentgatewayParameters` sidecar exclusion (for agentgateway-proxy) in place, end-to-end GAIE inference works correctly under Istio namespace-level injection.
+</Note>
+
 ### 6. Verify Installation ###
 
 Check that all resources are properly deployed:
