@@ -37,6 +37,14 @@ class GenerateRequest(TypedDict, total=False):
     Disaggregated-serving keys (``prefill_result``, ``bootstrap_info``)
     are set by the frontend's PrefillRouter on decode requests; engines
     read them via ``dynamo.common.backend.disagg`` helpers.
+
+    Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
+    ``mm_routing_info``) are populated by the frontend preprocessor when
+    the request carries media. ``encoder_result`` is set by the
+    frontend's EncoderRouter on requests forwarded from an Encode worker
+    to a downstream Prefill/Aggregated peer; engines read it via
+    :func:`dynamo.common.backend.multimodal.require_encoder_result`. All
+    four are object-shaped (``dict``) by contract.
     """
 
     token_ids: Required[list[int]]
@@ -45,6 +53,10 @@ class GenerateRequest(TypedDict, total=False):
     output_options: dict[str, Any]
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
+    multi_modal_data: dict[str, Any]
+    mm_processor_kwargs: dict[str, Any]
+    mm_routing_info: dict[str, Any]
+    encoder_result: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):
@@ -55,6 +67,11 @@ class GenerateChunk(TypedDict, total=False):
     additionally include ``finish_reason`` and ``completion_usage``.
     Prefill terminals carry ``disaggregated_params`` for the
     PrefillRouter to forward to the decode peer.
+
+    Encode terminals carry ``encoder_result`` (an opaque object the
+    EncoderRouter forwards onto the downstream
+    ``PreprocessedRequest.encoder_result``). Construct with
+    :func:`dynamo.common.backend.multimodal.encoder_terminal_chunk`.
     """
 
     token_ids: Required[list[int]]
@@ -62,6 +79,7 @@ class GenerateChunk(TypedDict, total=False):
     finish_reason: str
     completion_usage: dict[str, int]
     disaggregated_params: dict[str, Any]
+    encoder_result: dict[str, Any]
 
 
 @dataclass
