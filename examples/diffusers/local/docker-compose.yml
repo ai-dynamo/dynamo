@@ -21,6 +21,7 @@ x-backend-base: &backend-base
     - SYS_PTRACE
   environment:
     - DYN_DISCOVERY_BACKEND=file
+    - DYN_EVENT_PLANE=zmq
     - DYN_FILE_KV=/tmp/dynamo-discovery
     - LD_LIBRARY_PATH=
     - TORCHINDUCTOR_CACHE_DIR=/cache/torchinductor
@@ -50,7 +51,11 @@ services:
       python -m dynamo.frontend
         --http-port 8000
         --discovery-backend file
+        --request-plane tcp
+        --event-plane zmq
     environment:
+      - DYN_DISCOVERY_BACKEND=file
+      - DYN_EVENT_PLANE=zmq
       - DYN_FILE_KV=/tmp/dynamo-discovery
     volumes:
       - dynamo-discovery:/tmp/dynamo-discovery

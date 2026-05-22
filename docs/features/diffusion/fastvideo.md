@@ -239,7 +239,7 @@ Start the local example with an LTX-2 model:
 cd <dynamo-root>/examples/diffusers/local
 
 MODEL=FastVideo/LTX2-Distilled-Diffusers \
-WORKER_EXTRA_ARGS="--attention-backend TORCH_SDPA" \
+WORKER_EXTRA_ARGS="--torch-compile --fp4-quantization --attention-backend FLASH_ATTN" \
 ./run_local.sh
 ```
 
@@ -264,6 +264,9 @@ curl -s -X POST http://localhost:8000/v1/videos \
 ```
 
 FastVideo exposes generated audio and `audio_sample_rate` on its Python result object. This Dynamo worker returns the saved MP4 in `data[0].b64_json`, with FastVideo muxing the generated 24 kHz audio into the MP4 output.
+
+> [!NOTE]
+> LTX2 refine pipeline flags such as `ltx2_refine_enabled`, `ltx2_refine_upsampler_path`, and per-component compile settings are not yet exposed through FastVideo's typed API config.
 
 ## Worker Configuration Reference
 
