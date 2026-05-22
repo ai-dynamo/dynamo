@@ -2049,13 +2049,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-config"
-version = "1.2.0"
-dependencies = [
- "anyhow",
-]
-
-[[package]]
 name = "dynamo-data-gen"
 version = "1.2.0"
 dependencies = [
@@ -2123,7 +2116,6 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2329,7 +2321,6 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
  "educe",
  "either",
  "etcd-client",
