@@ -1,16 +1,27 @@
 # ---------------------------------------------------------------------
-# FAILED PROBE (2026-05-21, dpp-dev-env AKS).
-# This manifest pins the bystander to a specific GPU via
-# `NVIDIA_VISIBLE_DEVICES=GPU-<uuid>`. AKS in CDI device mode rejects
-# this and refuses to admit the pod with
-#   `unresolvable CDI devices management.nvidia.com/gpu=GPU-<uuid>`.
-# The Python equivalent in test_multi_dgd_live.py::TestMultiPodConflict
-# is therefore skipped as a class (see Finding #7 in this directory's
-# README.md). Re-enable both this file AND the test only after they're
-# rewritten to use the K8s device plugin's `nvidia.com/gpu: 1` claim
-# plus runtime UUID discovery from inside the agent pod
-# (`nvmlDeviceGetUUID(nvmlDeviceGetHandleByIndex(0))`).
-# Kept in tree for reference; not applied by 99-teardown.sh on Path B.
+# Multi-pod conflict bystander pod (§8.5.7).
+#
+# Schedules itself onto any one of the 8 GPUs on $TEST_NODE via the
+# NVIDIA device plugin's `nvidia.com/gpu: 1` resource claim and
+# annotates itself with a power-limit value that conflicts with
+# whatever the worker pods on that GPU asked for. The Power Agent
+# should detect the conflict, increment its `multi_pod_gpu_total`
+# (disposition=conflict) counter, apply safe-default on the assigned
+# GPU only, and leave the other 7 untouched.
+#
+# Historical note: a previous revision pinned this pod to a specific
+# GPU UUID via `NVIDIA_VISIBLE_DEVICES=GPU-<uuid>`. AKS clusters in
+# CDI device mode (the dpp-dev-env default) reject that with
+#   `unresolvable CDI devices management.nvidia.com/gpu=GPU-<uuid>`
+# and refuse to admit the pod. The resource-claim approach below is
+# CDI-mode-agnostic — the device plugin negotiates assignment using
+# its own machinery — and the live test discovers which GPU got the
+# bystander at runtime by intersecting NVML compute-running PIDs
+# across all 8 GPUs.
+#
+# Tracked as PR #9683 Finding #7. Test class:
+# `components/src/dynamo/planner/tests/integration/test_multi_dgd_live.py`
+# ::TestMultiPodConflict.
 # ---------------------------------------------------------------------
 apiVersion: v1
 kind: Pod
@@ -21,6 +32,8 @@ metadata:
     purpose: power-aware-multi-dgd-test
     role: conflict-bystander
   annotations:
+    # 200 W conflicts with every value in the topology table
+    # (300 / 325 / 350 / 375). The conflict is intentional.
     dynamo.nvidia.com/gpu-power-limit: "200"
 spec:
   restartPolicy: Never
@@ -38,17 +51,20 @@ spec:
       image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
       imagePullPolicy: IfNotPresent
       env:
-        - name: NVIDIA_VISIBLE_DEVICES
-          value: "GPU-bf70c96a-e37d-6949-07f8-eec8f315c14b"
+        # NVIDIA_DRIVER_CAPABILITIES still required so the toolkit
+        # injects libnvidia-ml.so etc.; the device plugin owns the
+        # actual GPU-id wiring via the resource claim above.
         - name: NVIDIA_DRIVER_CAPABILITIES
           value: "compute,utility"
       resources:
         requests:
           cpu: "200m"
           memory: "1Gi"
+          nvidia.com/gpu: 1
         limits:
           cpu: "1"
           memory: "2Gi"
+          nvidia.com/gpu: 1
       command: ["python3", "-c"]
       args:
         - |

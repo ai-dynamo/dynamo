@@ -131,10 +131,10 @@ kubectl exec -n $NS planner-dev -- env \
         -v --tb=short \
         -k 'not test_dcgm_'
 # Expected on Path A: TestPerDgdAnnotation (3), TestPowerAgentReconcile (2),
-# TestCapApplicationProof::test_nvml_per_gpu_cap_matches_topology (1) PASS;
-# TestMultiPodConflict SKIP; DCGM tests deselected by -k.
-# Expected on Path B: 4 PASS (annotation presence, PowerAgent reconcile x2,
-# NVML driver proof), 3 SKIP (2 Path-A-only planner tests + conflict class);
+# TestCapApplicationProof::test_nvml_per_gpu_cap_matches_topology (1),
+# TestMultiPodConflict (1) PASS; DCGM tests deselected by -k.
+# Expected on Path B: 5 PASS (annotation presence, PowerAgent reconcile x2,
+# NVML driver proof, multi-pod conflict), 2 SKIP (2 Path-A-only planner tests);
 # DCGM tests deselected by -k.
 ```
 
@@ -187,14 +187,12 @@ kubectl exec -n $NS planner-dev -- env \
 #   PASS — TestCapApplicationProof::test_dcgm_target_config_registered
 #          (same per-GPU-group iteration shape, reads Target instead of Current)
 #   PASS — TestPerDgdAnnotation (3 tests on Path A)
-#   SKIP — TestMultiPodConflict (Finding #7: AKS CDI rejects
-#          NVIDIA_VISIBLE_DEVICES=<uuid>; class-level skip with reason)
+#   PASS — TestMultiPodConflict (Finding #7 fixed via `nvidia.com/gpu: 1`
+#          resource claim + runtime GPU-index discovery — see below)
 ```
 
 If you only have time for one pass, run Phase 2 (NVML) — it covers the
-common-path actuator. The conflict scenario is currently skipped on
-AKS-CDI clusters (Finding #7); rerunning Phase 2 with that test
-re-enabled is the planned follow-up once the resource-claim rewrite lands.
+common-path actuator including the multi-pod conflict scenario.
 
 ## What this complements
 
@@ -233,10 +231,8 @@ planner pods at import time
   - `TestPowerAgentReconcile` (2 tests)
   - `TestCapApplicationProof` (NVML; DCGM gated additionally on
     `DCGM_HOSTENGINE_AVAILABLE=1`)
-- **Class-level-skipped tests** (skipped on every path until rewritten):
-  - `TestMultiPodConflict` (Finding #7 — AKS CDI mode)
 
-So on Path B the suite reports e.g. `4 passed, 3 skipped` with skip
+So on Path B the suite reports e.g. `5 passed, 2 skipped` with skip
 reasons that tie back to specific findings — no need for a `-k` filter.
 
 ### Path-B prerequisites
@@ -353,8 +349,9 @@ python3.10 -m pytest $TEST_FILE -v --tb=short -k 'not test_dcgm_'
 #            test_happy_path_zero_counters,
 #            test_nvml_per_gpu_cap_matches_topology
 #   skipped: test_aggregated_dgd_c_pod_was_patched_via_decode_branch (Path-A only),
-#            test_no_cross_dgd_annotation_contamination (Path-A only),
-#            TestMultiPodConflict class (Finding #7).
+#            test_no_cross_dgd_annotation_contamination (Path-A only).
+# (Post-Finding-#7-fix expected: 5 PASSED, 2 SKIPPED — multi-pod
+#  conflict now runs on Path B via the device-plugin claim path.)
 
 # --- DCGM pass --------------------------------------------------------
 # B.5 — standalone DCGM 4.5.1 hostengine DS (image was retagged to
@@ -378,7 +375,9 @@ python3.10 -m pytest $TEST_FILE -v --tb=short
 #   6 PASSED, 3 SKIPPED.
 #   newly passing (vs B.4): test_dcgm_per_gpu_cap_matches_topology,
 #                           test_dcgm_target_config_registered.
-#   still skipped:          2 Path-A tests + TestMultiPodConflict class.
+#   still skipped:          2 Path-A tests.
+# (Post-Finding-#7-fix expected: 7 PASSED, 2 SKIPPED on the DCGM pass,
+#  including the multi-pod conflict scenario.)
 ```
 
 ## 2026-05-21 live-run record on dpp-dev-env AKS
@@ -395,7 +394,7 @@ reference and as PR-feedback context.
 | 1 NVML | `TestPowerAgentReconcile::test_applied_limit_watts_metric_matches_topology` | **PASS** |
 | 1 NVML | `TestPowerAgentReconcile::test_happy_path_zero_counters` | **PASS** |
 | 1 NVML | `TestCapApplicationProof::test_nvml_per_gpu_cap_matches_topology` | **PASS** |
-| 1 NVML | `TestMultiPodConflict::test_conflict_triggers_safe_default_on_gpu0_only` | **BLOCKED** by AKS CDI (Finding #7) — *now class-level `@pytest.mark.skip` with that reason; no longer false-fails on a re-run* |
+| 1 NVML | `TestMultiPodConflict::test_conflict_triggers_safe_default_on_gpu0_only` | **BLOCKED** by AKS CDI (Finding #7) — *now rewritten to `test_conflict_triggers_safe_default_on_assigned_gpu` using a `nvidia.com/gpu: 1` device-plugin claim + runtime GPU-index discovery (Finding #7 fix). Expected to PASS on next live run.* |
 | 2 DCGM | Same 4 NVML tests re-run with PA in DCGM mode | **PASS** (4/4) |
 | 2 DCGM | `TestCapApplicationProof::test_dcgm_per_gpu_cap_matches_topology` | **SKIP** on live run (`dcgmi --json -g all` parse error — Finding #9). *Rewritten 2026-05-21 to iterate per-GPU groups; expected to PASS on next live run.* **Update 2026-05-21T20:11Z** — next live Path-B run (same date, post-rewrite) SKIPed again on a NEW defect: `kubernetes-client>=35.0.0` mangles JSON pod-exec stdout into a Python-dict-repr string before `json.loads` sees it (Finding #11). Manual per-group readback shows the DCGM contract holds (`Current == Target`, multiset matches topology). |
 | 2 DCGM | `TestCapApplicationProof::test_dcgm_target_config_registered` | **SKIP** on live run (same `dcgmi --json` issue). *Same rewrite; reads `Target` instead of `Current` from the same per-GPU-group payload.* **Update 2026-05-21T20:11Z** — same Finding #11 mangling causes the same skip; `Target` field present and matches NVML on manual readback. |
@@ -460,14 +459,25 @@ is just for cross-referencing.
    stdlib-`logging` shim into `/opt/dcgm/python/logger.py` (see the
    Path-B build script above).
 7. **`TestMultiPodConflict` needs a CDI-mode-safe bystander pattern.**
-   The test pins the bystander to a specific GPU UUID via
+   The previous test pinned the bystander to a specific GPU UUID via
    `NVIDIA_VISIBLE_DEVICES=<uuid>`. AKS clusters in CDI device mode
    reject both index and UUID forms with
-   `unresolvable CDI devices management.nvidia.com/gpu=*`. Fix: use
-   `nvidia.com/gpu: 1` device-plugin claim + discover the assigned
-   GPU UUID from `nvmlDeviceGetComputeRunningProcesses` inside the
-   agent pod, then drive the conflict assertions off that UUID.
-   File: `components/src/dynamo/planner/tests/integration/test_multi_dgd_live.py:849-862`.
+   `unresolvable CDI devices management.nvidia.com/gpu=*`.
+
+   **Status: fixed in `test_multi_dgd_live.py::TestMultiPodConflict`
+   and `40-conflict-bystander-pod.yaml` (commit landing with PR #9683
+   alongside this README).** The CDI-safe flow:
+   (a) bystander claims `nvidia.com/gpu: 1` from the device plugin
+       (CDI-mode-agnostic — the plugin owns assignment);
+   (b) after the pod reaches Running and starts a CUDA context, the
+       test intersects `nvmlDeviceGetComputeRunningProcesses` across
+       all 8 GPUs from the agent pod to discover *which* index the
+       plugin picked;
+   (c) the blast-radius and recovery asserts then key off that
+       discovered index instead of a hard-coded `0`.
+   Class-level `@pytest.mark.skip` has been removed, and the test is
+   renamed `test_conflict_triggers_safe_default_on_assigned_gpu` to
+   reflect the index-agnostic contract.
 8. **`_EXPECTED_CAP_PER_GPU` hard-codes per-index mapping.**
    The K8s device plugin assigns GPU indices nondeterministically — on
    our run the TP=2 pods landed on GPUs 0,1 and 4,5,6,7 instead of the

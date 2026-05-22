@@ -975,52 +975,50 @@ class TestCapApplicationProof:
 # ---------------------------------------------------------------------------
 
 
-# 2026-05-21 live-run: the implementation below pins the bystander pod
-# to a specific GPU UUID via `NVIDIA_VISIBLE_DEVICES=<uuid>`. AKS
-# clusters in CDI device mode reject both index AND UUID forms with
-# `unresolvable CDI devices management.nvidia.com/gpu=*`, so the test
-# does not run on dpp-dev-env. Captured as Finding #7 in
-# examples/multi-dgd-live-test/README.md. Until the fix lands
-# (resource-claim + PID-discovery to find the assigned UUID at runtime),
-# we skip the whole class to keep the suite green and the docs honest.
-_CDI_CONFLICT_SKIP_REASON = (
-    "Finding #7: AKS CDI device mode rejects NVIDIA_VISIBLE_DEVICES=<uuid>. "
-    "The bystander pod cannot be scheduled. Re-enable when the test is "
-    "rewritten to use `nvidia.com/gpu: 1` resource-claim + UUID discovery "
-    "from the agent pod (see README.md § PR feedback finding #7)."
-)
-
-
-@pytest.mark.skip(reason=_CDI_CONFLICT_SKIP_REASON)
 class TestMultiPodConflict:
-    """Deliberate misconfig: a bystander pod claims GPU 0 with a different
-    cap value. Power Agent must detect, increment counters, apply
-    safe-default on GPU 0 only, and leave GPUs 1-7 alone."""
+    """Deliberate misconfig: a bystander pod claims one GPU (whichever
+    the device plugin hands it) with a power-limit value that disagrees
+    with whatever worker pod already shares that GPU. Power Agent must
+    detect the disagreement, increment its multi_pod_gpu_total /
+    safe_default_applied_total counters, apply safe-default on the
+    *assigned* GPU only, and leave the other 7 GPUs alone.
 
-    @pytest.fixture(scope="class")
-    def bystander_uuid(
-        self, core_api: "k8s_client.CoreV1Api", power_agent_pod_name: str
-    ) -> str:
-        """Discover the UUID of GPU 0 on $TEST_NODE."""
-        py = (
-            "import pynvml; pynvml.nvmlInit(); "
-            "print(pynvml.nvmlDeviceGetUUID(pynvml.nvmlDeviceGetHandleByIndex(0)))"
-        )
-        out = _exec_in_pod(core_api, power_agent_pod_name, ["python", "-c", py])
-        return out.strip()
+    Historical note (PR #9683 Finding #7): the earlier implementation
+    pinned the bystander to a specific GPU UUID via
+    ``NVIDIA_VISIBLE_DEVICES=<uuid>``. AKS in CDI device mode rejects
+    that with ``unresolvable CDI devices management.nvidia.com/gpu=*``
+    and refuses to admit the pod. The CDI-safe path used here is:
 
-    def test_conflict_triggers_safe_default_on_gpu0_only(
+      1. Bystander pod claims ``nvidia.com/gpu: 1`` from the device
+         plugin — CDI-mode-agnostic, the plugin owns assignment.
+      2. After the bystander reaches Running and creates a CUDA
+         context, we discover *which* GPU index the device plugin
+         picked by intersecting NVML compute-running PIDs across all
+         8 GPUs (the agent pod has hostPID + NVML access, so it sees
+         the full picture).
+      3. All blast-radius asserts then key off the discovered index,
+         not a hard-coded `0`.
+
+    The bystander MUST create a CUDA compute context (a Python that
+    just imports torch isn't enough) because
+    ``nvmlDeviceGetComputeRunningProcesses`` — the API the Power Agent
+    reads (see ``actuator.py:199``) — only enumerates CUDA compute
+    PIDs. ``40-conflict-bystander-pod.yaml`` mirrors the inline
+    bystander_manifest below so YAML-debugging and test-debugging
+    agree.
+    """
+
+    def test_conflict_triggers_safe_default_on_assigned_gpu(
         self,
         core_api: "k8s_client.CoreV1Api",
         power_agent_pod_name: str,
-        bystander_uuid: str,
     ):
-        """§8.5.7 live: applying the bystander pod with annotation 200 ≠ 350
+        """§8.5.7 live: applying the bystander with annotation 200 ≠ {topology}
         causes:
           - multi_pod_gpu_total{disposition="conflict"} += 1
           - safe_default_applied_total += 1
-          - GPU 0 cap drops to safe_default (280 W)
-          - GPUs 1–7 retain their topology caps
+          - the bystander's assigned GPU drops to safe_default (280 W)
+          - the other 7 GPUs retain their topology caps
         """
         baseline_metrics = _scrape_power_agent_metrics(core_api, power_agent_pod_name)
 
@@ -1035,14 +1033,6 @@ class TestMultiPodConflict:
             "dynamo_power_agent_safe_default_applied_total", baseline_metrics
         )
 
-        # Create the bystander pod with the discovered UUID.
-        # IMPORTANT (review fix H3): the bystander MUST create a CUDA compute
-        # context — `nvmlDeviceGetComputeRunningProcesses` (the API the Power
-        # Agent reads, see actuator.py:199) only returns CUDA compute PIDs.
-        # nvidia-smi --query-gpu doesn't create a CUDA context. We use
-        # vllm-runtime (cached on the node) + a torch.cuda.init() + an
-        # active kernel loop. Match the 40-conflict-bystander-pod.yaml
-        # contents exactly so debugging the YAML by hand and by test agree.
         bystander_script = (
             "import torch, time\n"
             "torch.cuda.init()\n"
@@ -1053,6 +1043,9 @@ class TestMultiPodConflict:
             "    x.add_(1)\n"
             "    time.sleep(0.1)\n"
         )
+        # CDI-safe: no NVIDIA_VISIBLE_DEVICES. The device plugin's
+        # `nvidia.com/gpu: 1` claim drives assignment, and CDI mode
+        # negotiates the actual device wiring transparently.
         bystander_manifest = {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -1085,55 +1078,68 @@ class TestMultiPodConflict:
                         "command": ["python3", "-c"],
                         "args": [bystander_script],
                         "env": [
-                            {"name": "NVIDIA_VISIBLE_DEVICES", "value": bystander_uuid},
                             {
                                 "name": "NVIDIA_DRIVER_CAPABILITIES",
                                 "value": "compute,utility",
                             },
                         ],
                         "resources": {
-                            "requests": {"cpu": "200m", "memory": "1Gi"},
-                            "limits": {"cpu": "1", "memory": "2Gi"},
+                            "requests": {
+                                "cpu": "200m",
+                                "memory": "1Gi",
+                                "nvidia.com/gpu": 1,
+                            },
+                            "limits": {
+                                "cpu": "1",
+                                "memory": "2Gi",
+                                "nvidia.com/gpu": 1,
+                            },
                         },
                     }
                 ],
             },
         }
 
-        def _gpu0_compute_pids() -> Set[int]:
-            """Snapshot of GPU 0's compute-running PIDs as NVML sees them."""
+        def _per_gpu_compute_pids() -> Dict[int, Set[int]]:
+            """Snapshot {gpu_idx: {pid, ...}} across all 8 GPUs.
+
+            We query the agent pod (which has NVML + hostPID and so
+            sees the same view the reconcile loop does), then index
+            into the result by GPU index. Returning a dict keyed by
+            int rather than a flat set lets the caller discover which
+            GPU received the bystander by diffing per-index.
+            """
             py = (
-                "import pynvml, json; pynvml.nvmlInit(); "
-                "print(json.dumps([p.pid for p in "
-                "pynvml.nvmlDeviceGetComputeRunningProcesses("
-                "pynvml.nvmlDeviceGetHandleByIndex(0))]))"
+                "import pynvml, json\n"
+                "pynvml.nvmlInit()\n"
+                "n = pynvml.nvmlDeviceGetCount()\n"
+                "out = {}\n"
+                "for i in range(n):\n"
+                "    h = pynvml.nvmlDeviceGetHandleByIndex(i)\n"
+                "    out[i] = [p.pid for p in "
+                "pynvml.nvmlDeviceGetComputeRunningProcesses(h)]\n"
+                "print(json.dumps(out))"
             )
             raw = _exec_in_pod(core_api, power_agent_pod_name, ["python", "-c", py])
-            return set(json.loads(raw.strip()))
+            parsed = json.loads(raw.strip())
+            return {int(k): set(v) for k, v in parsed.items()}
 
-        # Capture the GPU 0 PID baseline BEFORE creating the bystander. vLLM
-        # pods can legitimately have multiple compute PIDs (rank-main +
-        # helpers), so a `count >= 2` check is not a reliable proof that
-        # the bystander's PID has actually arrived. We instead diff
-        # before-vs-after sets and wait until a NEW PID appears that wasn't
-        # in the baseline.
-        baseline_pids = _gpu0_compute_pids()
-        # Also snapshot the full per-GPU cap topology so we can later assert
-        # that the conflict's blast radius is GPU 0 only AND that recovery
-        # restores the exact pre-conflict state. We compare against this
-        # observed baseline, not the hard-coded _EXPECTED_CAP_PER_GPU,
-        # because the K8s device plugin assigns GPU indices arbitrarily on
-        # a clean test node — see _EXPECTED_CAP_PER_GPU comment in
-        # test_applied_limit_watts_metric_matches_topology.
+        # Capture the per-GPU PID baseline BEFORE creating the bystander
+        # so we can later diff to find which GPU the device plugin picked.
+        # vLLM pods can legitimately have multiple compute PIDs (rank-main +
+        # helpers); the diff-based approach is robust to that.
+        baseline_per_gpu_pids = _per_gpu_compute_pids()
+        # Snapshot the full cap topology too so the blast-radius assertion
+        # can compare against observed pre-conflict state (the device
+        # plugin's index assignment is what it is; we compare per-index
+        # before/after rather than against a hard-coded topology table).
         baseline_caps = _read_nvml_caps_via_pod(core_api, power_agent_pod_name)
 
         try:
             core_api.create_namespaced_pod(_NAMESPACE, bystander_manifest)
 
-            # Wait for the bystander to actually create a CUDA compute context
-            # on GPU 0 — Pod Running is necessary but NOT sufficient. torch
-            # context initialization takes a few seconds AFTER the Python
-            # process starts.
+            # Wait for Pod Running (CUDA context init follows a few
+            # seconds later — Running is necessary, not sufficient).
             for _ in range(60):
                 pod = core_api.read_namespaced_pod(
                     "power-conflict-bystander", _NAMESPACE
@@ -1144,39 +1150,41 @@ class TestMultiPodConflict:
             else:
                 pytest.fail("Bystander pod never reached Running state")
 
-            # Poll until at least one new PID appears that wasn't in the
-            # baseline. We don't try to map PIDs to cgroups (the agent's
-            # `_extract_pod_uid_from_cgroup` reads /host/proc which isn't
-            # exposed to us here) — instead we rely on the set difference,
-            # which proves *some* new compute context started on GPU 0
-            # after we created the bystander. If a vLLM rank crashed and
-            # restarted at the wrong moment that diff would be polluted,
-            # but that's a rare-race; in steady state baseline_pids is
-            # stable.
-            new_pids: Set[int] = set()
+            # Discover which GPU index the device plugin assigned by
+            # polling per-GPU PIDs and detecting the first index that
+            # gained a PID not present in the baseline. Wait up to 90 s
+            # (the torch.cuda.init() inside vllm-runtime is slow on a
+            # cold pod).
+            assigned_gpu: int = -1
             for _ in range(30):
-                current = _gpu0_compute_pids()
-                new_pids = current - baseline_pids
-                if new_pids:
+                current_per_gpu = _per_gpu_compute_pids()
+                # An assignment shows up as a new PID on exactly one GPU.
+                for idx, pids in current_per_gpu.items():
+                    new = pids - baseline_per_gpu_pids.get(idx, set())
+                    if new:
+                        assigned_gpu = idx
+                        break
+                if assigned_gpu >= 0:
                     break
                 time.sleep(3)
             else:
                 pytest.fail(
-                    "No new compute PID appeared on GPU 0 within 90s of "
-                    "bystander pod start. Either the torch script crashed "
-                    "(check `kubectl logs power-conflict-bystander -n "
-                    f"{_NAMESPACE}`), or NVIDIA_VISIBLE_DEVICES routing "
-                    f"failed (uuid={bystander_uuid!r}). "
-                    f"baseline_pids={sorted(baseline_pids)}, "
-                    f"current_pids={sorted(_gpu0_compute_pids())}"
+                    "No new compute PID appeared on ANY GPU within 90s of "
+                    "the bystander reaching Running. Either the torch "
+                    "script crashed (check `kubectl logs "
+                    f"power-conflict-bystander -n {_NAMESPACE}`), or the "
+                    "device-plugin claim didn't actually route a GPU to "
+                    "the pod. baseline="
+                    f"{ {k: sorted(v) for k, v in baseline_per_gpu_pids.items()} }, "
+                    "current="
+                    f"{ {k: sorted(v) for k, v in _per_gpu_compute_pids().items()} }"
                 )
 
-            # Now wait for the Power Agent to reconcile and detect the conflict.
+            # Let the Power Agent reconcile twice so the conflict is
+            # detected AND the safe-default cap-write is committed.
             time.sleep(2 * _RECONCILE_INTERVAL_S + 5)
 
             post_metrics = _scrape_power_agent_metrics(core_api, power_agent_pod_name)
-
-            # Counter delta assertions
             post_conflict = total(
                 'dynamo_power_agent_multi_pod_gpu_total{disposition="conflict"',
                 post_metrics,
@@ -1193,34 +1201,30 @@ class TestMultiPodConflict:
                 f"baseline={baseline_safe}, post={post_safe}"
             )
 
-            # GPU 0 should now be at safe-default; GPUs 1-7 unchanged
-            # relative to their pre-conflict caps. We compare GPUs 1-7
-            # against `baseline_caps` rather than the hard-coded topology
-            # table because the device plugin's index assignment is what it
-            # is — the contract is "the conflict on GPU 0 must NOT perturb
-            # any other GPU", which `baseline_caps[idx]` expresses
-            # faithfully regardless of which physical GPU got which pod.
+            # Blast-radius containment: the assigned GPU is at safe-default;
+            # every OTHER GPU still carries its pre-conflict cap.
             observed = _read_nvml_caps_via_pod(core_api, power_agent_pod_name)
-            assert observed[0] == _SAFE_DEFAULT_WATTS, (
-                f"GPU 0 should be at safe-default {_SAFE_DEFAULT_WATTS} W "
-                f"during conflict, got {observed[0]} W"
+            assert observed[assigned_gpu] == _SAFE_DEFAULT_WATTS, (
+                f"GPU {assigned_gpu} (the device-plugin's assignment for the "
+                f"bystander) should be at safe-default {_SAFE_DEFAULT_WATTS} W "
+                f"during conflict, got {observed[assigned_gpu]} W"
             )
-            for idx in range(1, 8):
+            for idx in range(8):
+                if idx == assigned_gpu:
+                    continue
                 assert observed[idx] == baseline_caps[idx], (
-                    f"GPU {idx} cap drifted during GPU 0 conflict: "
-                    f"baseline {baseline_caps[idx]} W, observed {observed[idx]} W. "
-                    f"Blast-radius containment violated."
+                    f"GPU {idx} cap drifted during GPU {assigned_gpu} conflict: "
+                    f"baseline {baseline_caps[idx]} W, observed "
+                    f"{observed[idx]} W. Blast-radius containment violated."
                 )
 
         finally:
-            # Always clean up — even if the asserts above failed.
             core_api.delete_namespaced_pod(
                 "power-conflict-bystander", _NAMESPACE, grace_period_seconds=0
             )
-            # Wait for the next agent tick to restore GPU 0 to its
-            # pre-conflict cap (the cap value of whichever worker pod owns
-            # GPU 0 in this particular run). Same baseline-vs-observed
-            # rationale as above.
+            # Recovery: after the bystander is gone the next reconcile
+            # tick should restore the assigned GPU to its pre-conflict
+            # cap (whatever worker pod owns it in this particular run).
             time.sleep(_RECONCILE_INTERVAL_S + 5)
             recovered = _read_nvml_caps_via_pod(core_api, power_agent_pod_name)
             assert recovered == baseline_caps, (
