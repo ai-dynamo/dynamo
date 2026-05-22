@@ -199,46 +199,9 @@ impl
                     .build()
                     .into());
             }
-            PrefillResolveDecision::NoBootstrapEndpoint {
-                worker_id: resolved_wid,
-                dp_rank: resolved_dp_rank,
-            } => {
-                // Bootstrap unavailable but worker was selected; use synchronous prefill
-                // and carry the known worker_id for topology-aware decode routing.
-                tracing::debug!(
-                    worker_id = resolved_wid,
-                    "Using original prefill path (no bootstrap endpoint), routing to resolved worker"
-                );
-                if !self.router_mode.is_kv_routing()
-                    && let Some(router) = self.prefill_router.get()
-                {
-                    router.select_next_worker();
-                }
-
-                let routing = prefill_req.routing_mut();
-                routing.prefill_worker_id = Some(resolved_wid);
-                routing.dp_rank = resolved_dp_rank;
-
-                drop(prefill_phase_barrier);
-                let prefill_context = Context::with_id_and_metadata(
-                    prefill_req,
-                    request_id.clone(),
-                    metadata.clone(),
-                );
-                let completion = Self::execute_prefill(
-                    self.prefill_router.get().cloned(),
-                    prefill_context,
-                    Some(resolved_wid),
-                    None,
-                )
-                .await?;
-                Ok(PrefillOutcome::Completed {
-                    result: completion.result,
-                    worker_id: Some(resolved_wid),
-                    worker_link: completion.worker_link,
-                })
-            }
-            PrefillResolveDecision::Unavailable | PrefillResolveDecision::NotActivated => {
+            PrefillResolveDecision::Unavailable
+            | PrefillResolveDecision::NotActivated
+            | PrefillResolveDecision::NoBootstrapEndpoint => {
                 // No worker resolved; fall back to router-selected prefill.
                 tracing::debug!("Using original prefill path (no resolved worker)");
                 drop(prefill_phase_barrier);

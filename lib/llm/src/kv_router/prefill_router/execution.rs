@@ -108,13 +108,13 @@ impl PrefillRouter {
             .model_manager
             .get_disaggregated_endpoint(endpoint_id, worker_id)
         else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
+            return PrefillResolveDecision::NoBootstrapEndpoint;
         };
         let Some(host) = endpoint.bootstrap_host else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
+            return PrefillResolveDecision::NoBootstrapEndpoint;
         };
         let Some(port) = endpoint.bootstrap_port else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
+            return PrefillResolveDecision::NoBootstrapEndpoint;
         };
 
         let dp_size: Option<u32> = self
