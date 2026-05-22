@@ -53,8 +53,13 @@ pub(super) enum PrefillResolveDecision {
     },
     Unavailable,
     NotActivated,
-    /// Bootstrap endpoint unavailable; caller should use synchronous prefill.
-    NoBootstrapEndpoint,
+    /// Bootstrap endpoint unavailable after a worker was selected.
+    /// Carries the peeked worker so the synchronous prefill path can commit
+    /// that selection instead of re-entering router selection.
+    NoBootstrapEndpoint {
+        worker_id: u64,
+        dp_rank: Option<u32>,
+    },
     Backpressure {
         reason: RouterBackpressureReason,
         queued_isl_tokens: usize,
