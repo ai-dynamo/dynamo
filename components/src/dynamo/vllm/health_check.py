@@ -113,6 +113,45 @@ class VllmHealthCheckPayload(HealthCheckPayload):
         return _layer_probe_marker(super().to_dict())
 
 
+class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
+    """
+    vLLM-specific health check payload for pooling/embedding workers.
+
+    Embedding workers run an ``AsyncLLM`` in pooling mode and serve the
+    ``EmbeddingWorkerHandler.generate`` entry point, which expects the
+    OpenAI ``/v1/embeddings`` request shape -- ``{model, input}`` -- not
+    the token-id/sampling-options shape the chat health check uses.
+    Sending the chat payload through the embedding handler raises
+    "missing required 'input' field" and the canary stays unhealthy
+    forever, so the runtime's ``/health`` never flips to 200 and any
+    caller that waits on it (``health_check_workers=True`` in the test
+    harness, K8s readiness probes, etc.) races against worker startup.
+
+    The probe runs a real pooling forward pass with a short input, so
+    "healthy" actually means "the engine produced an embedding," not
+    just "the process is up." Cost is one small batch every probe
+    cycle.
+    """
+
+    def __init__(self, model_name: str):
+        """
+        Args:
+            model_name: served model name the handler will accept on
+                ``request["model"]``. The handler also falls back to
+                ``config.served_model_name`` when the field is absent,
+                so this is technically optional, but providing it keeps
+                the probe self-describing in worker logs.
+        """
+        self.default_payload = {
+            "model": model_name,
+            "input": "probe",
+        }
+        super().__init__()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _layer_probe_marker(super().to_dict())
+
+
 class VllmPrefillHealthCheckPayload(HealthCheckPayload):
     """
     vLLM-specific health check payload for prefill workers in disaggregated mode.
