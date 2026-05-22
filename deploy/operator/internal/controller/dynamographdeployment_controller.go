@@ -25,6 +25,7 @@ import (
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/imdario/mergo"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 
@@ -58,6 +59,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	rbacv1 "k8s.io/api/rbac/v1"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -933,12 +935,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 		component := &dynamoDeployment.Spec.Components[i]
 		gmsSpec := dynamo.GetGPUMemoryService(component)
 		componentName := component.ComponentName
-		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(gmsSpec, dynamo.GetMainContainerResources(component))
-		if err != nil {
-			return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate for %s: %w", componentName, err)
+		gpuCount := 0
+		deviceClassName := ""
+		if gmsSpec != nil {
+			var err error
+			gpuCount, err = dra.ExtractGPUCountFromResourceRequirements(dynamo.GetMainContainerResources(component))
+			if err != nil {
+				return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate for %s: %w", componentName, err)
+			}
+			deviceClassName = gmsSpec.DeviceClassName
+			if deviceClassName == "" {
+				deviceClassName = dra.DefaultDeviceClassName
+			}
 		}
 		claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, componentName)
-		_, _, err = commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
 			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
 		})
 		if err != nil {
@@ -1685,6 +1696,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		if dynamo.IsIntraPodFailoverEnabled(component) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
+		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
+			return nil, nil, fmt.Errorf("failed to apply checkpoint gpuMemoryService config for component %s: %w", componentName, err)
+		}
 
 		// Store checkpoint info for later use in pod spec generation
 		checkpointInfos[componentName] = info
@@ -1747,19 +1761,30 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
 	}
 
+	targetContainerName := consts.MainContainerName
+	if checkpointConfig.TargetContainerName != "" {
+		targetContainerName = checkpointConfig.TargetContainerName
+	}
+	var gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec
+	if converted := gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)); converted != nil {
+		gmsSpec = converted.DeepCopy()
+	}
 	return checkpoint.CreateOrGetAutoCheckpoint(
 		ctx,
 		r.Client,
 		dynamoDeployment.Namespace,
 		checkpointIdentity,
 		podTemplate,
-		dynamo.ToAlphaGPUMemoryService(dynamo.GetGPUMemoryService(component)),
+		targetContainerName,
+		gmsSpec,
 	)
 }
 
-// buildCheckpointJobPodTemplate builds a pod template for the checkpoint job from the component spec.
-// It reuses GenerateBasePodSpec to ensure checkpoint jobs have the same configuration as regular pods,
-// including auto-discovered image pull secrets, envFromSecret, resources, security context, etc.
+// buildCheckpointJobPodTemplate builds a checkpoint job template from the same
+// component defaults used for regular DGD pods, then keeps only the target
+// container plus any checkpoint-job sidecars supplied by the user.
+//
+//nolint:gocyclo
 func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -1772,33 +1797,36 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		return corev1.PodTemplateSpec{}, err
 	}
 
+	targetContainerName := consts.MainContainerName
+	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.TargetContainerName != "" {
+		targetContainerName = checkpointConfig.TargetContainerName
+	}
+
 	// Create a copy of the component spec stripped of features that buildCheckpointJob
 	// or the checkpoint controller handle independently. GenerateBasePodSpec would
 	// otherwise apply DGD-specific transforms (DRA claims, GMS server sidecar,
-	// frontend sidecar) that conflict with the checkpoint path's own setup.
+	// frontend sidecar, failover transforms) that conflict with the checkpoint path's
+	// own setup.
 	componentForJob := component.DeepCopy()
 	if componentForJob.Experimental != nil {
 		componentForJob.Experimental.Checkpoint = nil
 		componentForJob.Experimental.GPUMemoryService = nil
-		if componentForJob.Experimental.Failover == nil {
+		componentForJob.Experimental.Failover = nil
+		if componentForJob.Experimental.GPUMemoryService == nil &&
+			componentForJob.Experimental.Failover == nil &&
+			componentForJob.Experimental.Checkpoint == nil {
 			componentForJob.Experimental = nil
 		}
 	}
 	componentForJob.FrontendSidecar = nil
 
-	// Generate base PodSpec using the same logic as regular worker pods
-	// This includes: image pull secrets (auto-discovered + explicit), envFromSecret,
-	// resources, security context, tolerations, node selectors, etc.
-	//
-	// Note: For checkpoint jobs, we use Grove deployment type even though it's single-node.
-	// This is because GenerateBasePodSpec requires a valid MultinodeDeployer, and for
-	// single-node cases, the backends simply return early without modifications.
-	podSpec, err := dynamo.GenerateBasePodSpec(
+	// Use the normal DGD path so graph-level defaults such as spec.env,
+	// annotations, labels, and pod-template metadata are applied consistently.
+	podSpec, err := dynamo.GeneratePodSpecForComponent(
 		componentForJob,
 		backendFramework,
 		r.DockerSecretRetriever,
-		dynamoDeployment.Name,
-		dynamoDeployment.Namespace,
+		dynamoDeployment,
 		dynamo.RoleCheckpoint, // Use checkpoint role
 		1,                     // Single node for checkpoint job
 		r.Config,
@@ -1811,17 +1839,98 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)
 	}
 
+	if podSpec == nil {
+		return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint job pod spec is nil")
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == targetContainerName {
+			podSpec.Containers = []corev1.Container{*podSpec.Containers[i].DeepCopy()}
+			break
+		}
+	}
+	if len(podSpec.Containers) != 1 || podSpec.Containers[0].Name != targetContainerName {
+		return corev1.PodTemplateSpec{}, fmt.Errorf("checkpoint target container %q not found", targetContainerName)
+	}
+
 	// Override RestartPolicy for job (must be Never or OnFailure)
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
-	return corev1.PodTemplateSpec{
+	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
 				consts.KubeLabelDynamoComponent: componentName,
 			},
 		},
 		Spec: *podSpec,
-	}, nil
+	}
+	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.Job != nil {
+		if overrides := checkpointConfig.Job.PodTemplate; overrides != nil {
+			if len(overrides.Labels) > 0 {
+				if podTemplate.Labels == nil {
+					podTemplate.Labels = make(map[string]string, len(overrides.Labels))
+				}
+				for k, v := range overrides.Labels {
+					podTemplate.Labels[k] = v
+				}
+			}
+			if len(overrides.Annotations) > 0 {
+				if podTemplate.Annotations == nil {
+					podTemplate.Annotations = make(map[string]string, len(overrides.Annotations))
+				}
+				for k, v := range overrides.Annotations {
+					podTemplate.Annotations[k] = v
+				}
+			}
+
+			overlay := overrides.Spec.DeepCopy()
+			containers := overlay.Containers
+			initContainers := overlay.InitContainers
+			volumes := overlay.Volumes
+			overlay.Containers = nil
+			overlay.InitContainers = nil
+			overlay.Volumes = nil
+			if err := mergo.Merge(&podTemplate.Spec, *overlay, mergo.WithOverride); err != nil {
+				return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge checkpoint job pod spec: %w", err)
+			}
+
+			podTemplate.Spec.Volumes = mergeNamedSlice(podTemplate.Spec.Volumes, volumes, func(v corev1.Volume) string { return v.Name })
+			podTemplate.Spec.InitContainers = mergeNamedSlice(podTemplate.Spec.InitContainers, initContainers, func(c corev1.Container) string { return c.Name })
+			for _, override := range containers {
+				if override.Name == "" {
+					podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, override)
+					continue
+				}
+				var existing *corev1.Container
+				for i := range podTemplate.Spec.Containers {
+					if podTemplate.Spec.Containers[i].Name == override.Name {
+						existing = &podTemplate.Spec.Containers[i]
+						break
+					}
+				}
+				if existing == nil {
+					podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, override)
+					continue
+				}
+
+				baseEnv := existing.Env
+				user := override.DeepCopy()
+				if err := mergo.Merge(existing, *user, mergo.WithOverride); err != nil {
+					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge checkpoint job container %q: %w", override.Name, err)
+				}
+				existing.Env = dynamo.MergeEnvs(baseEnv, user.Env)
+				if user.LivenessProbe != nil {
+					existing.LivenessProbe = user.LivenessProbe.DeepCopy()
+				}
+				if user.ReadinessProbe != nil {
+					existing.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+				}
+				if user.StartupProbe != nil {
+					existing.StartupProbe = user.StartupProbe.DeepCopy()
+				}
+			}
+		}
+	}
+	return podTemplate, nil
 }
 
 // reconcileScalingAdapters ensures a DynamoGraphDeploymentScalingAdapter exists for each component in the DGD

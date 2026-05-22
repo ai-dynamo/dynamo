@@ -167,18 +167,19 @@ const (
 	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
 	// GMSModeInterPod runs GMS as a separate weight server pod and one or more
 	// engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared
-	// hostPath volume for UDS sockets. Only valid on FailoverSpec; the
-	// GPUMemoryServiceSpec sidecar always runs in intraPod mode.
+	// hostPath volume for UDS sockets. Extra client pod rendering is reserved
+	// for a follow-up change.
 	GMSModeInterPod GPUMemoryServiceMode = "interPod"
 )
 
-// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
-// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
-// via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
-// (weights + kv_cache) and communicates with the main container over UDS sockets.
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a worker component.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == 'intraPod'",message="extraClientContainers is only supported with mode=intraPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == 'interPod'",message="extraClientPods is only supported with mode=interPod"
+// +kubebuilder:validation:XValidation:rule="!has(self.extraClientPods) || size(self.extraClientPods) == 0",message="extraClientPods is reserved for inter-pod GMS and is not implemented yet"
 type GPUMemoryServiceSpec struct {
-	// Enabled activates the GMS sidecar. GPU resources on the main container
-	// are replaced with a DRA ResourceClaim for shared GPU access.
+	// Enabled activates GMS wiring. GPU resources on client containers are
+	// replaced with a DRA ResourceClaim for shared GPU access.
 	Enabled bool `json:"enabled"`
 	// Mode selects the GMS deployment topology.
 	// +kubebuilder:default=intraPod
@@ -189,6 +190,38 @@ type GPUMemoryServiceSpec struct {
 	// +kubebuilder:default="gpu.nvidia.com"
 	// +optional
 	DeviceClassName string `json:"deviceClassName,omitempty"`
+
+	// ExtraClientContainers lists additional user-declared containers that should
+	// be wired as GMS clients in intrapod pods/jobs. In each rendered pod, only
+	// matching container names are wired; absent names are ignored.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	ExtraClientContainers []string `json:"extraClientContainers,omitempty"`
+
+	// ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+	// reserved for future use and is rejected until inter-pod client orchestration is wired.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	ExtraClientPods []GMSClientPodSpec `json:"extraClientPods,omitempty"`
+}
+
+// GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+type GMSClientPodSpec struct {
+	// Name identifies this client pod.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// PodTemplate configures the pod to run as a GMS client.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate"`
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
@@ -243,6 +276,8 @@ const (
 
 // ServiceCheckpointConfig configures checkpointing for a DGD service
 // +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.mode) || self.mode == 'Auto'",message="checkpoint.job can only be set in Auto mode"
 type ServiceCheckpointConfig struct {
 	// Enabled indicates whether checkpointing is enabled for this service
 	// +optional
@@ -266,4 +301,28 @@ type ServiceCheckpointConfig struct {
 	// Required when checkpointRef is not specified
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
+
+	// TargetContainerName is the workload container to snapshot and restore.
+	// +optional
+	// +kubebuilder:default=main
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetContainerName string `json:"targetContainerName,omitempty"`
+
+	// Job customizes the checkpoint Job that is created in Auto mode.
+	// +optional
+	Job *ServiceCheckpointJobConfig `json:"job,omitempty"`
+}
+
+// ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
+type ServiceCheckpointJobConfig struct {
+	// PodTemplate customizes the checkpoint Job pod. The operator starts from the
+	// selected workload container and merges this template so users can add helper
+	// containers such as gms-saver.
+	// +optional
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
