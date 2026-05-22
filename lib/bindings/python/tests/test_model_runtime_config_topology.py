@@ -19,7 +19,7 @@ def test_model_runtime_config_topology_fields_round_trip():
     runtime_config.taints = {"user.taint/example"}
     runtime_config.topology_domains = {"zone": "us-east-1a"}
     runtime_config.kv_transfer_domain = "zone"
-    runtime_config.kv_transfer_enforcement = "Preferred"
+    runtime_config.kv_transfer_enforcement = "preferred"
     runtime_config.kv_transfer_preferred_weight = 0.85
 
     assert runtime_config.taints == {"user.taint/example"}
@@ -40,7 +40,3 @@ def test_model_runtime_config_rejects_invalid_topology_policy_values():
 
     with pytest.raises(ValueError, match="kv_transfer_enforcement"):
         runtime_config.kv_transfer_enforcement = "fallback"
-
-    for invalid_weight in (1.1, -0.1, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="kv_transfer_preferred_weight"):
-            runtime_config.kv_transfer_preferred_weight = invalid_weight

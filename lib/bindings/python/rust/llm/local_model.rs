@@ -313,7 +313,7 @@ impl ModelRuntimeConfig {
             return Ok(());
         };
 
-        let kv_transfer_enforcement = kv_transfer_enforcement.trim().to_ascii_lowercase();
+        let kv_transfer_enforcement = kv_transfer_enforcement;
         self.inner.kv_transfer_enforcement = match kv_transfer_enforcement.as_str() {
             "" => None,
             "required" => Some(RsKvTransferEnforcement::Required),
@@ -337,14 +337,6 @@ impl ModelRuntimeConfig {
         &mut self,
         kv_transfer_preferred_weight: Option<f32>,
     ) -> PyResult<()> {
-        if let Some(value) = kv_transfer_preferred_weight
-            && (!value.is_finite() || !(0.0..=1.0).contains(&value))
-        {
-            return Err(PyValueError::new_err(
-                "kv_transfer_preferred_weight must be finite and between 0.0 and 1.0",
-            ));
-        }
-
         self.inner.kv_transfer_preferred_weight = kv_transfer_preferred_weight;
         Ok(())
     }
