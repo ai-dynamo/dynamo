@@ -25,7 +25,9 @@ use crate::local_model::LocalModel;
 use crate::protocols::common::FinishReason as BackendFinishReason;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use crate::protocols::openai::{
+    chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
+};
 
 pub(crate) type SharedFinishReasonMetadata = Arc<Mutex<FinishReasonMetadataState>>;
 
@@ -274,6 +276,41 @@ fn record_chat_finish_reason_metadata(
     }
 }
 
+fn completion_finish_reason_to_finish_reason(
+    finish_reason: dynamo_protocols::types::CompletionFinishReason,
+) -> dynamo_protocols::types::FinishReason {
+    match finish_reason {
+        dynamo_protocols::types::CompletionFinishReason::Stop => {
+            dynamo_protocols::types::FinishReason::Stop
+        }
+        dynamo_protocols::types::CompletionFinishReason::Length => {
+            dynamo_protocols::types::FinishReason::Length
+        }
+        dynamo_protocols::types::CompletionFinishReason::ContentFilter => {
+            dynamo_protocols::types::FinishReason::ContentFilter
+        }
+    }
+}
+
+fn record_completion_finish_reason_metadata(
+    finish_reason_metadata: &SharedFinishReasonMetadata,
+    response: &Annotated<NvCreateCompletionResponse>,
+) {
+    let Some(data) = response.data.as_ref() else {
+        return;
+    };
+
+    let mut metadata = finish_reason_metadata.lock();
+    for choice in &data.inner.choices {
+        if let Some(finish_reason) = choice.finish_reason {
+            metadata.record_choice_finish_reason(
+                choice.index,
+                completion_finish_reason_to_finish_reason(finish_reason),
+            );
+        }
+    }
+}
+
 fn snapshot_finish_reason_metadata(
     finish_reason_metadata: &SharedFinishReasonMetadata,
 ) -> Option<FinishReasonMetadata> {
@@ -333,6 +370,22 @@ pub(crate) fn wrap_agent_trace_chat_request_end_stream(
 
     let stream = stream.map(move |response| {
         record_chat_finish_reason_metadata(&finish_reason_metadata, &response);
+        response
+    });
+    wrap_agent_trace_request_end_stream(Box::pin(stream), trace_state, request_id)
+}
+
+pub(crate) fn wrap_agent_trace_completion_request_end_stream(
+    stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>,
+    trace_state: Option<AgentTraceRequestEndState>,
+    request_id: String,
+) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>> {
+    let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
+        return wrap_agent_trace_request_end_stream(stream, trace_state, request_id);
+    };
+
+    let stream = stream.map(move |response| {
+        record_completion_finish_reason_metadata(&finish_reason_metadata, &response);
         response
     });
     wrap_agent_trace_request_end_stream(Box::pin(stream), trace_state, request_id)
@@ -484,16 +537,20 @@ mod tests {
         self,
         timing::{RequestTracker, WORKER_TYPE_DECODE},
     };
-    use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+    use crate::protocols::openai::{
+        chat_completions::NvCreateChatCompletionStreamResponse,
+        completions::NvCreateCompletionResponse,
+    };
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
-        CreateChatCompletionStreamResponse, FinishReason, FunctionCallStream, StopReason,
+        Choice, CompletionFinishReason, CreateChatCompletionStreamResponse,
+        CreateCompletionResponse, FinishReason, FunctionCallStream, StopReason,
     };
 
     use super::{
         AgentTraceRequestEndState, FinishReasonMetadataState,
         record_backend_finish_reason_metadata, request_metrics,
-        wrap_agent_trace_chat_request_end_stream,
+        wrap_agent_trace_chat_request_end_stream, wrap_agent_trace_completion_request_end_stream,
     };
 
     #[test]
@@ -714,6 +771,98 @@ mod tests {
         assert_eq!(
             metadata.choices[0].finish_reason,
             Some(FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_completion_request_end_records_finish_reason_metadata() {
+        super::super::BUS.init(16);
+        let mut rx = super::super::BUS.subscribe();
+
+        let finish_reason_metadata = Arc::new(Mutex::new(FinishReasonMetadataState::default()));
+        record_backend_finish_reason_metadata(
+            Some(&finish_reason_metadata),
+            Some(0),
+            Some(&common::FinishReason::Stop),
+            Some(&StopReason::String("END".to_string())),
+        );
+
+        let trace_state = AgentTraceRequestEndState {
+            agent_context: AgentContext {
+                session_type_id: "ms_agent".to_string(),
+                session_id: "run-completion-finish".to_string(),
+                trajectory_id: "run-completion-finish:agent".to_string(),
+                parent_trajectory_id: None,
+            },
+            request_model: "test-model".to_string(),
+            request_tracker: None,
+            x_request_id: Some("completion-call-1".to_string()),
+            replay_metrics: None,
+            finish_reason_metadata,
+        };
+
+        let stream =
+            futures::stream::iter(vec![Annotated::from_data(NvCreateCompletionResponse {
+                inner: CreateCompletionResponse {
+                    id: "cmpl-1".to_string(),
+                    object: "text_completion".to_string(),
+                    created: 0,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    choices: vec![Choice {
+                        text: "".to_string(),
+                        index: 0,
+                        logprobs: None,
+                        finish_reason: Some(CompletionFinishReason::Length),
+                    }],
+                    usage: None,
+                },
+                nvext: None,
+            })]);
+
+        let wrapped = wrap_agent_trace_completion_request_end_stream(
+            Box::pin(stream),
+            Some(trace_state),
+            "req-completion-finish".to_string(),
+        );
+        let responses: Vec<_> = wrapped.collect().await;
+        assert_eq!(responses.len(), 1);
+
+        let record = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let record = rx.recv().await.expect("trace record should publish");
+                if record.event_type == TraceEventType::RequestEnd
+                    && record
+                        .request
+                        .as_ref()
+                        .is_some_and(|request| request.request_id == "req-completion-finish")
+                {
+                    break record;
+                }
+            }
+        })
+        .await
+        .expect("trace record for req-completion-finish should publish");
+        let request = record.request.expect("request metrics should be present");
+        let metadata = request
+            .finish_reason_metadata
+            .expect("finish metadata should be recorded");
+        assert_eq!(metadata.backend_finish_reason.as_deref(), Some("stop"));
+        assert_eq!(metadata.finish_reason, Some(FinishReason::Length));
+        assert_eq!(
+            metadata.stop_reason,
+            Some(StopReason::String("END".to_string()))
+        );
+        assert!(metadata.tool_calls.is_empty());
+        assert_eq!(metadata.choices.len(), 1);
+        assert_eq!(metadata.choices[0].choice_index, 0);
+        assert_eq!(
+            metadata.choices[0].backend_finish_reason.as_deref(),
+            Some("stop")
+        );
+        assert_eq!(
+            metadata.choices[0].finish_reason,
+            Some(FinishReason::Length)
         );
     }
 }

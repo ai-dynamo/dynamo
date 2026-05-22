@@ -2843,7 +2843,7 @@ impl
             trace_finish_reason_metadata,
         );
 
-        let stream = crate::agents::trace::wrap_agent_trace_request_end_stream(
+        let stream = crate::agents::trace::wrap_agent_trace_completion_request_end_stream(
             Box::pin(stream),
             trace_state,
             request_id,

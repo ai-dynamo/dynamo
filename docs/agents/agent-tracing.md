@@ -191,7 +191,8 @@ Top-level finish fields summarize the common single-choice case; `choices`
 keeps per-choice finish fields when `n > 1`. Tool-call metadata includes ids and
 names only; arguments are intentionally not stored in agent traces.
 For chat streams, final finish metadata is recorded after parser/jail rewrites;
-completion streams currently record backend finish and stop metadata only.
+completion streams record the final OpenAI-compatible completion finish reason
+from the completion response choices.
 
 By default we do not save the input/ouput payloads. In order to view these, use the built in Dynamo `audit_sink` functionality.
 
