@@ -54,10 +54,11 @@ pub(super) enum PrefillResolveDecision {
     Unavailable,
     NotActivated,
     /// Bootstrap endpoint unavailable, but a worker was selected.
-    /// Carries the worker_id so the synchronous path can route to the
+    /// Carries the worker selection so the synchronous path can route to the
     /// same worker and use it for topology-aware decode routing.
     NoBootstrapEndpoint {
         worker_id: u64,
+        dp_rank: Option<u32>,
     },
     Backpressure {
         reason: RouterBackpressureReason,
