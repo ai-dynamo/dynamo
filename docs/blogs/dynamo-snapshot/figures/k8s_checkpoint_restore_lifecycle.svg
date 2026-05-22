@@ -1,95 +1,74 @@
-<svg width="100%" viewBox="0 0 690 360" role="img" xmlns="http://www.w3.org/2000/svg" style="">
-<rect width="100%" height="100%" fill="#ffffff"/>
-  <title style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">Kubernetes checkpoint and restore lifecycle</title>
-  <desc style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">On the checkpoint node, the snapshot agent observes the workload pod from the host and writes the artifact plus overlay diff to a shared PVC. On the restore node, the agent enters a placeholder pod's namespaces and restores the workload inside.</desc>
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-  </defs>
-
-  <g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-    <rect x="20" y="40" width="240" height="260" rx="14" fill="none" stroke-width="0.5" stroke-dasharray="4 3" style="fill:rgb(241, 239, 232);stroke:rgb(95, 94, 90);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-dasharray:4px, 3px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="40" y="62" style="fill:rgb(95, 94, 90);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:start;dominant-baseline:auto">Node 0</text>
-  </g>
-
-  <g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-    <rect x="40" y="80" width="200" height="120" rx="10" stroke-width="0.5" style="fill:rgb(230, 241, 251);stroke:rgb(24, 95, 165);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="45" y="100" style="fill:rgb(24, 95, 165);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:start;dominant-baseline:auto">Workload pod (checkpoint target)</text>
-    <rect x="64" y="118" width="152" height="64" rx="6" fill="none" stroke-width="0.5" opacity="0.7" style="fill:rgb(230, 241, 251);stroke:rgb(24, 95, 165);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.7;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="140" y="142" text-anchor="middle" dominant-baseline="central" style="fill:rgb(12, 68, 124);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">Workload</text>
-    <text x="140" y="162" text-anchor="middle" dominant-baseline="central" style="fill:rgb(24, 95, 165);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:middle;dominant-baseline:central">vLLM/SGLang/TRTLLM</text>
-  </g>
-
-  <g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-    <rect x="40" y="218" width="200" height="60" rx="8" stroke-width="0.5" style="fill:rgb(250, 238, 218);stroke:rgb(133, 79, 11);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="140" y="240" text-anchor="middle" dominant-baseline="central" style="fill:rgb(99, 56, 6);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">snapshot-agent</text>
-    <text x="140" y="260" text-anchor="middle" dominant-baseline="central" style="fill:rgb(133, 79, 11);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:middle;dominant-baseline:central">Privileged DaemonSet</text>
-  </g>
-
-  <line x1="140" y1="200" x2="140" y2="218" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arrow)" style="fill:rgb(0, 0, 0);stroke:rgb(95, 94, 90);color:rgb(0, 0, 0);stroke-width:1px;stroke-dasharray:3px, 3px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-  <text x="148" y="213" text-anchor="start" style="fill:rgb(61, 61, 58);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:start;dominant-baseline:auto">Observe from host</text>
-
-  <g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-    <rect x="290" y="160" width="100" height="60" rx="8" stroke-width="0.5" style="fill:rgb(225, 245, 238);stroke:rgb(15, 110, 86);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="340" y="182" text-anchor="middle" dominant-baseline="central" style="fill:rgb(8, 80, 65);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">PVC</text>
-    <text x="340" y="202" text-anchor="middle" dominant-baseline="central" style="fill:rgb(15, 110, 86);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:middle;dominant-baseline:central">shared storage</text>
-  </g>
-
-  <g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-    <rect x="420" y="40" width="240" height="260" rx="14" fill="none" stroke-width="0.5" stroke-dasharray="4 3" style="fill:rgb(241, 239, 232);stroke:rgb(95, 94, 90);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-dasharray:4px, 3px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="440" y="62" style="fill:rgb(95, 94, 90);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:start;dominant-baseline:auto">Node #1</text>
-  </g>
-
-  <g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-    <rect x="440" y="80" width="200" height="120" rx="10" stroke-width="0.5" style="fill:rgb(230, 241, 251);stroke:rgb(24, 95, 165);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="450" y="100" style="fill:rgb(24, 95, 165);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:start;dominant-baseline:auto">Placeholder Pod (restore target)</text>
-    <rect x="464" y="118" width="152" height="64" rx="6" fill="none" stroke-width="0.5" opacity="0.7" style="fill:rgb(230, 241, 251);stroke:rgb(24, 95, 165);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.7;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="540" y="138" text-anchor="middle" dominant-baseline="central" style="fill:rgb(12, 68, 124);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">Placeholder</text>
-    <text x="540" y="156" text-anchor="middle" dominant-baseline="central" style="fill:rgb(24, 95, 165);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:middle;dominant-baseline:central">sleep ∞</text>
-  </g>
-
-  <g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-    <rect x="440" y="218" width="200" height="60" rx="8" stroke-width="0.5" style="fill:rgb(250, 238, 218);stroke:rgb(133, 79, 11);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-    <text x="540" y="240" text-anchor="middle" dominant-baseline="central" style="fill:rgb(99, 56, 6);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">snapshot-agent</text>
-    <text x="540" y="260" text-anchor="middle" dominant-baseline="central" style="fill:rgb(133, 79, 11);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:middle;dominant-baseline:central">Privileged DaemonSet</text>
-  </g>
-
-  <line x1="460" y1="218" x2="460" y2="200" stroke="#BA7517" stroke-width="1.4" marker-end="url(#arrow)" style="fill:rgb(0, 0, 0);stroke:rgb(186, 117, 23);color:rgb(0, 0, 0);stroke-width:1.4px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-  <text x="465.64" y="213" text-anchor="start" style="fill:rgb(61, 61, 58);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:start;dominant-baseline:auto">Enter and restore inside NS</text>
-
-  <line x1="240" y1="248" x2="290" y2="200" stroke="#0F6E56" stroke-width="1.4" marker-end="url(#arrow)" style="fill:rgb(0, 0, 0);stroke:rgb(15, 110, 86);color:rgb(0, 0, 0);stroke-width:1.4px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-  <line x1="390" y1="200" x2="440" y2="248" stroke="#0F6E56" stroke-width="1.4" marker-end="url(#arrow)" style="fill:rgb(0, 0, 0);stroke:rgb(15, 110, 86);color:rgb(0, 0, 0);stroke-width:1.4px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-  <text x="340" y="248" text-anchor="middle" style="fill:rgb(61, 61, 58);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:middle;dominant-baseline:auto">dump artifact + overlay diff</text>
-  <!-- Sequence badges: checkpoint (amber) and restore (purple) -->
-  <g font-family="&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif" font-size="11" font-weight="700" text-anchor="middle" dominant-baseline="central">
-    <!-- Checkpoint flow (amber #BA7517): 1 workload ready, 2 agent observes, 3 dump to PVC -->
-    <circle cx="54" cy="80" r="9" fill="#BA7517" stroke="#ffffff" stroke-width="1.5"/>
-    <text x="54" y="80" fill="#ffffff">1</text>
-
-    <circle cx="124" cy="209" r="9" fill="#BA7517" stroke="#ffffff" stroke-width="1.5"/>
-    <text x="124" y="209" fill="#ffffff">2</text>
-
-    <circle cx="265" cy="225" r="9" fill="#BA7517" stroke="#ffffff" stroke-width="1.5"/>
-    <text x="265" y="225" fill="#ffffff">3</text>
-
-    <!-- Restore flow (purple #6B46C1): 1 placeholder ready, 2 read from PVC, 3 enter and restore -->
-    <circle cx="454" cy="80" r="9" fill="#6B46C1" stroke="#ffffff" stroke-width="1.5"/>
-    <text x="454" y="80" fill="#ffffff">1</text>
-
-    <circle cx="415" cy="225" r="9" fill="#6B46C1" stroke="#ffffff" stroke-width="1.5"/>
-    <text x="415" y="225" fill="#ffffff">2</text>
-
-    <circle cx="446" cy="209" r="9" fill="#6B46C1" stroke="#ffffff" stroke-width="1.5"/>
-    <text x="446" y="209" fill="#ffffff">3</text>
-  </g>
-
-  <!-- Legend -->
-  <g font-family="&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif" font-size="11" dominant-baseline="central">
-    <circle cx="40" cy="328" r="7" fill="#BA7517"/>
-    <text x="52" y="328" fill="#3D3D3A">Checkpoint</text>
-    <circle cx="140" cy="328" r="7" fill="#6B46C1"/>
-    <text x="152" y="328" fill="#3D3D3A">Restore</text>
-  </g>
-
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+<rect width="1280" height="720" fill="#000000"/>
+<style>
+  .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 36px; font-weight: 300; fill: #ffffff; }
+  .subtitle { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 17px; font-weight: 300; fill: #cdcdcd; }
+  .node-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; fill: #cdcdcd; letter-spacing: 0.02em; }
+  .role-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+  .card-title { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 500; fill: #ffffff; }
+  .card-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #8c8c8c; }
+  .step-num { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; fill: #000000; }
+  .step-num-green { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; fill: #ffffff; }
+  .arrow-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 500; fill: #cdcdcd; }
+  .arrow-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 10px; font-weight: 400; fill: #8c8c8c; }
+  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
+</style>
+<text class="title" x="60" y="60">Kubernetes checkpoint and restore lifecycle</text>
+<text class="subtitle" x="60" y="88">A privileged DaemonSet observes the workload pod, writes the artifact to shared storage, and restores into a placeholder pod on another node</text>
+<rect x="80.0" y="150" width="420" height="460" fill="none" stroke="#2a2a2a" stroke-width="1" stroke-dasharray="4 4"/>
+<text class="node-label" x="96.0" y="172">Node 0</text>
+<text class="role-label" x="484.0" y="172" text-anchor="end" fill="#8c8c8c">checkpoint</text>
+<rect x="110.0" y="200" width="360" height="210" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="card-title" x="156.0" y="228">Workload pod</text>
+<text class="card-meta" x="156.0" y="248">checkpoint target</text>
+<rect x="130.0" y="270" width="320" height="120" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="card-title" x="290.0" y="334.0" text-anchor="middle">Workload runtime</text>
+<text class="card-meta" x="290.0" y="354.0" text-anchor="middle">vLLM &#183; SGLang &#183; TensorRT-LLM</text>
+<circle cx="130.0" cy="224" r="11" fill="#5a5a5a"/>
+<text class="step-num" x="130.0" y="228" text-anchor="middle">1</text>
+<rect x="110.0" y="440" width="360" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="card-title" x="156.0" y="470">snapshot-agent</text>
+<text class="card-meta" x="156.0" y="492">privileged DaemonSet</text>
+<circle cx="130.0" cy="466" r="11" fill="#5a5a5a"/>
+<text class="step-num" x="130.0" y="470" text-anchor="middle">2</text>
+<circle cx="450.0" cy="466" r="11" fill="#5a5a5a"/>
+<text class="step-num" x="450.0" y="470" text-anchor="middle">3</text>
+<rect x="780.0" y="150" width="420" height="460" fill="none" stroke="#2a2a2a" stroke-width="1" stroke-dasharray="4 4"/>
+<text class="node-label" x="796.0" y="172">Node 1</text>
+<text class="role-label" x="1184.0" y="172" text-anchor="end" fill="#74b711">restore</text>
+<rect x="810.0" y="200" width="360" height="210" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="card-title" x="856.0" y="228">Placeholder pod</text>
+<text class="card-meta" x="856.0" y="248">restore target</text>
+<rect x="830.0" y="270" width="320" height="120" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="card-title" x="990.0" y="334.0" text-anchor="middle">Placeholder</text>
+<text class="card-meta" x="990.0" y="354.0" text-anchor="middle">sleep &#8734;</text>
+<circle cx="830.0" cy="224" r="11" fill="#74b711"/>
+<text class="step-num-green" x="830.0" y="228" text-anchor="middle">3</text>
+<rect x="810.0" y="440" width="360" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="card-title" x="856.0" y="470">snapshot-agent</text>
+<text class="card-meta" x="856.0" y="492">privileged DaemonSet</text>
+<circle cx="830.0" cy="466" r="11" fill="#74b711"/>
+<text class="step-num-green" x="830.0" y="470" text-anchor="middle">1</text>
+<circle cx="1150.0" cy="466" r="11" fill="#74b711"/>
+<text class="step-num-green" x="1150.0" y="470" text-anchor="middle">2</text>
+<line x1="180.0" y1="410" x2="180.0" y2="432" stroke="#5a5a5a" stroke-width="1" stroke-dasharray="3 3"/>
+<polygon points="175.0,432 185.0,432 180.0,440" fill="#5a5a5a"/>
+<text class="arrow-meta" x="192.0" y="429.0">Observe from host</text>
+<line x1="880.0" y1="440" x2="880.0" y2="418" stroke="#74b711" stroke-width="1.5"/>
+<polygon points="875.0,418 885.0,418 880.0,410" fill="#74b711"/>
+<text class="arrow-meta" x="892.0" y="429.0">Enter and restore inside NS</text>
+<rect x="540.0" y="430.0" width="200" height="110" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="card-title" x="640.0" y="481.0" text-anchor="middle">PVC</text>
+<text class="card-meta" x="640.0" y="505.0" text-anchor="middle">shared storage</text>
+<line x1="470.0" y1="485.0" x2="530.0" y2="485.0" stroke="#7a7a7a" stroke-width="2"/>
+<polygon points="530.0,478.0 540.0,485.0 530.0,492.0" fill="#7a7a7a"/>
+<text class="arrow-meta" x="505.0" y="475.0" text-anchor="middle">dump artifact</text>
+<text class="arrow-meta" x="505.0" y="507.0" text-anchor="middle" fill="#5a5a5a">+ overlay diff</text>
+<line x1="740.0" y1="485.0" x2="800.0" y2="485.0" stroke="#74b711" stroke-width="2"/>
+<polygon points="800.0,478.0 810.0,485.0 800.0,492.0" fill="#74b711"/>
+<text class="arrow-meta" x="775.0" y="475.0" text-anchor="middle">restore artifact</text>
+<circle cx="553.5" cy="676" r="6" fill="#5a5a5a"/>
+<text class="legend" x="567.5" y="680">checkpoint</text>
+<circle cx="671.5" cy="676" r="6" fill="#74b711"/>
+<text class="legend" x="685.5" y="680">restore</text>
 </svg>

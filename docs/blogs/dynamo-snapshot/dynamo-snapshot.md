@@ -126,11 +126,9 @@ After CRIU has restored the shared resources (files, sockets, shmem objects, mem
 
 In upstream CRIU, that fill was a synchronous `preadv` loop. The restorer pulls one job off the list, hands it to `preadv`, and waits. The kernel issues that single read to the storage device, the device DMAs the bytes into the destination VMA pages, and `preadv` returns. Only then does the restorer move on to the next job. There's exactly one read in flight at any moment, which means the storage device is idle for most of the wall-clock time — sitting there waiting for the next request between every read. A single blocking stream barely uses what fast NVMe can do, and on network-attached storage every read pays a full round-trip before the next one starts.
 
-![Synchronous preadv loop: one read in flight at a time, storage device idle between requests.](./figures/preadv_serial_before.svg)
-
 We replaced the `preadv` loop with Linux native AIO. CRIU builds a list of read jobs ahead of time — each job is an `iocb` describing a file offset, a byte count, and an `iovec` pointing at the destination VMA pages. The restorer creates an AIO context, which holds many distinct read transactions simultaneously, allowing the storage device to run them concurrently across its internal channels. The restorer then submits a batch of those iocbs with `io_submit`, and keeps a window of up to 128 in flight. As completions come back via `io_getevents`, new submissions backfill the window until every job is done.
 
-![Native AIO pipeline: up to 128 reads in flight via io_submit and io_getevents, storage device runs them concurrently.](./figures/aio_pipeline_after.svg)
+![Before: a synchronous preadv loop has one read in flight at a time, leaving the storage device idle between requests. After: a native AIO pipeline keeps up to 128 reads in flight via io_submit and io_getevents, running them concurrently across the storage device's internal channels.](./figures/aio_pipeline_after.svg)
 
 
 #### Direct I/O and the Page Cache
@@ -199,7 +197,7 @@ The CRIU checkpoint now only contains the host-side state of the container's pro
 
 ### Full Overlap with External Weight Restoration
 
-To demonstrate the full power of overlapping CRIU and cuda-checkpoint restore with a faster channel for restoring the weights, we implemented a proof-of-concept backend for `gms-loader` where the weights for each model are sharded across 8 SSDs on a node. However, we had to ensure the restored workload was on the same node it was checkpointed on. This setup demonstrates what restore times we can expect when *weight restoration isn't the bottleneck*, and come from a very fast channel that is independent from NFS that we are using for the CRIU checkpoint artifact (e.g. P2P transfer over RDMA, GPUDirect Storage, etc). 
+To demonstrate the full power of overlapping CRIU and cuda-checkpoint restore with a faster channel for restoring the weights, we implemented a proof-of-concept backend for `gms-loader` where the weights for each model are sharded across 8 SSDs on a node. However, we had to ensure the restored workload was on the same node it was checkpointed on. This setup demonstrates what restore times we can expect when *weight restoration isn't the bottleneck*, and come from a very fast channel that is independent from NFS that we are using for the CRIU checkpoint artifact (e.g. P2P transfer over RDMA, GPUDirect Storage, etc).
 
 For this setup, parallelizing the container restoration in CRIU and the weights restoration via `gms-loader` allows us to achieve under 6s restore time, even for the largest checkpoint (Qwen2.5 72B). For most other models, the startup time is well under 5 seconds.
 

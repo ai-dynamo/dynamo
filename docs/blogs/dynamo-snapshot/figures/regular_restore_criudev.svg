@@ -1,134 +1,74 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="834" viewBox="0 0 1900 834" style="background:#f8fafc;color-scheme:light">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+<rect width="1280" height="720" fill="#000000"/>
 <style>
-  text { font-family: Inter, Arial, Helvetica, sans-serif; letter-spacing: 0; fill: #0F172A; }
-  .title { font-size: 50px; font-weight: 800; }
-  .subtitle { font-size: 26px; fill: #475569; }
-  .axis, .axis-label { font-size: 21px; font-weight: 700; fill: #334155; }
-  .model, .model-label { font-size: 24px; font-weight: 800; fill: #0F172A; }
-  .lane-label { font-size: 20px; font-weight: 700; fill: #475569; }
-  .legend, .legend-label { font-size: 22px; font-weight: 700; fill: #1E293B; }
-  .bar-label { font-size: 19px; font-weight: 800; fill: #0F172A; }
+  .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 36px; font-weight: 300; fill: #ffffff; }
+  .subtitle { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 17px; font-weight: 300; fill: #cdcdcd; }
+  .model { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #ffffff; }
+  .lane-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 11px; font-weight: 400; fill: #cdcdcd; }
+  .num { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 500; fill: #ffffff; }
+  .num-on-green { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 600; fill: #000000; }
+  .total { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 14px; font-weight: 500; fill: #ffffff; }
+  .axis { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
+  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
 </style>
-<rect width="100%" height="100%" fill="#f8fafc"/>
-<rect x="228" y="168" width="1594" height="502" rx="6" fill="#ffffff" stroke="#e2e8f0"/>
-<text class="title" x="240" y="64">Dynamo vLLM Snapshot Restore (Unoptimized)</text>
-<text class="subtitle" x="240" y="110">Single-GPU (1xB200)</text>
-<line x1="240.0" y1="190" x2="240.0" y2="682" stroke="#e5e7eb"/>
-<line x1="240.0" y1="184" x2="240.0" y2="190" stroke="#64748b"/>
-<text class="axis-label" x="240.0" y="180" text-anchor="middle">0.0s</text>
-<text class="axis-label" x="240.0" y="708" text-anchor="middle">0.0s</text>
-<line x1="464.3" y1="190" x2="464.3" y2="682" stroke="#e5e7eb"/>
-<line x1="464.3" y1="184" x2="464.3" y2="190" stroke="#64748b"/>
-<text class="axis-label" x="464.3" y="180" text-anchor="middle">20s</text>
-<text class="axis-label" x="464.3" y="708" text-anchor="middle">20s</text>
-<line x1="688.6" y1="190" x2="688.6" y2="682" stroke="#e5e7eb"/>
-<line x1="688.6" y1="184" x2="688.6" y2="190" stroke="#64748b"/>
-<text class="axis-label" x="688.6" y="180" text-anchor="middle">40s</text>
-<text class="axis-label" x="688.6" y="708" text-anchor="middle">40s</text>
-<line x1="912.9" y1="190" x2="912.9" y2="682" stroke="#e5e7eb"/>
-<line x1="912.9" y1="184" x2="912.9" y2="190" stroke="#64748b"/>
-<text class="axis-label" x="912.9" y="180" text-anchor="middle">1m</text>
-<text class="axis-label" x="912.9" y="708" text-anchor="middle">1m</text>
-<line x1="1137.1" y1="190" x2="1137.1" y2="682" stroke="#e5e7eb"/>
-<line x1="1137.1" y1="184" x2="1137.1" y2="190" stroke="#64748b"/>
-<text class="axis-label" x="1137.1" y="180" text-anchor="middle">1m20s</text>
-<text class="axis-label" x="1137.1" y="708" text-anchor="middle">1m20s</text>
-<line x1="1361.4" y1="190" x2="1361.4" y2="682" stroke="#e5e7eb"/>
-<line x1="1361.4" y1="184" x2="1361.4" y2="190" stroke="#64748b"/>
-<text class="axis-label" x="1361.4" y="180" text-anchor="middle">1m40s</text>
-<text class="axis-label" x="1361.4" y="708" text-anchor="middle">1m40s</text>
-<line x1="1585.7" y1="190" x2="1585.7" y2="682" stroke="#e5e7eb"/>
-<line x1="1585.7" y1="184" x2="1585.7" y2="190" stroke="#64748b"/>
-<text class="axis-label" x="1585.7" y="180" text-anchor="middle">2m</text>
-<text class="axis-label" x="1585.7" y="708" text-anchor="middle">2m</text>
-<line x1="1810.0" y1="190" x2="1810.0" y2="682" stroke="#e5e7eb"/>
-<line x1="1810.0" y1="184" x2="1810.0" y2="190" stroke="#64748b"/>
-<text class="axis-label" x="1810.0" y="180" text-anchor="middle">2m20s</text>
-<text class="axis-label" x="1810.0" y="708" text-anchor="middle">2m20s</text>
-<line x1="240" y1="190" x2="1810" y2="190" stroke="#64748b" stroke-width="1"/>
-<line x1="240" y1="168" x2="240" y2="682" stroke="#0f172a" stroke-width="1.2"/>
-<text class="model-label" x="230" y="206" text-anchor="end">Qwen3 0.6B</text>
-<text class="lane-label" x="230" y="249" text-anchor="end">Cold Start</text>
-<line x1="240" y1="272" x2="1810" y2="272" stroke="#f1f5f9"/>
-<rect x="240.0" y="218" width="590.8" height="50" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 0.6B Cold Start: 52.686s (0.000s -&gt; 52.686s); raw=cold start total, excluding base container startup</title>
-</rect>
-<rect x="509.9" y="227.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="535.4" y="250.0" class="bar-label" text-anchor="middle">53s</text>
-<text class="lane-label" x="230" y="313" text-anchor="end">Snapshot Restore</text>
-<line x1="240" y1="336" x2="1810" y2="336" stroke="#f1f5f9"/>
-<rect x="240.0" y="282" width="1.2" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 0.6B agent setup: 0.070s (0.000s -&gt; 0.070s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
-</rect>
-<rect x="240.8" y="282" width="76.2" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 0.6B CRIU restore: 6.793s (0.069s -&gt; 6.862s); raw=criu_restore</title>
-</rect>
-<rect x="247.9" y="291.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="278.9" y="314.0" class="bar-label" text-anchor="middle">6.8s</text>
-<rect x="317.0" y="282" width="11.1" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 0.6B CUDA restore: 0.989s (6.863s -&gt; 7.852s); raw=cuda_restore</title>
-</rect>
-<rect x="328.2" y="282" width="1.9" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 0.6B wake / remap: 0.166s (7.861s -&gt; 8.027s); raw=worker_wake_up</title>
-</rect>
-<text class="model-label" x="230" y="376" text-anchor="end">Qwen3 8B</text>
-<text class="lane-label" x="230" y="419" text-anchor="end">Cold Start</text>
-<line x1="240" y1="442" x2="1810" y2="442" stroke="#f1f5f9"/>
-<rect x="240.0" y="388" width="657.9" height="50" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 8B Cold Start: 58.664s (0.000s -&gt; 58.664s); raw=cold start total, excluding base container startup</title>
-</rect>
-<rect x="543.4" y="397.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="568.9" y="420.0" class="bar-label" text-anchor="middle">59s</text>
-<text class="lane-label" x="230" y="483" text-anchor="end">Snapshot Restore</text>
-<line x1="240" y1="506" x2="1810" y2="506" stroke="#f1f5f9"/>
-<rect x="240.0" y="452" width="1.2" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 8B agent setup: 0.073s (0.000s -&gt; 0.073s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
-</rect>
-<rect x="240.8" y="452" width="273.4" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 8B CRIU restore: 24.383s (0.073s -&gt; 24.456s); raw=criu_restore</title>
-</rect>
-<rect x="352.0" y="461.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="377.5" y="484.0" class="bar-label" text-anchor="middle">24s</text>
-<rect x="514.3" y="452" width="34.1" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 8B CUDA restore: 3.039s (24.457s -&gt; 27.496s); raw=cuda_restore</title>
-</rect>
-<rect x="548.5" y="452" width="5.1" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>Qwen3 8B wake / remap: 0.452s (27.508s -&gt; 27.960s); raw=worker_wake_up</title>
-</rect>
-<text class="model-label" x="230" y="546" text-anchor="end">gpt-oss-120b</text>
-<text class="lane-label" x="230" y="589" text-anchor="end">Cold Start</text>
-<line x1="240" y1="612" x2="1810" y2="612" stroke="#f1f5f9"/>
-<rect x="240.0" y="558" width="958.5" height="50" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>gpt-oss-120b Cold Start: 85.473s (0.000s -&gt; 85.473s); raw=cold start total, excluding base container startup</title>
-</rect>
-<rect x="693.8" y="567.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="719.3" y="590.0" class="bar-label" text-anchor="middle">85s</text>
-<text class="lane-label" x="230" y="653" text-anchor="end">Snapshot Restore</text>
-<line x1="240" y1="676" x2="1810" y2="676" stroke="#f1f5f9"/>
-<rect x="240.0" y="622" width="1.2" height="50" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>gpt-oss-120b agent setup: 0.082s (0.000s -&gt; 0.082s); raw=agent_detect_to_restore_start, host_inspect, agent_nsrestore_launch, nsrestore_setup</title>
-</rect>
-<rect x="240.9" y="622" width="1338.1" height="50" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>gpt-oss-120b CRIU restore: 119.317s (0.082s -&gt; 119.399s); raw=criu_restore</title>
-</rect>
-<rect x="878.9" y="631.0" width="62.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="909.9" y="654.0" class="bar-label" text-anchor="middle">119s</text>
-<rect x="1579.0" y="622" width="158.8" height="50" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>gpt-oss-120b CUDA restore: 14.162s (119.399s -&gt; 133.561s); raw=cuda_restore</title>
-</rect>
-<rect x="1632.9" y="631.0" width="51.0" height="32" rx="5" fill="#FFFFFF" fill-opacity="0.96" stroke="#0F172A" stroke-opacity="0.35"/>
-<text x="1658.4" y="654.0" class="bar-label" text-anchor="middle">14s</text>
-<rect x="1737.9" y="622" width="18.0" height="50" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.22" stroke-width="1">
-<title>gpt-oss-120b wake / remap: 1.605s (133.568s -&gt; 135.173s); raw=worker_wake_up</title>
-</rect>
-<rect x="240" y="733" width="22" height="22" rx="3" fill="#9C755F" stroke="#0f172a" stroke-opacity="0.20"/>
-<text class="legend-label" x="272" y="751">Cold Start</text>
-<rect x="554" y="733" width="22" height="22" rx="3" fill="#111827" stroke="#0f172a" stroke-opacity="0.20"/>
-<text class="legend-label" x="586" y="751">agent setup</text>
-<rect x="868" y="733" width="22" height="22" rx="3" fill="#377eb8" stroke="#0f172a" stroke-opacity="0.20"/>
-<text class="legend-label" x="900" y="751">CRIU restore</text>
-<rect x="1182" y="733" width="22" height="22" rx="3" fill="#4daf4a" stroke="#0f172a" stroke-opacity="0.20"/>
-<text class="legend-label" x="1214" y="751">CUDA restore</text>
-<rect x="1496" y="733" width="22" height="22" rx="3" fill="#6a3d9a" stroke="#0f172a" stroke-opacity="0.20"/>
-<text class="legend-label" x="1528" y="751">wake / remap</text>
+<text class="title" x="40" y="58">Snapshot restore vs cold start (unoptimized)</text>
+<text class="subtitle" x="40" y="88">Without our CRIU patches, snapshot restore is slower than a cold start for gpt-oss-120b (135s vs 85s)</text>
+<line x1="260.0" y1="160" x2="260.0" y2="650" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="260.0" y="668" text-anchor="middle">0s</text>
+<line x1="379.2" y1="160" x2="379.2" y2="650" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="379.2" y="668" text-anchor="middle">20s</text>
+<line x1="498.5" y1="160" x2="498.5" y2="650" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="498.5" y="668" text-anchor="middle">40s</text>
+<line x1="617.7" y1="160" x2="617.7" y2="650" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="617.7" y="668" text-anchor="middle">60s</text>
+<line x1="737.0" y1="160" x2="737.0" y2="650" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="737.0" y="668" text-anchor="middle">80s</text>
+<line x1="856.2" y1="160" x2="856.2" y2="650" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="856.2" y="668" text-anchor="middle">100s</text>
+<line x1="975.4" y1="160" x2="975.4" y2="650" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="975.4" y="668" text-anchor="middle">120s</text>
+<line x1="1094.7" y1="160" x2="1094.7" y2="650" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="1094.7" y="668" text-anchor="middle">140s</text>
+<text class="model" x="40" y="182">Qwen3 0.6B</text>
+<text class="lane-label" x="245" y="224.0" text-anchor="end">cold start</text>
+<text class="lane-label" x="245" y="272.0" text-anchor="end">snapshot restore</text>
+<rect x="260.0" y="206" width="314.1" height="28" fill="#4a4a4a"/>
+<text class="num" x="417.1" y="224.0" text-anchor="middle">52.7s</text>
+<text class="total" x="586.1" y="225.0">52.7s</text>
+<rect x="260.0" y="254" width="2.0" height="28" fill="#5a5a5a"/>
+<rect x="260.4" y="254" width="40.5" height="28" fill="#7a7a7a"/>
+<text class="num" x="280.7" y="272.0" text-anchor="middle">6.8s</text>
+<rect x="300.9" y="254" width="12.0" height="28" fill="#9a9a9a"/>
+<text class="total" x="318.8" y="273.0">7.9s</text>
+<text class="model" x="40" y="352">Qwen3 8B</text>
+<text class="lane-label" x="245" y="394.0" text-anchor="end">cold start</text>
+<text class="lane-label" x="245" y="442.0" text-anchor="end">snapshot restore</text>
+<rect x="260.0" y="376" width="349.8" height="28" fill="#4a4a4a"/>
+<text class="num" x="434.9" y="394.0" text-anchor="middle">58.7s</text>
+<text class="total" x="621.8" y="395.0">58.7s</text>
+<rect x="260.0" y="424" width="2.0" height="28" fill="#5a5a5a"/>
+<rect x="260.4" y="424" width="145.4" height="28" fill="#7a7a7a"/>
+<text class="num" x="333.1" y="442.0" text-anchor="middle">24.4s</text>
+<rect x="405.8" y="424" width="18.1" height="28" fill="#9a9a9a"/>
+<text class="total" x="435.9" y="443.0">27.5s</text>
+<text class="model" x="40" y="522">gpt-oss-120b</text>
+<text class="lane-label" x="245" y="564.0" text-anchor="end">cold start</text>
+<text class="lane-label" x="245" y="612.0" text-anchor="end">snapshot restore</text>
+<rect x="260.0" y="546" width="509.6" height="28" fill="#4a4a4a"/>
+<text class="num" x="514.8" y="564.0" text-anchor="middle">85.5s</text>
+<text class="total" x="781.6" y="565.0">85.5s</text>
+<rect x="260.0" y="594" width="2.0" height="28" fill="#5a5a5a"/>
+<rect x="260.5" y="594" width="711.4" height="28" fill="#7a7a7a"/>
+<text class="num" x="616.2" y="612.0" text-anchor="middle">119.3s</text>
+<rect x="971.9" y="594" width="84.4" height="28" fill="#9a9a9a"/>
+<text class="num" x="1014.1" y="612.0" text-anchor="middle">14.2s</text>
+<text class="total" x="1068.3" y="613.0">133.6s</text>
+<rect x="419.5" y="680" width="12" height="12" fill="#4a4a4a"/>
+<text class="legend" x="437.5" y="690">cold start</text>
+<rect x="525.5" y="680" width="12" height="12" fill="#5a5a5a"/>
+<text class="legend" x="543.5" y="690">agent setup</text>
+<rect x="638.5" y="680" width="12" height="12" fill="#7a7a7a"/>
+<text class="legend" x="656.5" y="690">CRIU restore</text>
+<rect x="758.5" y="680" width="12" height="12" fill="#9a9a9a"/>
+<text class="legend" x="776.5" y="690">CUDA restore</text>
 </svg>

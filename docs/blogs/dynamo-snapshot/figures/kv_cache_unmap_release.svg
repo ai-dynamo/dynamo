@@ -1,45 +1,50 @@
-<svg width="100%" viewBox="0 0 680 280" role="img" xmlns="http://www.w3.org/2000/svg" style="">
-<rect width="100%" height="100%" fill="#ffffff"/>
-<title style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">KV cache unmap and release optimization</title>
-<desc style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">Two device memory boxes shown side by side. The left box contains weights, KV cache, and CUDA graph plus buffers. An arrow points to the right box, which contains only weights and CUDA graph plus buffers — the KV cache has been unmapped and released.</desc>
-<defs>
-<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
-</defs>
-
-<g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-<rect x="20" y="40" width="290" height="220" rx="12" stroke-width="0.5" style="fill:rgb(241, 239, 232);stroke:rgb(95, 94, 90);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<text x="165" y="62" text-anchor="middle" dominant-baseline="central" style="fill:rgb(68, 68, 65);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">Device memory</text>
-</g>
-
-<g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-<rect x="40" y="80" width="100" height="120" rx="8" stroke-width="0.5" style="fill:rgb(234, 243, 222);stroke:rgb(59, 109, 17);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<text x="90" y="140" text-anchor="middle" dominant-baseline="central" style="fill:rgb(39, 80, 10);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">Weights</text>
-</g>
-
-<g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-<rect x="160" y="80" width="130" height="120" rx="8" stroke-width="0.5" style="fill:rgb(234, 243, 222);stroke:rgb(59, 109, 17);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<text x="225" y="140" text-anchor="middle" dominant-baseline="central" style="fill:rgb(39, 80, 10);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">KV cache</text>
-</g>
-
-<g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-<rect x="40" y="210" width="250" height="36" rx="8" stroke-width="0.5" style="fill:rgb(234, 243, 222);stroke:rgb(59, 109, 17);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<text x="165" y="228" text-anchor="middle" dominant-baseline="central" style="fill:rgb(39, 80, 10);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">CUDA graph + buffers</text>
-</g>
-
-<line x1="325" y1="150" x2="365" y2="150" marker-end="url(#arrow)" stroke-width="1.5" style="fill:none;stroke:rgb(115, 114, 108);color:rgb(0, 0, 0);stroke-width:1.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-
-<g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-<rect x="380" y="40" width="280" height="220" rx="12" stroke-width="0.5" style="fill:rgb(241, 239, 232);stroke:rgb(95, 94, 90);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<text x="520" y="62" text-anchor="middle" dominant-baseline="central" style="fill:rgb(68, 68, 65);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">Device memory</text>
-</g>
-
-<g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-<rect x="400" y="80" width="100" height="120" rx="8" stroke-width="0.5" style="fill:rgb(234, 243, 222);stroke:rgb(59, 109, 17);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<text x="450" y="140" text-anchor="middle" dominant-baseline="central" style="fill:rgb(39, 80, 10);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">Weights</text>
-</g>
-
-<g style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-<rect x="400" y="210" width="240" height="36" rx="8" stroke-width="0.5" style="fill:rgb(234, 243, 222);stroke:rgb(59, 109, 17);color:rgb(0, 0, 0);stroke-width:0.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<text x="520" y="228" text-anchor="middle" dominant-baseline="central" style="fill:rgb(39, 80, 10);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:14px;font-weight:500;text-anchor:middle;dominant-baseline:central">CUDA graph + buffers</text>
-</g>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="600" viewBox="0 0 1280 600">
+<rect width="1280" height="600" fill="#000000"/>
+<style>
+  .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 36px; font-weight: 300; fill: #ffffff; }
+  .subtitle { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 17px; font-weight: 300; fill: #cdcdcd; }
+  .frame-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; fill: #8c8c8c; letter-spacing: 0.04em; text-transform: uppercase; }
+  .frame-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
+  .block-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #ffffff; }
+  .block-label-small { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; fill: #ffffff; }
+  .block-label-green { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #74b711; }
+  .block-label-ghost { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 400; fill: #5a5a5a; font-style: italic; }
+  .block-meta-mono { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
+  .block-meta-mono-dim { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #8c8c8c; }
+  .block-meta-mono-green { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #74b711; }
+  .block-meta-mono-ghost { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #5a5a5a; }
+  .arrow-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; fill: #ffffff; letter-spacing: 0.04em; }
+  .arrow-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #74b711; }
+</style>
+<text class="title" x="40" y="58">Releasing the KV cache before freeze</text>
+<text class="subtitle" x="40" y="86">Unmapping cache buffers before the snapshot keeps the artifact small &#8212; checkpoint shrinks by 186 GiB for Qwen3 0.6B on B200</text>
+<rect x="70.0" y="140" width="480" height="400" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="frame-label" x="94.0" y="170">Before freeze</text>
+<text class="frame-meta" x="526.0" y="170" text-anchor="end">Device memory &#183; 192 GiB HBM</text>
+<rect x="94.0" y="196" width="432" height="35.95854922279793" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label-small" x="108.0" y="217.97927461139898">Weights</text>
+<text class="block-meta-mono" x="512.0" y="217.97927461139898" text-anchor="end">~6 GiB &#183; Qwen3 0.6B FP8</text>
+<rect x="94.0" y="239.95854922279793" width="432" height="246.71502590673575" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label" x="310.0" y="359.3160621761658" text-anchor="middle">KV cache</text>
+<text class="block-meta-mono" x="310.0" y="381.3160621761658" text-anchor="middle">~186 GiB &#183; active sessions</text>
+<rect x="94.0" y="494.6735751295337" width="432" height="29.326424870466322" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label-small" x="108.0" y="513.3367875647668">CUDA graph + buffers</text>
+<text class="block-meta-mono" x="512.0" y="513.3367875647668" text-anchor="end">small &#183; compiled kernels</text>
+<rect x="730.0" y="140" width="480" height="400" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="frame-label" x="754.0" y="170">After unmap + release</text>
+<text class="frame-meta" x="1186.0" y="170" text-anchor="end">Snapshot footprint &#183; ~6 GiB</text>
+<rect x="754.0" y="196" width="432" height="35.95854922279793" fill="#000000" stroke="#74b711" stroke-width="1.5"/>
+<text class="block-label-small" x="768.0" y="217.97927461139898">Weights</text>
+<text class="block-meta-mono-green" x="1172.0" y="217.97927461139898" text-anchor="end">~6 GiB &#183; survives freeze</text>
+<rect x="754.0" y="239.95854922279793" width="432" height="246.71502590673575" fill="none" stroke="#5a5a5a" stroke-width="1" stroke-dasharray="6 6"/>
+<text class="block-label-ghost" x="970.0" y="359.3160621761658" text-anchor="middle">KV cache</text>
+<text class="block-meta-mono-ghost" x="970.0" y="381.3160621761658" text-anchor="middle">released &#183; ~186 GiB recovered</text>
+<rect x="754.0" y="494.6735751295337" width="432" height="29.326424870466322" fill="#000000" stroke="#74b711" stroke-width="1.5"/>
+<text class="block-label-small" x="768.0" y="513.3367875647668">CUDA graph + buffers</text>
+<text class="block-meta-mono-green" x="1172.0" y="513.3367875647668" text-anchor="end">small &#183; survives freeze</text>
+<line x1="564.0" y1="340.0" x2="704.0" y2="340.0" stroke="#74b711" stroke-width="2"/>
+<polygon points="704.0,332.0 716.0,340.0 704.0,348.0" fill="#74b711"/>
+<text class="arrow-label" x="640.0" y="312.0" text-anchor="middle">UNMAP + RELEASE</text>
+<text class="arrow-meta" x="640.0" y="366.0" text-anchor="middle">192 GiB &#8594; 6 GiB</text>
+<text class="arrow-meta" x="640.0" y="384.0" text-anchor="middle" fill="#8c8c8c">&#8722;186 GiB checkpoint</text>
 </svg>

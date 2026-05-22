@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="760" viewBox="0 0 1600 760">
+<rect width="1600" height="760" fill="#000000"/>
+<style>
+  .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 44px; font-weight: 300; fill: #ffffff; }
+  .subtitle { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 20px; font-weight: 300; fill: #cdcdcd; }
+  .pod-name { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 18px; font-weight: 500; fill: #ffffff; }
+  .pod-tag { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; fill: #8c8c8c; letter-spacing: 0.08em; }
+  .pod-tag-green { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 500; fill: #74b711; letter-spacing: 0.08em; }
+  .block-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 500; fill: #ffffff; }
+  .block-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
+  .arrow-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 500; fill: #ffffff; letter-spacing: 0.04em; }
+  .arrow-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
+  .arrow { stroke: #5a5a5a; stroke-width: 1.5; fill: none; }
+  .arrow-green { stroke: #74b711; stroke-width: 1.5; fill: none; }
+</style>
+<text class="title" x="50" y="68">Dynamo Snapshot</text>
+<text class="subtitle" x="50" y="100">Capture a warm worker once, restore it in seconds</text>
+<rect x="110" y="200" width="380" height="380" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="pod-name" x="134" y="238">Running worker</text>
+<text class="pod-tag" x="466" y="238" text-anchor="end">WARM</text>
+<line x1="134" y1="260" x2="466" y2="260" stroke="#2a2a2a" stroke-width="1"/>
+<rect x="134" y="280" width="332" height="130" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label" x="150" y="341.0">vLLM engine</text>
+<text class="block-meta" x="150" y="365.0">EngineCore + workers</text>
+<rect x="134" y="426" width="332" height="130" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label" x="150" y="487.0">GPU state</text>
+<text class="block-meta" x="150" y="511.0">weights, KV cache, CUDA context</text>
+<rect x="610" y="200" width="380" height="380" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="pod-name" x="634" y="238">Snapshot artifact</text>
+<text class="pod-tag" x="966" y="238" text-anchor="end">CAPTURED</text>
+<line x1="634" y1="260" x2="966" y2="260" stroke="#2a2a2a" stroke-width="1"/>
+<rect x="634" y="280" width="332" height="130" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label" x="650" y="341.0">CRIU process tree</text>
+<text class="block-meta" x="650" y="365.0">cuda-checkpoint + memfd pool</text>
+<rect x="634" y="426" width="332" height="130" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label" x="650" y="487.0">GPU state</text>
+<text class="block-meta" x="650" y="511.0">captured to image on disk</text>
+<rect x="1110" y="200" width="380" height="380" fill="#0f1607" stroke="#74b711" stroke-width="1.5"/>
+<text class="pod-name" x="1134" y="238">Restored worker</text>
+<text class="pod-tag-green" x="1466" y="238" text-anchor="end">LIVE</text>
+<line x1="1134" y1="260" x2="1466" y2="260" stroke="#2a2a2a" stroke-width="1"/>
+<rect x="1134" y="280" width="332" height="130" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label" x="1150" y="341.0">vLLM engine</text>
+<text class="block-meta" x="1150" y="365.0">process tree restored</text>
+<rect x="1134" y="426" width="332" height="130" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label" x="1150" y="487.0">GPU state</text>
+<text class="block-meta" x="1150" y="511.0">remapped, ready to serve</text>
+<line x1="498" y1="390.0" x2="598" y2="390.0" class="arrow"/>
+<polygon points="598,383.0 608,390.0 598,397.0" fill="#5a5a5a"/>
+<text class="arrow-label" x="550.0" y="368.0" text-anchor="middle">Checkpoint</text>
+<text class="arrow-meta" x="550.0" y="416.0" text-anchor="middle">cuda-checkpoint + CRIU</text>
+<line x1="998" y1="390.0" x2="1098" y2="390.0" class="arrow-green"/>
+<polygon points="1098,383.0 1108,390.0 1098,397.0" fill="#74b711"/>
+<text class="arrow-label" x="1050.0" y="368.0" text-anchor="middle">Restore</text>
+<text class="arrow-meta" x="1050.0" y="416.0" text-anchor="middle">memfd parallel restore</text>
+</svg>

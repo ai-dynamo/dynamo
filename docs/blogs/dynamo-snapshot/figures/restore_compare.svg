@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+<rect width="1280" height="760" fill="#000000"/>
+<style>
+  .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 36px; font-weight: 300; fill: #ffffff; }
+  .subtitle { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 17px; font-weight: 300; fill: #cdcdcd; }
+  .model { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #ffffff; }
+  .strategy { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
+  .num { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; fill: #ffffff; }
+  .num-on-green { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; fill: #000000; }
+  .num-overflow { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; font-weight: 600; fill: #cdcdcd; }
+  .axis { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
+  .legend { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
+  .annot { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 11px; font-weight: 400; fill: #8c8c8c; font-style: italic; }
+</style>
+<text class="title" x="40" y="58">Snapshot restore: optimized vs unoptimized</text>
+<text class="subtitle" x="40" y="88">Without our CRIU patches, restoring gpt-oss-120b is slower than a cold start; with them, snapshot restore is 3&#8211;15&#215; faster</text>
+<line x1="240.0" y1="160" x2="240.0" y2="676" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="240.0" y="694" text-anchor="middle">0s</text>
+<line x1="386.7" y1="160" x2="386.7" y2="676" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="386.7" y="694" text-anchor="middle">15s</text>
+<line x1="533.3" y1="160" x2="533.3" y2="676" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="533.3" y="694" text-anchor="middle">30s</text>
+<line x1="680.0" y1="160" x2="680.0" y2="676" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="680.0" y="694" text-anchor="middle">45s</text>
+<line x1="826.7" y1="160" x2="826.7" y2="676" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="826.7" y="694" text-anchor="middle">60s</text>
+<line x1="973.3" y1="160" x2="973.3" y2="676" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="973.3" y="694" text-anchor="middle">75s</text>
+<line x1="1120.0" y1="160" x2="1120.0" y2="676" stroke="#1a1a1a" stroke-width="1"/>
+<text class="axis" x="1120.0" y="694" text-anchor="middle">90s+</text>
+<text class="model" x="40" y="182">Qwen3 0.6B</text>
+<text class="strategy" x="225" y="224" text-anchor="end">Cold start</text>
+<rect x="240" y="200" width="515.2" height="30" fill="#4a4a4a"/>
+<text class="num" x="497.6" y="222" text-anchor="middle">52.7s</text>
+<text class="strategy" x="225" y="266" text-anchor="end">Snapshot, unoptimized</text>
+<rect x="240" y="242" width="78.5" height="30" fill="#7a7a7a"/>
+<text class="num" x="279.2" y="264" text-anchor="middle">8.0s</text>
+<text class="strategy" x="225" y="308" text-anchor="end">Snapshot, optimized</text>
+<rect x="240" y="284" width="34.2" height="30" fill="#74b711"/>
+<text class="num-on-green" x="257.1" y="306" text-anchor="middle">3.5s</text>
+<text x="1180" y="182" text-anchor="middle" font-family="Geist Mono, SF Mono, monospace" font-size="22" font-weight="600" fill="#74b711">15&#215;</text>
+<text x="1180" y="198" text-anchor="middle" font-family="Geist, Helvetica Neue, sans-serif" font-size="10" font-weight="400" fill="#8c8c8c">opt vs cold</text>
+<text class="model" x="40" y="360">Qwen3 8B</text>
+<text class="strategy" x="225" y="402" text-anchor="end">Cold start</text>
+<rect x="240" y="378" width="573.6" height="30" fill="#4a4a4a"/>
+<text class="num" x="526.8" y="400" text-anchor="middle">58.7s</text>
+<text class="strategy" x="225" y="444" text-anchor="end">Snapshot, unoptimized</text>
+<rect x="240" y="420" width="273.4" height="30" fill="#7a7a7a"/>
+<text class="num" x="376.7" y="442" text-anchor="middle">28.0s</text>
+<text class="strategy" x="225" y="486" text-anchor="end">Snapshot, optimized</text>
+<rect x="240" y="462" width="78.8" height="30" fill="#74b711"/>
+<text class="num-on-green" x="279.4" y="484" text-anchor="middle">8.1s</text>
+<text x="1180" y="360" text-anchor="middle" font-family="Geist Mono, SF Mono, monospace" font-size="22" font-weight="600" fill="#74b711">7&#215;</text>
+<text x="1180" y="376" text-anchor="middle" font-family="Geist, Helvetica Neue, sans-serif" font-size="10" font-weight="400" fill="#8c8c8c">opt vs cold</text>
+<text class="model" x="40" y="538">gpt-oss-120b</text>
+<text class="strategy" x="225" y="580" text-anchor="end">Cold start</text>
+<rect x="240" y="556" width="835.7" height="30" fill="#4a4a4a"/>
+<text class="num" x="657.9" y="578" text-anchor="middle">85.5s</text>
+<text class="strategy" x="225" y="622" text-anchor="end">Snapshot, unoptimized</text>
+<rect x="240" y="598" width="880.0" height="30" fill="#7a7a7a"/>
+<polygon points="1125,602 1135,613.0 1125,624" fill="#7a7a7a"/>
+<text class="num-overflow" x="1141" y="620">135.2s</text>
+<text class="annot" x="1141" y="636">slower than cold start</text>
+<text class="strategy" x="225" y="664" text-anchor="end">Snapshot, optimized</text>
+<rect x="240" y="640" width="304.4" height="30" fill="#74b711"/>
+<text class="num-on-green" x="392.2" y="662" text-anchor="middle">31.1s</text>
+<text x="1180" y="538" text-anchor="middle" font-family="Geist Mono, SF Mono, monospace" font-size="22" font-weight="600" fill="#74b711">3&#215;</text>
+<text x="1180" y="554" text-anchor="middle" font-family="Geist, Helvetica Neue, sans-serif" font-size="10" font-weight="400" fill="#8c8c8c">opt vs cold</text>
+<rect x="418.0" y="720" width="12" height="12" fill="#4a4a4a"/>
+<text class="legend" x="436.0" y="730">Cold start</text>
+<rect x="526.0" y="720" width="12" height="12" fill="#7a7a7a"/>
+<text class="legend" x="544.0" y="730">Snapshot, unoptimized</text>
+<rect x="711.0" y="720" width="12" height="12" fill="#74b711"/>
+<text class="legend" x="729.0" y="730">Snapshot, optimized</text>
+</svg>
