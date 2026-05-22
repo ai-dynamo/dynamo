@@ -1006,15 +1006,13 @@ def test_embedding_multi_worker_same_model_load_balance(
         marks=[],  # markers at function level
         model=_EMBED_SAME_MODEL,
         timeout=420,
-        # Crude readiness gate: wait long enough for both Qwen3-Embedding
-        # workers to load + register before sending traffic. The
-        # framework's ``health_check_workers=True`` path polls
-        # ``/health`` on each ``DYN_SYSTEM_PORT*``, but the embedding
-        # worker handler in PR #9713 doesn't call
-        # ``set_health_status(True)`` so ``/health`` stays at 503
-        # indefinitely — using ``delayed_start`` instead. 90s is
-        # comfortably above the observed ~30s per-worker load time.
-        delayed_start=90,
+        # Poll each worker's ``/health`` until 200 before sending
+        # traffic. The embedding worker registers a canary
+        # ``VllmEmbeddingHealthCheckPayload`` with ``serve_endpoint``,
+        # so the runtime drives /health to 200 once the engine produces
+        # a real embedding -- not a fixed-time sleep that races against
+        # variable per-worker cold-load latency.
+        health_check_workers=True,
         request_payloads=[
             _embedding_warmup_payload(_EMBED_SAME_MODEL),
             burst,
@@ -1086,12 +1084,12 @@ def test_embedding_multi_worker_multi_model_dispatch(
         # Qwen3-Embedding-0.6B happily accepts the lower cap.
         env={"MAX_MODEL_LEN": "512"},
         timeout=420,
-        # Crude readiness gate. ``health_check_workers=True`` would race
-        # against ``/health`` which stays at HTTP 503 on the embedding
-        # worker (see same-model test for the rationale). 90s is enough
-        # for both Qwen3-Embedding-0.6B and BGE-small to load and
-        # register their model names with the frontend.
-        delayed_start=90,
+        # Poll each worker's ``/health`` until 200 before sending
+        # traffic -- same canary mechanism as the same-model test.
+        # Both workers register an embedding-shaped probe via
+        # ``VllmEmbeddingHealthCheckPayload``, so the framework only
+        # advances once each engine has produced a real embedding.
+        health_check_workers=True,
         request_payloads=[
             _embedding_warmup_payload(_EMBED_MODEL_A),
             _embedding_warmup_payload(_EMBED_MODEL_B),
