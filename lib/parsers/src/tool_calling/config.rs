@@ -350,10 +350,10 @@ impl ToolCallConfig {
             structural_tag_builder: Some(StructuralTagBuilder::TriggeredTags(
                 TriggeredTagsConfig {
                     begin_template: format!(
-                        "<tool_call>{{\"name\": \"{}\", \"arguments\": ",
+                        "<tool_call>\n{{\"name\": \"{}\", \"arguments\": ",
                         TOOL_NAME_PLACEHOLDER
                     ),
-                    end_template: "}</tool_call>".to_string(),
+                    end_template: "}\n</tool_call>".to_string(),
                     triggers: vec!["<tool_call>".to_string()],
                     content_style: JsonSchemaStyle::Json,
                     tool_call_ban_tokens: vec!["<tool_call>".to_string()],
