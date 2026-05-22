@@ -16,13 +16,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kvbm_common::SequenceHash;
+use kvbm_engine::leader::ControlPlane;
+use kvbm_engine::leader::InstanceLeader;
+use kvbm_engine::leader::control::TransferModule;
 use kvbm_engine::p2p::session::testing::wait_until;
 use kvbm_engine::p2p::session::{
     LifecycleEvent, MockSessionFactory, SessionFactory, SessionManager,
 };
-use kvbm_engine::leader::ControlPlane;
-use kvbm_engine::leader::InstanceLeader;
-use kvbm_engine::leader::control::TransferModule;
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::{G2, G3};
 use kvbm_logical::blocks::BlockRegistry;

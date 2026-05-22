@@ -17,15 +17,19 @@
 /// `kvbmctl` client CLI for this feature. Gated behind the `kvbmctl` feature.
 #[cfg(feature = "kvbmctl")]
 pub mod cli;
+pub mod client;
+pub mod handlers;
 pub mod index;
 pub mod ingest;
 pub mod manager;
 pub mod protocol;
 pub mod zmq;
 
+pub use client::IndexerLookupClient;
+pub use handlers::create_query_handler;
 pub use index::PositionalIndex;
 pub use manager::IndexerManager;
 pub use protocol::{
-    ByPositionResponse, IndexEntry, IndexerConfigResponse, InstancesResponse, QueryRequest,
-    QueryResponse, ROUTE_PREFIX,
+    ByPositionResponse, FindBlocksHit, IndexEntry, IndexerConfigResponse, InstancesResponse,
+    QUERY_HANDLER, QueryRequest, QueryResponse, ROUTE_PREFIX,
 };

@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use kvbm_hub::features::disagg::cli::DisaggCli;
 use kvbm_hub::features::indexer::cli::IndexerCli;
 use kvbm_hub::render::{VllmRenderOptions, render_vllm_cli};
 use kvbm_hub::{
@@ -201,4 +202,24 @@ async fn indexer_cli_against_live_hub() {
         v["hit"].is_null(),
         "expected no hit on empty index, got {v}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disagg_cli_against_live_hub() {
+    let server = start_hub().await;
+    let hub_url = format!("http://{}", server.discovery_addr());
+    let client = HubClientBuilder::from_url(&hub_url)
+        .expect("from_url")
+        .build()
+        .expect("build client");
+    let cli = DisaggCli;
+
+    // `disagg instances` — fresh hub, nothing registered as prefill/decode yet.
+    let m = cli
+        .command()
+        .try_get_matches_from(["disagg", "instances"])
+        .expect("parse instances");
+    let v = cli.run(&client, &m).await.expect("instances run");
+    assert_eq!(v["prefill"].as_array().unwrap().len(), 0, "got {v}");
+    assert_eq!(v["decode"].as_array().unwrap().len(), 0, "got {v}");
 }

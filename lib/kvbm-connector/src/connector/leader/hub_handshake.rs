@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use kvbm_config::{BlockLayoutMode, DisaggConfig, LeaderHubConfig};
+use kvbm_config::{BlockLayoutMode, DisaggConfig, LeaderHubConfig, RemoteSearch};
 use kvbm_hub::{
     FeatureConfigRequirements, FeatureDescriptor, FeatureKey, HubConfigResponse, PrimaryConfig,
     RuntimeConfigSummary,
@@ -53,6 +53,28 @@ impl HubHandshake {
     pub fn has(&self, key: FeatureKey) -> bool {
         self.effective.contains(&key)
     }
+}
+
+/// Validate that remote search, if requested, can actually run against the
+/// resolved hub. Remote search consumes the hub's KV indexer over velo, so it
+/// requires the hub to be enabled (`handshake` is `Some`) **and** the `indexer`
+/// feature to be effective. Returns an invalid-configuration error otherwise.
+///
+/// `None` `remote_search` is always `Ok` (feature disabled).
+pub fn validate_remote_search_availability(
+    remote_search: Option<&RemoteSearch>,
+    handshake: Option<&HubHandshake>,
+) -> Result<()> {
+    if remote_search.is_none() {
+        return Ok(());
+    }
+    if handshake.is_some_and(|h| h.has(FeatureKey::Indexer)) {
+        return Ok(());
+    }
+    bail!(
+        "invalid configuration: remote_search is enabled but the hub's `indexer` feature \
+         is not available (no hub configured, or indexer not offered/effective)"
+    )
 }
 
 /// Run the handshake. `page_size` is the worker layout block size; `disagg` is
@@ -365,6 +387,51 @@ mod tests {
             role: DisaggregationRole::Decode,
             max_inflight_remote_prefill_tokens: usize::MAX,
         }
+    }
+
+    fn handshake_with(effective: &[FeatureKey]) -> HubHandshake {
+        HubHandshake {
+            url: "http://hub".to_string(),
+            effective: effective.iter().copied().collect(),
+            indexer_zmq_endpoint: None,
+            runtime_summary: RuntimeConfigSummary {
+                block_size: Some(BS),
+                block_layout: Some(BlockLayoutMode::Operational),
+            },
+        }
+    }
+
+    #[test]
+    fn remote_search_disabled_is_always_ok() {
+        // No remote_search → Ok regardless of handshake state.
+        assert!(validate_remote_search_availability(None, None).is_ok());
+        assert!(
+            validate_remote_search_availability(None, Some(&handshake_with(&[]))).is_ok(),
+            "disabled remote_search must not error even without indexer"
+        );
+    }
+
+    #[test]
+    fn remote_search_requires_a_hub() {
+        let rs = RemoteSearch {
+            min_remote_tokens: 0,
+        };
+        // Requested but no hub configured (handshake None) → invalid config.
+        assert!(validate_remote_search_availability(Some(&rs), None).is_err());
+    }
+
+    #[test]
+    fn remote_search_requires_effective_indexer() {
+        let rs = RemoteSearch {
+            min_remote_tokens: 0,
+        };
+        // Hub present but indexer not effective → invalid config.
+        let no_indexer = handshake_with(&[FeatureKey::P2P]);
+        assert!(validate_remote_search_availability(Some(&rs), Some(&no_indexer)).is_err());
+
+        // Indexer effective → Ok.
+        let with_indexer = handshake_with(&[FeatureKey::Indexer]);
+        assert!(validate_remote_search_availability(Some(&rs), Some(&with_indexer)).is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

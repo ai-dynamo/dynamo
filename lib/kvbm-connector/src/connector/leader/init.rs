@@ -462,6 +462,14 @@ impl ConnectorLeader {
             .as_ref()
             .and_then(|h| h.indexer_zmq_endpoint.clone());
 
+        // Remote search consumes the hub's indexer over velo. Fail fast (before
+        // any registration) if it's requested but the indexer isn't effective.
+        // The client is captured after registration completes (end of fn).
+        super::hub_handshake::validate_remote_search_availability(
+            cfg.remote_search.as_ref(),
+            handshake.as_ref(),
+        )?;
+
         // Create an EventsManager when either the consolidator or the KV-index
         // publisher needs block registration events. The same Arc is wired into
         // the BlockRegistry (so events are emitted on register/evict) and into
@@ -1152,6 +1160,39 @@ impl ConnectorLeader {
             tracing::info!(url = %handshake.url, "standalone P2P participation registered with hub");
         }
 
+        // Capture the remote-search lookup client once a hub registration is
+        // live. The availability check above guarantees that when
+        // `remote_search` is set the indexer is effective, so exactly one of
+        // the paths above registered with the hub.
+        if self.runtime.config().remote_search.is_some() {
+            let hub = self.registered_hub_client().ok_or_else(|| {
+                anyhow!("invalid configuration: remote_search enabled but no hub client registered")
+            })?;
+            let client = build_remote_search_client(&hub, self.runtime.messenger().clone())?;
+            self.set_remote_search_client(client)?;
+            tracing::info!("remote-search indexer lookup client captured");
+        }
+
         Ok(())
     }
+}
+
+/// Build a remote-search [`IndexerLookupClient`] targeting the hub.
+///
+/// The hub handshake already determined the indexer is available, so this skips
+/// the probe-based [`HubClient::indexer_lookup_client`] and constructs directly
+/// from the hub's velo `InstanceId` (cached at registration). A missing id means
+/// the hub has the indexer over HTTP but no velo transport, which cannot serve
+/// `find_blocks` → invalid configuration.
+fn build_remote_search_client(
+    hub: &kvbm_hub::HubClient,
+    messenger: Arc<velo::Messenger>,
+) -> Result<Arc<kvbm_hub::IndexerLookupClient>> {
+    let hub_velo_id = hub.hub_velo_id().ok_or_else(|| {
+        anyhow!(
+            "invalid configuration: remote_search requires a velo-enabled hub \
+             (indexer find_blocks runs over velo active messaging)"
+        )
+    })?;
+    Ok(kvbm_hub::IndexerLookupClient::new(messenger, hub_velo_id))
 }

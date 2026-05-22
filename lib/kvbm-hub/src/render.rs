@@ -17,11 +17,11 @@
 //! whatever `kvbmctl` prints is guaranteed to parse identically in the
 //! connector.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 
 use crate::protocol::{FeatureKey, HubConfigResponse};
-use kvbm_config::KvbmConfig;
+use kvbm_config::overrides::{apply_overrides, deep_merge, validate_extra_config};
 
 /// Feature keys a connector can actually participate in. `ConnectorControl` is
 /// hub infrastructure (no client-side `Feature` payload) so it is never
@@ -41,16 +41,19 @@ pub struct VllmRenderOptions {
     /// Conditional-disagg role (`prefill` / `decode`). Required iff
     /// `disagg` is in the effective set; rejected otherwise.
     pub role: Option<String>,
-    /// `--kvbm <dotted.path>=<value>` overrides. Highest precedence among free
-    /// fields; hub-authoritative fields (`default.block_layout`,
-    /// `leader.hub.{url,features}`, and `leader.disagg.role` when
-    /// disagg is active) are re-applied afterwards and always win.
-    /// The first path segment may be a figment profile (`default` / `leader` /
-    /// `worker`) or a flat config key — both are accepted by the connector.
+    /// `--kvbm <dotted.path>=<value>` overrides from the connector side.
+    /// Precedence among free fields, lowest to highest: `build_extra_config`
+    /// (structural fields from `aggregate.primary`), then `aggregate.base_config`
+    /// (hub-side `--kvbm`/`--kvbm-config`), then the `kvbm_config` blob, then
+    /// these `kvbm_overrides` (highest among free fields). The
+    /// `authoritative_overlay` is applied last and always wins for must-match
+    /// fields. The first path segment may be a figment profile (`default` /
+    /// `leader` / `worker`) or a flat config key — both are accepted by the
+    /// connector.
     pub kvbm_overrides: Vec<String>,
-    /// `--kvbm-config '{json}'` blob deep-merged over the rendered
-    /// `kv_connector_extra_config` (below the individual `--kvbm` overrides, and
-    /// below the re-applied hub-authoritative fields).
+    /// `--kvbm-config '{json}'` blob from the connector side. Deep-merged below
+    /// the individual `--kvbm` overrides; see `kvbm_overrides` for full
+    /// precedence order.
     pub kvbm_config: Option<String>,
     /// vLLM `kv_connector` class name.
     pub kv_connector: String,
@@ -231,84 +234,6 @@ fn authoritative_overlay(
     })
 }
 
-/// Apply `--kvbm-config` (deep merge) then the individual `--kvbm` dotted
-/// overrides (highest precedence) onto the rendered `extra_config`.
-fn apply_overrides(
-    extra: &mut Value,
-    kvbm_config: Option<&str>,
-    overrides: &[String],
-) -> Result<()> {
-    if let Some(blob) = kvbm_config {
-        let parsed: Value = serde_json::from_str(blob).context("parsing --kvbm-config JSON")?;
-        if !parsed.is_object() {
-            bail!("--kvbm-config must be a JSON object");
-        }
-        deep_merge(extra, parsed);
-    }
-    for raw in overrides {
-        let (path, value) = raw
-            .split_once('=')
-            .ok_or_else(|| anyhow!("--kvbm override {raw:?} must be of the form key.path=value"))?;
-        if path.is_empty() {
-            bail!("--kvbm override {raw:?} has an empty key path");
-        }
-        set_dotted(extra, path, parse_override_value(value));
-    }
-    Ok(())
-}
-
-/// Parse an override RHS as JSON (so `=2` → int, `=true` → bool, `={...}` →
-/// object), falling back to a string for bare words like `universal`.
-fn parse_override_value(s: &str) -> Value {
-    serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
-}
-
-/// Recursively merge `src` into `dst`. Object values merge key-by-key; any
-/// other value (or a type mismatch) overwrites.
-fn deep_merge(dst: &mut Value, src: Value) {
-    match (dst, src) {
-        (Value::Object(d), Value::Object(s)) => {
-            for (k, v) in s {
-                deep_merge(d.entry(k).or_insert(Value::Null), v);
-            }
-        }
-        (d, s) => *d = s,
-    }
-}
-
-/// Set a dotted path (`a.b.c`) in `root`, creating intermediate objects.
-fn set_dotted(root: &mut Value, path: &str, value: Value) {
-    let mut cur = root;
-    let mut parts = path.split('.').peekable();
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            if let Value::Object(map) = cur {
-                map.insert(part.to_string(), value);
-            }
-            return;
-        }
-        if !cur.is_object() {
-            *cur = Value::Object(Map::new());
-        }
-        let map = cur.as_object_mut().expect("ensured object above");
-        cur = map
-            .entry(part.to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-    }
-}
-
-/// Validate the rendered `extra_config` by parsing it with the same loaders the
-/// connector uses for both roles. Errors carry the figment message so a bad
-/// `--kvbm` override surfaces precisely.
-fn validate_extra_config(extra: &Value) -> Result<()> {
-    let s = extra.to_string();
-    KvbmConfig::from_figment_with_json_for_leader(&s)
-        .map_err(|e| anyhow!("rendered config rejected by the leader parser: {e}"))?;
-    KvbmConfig::from_figment_with_json_for_worker(&s)
-        .map_err(|e| anyhow!("rendered config rejected by the worker parser: {e}"))?;
-    Ok(())
-}
-
 /// Render the full vLLM CLI fragment for `--hub <hub_url>`.
 ///
 /// Output is a single line: the hub-authoritative vLLM flags (`--block-size`,
@@ -320,18 +245,25 @@ pub fn render_vllm_cli(
 ) -> Result<String> {
     let effective = resolve_features(aggregate, &opts.features)?;
     let mut extra = build_extra_config(aggregate, &effective, hub_url, opts.role.as_deref())?;
+    // Apply the hub's base_config (operator `--kvbm`/`--kvbm-config` on the hub
+    // binary) as the next layer. Per-connector overrides below win over these
+    // hub-side defaults; hub-authoritative fields are re-applied last and always
+    // win over everything.
+    if !aggregate.base_config.is_null() {
+        deep_merge(&mut extra, aggregate.base_config.clone());
+    }
     apply_overrides(
         &mut extra,
         opts.kvbm_config.as_deref(),
         &opts.kvbm_overrides,
     )?;
     // Re-apply the hub-authoritative fields *last* so `--kvbm` / `--kvbm-config`
-    // can tune free fields (tokio workers, cache sizing, nixl, …) but can never
-    // clobber what the hub owns: `block_layout` is must-match (a mismatch makes
-    // the connector's registration get rejected), `hub.{url,features}` are the
-    // validated identity kvbmctl resolved against this hub, and `disagg.role` is
-    // re-coupled to `features` so an override can't strip the role off a
-    // disagg config.
+    // (on either the hub or the connector side) can tune free fields (tokio
+    // workers, cache sizing, nixl, …) but can never clobber what the hub owns:
+    // `block_layout` is must-match (a mismatch makes the connector's registration
+    // get rejected), `hub.{url,features}` are the validated identity kvbmctl
+    // resolved against this hub, and `disagg.role` is re-coupled to `features`
+    // so an override can't strip the role off a disagg config.
     deep_merge(
         &mut extra,
         authoritative_overlay(aggregate, &effective, hub_url, opts.role.as_deref()),
@@ -414,6 +346,7 @@ mod tests {
                 advertise_host: None,
             },
             features,
+            base_config: Value::Null,
         }
     }
 
@@ -533,6 +466,50 @@ mod tests {
         o.role = Some("prefill".to_string());
         let err = resolve_features(&agg, &o.features).unwrap_err();
         assert!(err.to_string().contains("depends on"), "got: {err}");
+    }
+
+    #[test]
+    fn hub_base_config_flows_through_to_rendered_connector_config() {
+        // Hub-side --kvbm overrides (stored in aggregate.base_config) must
+        // appear in the rendered kv_connector_extra_config so connectors inherit
+        // them without each launcher repeating the same flags.
+        let mut agg = aggregate(vec![descriptor(FeatureKey::Indexer, vec![])]);
+        agg.base_config = json!({
+            "leader": { "tokio": { "worker_threads": 2 } },
+            "worker": { "nixl": { "backends": { "UCX": {}, "POSIX": {} } } }
+        });
+        let cli = render_vllm_cli(&agg, "http://hub:1337", &opts()).unwrap();
+        let extra = extract_config(&cli);
+        assert_eq!(extra["leader"]["tokio"]["worker_threads"], json!(2));
+        assert!(extra["worker"]["nixl"]["backends"]["UCX"].is_object());
+    }
+
+    #[test]
+    fn per_connector_override_wins_over_hub_base_config() {
+        // Per-connector --kvbm has higher precedence than the hub's base_config.
+        let mut agg = aggregate(vec![descriptor(FeatureKey::Indexer, vec![])]);
+        agg.base_config = json!({ "leader": { "tokio": { "worker_threads": 2 } } });
+        let mut o = opts();
+        o.kvbm_overrides = vec!["leader.tokio.worker_threads=8".to_string()];
+        let cli = render_vllm_cli(&agg, "http://hub:1337", &o).unwrap();
+        let extra = extract_config(&cli);
+        assert_eq!(extra["leader"]["tokio"]["worker_threads"], json!(8));
+    }
+
+    #[test]
+    fn authoritative_fields_win_over_hub_base_config() {
+        // Hub-side base_config must not be able to clobber hub-authoritative
+        // fields (block_layout, hub.url, hub.features).
+        let mut agg = aggregate(vec![descriptor(FeatureKey::Indexer, vec![])]);
+        agg.base_config = json!({
+            "default": { "block_layout": "universal" },
+            "leader": { "hub": { "url": "http://evil:9999", "features": ["p2p"] } }
+        });
+        let cli = render_vllm_cli(&agg, "http://hub:1337", &opts()).unwrap();
+        let extra = extract_config(&cli);
+        assert_eq!(extra["default"]["block_layout"], "operational");
+        assert_eq!(extra["leader"]["hub"]["url"], "http://hub:1337");
+        assert_eq!(extra["leader"]["hub"]["features"], json!(["indexer"]));
     }
 
     #[test]

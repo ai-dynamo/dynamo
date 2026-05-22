@@ -41,6 +41,11 @@ pub struct HubClient {
     config: HubClientConfig,
     http: reqwest::Client,
     guard: OnceLock<HubRegistrationGuard>,
+    /// Hub's own velo `InstanceId`, learned from the registration response when
+    /// the hub runs with a velo transport. `None` until a `register_instance*`
+    /// call returns it. Used to address hub-side velo handlers (e.g. the KV
+    /// indexer lookup).
+    hub_velo_id: OnceLock<InstanceId>,
     /// Last hub-heartbeat sequence observed via the velo handler. `0` when
     /// no heartbeat has been received.
     pub(crate) last_heartbeat_seq: AtomicU64,
@@ -185,6 +190,7 @@ impl HubClientBuilder {
             },
             http,
             guard: OnceLock::new(),
+            hub_velo_id: OnceLock::new(),
             last_heartbeat_seq: AtomicU64::new(0),
             last_heartbeat_at_ms: AtomicU64::new(0),
         }))
@@ -303,7 +309,17 @@ impl HubClient {
         self.guard
             .set(guard)
             .map_err(|_| anyhow!("HubClient: instance already registered (race)"))?;
+        if let Some(hub_id) = parsed.hub_instance_id {
+            let _ = self.hub_velo_id.set(hub_id);
+        }
         Ok(parsed.hub_instance_id)
+    }
+
+    /// The hub's own velo `InstanceId`, if a `register_instance*` call has
+    /// returned it (i.e. the hub runs with a velo transport). `None` before
+    /// registration or against a discovery-only hub.
+    pub fn hub_velo_id(&self) -> Option<InstanceId> {
+        self.hub_velo_id.get().copied()
     }
 
     /// Explicitly unregister the current instance (if any).
@@ -331,6 +347,47 @@ impl HubClient {
         let url = self.discovery_url(protocol::paths::HUB_CONFIG)?;
         let resp = self.http.get(url).send().await.context("GET /v1/config")?;
         parse_json(resp).await
+    }
+
+    /// Build a velo lookup client for the hub's KV block index — but only when
+    /// the indexer feature is enabled on the hub.
+    ///
+    /// Probes `GET /v1/features/indexer/config` (a `200` means the indexer is
+    /// present and reachable). Gating:
+    /// - indexer disabled / probe fails ⇒ `Ok(None)`
+    /// - indexer enabled but this client has no known hub velo `InstanceId`
+    ///   (not registered yet, or the hub runs without a velo transport) ⇒
+    ///   `Err` — the velo lookup genuinely cannot work; register against a
+    ///   velo-enabled hub first.
+    ///
+    /// The returned client targets the hub's velo handler over `messenger` (the
+    /// same `Arc<Messenger>` the caller already holds for its own velo IO).
+    pub async fn indexer_lookup_client(
+        self: &Arc<Self>,
+        messenger: Arc<velo::Messenger>,
+    ) -> Result<Option<Arc<crate::features::indexer::IndexerLookupClient>>> {
+        let path = format!(
+            "/v1/features/{}/config",
+            crate::features::indexer::ROUTE_PREFIX
+        );
+        // A failed probe (404 when the indexer isn't mounted, or any transport
+        // error) means "not available" — not an error for the caller.
+        if self
+            .get_json::<crate::features::indexer::IndexerConfigResponse>(&path)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        let hub_id = self.hub_velo_id().ok_or_else(|| {
+            anyhow!(
+                "indexer enabled but hub velo InstanceId unknown — \
+                 register against a velo-enabled hub first"
+            )
+        })?;
+        Ok(Some(crate::features::indexer::IndexerLookupClient::new(
+            messenger, hub_id,
+        )))
     }
 
     /// `GET <discovery>/<path>` and decode the JSON body into `T`. Generic

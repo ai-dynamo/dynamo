@@ -7,7 +7,7 @@
 # `ConnectorLeader::update_state_after_alloc` which honors `onboard.mode`,
 # so `KVBM_ONBOARD_MODE=intra` actually fires `execute_local_layerwise_onboard`
 # on warm-prefix requests. This is the bringup the intra-pass-onboard
-# smoke uses to exercise the Phase-4b kernel-catalog + `layer_range` path.
+# smoke uses to exercise the kernel-catalog + `layer_range` path.
 #
 # Env vars (default-friendly so single-arg invocation works):
 #   KVBM_VENV          (default: <repo>/.sandbox)

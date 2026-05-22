@@ -8,17 +8,24 @@ use std::sync::Arc;
 
 use kvbm_hub::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 use kvbm_hub::protocol::{
-    ConditionalDisaggConfig, ConditionalDisaggInstancesResponse, ConditionalDisaggRole,
-    DISAGG_PROTOCOL_VERSION, ErrorBody, ErrorCode, Feature, HeartbeatResponse, LayoutCompatPayload,
-    ListInstancesResponse, P2pConfig, PeerLookupResponse, PrefillRequest, ProbeResponse,
-    RegisterRequest, RegisterResponse, instance_by_id, instance_heartbeat, instance_probe, paths,
-    peers_by_instance, peers_by_worker,
+    ConditionalDisaggConfig, ConditionalDisaggRole, DISAGG_PROTOCOL_VERSION, ErrorBody, ErrorCode,
+    Feature, HeartbeatResponse, LayoutCompatPayload, ListInstancesResponse, P2pConfig,
+    PeerLookupResponse, PrefillRequest, ProbeResponse, RegisterRequest, RegisterResponse,
+    instance_by_id, instance_heartbeat, instance_probe, paths, peers_by_instance, peers_by_worker,
 };
-use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer};
+use kvbm_hub::{
+    ConditionalDisaggClient, ConditionalDisaggInstancesResponse, ConditionalDisaggManager,
+    HubClientBuilder, HubServer,
+};
 use velo::Transport;
 use velo::discovery::PeerDiscovery;
 use velo::transports::tcp::TcpTransportBuilder;
 use velo_ext::{InstanceId, PeerInfo, WorkerAddress};
+
+use dynamo_tokens::TokenBlockSequence;
+use kvbm_hub::IndexerManager;
+use kvbm_logical::events::{KvCacheEvents, KvbmCacheEvents};
+use kvbm_logical::{KvbmSequenceHashProvider, SequenceHash};
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -880,8 +887,8 @@ async fn feature_register_without_manager_rejects() {
 async fn feature_cd_list_empty_on_both_ports() {
     let (server, _cd) = start_server_with_cd_no_velo().await;
     for url in [
-        discovery_url(&server, paths::CD_INSTANCES),
-        control_url(&server, paths::CD_INSTANCES),
+        discovery_url(&server, "/v1/features/disagg/instances"),
+        control_url(&server, "/v1/features/disagg/instances"),
     ] {
         let body: ConditionalDisaggInstancesResponse =
             http().get(url).send().await.unwrap().json().await.unwrap();
@@ -1046,8 +1053,8 @@ async fn feature_cd_prefill_and_decode_register_and_list() {
     let p_id = p_velo.instance_id();
     let d_id = d_velo.instance_id();
     for url in [
-        discovery_url(&server, paths::CD_INSTANCES),
-        control_url(&server, paths::CD_INSTANCES),
+        discovery_url(&server, "/v1/features/disagg/instances"),
+        control_url(&server, "/v1/features/disagg/instances"),
     ] {
         let body: ConditionalDisaggInstancesResponse =
             http().get(&url).send().await.unwrap().json().await.unwrap();
@@ -1330,5 +1337,139 @@ async fn no_dispatcher_does_not_spawn_worker() {
     assert!(
         pulled.is_some(),
         "passive pull path should still receive the queued request"
+    );
+}
+
+// ---- KV indexer velo find_blocks lookup -------------------------------------
+
+/// Block size the indexer test hub + its PLHs agree on.
+const IDX_BLOCK_SIZE: usize = 4;
+
+/// Build `n` PLHs at positions `0..n` for a given salt — same recipe the
+/// in-crate index unit tests use.
+fn idx_plhs(n: usize, salt: u64) -> Vec<SequenceHash> {
+    let tokens: Vec<u32> = (0..(IDX_BLOCK_SIZE * n) as u32).collect();
+    let seq = TokenBlockSequence::from_slice(&tokens, IDX_BLOCK_SIZE as u32, Some(salt));
+    seq.blocks()
+        .iter()
+        .map(|b| b.kvbm_sequence_hash())
+        .collect()
+}
+
+/// Hub with a TCP transport **and** an attached `IndexerManager`. Returns the
+/// manager handle so the test can seed the index directly.
+async fn start_server_with_indexer() -> (
+    HubServer,
+    Arc<IndexerManager>,
+    Arc<velo::transports::tcp::TcpTransport>,
+) {
+    let transport = new_velo_transport();
+    let mgr = Arc::new(IndexerManager::new(64, IDX_BLOCK_SIZE, None, None).unwrap());
+    let server = kvbm_hub::create_server_builder()
+        .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .discovery_port(0)
+        .control_port(0)
+        .add_transport(Arc::clone(&transport) as Arc<dyn Transport>)
+        .add_feature_manager(Arc::clone(&mgr) as Arc<dyn kvbm_hub::FeatureManager>)
+        .serve()
+        .await
+        .expect("start test server with indexer");
+    (server, mgr, transport)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn indexer_find_blocks_velo_lookup() {
+    let (server, mgr, _transport) = start_server_with_indexer().await;
+    let client_velo = new_velo().await;
+    let hub_client = wire_mutual_velo(&server, &client_velo).await;
+
+    // Seed: this client's instance holds a 3-deep sequence. The index stores
+    // holder ids as the velo id's u128 (publishers stamp `velo_id.as_u128()`).
+    let holder = client_velo.instance_id();
+    let hashes = idx_plhs(3, 4242);
+    mgr.index().apply(KvbmCacheEvents {
+        events: KvCacheEvents::Create(hashes.clone()),
+        instance_id: holder.as_u128(),
+    });
+
+    // The gated constructor returns a client because the hub has the indexer.
+    let lookup = hub_client
+        .indexer_lookup_client(client_velo.messenger().clone())
+        .await
+        .expect("indexer probe should succeed")
+        .expect("indexer is enabled on this hub");
+
+    // Full sequence → deepest hit (position 2), seeded holder present.
+    let hit = lookup
+        .find_blocks(hashes.clone())
+        .await
+        .unwrap()
+        .expect("deepest hit");
+    assert_eq!(hit.matched, hashes[2], "deepest candidate");
+    assert!(
+        hit.candidates.contains(&holder),
+        "candidates should reconstruct the seeded InstanceId"
+    );
+
+    // Deepest blocks unknown → falls back to the shallow hit (position 1).
+    let unknown = idx_plhs(5, 9999);
+    let mut mixed = vec![hashes[0], hashes[1]];
+    mixed.extend_from_slice(&unknown[2..]); // positions 2..4 unknown
+    let hit = lookup
+        .find_blocks(mixed)
+        .await
+        .unwrap()
+        .expect("shallow hit");
+    assert_eq!(hit.matched, hashes[1], "shallow fallback");
+
+    // Full miss → None.
+    let miss = lookup.find_blocks(idx_plhs(2, 123_456)).await.unwrap();
+    assert!(miss.is_none(), "no candidate indexed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn indexer_lookup_client_none_when_indexer_disabled() {
+    // A hub with a transport but no IndexerManager.
+    let (server, _hub_transport) = start_server_with_transport().await;
+    let client_velo = new_velo().await;
+    let hub_client = wire_mutual_velo(&server, &client_velo).await;
+
+    let res = hub_client
+        .indexer_lookup_client(client_velo.messenger().clone())
+        .await
+        .expect("probe should not error");
+    assert!(res.is_none(), "indexer not enabled ⇒ None");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn indexer_lookup_client_errs_when_hub_has_no_velo() {
+    // Indexer mounted, but the hub runs without a transport — so registration
+    // returns no hub velo InstanceId and the velo lookup can't be addressed.
+    // The probe succeeds (indexer present), so this is the `Err` branch.
+    let mgr = Arc::new(IndexerManager::new(64, IDX_BLOCK_SIZE, None, None).unwrap());
+    let server = kvbm_hub::create_server_builder()
+        .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .discovery_port(0)
+        .control_port(0)
+        .add_feature_manager(Arc::clone(&mgr) as Arc<dyn kvbm_hub::FeatureManager>)
+        .serve()
+        .await
+        .expect("start indexer hub without transport");
+
+    let client_velo = new_velo().await;
+    let hub_client = build_client(&server);
+    let hub_id = hub_client
+        .register_instance(client_velo.peer_info())
+        .await
+        .unwrap();
+    assert!(hub_id.is_none(), "discovery-only hub returns no velo id");
+
+    let err = hub_client
+        .indexer_lookup_client(client_velo.messenger().clone())
+        .await
+        .expect_err("indexer enabled but no hub velo ⇒ Err");
+    assert!(
+        err.to_string().contains("hub velo InstanceId unknown"),
+        "unexpected error: {err}"
     );
 }

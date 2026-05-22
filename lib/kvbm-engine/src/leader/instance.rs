@@ -20,8 +20,11 @@ use kvbm_protocols::control::{
 
 use crate::{
     BlockId, G2, G3, InstanceId, SequenceHash,
-    p2p::{RemoteBlockSet, session::{SessionFactory, SessionManager}},
     object::ObjectBlockOps,
+    p2p::{
+        RemoteBlockSet,
+        session::{SessionFactory, SessionManager},
+    },
     worker::RemoteDescriptor,
 };
 use kvbm_common::LogicalLayoutHandle;

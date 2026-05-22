@@ -37,6 +37,10 @@
 #   KVBM_HUB_PREFILL_VLLM_URL / KVBM_HUB_PREFILL_VLLM_MODEL
 #                              (optional; enables the CD prefill dispatcher — both
 #                               required together)
+#   KVBM_HUB_KVBM             (optional; newline-separated KEY.PATH=VALUE entries
+#                               each becoming a --kvbm flag on the hub binary)
+#   KVBM_HUB_KVBM_CONFIG      (optional; JSON blob → --kvbm-config; applied before
+#                               KVBM_HUB_KVBM entries)
 #   RUST_LOG                  (default: info,kvbm_hub=debug,kvbm_connector=debug)
 set -eu
 
@@ -92,6 +96,18 @@ fi
 if [ -n "${KVBM_HUB_PREFILL_VLLM_URL:-}" ]; then
     args+=( --prefill-vllm-url "$KVBM_HUB_PREFILL_VLLM_URL"
             --prefill-vllm-model "${KVBM_HUB_PREFILL_VLLM_MODEL:?KVBM_HUB_PREFILL_VLLM_MODEL required with _URL}" )
+fi
+
+# Optional hub-side KvbmConfig overrides.
+# KVBM_HUB_KVBM_CONFIG: JSON blob → --kvbm-config (applied before KVBM_HUB_KVBM entries).
+# KVBM_HUB_KVBM: newline-separated KEY.PATH=VALUE entries → one --kvbm per entry.
+if [ -n "${KVBM_HUB_KVBM_CONFIG:-}" ]; then
+    args+=( --kvbm-config "$KVBM_HUB_KVBM_CONFIG" )
+fi
+if [ -n "${KVBM_HUB_KVBM:-}" ]; then
+    while IFS= read -r kv; do
+        [ -n "$kv" ] && args+=( --kvbm "$kv" )
+    done <<< "$KVBM_HUB_KVBM"
 fi
 
 export RUST_LOG

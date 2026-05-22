@@ -125,6 +125,20 @@ struct Cli {
     /// (default `127.0.0.1`).
     #[arg(long)]
     kv_index_advertise_host: Option<String>,
+
+    /// Override a base connector-config key: `--kvbm <dotted.path>=<value>`
+    /// (repeatable). The first path segment may be a profile
+    /// (`default`/`leader`/`worker`) or a flat key. Values are parsed as JSON
+    /// (`2`, `true`, `{…}`) with a string fallback. Highest precedence among the
+    /// two override flags. The merged result is round-trip-validated through the
+    /// connector parser and served verbatim as `GET /v1/config`'s `base_config`.
+    #[arg(long = "kvbm", value_name = "KEY.PATH=VALUE")]
+    kvbm: Vec<String>,
+
+    /// Deep-merge a full `kv_connector_extra_config` JSON object into the served
+    /// base config (below individual `--kvbm` overrides).
+    #[arg(long = "kvbm-config", value_name = "JSON")]
+    kvbm_config: Option<String>,
 }
 
 /// All hub features a client can be granted via `--features` (in dependency
@@ -177,6 +191,9 @@ fn parse_features(spec: Option<&str>) -> anyhow::Result<HashSet<FeatureKey>> {
 struct ResolvedConfig {
     config: HubConfig,
     enabled: HashSet<FeatureKey>,
+    /// Operator-supplied default connector config (sparse
+    /// `kv_connector_extra_config` JSON), validated; served as `base_config`.
+    base_config: serde_json::Value,
 }
 
 fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
@@ -283,7 +300,24 @@ fn build_config(cli: &Cli) -> anyhow::Result<ResolvedConfig> {
         config.indexer = None;
     }
 
-    Ok(ResolvedConfig { config, enabled })
+    // Build the operator's base connector config from `--kvbm-config` +
+    // `--kvbm`, then round-trip-validate it through the same parser the
+    // connector uses (CUDA-free; kvbm-config carries no velo/CUDA). A bad
+    // override aborts startup with the parser's error.
+    let mut base_config = serde_json::json!({});
+    kvbm_config::overrides::apply_overrides(
+        &mut base_config,
+        cli.kvbm_config.as_deref(),
+        &cli.kvbm,
+    )?;
+    kvbm_config::overrides::validate_extra_config(&base_config)
+        .map_err(|e| anyhow::anyhow!("--kvbm/--kvbm-config rejected: {e}"))?;
+
+    Ok(ResolvedConfig {
+        config,
+        enabled,
+        base_config,
+    })
 }
 
 #[tokio::main]
@@ -291,7 +325,11 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    let ResolvedConfig { config, enabled } = build_config(&cli)?;
+    let ResolvedConfig {
+        config,
+        enabled,
+        base_config,
+    } = build_config(&cli)?;
 
     tracing::info!(
         bind_addr = %config.bind_addr,
@@ -315,7 +353,8 @@ async fn main() -> anyhow::Result<()> {
         .prune_interval(Duration::from_secs(config.prune_interval_secs))
         .heartbeat_interval(Duration::from_secs(config.heartbeat_interval_secs))
         .heartbeat_max_failures(config.heartbeat_max_failures)
-        .primary_config(config.primary.clone());
+        .primary_config(config.primary.clone())
+        .base_kvbm_config(base_config);
 
     // ConnectorControl is infrastructure — always attached.
     let cpm = Arc::new(kvbm_hub::ControlPlaneManager::new());
@@ -403,4 +442,63 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("shutting down");
     server.shutdown().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Minimal valid arg vector; callers append `--kvbm*` flags.
+    fn args(extra: &[&str]) -> Vec<String> {
+        let mut v = vec![
+            "kvbm-hub".to_string(),
+            "--block-size".to_string(),
+            "16".to_string(),
+            "--g2-memory".to_string(),
+            "4".to_string(),
+        ];
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    }
+
+    #[test]
+    fn no_kvbm_flags_yields_empty_base_config() {
+        let cli = Cli::parse_from(args(&[]));
+        let resolved = build_config(&cli).unwrap();
+        assert_eq!(resolved.base_config, json!({}));
+    }
+
+    #[test]
+    fn kvbm_override_is_applied_typed_and_validated() {
+        let cli = Cli::parse_from(args(&["--kvbm", "leader.tokio.worker_threads=4"]));
+        let resolved = build_config(&cli).unwrap();
+        // Parsed as an integer and nested under the leader profile.
+        assert_eq!(
+            resolved.base_config["leader"]["tokio"]["worker_threads"],
+            json!(4)
+        );
+    }
+
+    #[test]
+    fn kvbm_config_blob_then_override_precedence() {
+        let cli = Cli::parse_from(args(&[
+            "--kvbm-config",
+            r#"{"leader":{"tokio":{"worker_threads":8}}}"#,
+            "--kvbm",
+            "leader.tokio.worker_threads=3",
+        ]));
+        let resolved = build_config(&cli).unwrap();
+        assert_eq!(
+            resolved.base_config["leader"]["tokio"]["worker_threads"],
+            json!(3)
+        );
+    }
+
+    #[test]
+    fn invalid_kvbm_override_aborts_startup() {
+        // worker_threads must be an integer; a string fails the connector parser.
+        let cli = Cli::parse_from(args(&["--kvbm", "leader.tokio.worker_threads=notanint"]));
+        assert!(build_config(&cli).is_err());
+    }
 }

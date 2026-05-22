@@ -66,6 +66,10 @@ pub struct HubServerState {
     /// Hub-wide shared config served by `GET /v1/config` and used for
     /// must-match validation at registration.
     primary: Arc<PrimaryConfig>,
+    /// Operator-supplied default connector config, served verbatim in
+    /// `GET /v1/config`'s `base_config`. Sparse `kv_connector_extra_config` JSON
+    /// (`{}` when no `--kvbm` overrides were given).
+    base_config: Arc<serde_json::Value>,
 }
 
 impl std::fmt::Debug for HubServerState {
@@ -94,6 +98,7 @@ impl HubServerState {
             velo: None,
             managers: Arc::new(HashMap::new()),
             primary: Arc::new(PrimaryConfig::default()),
+            base_config: Arc::new(serde_json::json!({})),
         }
     }
 
@@ -133,6 +138,7 @@ pub struct HubServerBuilder {
     heartbeat_max_failures: u32,
     feature_managers: Vec<Arc<dyn FeatureManager>>,
     primary: PrimaryConfig,
+    base_config: serde_json::Value,
 }
 
 impl std::fmt::Debug for HubServerBuilder {
@@ -164,6 +170,7 @@ impl Default for HubServerBuilder {
             heartbeat_max_failures: DEFAULT_HEARTBEAT_MAX_FAILURES,
             feature_managers: Vec::new(),
             primary: PrimaryConfig::default(),
+            base_config: serde_json::json!({}),
         }
     }
 }
@@ -252,6 +259,15 @@ impl HubServerBuilder {
     /// [`PrimaryConfig::default`] (no authoritative fields → validation skipped).
     pub fn primary_config(mut self, primary: PrimaryConfig) -> Self {
         self.primary = primary;
+        self
+    }
+
+    /// Set the operator-supplied default connector config served verbatim as
+    /// `GET /v1/config`'s `base_config`. Expected to be a sparse
+    /// `kv_connector_extra_config`-shaped JSON object (the binary builds it from
+    /// `--kvbm` / `--kvbm-config` and validates it). Defaults to `{}`.
+    pub fn base_kvbm_config(mut self, base_config: serde_json::Value) -> Self {
+        self.base_config = base_config;
         self
     }
 
@@ -400,6 +416,7 @@ impl HubServerBuilder {
             velo,
             managers: Arc::clone(&managers),
             primary: Arc::new(primary),
+            base_config: Arc::new(self.base_config),
         };
         if heartbeat_task.is_none() {
             tracing::info!(
@@ -770,7 +787,11 @@ async fn get_hub_config(State(state): State<HubServerState>) -> Json<HubConfigRe
         .collect();
     // Deterministic order for stable responses / tests.
     features.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
-    Json(HubConfigResponse { primary, features })
+    Json(HubConfigResponse {
+        primary,
+        features,
+        base_config: (*state.base_config).clone(),
+    })
 }
 
 async fn list_instances(State(state): State<HubServerState>) -> Json<ListInstancesResponse> {

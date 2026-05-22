@@ -43,10 +43,8 @@ use anyhow::Result;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use kvbm_engine::G2;
-use kvbm_engine::p2p::session::{
-    LifecycleEvent, PeerResolver, SessionFactory, VeloSessionFactory,
-};
 use kvbm_engine::leader::InstanceLeader;
+use kvbm_engine::p2p::session::{LifecycleEvent, PeerResolver, SessionFactory, VeloSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_logical::manager::BlockManager;
 use parking_lot::Mutex;
