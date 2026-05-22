@@ -14,6 +14,7 @@
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
+ * - Match parser-specific files to parser-only filters
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
  */
 
@@ -27,6 +28,7 @@ const runCoverage = process.argv.includes('--coverage');
 
 // Find filters.yaml relative to this script
 const scriptDir = path.dirname(__filename);
+const repoRoot = path.resolve(scriptDir, '../..');
 const filtersPath = path.resolve(scriptDir, '../filters.yaml');
 
 console.log(`Reading filters from: ${filtersPath}\n`);
@@ -171,6 +173,168 @@ const testCases = [
   },
 ];
 
+function listFilesRecursive(relativeDir) {
+  const root = path.resolve(repoRoot, relativeDir);
+  if (!fs.existsSync(root)) return [];
+
+  const out = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile()) {
+        out.push(path.relative(repoRoot, fullPath).replaceAll(path.sep, '/'));
+      }
+    }
+  }
+  return out.sort();
+}
+
+for (const file of listFilesRecursive('lib/parsers').filter(file => file.endsWith('.rs'))) {
+  testCases.push({
+    file,
+    expect: { core: false, rust: false, parser: true, parser_rust: true },
+    desc: 'parser Rust file triggers parser Rust checks only',
+  });
+}
+
+for (const file of listFilesRecursive('tests/parity/parser').filter(file => file.endsWith('.py'))) {
+  const expect = {
+    core: false,
+    parser: true,
+    parser_rust: false,
+    parser_vllm: false,
+    parser_sglang: false,
+  };
+  if (file === 'tests/parity/parser/test_parity_parser.py') {
+    expect.parser_vllm = true;
+    expect.parser_sglang = true;
+  } else if (file === 'tests/parity/parser/vllm.py') {
+    expect.parser = false;
+    expect.parser_vllm = true;
+  } else if (file === 'tests/parity/parser/sglang.py') {
+    expect.parser = false;
+    expect.parser_sglang = true;
+  }
+  testCases.push({
+    file,
+    expect,
+    desc: 'parser parity Python file triggers parser tests only',
+  });
+}
+
+const parserFixtureYamlFiles = listFilesRecursive('tests/parity/parser/fixtures').filter(
+  file => file.endsWith('.yaml') || file.endsWith('.yml')
+);
+
+testCases.push(
+  {
+    file: 'tests/parity/common.py',
+    expect: {
+      core: false,
+      parser: true,
+      parser_vllm: true,
+      parser_sglang: true,
+      parser_rust: false,
+    },
+    desc: 'shared parity helpers trigger all parser parity lanes',
+  },
+  {
+    file: 'tests/parity/__init__.py',
+    expect: {
+      core: false,
+      parser: true,
+      parser_vllm: false,
+      parser_sglang: false,
+      parser_rust: false,
+    },
+    desc: 'parity package init triggers parser utilities',
+  },
+  {
+    file: 'tests/parity/generate_parity_table.py',
+    expect: {
+      core: false,
+      parser: true,
+      parser_vllm: false,
+      parser_sglang: false,
+      parser_rust: false,
+    },
+    desc: 'shared parity table CLI triggers parser utilities',
+  },
+  {
+    file: 'tests/parity/parity_table.html.j2',
+    expect: {
+      core: false,
+      parser: true,
+      parser_vllm: false,
+      parser_sglang: false,
+      parser_rust: false,
+    },
+    desc: 'shared parity table template triggers parser utilities',
+  },
+  {
+    file: 'tests/parity/README.md',
+    expect: { core: false, parser: false, parser_vllm: false, parser_sglang: false, docs: true },
+    desc: 'parity README remains docs only',
+  },
+  {
+    file: 'lib/parsers/README.md',
+    expect: { core: false, parser: false, parser_rust: false, docs: true },
+    desc: 'parser README remains docs only',
+  },
+  {
+    file: 'lib/parsers/Cargo.toml',
+    expect: { core: false, rust: false, parser: true, parser_rust: true },
+    desc: 'parser Cargo.toml triggers parser Rust checks only',
+  },
+  {
+    file: 'lib/bindings/python/rust/parsers.rs',
+    expect: {
+      core: false,
+      frontend: false,
+      parser: true,
+      parser_vllm: false,
+      parser_sglang: false,
+      rust: true,
+      parser_rust: false,
+    },
+    desc: 'python parser binding triggers parser and normal Rust checks',
+  },
+  {
+    file: 'lib/bindings/python/src/dynamo/_core.pyi',
+    expect: {
+      core: false,
+      frontend: false,
+      parser: true,
+      parser_vllm: false,
+      parser_sglang: false,
+      rust: false,
+      parser_rust: false,
+    },
+    desc: 'python parser binding stub triggers parser only',
+  },
+  {
+    file: 'lib/bindings/python/tests/test_parsers.py',
+    expect: {
+      core: false,
+      frontend: false,
+      parser: true,
+      parser_vllm: false,
+      parser_sglang: false,
+      parser_rust: false,
+    },
+    desc: 'python parser binding test triggers parser only',
+  },
+  {
+    file: 'tests/parity/parser/PARITY.html',
+    expect: { core: false, parser: false, ignore: true },
+    desc: 'generated parser parity HTML is ignored',
+  },
+);
+
 // Print available filters
 console.log('Loaded filters:', Object.keys(filters).join(', '));
 console.log('');
@@ -215,10 +379,37 @@ testCases.forEach(({ file, expect, desc }) => {
   }
 });
 
-console.log(`\n${passed}/${testCases.length} tests passed`);
+let fixtureAssertions = 0;
+let fixtureFailures = 0;
+for (const file of parserFixtureYamlFiles) {
+  const expect = {
+    core: false,
+    docs: false,
+    parser: true,
+    parser_vllm: true,
+    parser_sglang: true,
+    parser_rust: false,
+  };
+  for (const [filterName, expectedValue] of Object.entries(expect)) {
+    const actual = checkFilter(file, filters[filterName]);
+    if (actual !== expectedValue) {
+      fixtureFailures++;
+      console.log(
+        `✗ ${file} | ${filterName}: expected=${expectedValue}, got=${actual}`
+      );
+    } else {
+      fixtureAssertions++;
+    }
+  }
+}
 
-if (failed > 0) {
-  console.error(`\n${failed} test(s) failed!`);
+console.log(`\n${passed}/${testCases.length} tests passed`);
+console.log(
+  `Parser fixture sweep: ${parserFixtureYamlFiles.length} files, ${fixtureAssertions} assertions passed`
+);
+
+if (failed > 0 || fixtureFailures > 0) {
+  console.error(`\n${failed + fixtureFailures} test(s) failed!`);
   process.exit(1);
 }
 
@@ -231,13 +422,14 @@ if (runCoverage) {
   console.log('\n' + '='.repeat(60));
   console.log('Running full repository coverage check...\n');
 
-  // Get repo root (two levels up from .github/scripts)
-  const repoRoot = path.resolve(scriptDir, '../..');
-
   // Get all tracked files using git
   let allFiles;
   try {
-    const output = execSync('git ls-files', { cwd: repoRoot, encoding: 'utf8' });
+    const output = execSync('git ls-files', {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
     allFiles = output.trim().split('\n').filter(f => f.length > 0);
   } catch (err) {
     console.error('Failed to run git ls-files. Are you in a git repository?');

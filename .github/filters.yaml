@@ -10,6 +10,10 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
+#   parser   -> parser-only runtime build and Dynamo parser parity pytest
+#   parser_vllm -> vLLM runtime build and vLLM parser parity pytest
+#   parser_sglang -> SGLang runtime build and SGLang parser parity pytest
+#   parser_rust -> targeted dynamo-parsers Rust checks
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -22,7 +26,9 @@ all:
 docs:
   - 'docs/**'
   - 'fern/**'
+  - '.ai/**'
   - '.github/workflows/fern-docs.yml'
+  - '.github/FILTERS.md'
   - '**/*.md'
   - '**/*.txt'
   - '**/.gitignore'
@@ -37,6 +43,8 @@ docs:
 examples:
   - 'recipes/**'
   - 'examples/**'
+  - 'examples/**/.dockerignore'
+  - 'examples/**/.gitkeep'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
@@ -60,6 +68,8 @@ ignore:
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
   - '.github/allurerc.mjs'
+  - '**/.claude/**'
+  - 'tests/parity/parser/PARITY*.html'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
@@ -92,6 +102,7 @@ core:
   - 'container/deps/*'
   - 'container/compliance/**'
   - '.cargo/config.toml'
+  - 'lib/bindings/python/.cargo/**'
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
@@ -113,6 +124,15 @@ core:
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
+  - '!lib/parsers/**'
+  - '!lib/bindings/python/rust/parsers.rs'
+  - '!lib/bindings/python/src/dynamo/_core.pyi'
+  - '!lib/bindings/python/tests/test_parsers.py'
+  - '!tests/parity/__init__.py'
+  - '!tests/parity/common.py'
+  - '!tests/parity/generate_parity_table.py'
+  - '!tests/parity/parity_table.html.j2'
+  - '!tests/parity/parser/**'
 
 operator:
   - *ci
@@ -196,13 +216,62 @@ frontend:
   - 'container/templates/frontend.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
+  - '!lib/parsers/**'
+  - '!lib/bindings/python/rust/parsers.rs'
+  - '!lib/bindings/python/src/dynamo/_core.pyi'
+  - '!lib/bindings/python/tests/test_parsers.py'
+  - '!tests/parity/__init__.py'
+  - '!tests/parity/common.py'
+  - '!tests/parity/generate_parity_table.py'
+  - '!tests/parity/parity_table.html.j2'
+  - '!tests/parity/parser/**'
+
+parser:
+  - 'lib/parsers/**'
+  - '!lib/parsers/**/*.md'
+  - '!lib/parsers/**/*.txt'
+  - 'lib/bindings/python/rust/parsers.rs'
+  - 'lib/bindings/python/src/dynamo/_core.pyi'
+  - 'lib/bindings/python/tests/test_parsers.py'
+  - 'tests/parity/__init__.py'
+  - 'tests/parity/common.py'
+  - 'tests/parity/generate_parity_table.py'
+  - 'tests/parity/parity_table.html.j2'
+  - 'tests/parity/parser/**'
+  - '!tests/parity/parser/vllm.py'
+  - '!tests/parity/parser/sglang.py'
+  - '!tests/parity/parser/PARITY*.html'
+  - '!tests/parity/parser/PARITY*.md'
+
+parser_vllm:
+  - 'tests/parity/common.py'
+  - 'tests/parity/parser/fixtures/**'
+  - 'tests/parity/parser/test_parity_parser.py'
+  - 'tests/parity/parser/vllm.py'
+  - '!tests/parity/parser/PARITY*.html'
+  - '!tests/parity/parser/PARITY*.md'
+
+parser_sglang:
+  - 'tests/parity/common.py'
+  - 'tests/parity/parser/fixtures/**'
+  - 'tests/parity/parser/test_parity_parser.py'
+  - 'tests/parity/parser/sglang.py'
+  - '!tests/parity/parser/PARITY*.html'
+  - '!tests/parity/parser/PARITY*.md'
+
+parser_rust:
+  - 'lib/parsers/**'
+  - '!lib/parsers/**/*.md'
+  - '!lib/parsers/**/*.txt'
 
 rust:
   - '.github/workflows/pre-merge.yml'
+  - 'lib/bindings/python/.cargo/**'
   - '**/*.rs'
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+  - '!lib/parsers/**'
 
 benchmarks:
   - 'benchmarks/**'

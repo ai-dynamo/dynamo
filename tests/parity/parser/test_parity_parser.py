@@ -48,6 +48,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.core,
+    pytest.mark.parser,
 ]
 
 FIXTURES_ROOT = Path(__file__).parent / "fixtures"

@@ -16,10 +16,12 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.core,
+    pytest.mark.parser,
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GENERATOR = REPO_ROOT / "tests/parity/generate_parity_table.py"
+CAPTURE = REPO_ROOT / "tests/parity/parser/capture_parser_outputs.py"
 
 
 class LinkCollector(HTMLParser):
@@ -103,6 +105,21 @@ def test_generate_reasoning_parity_table_leak_markers_are_parser_specific() -> N
         r'<div class="ttip"><div class="ttip-head">REASONING\.batch\.3\.a — minimax_append_think',
         html,
     )
+
+
+@pytest.mark.timeout(60)
+def test_capture_parser_outputs_cli_help() -> None:
+    result = subprocess.run(
+        [sys.executable, str(CAPTURE.relative_to(REPO_ROOT)), "--help"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--impl" in result.stdout
+    assert "--merge" in result.stdout
+    assert "--overwrite-if-exists" in result.stdout
 
 
 def _render_html(*extra_args: str) -> str:

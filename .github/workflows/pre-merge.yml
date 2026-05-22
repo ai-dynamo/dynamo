@@ -33,6 +33,7 @@ jobs:
     outputs:
       operator: ${{ steps.changes.outputs.operator }}
       snapshot: ${{ steps.changes.outputs.snapshot }}
+      parser_rust: ${{ steps.changes.outputs.parser_rust }}
       rust: ${{ steps.changes.outputs.rust }}
     steps:
       - name: Checkout code
@@ -46,7 +47,7 @@ jobs:
 
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, operator, snapshot, rust-tests, rust-clippy]
+    needs: [changed-files, pre-commit, operator, snapshot, parser-rust-tests, parser-rust-clippy, rust-tests, rust-clippy]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -92,6 +93,60 @@ jobs:
       with:
         component: snapshot
         platform: linux/amd64
+
+  parser-rust-tests:
+    needs: changed-files
+    if: needs.changed-files.outputs.parser_rust == 'true' && needs.changed-files.outputs.rust != 'true'
+    runs-on:
+      group: Fastchecker
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        lfs: true
+    - name: Cache cargo artifacts
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+    - name: Set up Rust Toolchain Components
+      run: rustup component add rustfmt
+    - name: Verify parser formatting
+      run: cargo fmt -p dynamo-parsers -- --check
+    - name: Compile parser tests
+      run: cargo test --locked -p dynamo-parsers --all-targets --no-run
+    - name: Run parser unit tests
+      run: cargo test --locked -p dynamo-parsers --all-targets
+
+  parser-rust-clippy:
+    needs: changed-files
+    if: needs.changed-files.outputs.parser_rust == 'true' && needs.changed-files.outputs.rust != 'true'
+    runs-on:
+      group: Fastchecker
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        lfs: true
+    - name: Verify Cargo lock file is in sync
+      run: cargo metadata --locked --format-version 1
+    - name: Cache cargo artifacts
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+    - name: Set up Rust Toolchain Components
+      run: rustup component add clippy
+    - name: Run parser clippy
+      run: cargo clippy -p dynamo-parsers --no-deps --all-targets -- -D warnings
 
   rust-tests:
     needs: changed-files

@@ -29,6 +29,7 @@ pytestmark = [
     pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.parser,
 ]
 
 

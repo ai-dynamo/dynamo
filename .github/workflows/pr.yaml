@@ -32,6 +32,9 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       frontend: ${{ steps.changes.outputs.frontend }}
+      parser: ${{ steps.changes.outputs.parser }}
+      parser_vllm: ${{ steps.changes.outputs.parser_vllm }}
+      parser_sglang: ${{ steps.changes.outputs.parser_sglang }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
@@ -74,6 +77,10 @@ jobs:
       - planner-build
       - planner-test
       - frontend-build
+      - parser-vllm-build
+      - parser-vllm-test
+      - parser-sglang-build
+      - parser-sglang-test
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -94,6 +101,8 @@ jobs:
     needs:
       - changed-files
       - dynamo-pipeline
+      - parser-build
+      - parser-test
     if: always()
     steps:
       - name: Check all dynamo jobs
@@ -439,6 +448,108 @@ jobs:
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
   # ============================================================================
+
+  parser-build:
+    name: parser-runtime
+    needs: [changed-files]
+    if: needs.changed-files.outputs.parser == 'true' && needs.changed-files.outputs.core != 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 30
+    secrets: inherit
+
+  parser-test:
+    name: parser-runtime
+    needs: [changed-files, parser-build]
+    if: needs.changed-files.outputs.parser == 'true' && needs.changed-files.outputs.core != 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: parser
+      test_type: Parser
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.parser-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and parser and gpu_0 and not (vllm or sglang)'
+      cpu_only_test_timeout_minutes: 15
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+    secrets: inherit
+
+  parser-vllm-build:
+    name: parser-vllm-runtime
+    needs: [changed-files]
+    if: needs.changed-files.outputs.parser_vllm == 'true' && needs.changed-files.outputs.core != 'true' && needs.changed-files.outputs.vllm != 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  parser-vllm-test:
+    name: parser-vllm-runtime
+    needs: [changed-files, parser-vllm-build]
+    if: needs.changed-files.outputs.parser_vllm == 'true' && needs.changed-files.outputs.core != 'true' && needs.changed-files.outputs.vllm != 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: parser-vllm
+      test_type: Parser
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.parser-vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and parser and vllm and gpu_0'
+      cpu_only_test_timeout_minutes: 15
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+    secrets: inherit
+
+  parser-sglang-build:
+    name: parser-sglang-runtime
+    needs: [changed-files]
+    if: needs.changed-files.outputs.parser_sglang == 'true' && needs.changed-files.outputs.core != 'true' && needs.changed-files.outputs.sglang != 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  parser-sglang-test:
+    name: parser-sglang-runtime
+    needs: [changed-files, parser-sglang-build]
+    if: needs.changed-files.outputs.parser_sglang == 'true' && needs.changed-files.outputs.core != 'true' && needs.changed-files.outputs.sglang != 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: parser-sglang
+      test_type: Parser
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.parser-sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and parser and sglang and gpu_0'
+      cpu_only_test_timeout_minutes: 15
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+    secrets: inherit
 
   dynamo-pipeline:
     name: dynamo-runtime

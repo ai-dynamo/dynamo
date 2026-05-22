@@ -13,6 +13,10 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `snapshot` | Snapshot Agent tests |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
+| `parser` | Dynamo parser runtime image and parser parity pytest |
+| `parser_vllm` | vLLM runtime image and vLLM parser parity pytest |
+| `parser_sglang` | SGLang runtime image and SGLang parser parity pytest |
+| `parser_rust` | Targeted Rust checks for `dynamo-parsers` |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `docs` | Nothing (classification only) |
