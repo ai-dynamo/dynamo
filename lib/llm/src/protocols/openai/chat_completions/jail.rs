@@ -1059,7 +1059,9 @@ impl JailedStream {
                         // than accumulated_content, which still contains raw protocol markers.
                         let content = if is_finalize
                             && self.tool_call_parser.as_deref() == Some("minimax_m2")
-                            && normal_text.as_deref() == Some("")
+                            && self
+                                .prefix_before_first_tool_call_marker(accumulated_content)
+                                .is_some()
                         {
                             // MiniMax's reference parser is strict: missing paired fences means
                             // zero recovered calls. The raw `<minimax:tool_call>` envelope is
