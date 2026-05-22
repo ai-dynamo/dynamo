@@ -122,10 +122,7 @@ fn strip_harmony_protocol_from_normal_text(text: &str, reason: &'static str) -> 
         .replace_all(&cleaned, |caps: &Captures<'_>| {
             record_special_tokens(&caps[0], &mut stripped);
             push_unique(&mut stripped, "analysis_envelope".to_string());
-            caps.name("body")
-                .map(|m| m.as_str())
-                .unwrap_or_default()
-                .to_string()
+            ""
         })
         .into_owned();
 
@@ -418,7 +415,7 @@ pub async fn parse_tool_calls_harmony_complete(
             {
                 push_harmony_text(&mut normal_text, &message.content);
             }
-        } else if matches!(channel, Some("analysis" | "final")) {
+        } else if channel == Some("final") {
             push_harmony_text(&mut normal_text, &message.content);
         }
     }
@@ -529,10 +526,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 0);
     }
 
@@ -544,10 +538,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -563,10 +554,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -599,17 +587,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_parse_harmony_tool_only_keeps_analysis_and_final_as_normal_text() {
+    async fn test_parse_harmony_tool_only_keeps_final_as_normal_text() {
         let text = r#"<|channel|>analysis<|message|>Need to check weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>final<|message|>I checked the weather.<|return|>"#;
         let (tool_calls, normal_content) =
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(
-            normal_content,
-            Some("Need to check weather.I checked the weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("I checked the weather.".to_string()));
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "NYC");
@@ -719,8 +704,8 @@ mod tests {
         assert_eq!(normal, Some("".to_string()));
     }
 
-    // The regex fallback must preserve any non-tool spans (prose before
-    // the call, analysis, suffix after `<|call|>`) as `normal_text`, not zero them.
+    // The regex fallback must preserve user-visible non-tool spans (prose before
+    // the call and suffix after `<|call|>`) as `normal_text`, not zero them.
     #[tokio::test]
     async fn test_parse_harmony_regex_fallback_preserves_residual_text() {
         let text = r#"PREFIX <|channel|>analysis<|message|>Need a tool.<|end|><|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|> SUFFIX"#;
@@ -745,8 +730,8 @@ mod tests {
             "normal must keep suffix: {normal:?}"
         );
         assert!(
-            normal.contains("Need a tool."),
-            "normal must keep analysis when only tool parsing is active: {normal:?}"
+            !normal.contains("Need a tool."),
+            "normal must not expose Harmony analysis text: {normal:?}"
         );
         assert!(
             !normal.contains("<|start|>"),
@@ -787,7 +772,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_parse_harmony_parse_failure_preserves_analysis_body() {
+    async fn test_parse_harmony_parse_failure_strips_analysis_body() {
         let text = r#"Before <|channel|>analysis<|message|>Need to call get_weather.<|end|><|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"<|call|> After"#;
         let (tool_calls, normal) =
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
@@ -795,10 +780,14 @@ mod tests {
                 .unwrap();
         assert!(tool_calls.is_empty());
         let normal = normal.unwrap_or_default();
-        assert_eq!(normal, "Before Need to call get_weather. After");
+        assert_eq!(normal, "Before  After");
         assert!(
             !normal.contains("<|channel|>"),
             "normal_text must not leak Harmony protocol tokens: {normal:?}"
+        );
+        assert!(
+            !normal.contains("Need to call get_weather."),
+            "normal_text must not expose Harmony analysis text: {normal:?}"
         );
     }
 
@@ -810,13 +799,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some(
-                r#"We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function."#
-                    .to_string()
-            )
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert!(tool_calls.is_empty());
     }
 

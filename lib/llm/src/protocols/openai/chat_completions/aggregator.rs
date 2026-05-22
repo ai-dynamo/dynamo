@@ -1556,7 +1556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_harmony_aggregate_zero_call_uses_stripped_normal_text() {
+    async fn test_harmony_aggregate_zero_call_drops_internal_analysis() {
         let annotated_delta = create_test_delta(
             0,
             r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#,
@@ -1576,12 +1576,7 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         let choice = &response.inner.choices[0];
-        assert_eq!(
-            choice.message.content,
-            Some(ChatCompletionMessageContent::Text(
-                "Need current weather.".to_string()
-            ))
-        );
+        assert_eq!(choice.message.content, None);
         assert!(choice.message.tool_calls.is_none());
         assert_eq!(
             choice.finish_reason,

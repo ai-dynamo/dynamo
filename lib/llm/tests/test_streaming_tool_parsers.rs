@@ -454,10 +454,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gpt_oss_tool_parser_only_preserves_analysis_as_content_vllm() {
-        // Parent-ticket acceptance: if only tool parsing is configured, the
-        // Harmony analysis channel is not handled by a reasoning parser and
-        // should be surfaced as normal content while tool calls are parsed.
+    async fn test_gpt_oss_tool_parser_only_hides_analysis_from_content_vllm() {
+        // If only tool parsing is configured, the Harmony analysis channel is
+        // still internal reasoning and must not be surfaced as normal content.
         let file_path = format!(
             "{}/vllm/gpt-oss-20b/chat_completion_stream_f0c86d72-tool.json",
             DATA_ROOT_PATH
@@ -477,8 +476,8 @@ mod tests {
             "Reasoning content should stay empty when no reasoning parser is configured"
         );
         assert_eq!(
-            aggregated.normal_content, test_data.expected_reasoning_content,
-            "Tool-only parsing should preserve Harmony analysis as normal content"
+            aggregated.normal_content, test_data.expected_normal_content,
+            "Tool-only parsing should hide Harmony analysis from normal content"
         );
         assert!(
             !aggregated.normal_content.contains("<|channel|>"),
