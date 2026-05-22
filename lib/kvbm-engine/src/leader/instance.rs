@@ -73,15 +73,14 @@ pub struct InstanceLeader {
     /// Velo instance for distributed communication.
     messenger: Arc<Messenger>,
 
-    /// Full Velo handle when available. Required for the
-    /// `core/register_leader` control handler's
-    /// `velo.discover_and_register_peer` path, which fans out to both
-    /// the messenger registry and the streaming transport registry.
-    /// `messenger.discover_and_register_peer` only handles the
-    /// messenger side, so without this the streaming-transport
-    /// registry stays empty and `attach_anchor` fails with
-    /// "TCP streaming: peer <id> not registered". Optional because
-    /// some test/bench paths build a leader with just a messenger.
+    /// Full Velo handle when available. Required for peer registration on the
+    /// remote-search path (the connector's `PeerResolver` calls
+    /// `velo.register_peer`), which fans out to both the messenger registry and
+    /// the streaming transport registry. `messenger.register_peer` only handles
+    /// the messenger side, so without this the streaming-transport registry
+    /// stays empty and `attach_anchor` fails with
+    /// "TCP streaming: peer <id> not registered". Optional because some
+    /// test/bench paths build a leader with just a messenger.
     velo: Option<Arc<velo::Velo>>,
 
     /// Block registry for deduplication.
@@ -110,9 +109,6 @@ pub struct InstanceLeader {
     /// Populated by the local-staging `AsyncSession` path in `find_matches`
     /// and cleared via [`InstanceLeader::release_session`].
     session_states: Arc<DashMap<SessionId, SessionState>>,
-
-    /// List of remote leader instance IDs (mutable for post-construction configuration).
-    remote_leaders: Arc<std::sync::RwLock<Vec<InstanceId>>>,
 
     /// Client for the `kvbm.leader.export_metadata` RPC, used to import a peer
     /// leader's worker layout metadata before an RDMA pull.
@@ -243,7 +239,6 @@ pub struct InstanceLeaderBuilder {
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
     workers: Vec<Arc<dyn Worker>>,
-    remote_leaders: Option<Vec<InstanceId>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
     parallelism_template: Option<ParallelismTemplate>,
@@ -323,11 +318,6 @@ impl InstanceLeaderBuilder {
     /// Set all workers at once.
     pub fn workers(mut self, workers: Vec<Arc<dyn Worker>>) -> Self {
         self.workers = workers;
-        self
-    }
-
-    pub fn remote_leaders(mut self, leaders: Vec<InstanceId>) -> Self {
-        self.remote_leaders = Some(leaders);
         self
     }
 
@@ -460,9 +450,6 @@ impl InstanceLeaderBuilder {
             parallel_worker,
             cached_worker_metadata: self.cached_worker_metadata,
             session_states: Arc::new(DashMap::new()),
-            remote_leaders: Arc::new(std::sync::RwLock::new(
-                self.remote_leaders.unwrap_or_default(),
-            )),
             transport,
             object_client: self.object_client,
             parallelism_template: self.parallelism_template,
@@ -575,24 +562,6 @@ impl InstanceLeader {
     /// Reserved for the parked G4 search machinery in [`crate::leader::search`].
     pub fn object_client(&self) -> Option<Arc<dyn ObjectBlockOps>> {
         self.object_client.clone()
-    }
-
-    /// Record a peer leader instance ID in the registry surfaced by the
-    /// `register_leader` control RPC.
-    ///
-    /// This is a bookkeeping list only: `find_matches_with_options` no longer
-    /// consults static peer leaders (remote search is hub-indexer driven, and
-    /// remote worker metadata is fetched on demand via `ensure_remote_metadata`).
-    pub fn add_remote_leader(&self, instance_id: InstanceId) {
-        let mut remote_leaders = self.remote_leaders.write().unwrap();
-        if !remote_leaders.contains(&instance_id) {
-            remote_leaders.push(instance_id);
-        }
-    }
-
-    /// Get the list of registered remote leader instance IDs.
-    pub fn remote_leaders(&self) -> Vec<InstanceId> {
-        self.remote_leaders.read().unwrap().clone()
     }
 
     /// The disagg [`SessionManager`] — keeps control-plane-opened sessions
@@ -1110,7 +1079,7 @@ impl InstanceLeader {
     /// Distinct from [`register_handlers`](Self::register_handlers), which
     /// wires the engine-internal `VeloLeaderService`. The control plane is
     /// public surface, organized as modules:
-    /// - `core` (always-on) — `register_leader`.
+    /// - `core` (always-on) — `describe_instance`.
     /// - `transfer` (always-on) — G2 search → disagg-session creation. Reads
     ///   the `SessionFactory` lazily from the cell populated by
     ///   [`set_session_factory`](Self::set_session_factory).

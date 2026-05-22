@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The always-on `core` control module: `register_leader`.
+//! The always-on `core` control module: `describe_instance`.
 //!
 //! Migrated from the connector's `ConnectorControlApi`. The logic is
 //! pass-thru to [`InstanceLeader`]; the `NotInitialized` precondition is gone
@@ -13,9 +13,7 @@ use anyhow::Result;
 use velo::{Handler, Messenger};
 
 use kvbm_protocols::control::{
-    ControlError, ControlReply, DESCRIBE_INSTANCE_HANDLER, DescribeInstanceRequest,
-    InstanceDescription, ModuleId, REGISTER_LEADER_HANDLER, RegisterLeaderRequest,
-    RegisterLeaderResponse, RegisterLeaderStatus,
+    ControlReply, DESCRIBE_INSTANCE_HANDLER, DescribeInstanceRequest, InstanceDescription, ModuleId,
 };
 
 use super::ControlModule;
@@ -38,27 +36,9 @@ impl ControlModule for CoreModule {
     }
 
     fn register(&self, messenger: &Arc<Messenger>) -> Result<()> {
-        register_register_leader(messenger, self.leader.clone())?;
         register_describe_instance(messenger, self.leader.clone())?;
         Ok(())
     }
-}
-
-fn register_register_leader(messenger: &Arc<Messenger>, leader: Arc<InstanceLeader>) -> Result<()> {
-    let handler = Handler::typed_unary_async(REGISTER_LEADER_HANDLER, move |ctx| {
-        let leader = Arc::clone(&leader);
-        async move {
-            let req: RegisterLeaderRequest = ctx.input;
-            let reply: ControlReply<RegisterLeaderResponse> =
-                register_leader(&leader, req).await.into();
-            Ok::<ControlReply<RegisterLeaderResponse>, anyhow::Error>(reply)
-        }
-    })
-    .build();
-    messenger
-        .register_handler(handler)
-        .map_err(|e| anyhow::anyhow!("velo register_handler({REGISTER_LEADER_HANDLER}): {e}"))?;
-    Ok(())
 }
 
 /// Register the `describe_instance` velo handler.
@@ -84,49 +64,4 @@ fn register_describe_instance(
         .register_handler(handler)
         .map_err(|e| anyhow::anyhow!("velo register_handler({DESCRIBE_INSTANCE_HANDLER}): {e}"))?;
     Ok(())
-}
-
-/// Discover and register a remote leader by instance id.
-async fn register_leader(
-    leader: &InstanceLeader,
-    req: RegisterLeaderRequest,
-) -> Result<RegisterLeaderResponse, ControlError> {
-    let instance_id = req.instance_id;
-
-    if leader.remote_leaders().contains(&instance_id) {
-        return Ok(RegisterLeaderResponse {
-            outcome: RegisterLeaderStatus::AlreadyRegistered,
-            remote_leaders: leader.remote_leaders(),
-        });
-    }
-
-    // Prefer the full Velo handle: `Velo::discover_and_register_peer`
-    // fans out to BOTH the messenger registry and the streaming-transport
-    // registry. Calling `messenger.discover_and_register_peer` only
-    // populates the messenger side; the next `attach_anchor` then fails
-    // with "TCP streaming: peer <worker_id> not registered".
-    match leader.velo() {
-        Some(velo) => velo
-            .discover_and_register_peer(instance_id)
-            .await
-            .map_err(|e| ControlError::PeerNotFound {
-                instance_id,
-                reason: format!("{e:#}"),
-            })?,
-        None => leader
-            .messenger()
-            .discover_and_register_peer(instance_id)
-            .await
-            .map_err(|e| ControlError::PeerNotFound {
-                instance_id,
-                reason: format!("{e:#}"),
-            })?,
-    }
-
-    leader.add_remote_leader(instance_id);
-
-    Ok(RegisterLeaderResponse {
-        outcome: RegisterLeaderStatus::Registered,
-        remote_leaders: leader.remote_leaders(),
-    })
 }

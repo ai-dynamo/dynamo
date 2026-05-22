@@ -94,7 +94,6 @@ async fn build_side() -> Side {
             .registry(registry)
             .g2_manager(g2_manager.clone())
             .workers(vec![])
-            .remote_leaders(vec![])
             .build()
             .expect("build leader"),
     );

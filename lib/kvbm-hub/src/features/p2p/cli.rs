@@ -16,10 +16,11 @@
 //!   `{session_id, endpoint, committed}` triple. The session keeps the matched
 //!   G2 blocks pinned for the puller. The holder's blocks must already be
 //!   present (warmed by real inference); this CLI does not create them.
-//! - `pull` — make the **puller** learn the holder as a peer
-//!   (`core/register_leader`), then `pull_from_session` the holder's session
-//!   into the puller's G2. `--endpoint` is **required** in v1 (the leader
-//!   rejects a pull without it — there is no hub-registry lookup yet).
+//! - `pull` — `pull_from_session` the holder's session into the puller's G2.
+//!   The session `attach` resolves+registers the holder as a velo peer on
+//!   demand (PeerResolver → hub lookup → `velo.register_peer`), so no explicit
+//!   peer-registration step is needed. `--endpoint` is **required** in v1 (the
+//!   leader rejects a pull without it — there is no hub-registry lookup yet).
 //! - `unpin` — `close_session` on the holder. Idempotent.
 //! - `xfer` — `pin` → `pull` → `unpin`, threading the session endpoint
 //!   internally. The one-shot copy.
@@ -36,7 +37,7 @@ use serde_json::{Value, json};
 
 use crate::client::HubClient;
 use crate::protocol::paths::{
-    CONTROL_CORE_REGISTER_LEADER, CONTROL_TRANSFER_CLOSE_SESSION, CONTROL_TRANSFER_OPEN_SESSION,
+    CONTROL_TRANSFER_CLOSE_SESSION, CONTROL_TRANSFER_OPEN_SESSION,
     CONTROL_TRANSFER_PULL_FROM_SESSION,
 };
 
@@ -54,7 +55,7 @@ pub fn p2p_command() -> Command {
         )
         .subcommand(
             Command::new("pull")
-                .about("Pull a pinned session's blocks into the puller's G2 (register + pull)")
+                .about("Pull a pinned session's blocks into the puller's G2 (pull_from_session)")
                 .arg(instance_arg("from", "Source (holder) instance id"))
                 .arg(instance_arg("to", "Destination (puller) instance id"))
                 .arg(session_arg())
@@ -206,9 +207,9 @@ async fn pull(
     endpoint: Value,
     selector: Option<Vec<Vec<u8>>>,
 ) -> Result<Value> {
-    register_peer(hub, to, from)
-        .await
-        .context("register source as peer on destination")?;
+    // No explicit peer registration: `pull_from_session` opens a p2p session
+    // whose `attach` path resolves+registers the source via the hub
+    // (PeerResolver → velo.register_peer) on demand.
     let mut body = json!({
         "session_id": session_id,
         "source_instance_id": from,
@@ -276,16 +277,6 @@ async fn xfer(hub: &HubClient, from: &str, to: &str, hashes: Vec<Vec<u8>>) -> Re
         "pulled": pulled,
         "close": close,
     }))
-}
-
-/// Make `instance` learn `peer` as a velo peer via the hub's typed
-/// `core/register_leader` route.
-async fn register_peer(hub: &HubClient, instance: &str, peer: &str) -> Result<Value> {
-    hub.post_json(
-        &fill_instance(CONTROL_CORE_REGISTER_LEADER, instance),
-        &json!({ "instance_id": peer }),
-    )
-    .await
 }
 
 /// Pull `(session_id, endpoint, committed)` out of an
@@ -401,10 +392,6 @@ mod tests {
         assert_eq!(
             fill_instance(CONTROL_TRANSFER_OPEN_SESSION, "inst-1"),
             "/v1/instances/inst-1/control/transfer/open_session"
-        );
-        assert_eq!(
-            fill_instance(CONTROL_CORE_REGISTER_LEADER, "inst-2"),
-            "/v1/instances/inst-2/control/core/register_leader"
         );
     }
 

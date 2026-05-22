@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use futures::future::BoxFuture;
 use kvbm_protocols::control::{
     ControlError, DescribeInstanceRequest, InstanceDescription, LeaderControlClient,
-    MetricsSnapshotRequest, ModuleId, RegisterLeaderRequest, ResetRequest,
+    MetricsSnapshotRequest, ModuleId, ResetRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -394,7 +394,6 @@ fn routes(manager: Arc<ControlPlaneManager>) -> Router {
         .route(INSTANCE_MODULES, get(get_modules))
         .route(INSTANCE_DESCRIBE, get(get_describe).post(post_describe))
         // ---------- Typed control namespace ----------
-        .route(CONTROL_CORE_REGISTER_LEADER, post(core_register_leader))
         .route(CONTROL_CORE_DESCRIBE_INSTANCE, post(core_describe_instance))
         .route(CONTROL_DEV_RESET, post(dev_reset))
         // The `/control/transfer/*` routes moved to `P2pManager` — block copy
@@ -408,25 +407,6 @@ fn routes(manager: Arc<ControlPlaneManager>) -> Router {
 // ---------------------------------------------------------------------------
 // Handlers — typed namespace
 // ---------------------------------------------------------------------------
-
-/// `POST /control/core/register_leader` — typed RPC to the leader.
-///
-/// `RegisterLeaderRequest` has no `Default` derive (the `instance_id` field
-/// is required), so the body cannot be elided.
-async fn core_register_leader(
-    State(mgr): State<Arc<ControlPlaneManager>>,
-    Path(instance_id): Path<InstanceId>,
-    Json(req): Json<RegisterLeaderRequest>,
-) -> Response {
-    let client = match leader_client(&mgr, instance_id) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    match client.core().register_leader(req).await {
-        Ok(resp) => ok_response(&resp),
-        Err(err) => control_error_response(instance_id, "register_leader", err),
-    }
-}
 
 /// `POST /control/core/describe_instance` — pull a fresh
 /// [`InstanceDescription`] from the leader via velo. Hub also updates the

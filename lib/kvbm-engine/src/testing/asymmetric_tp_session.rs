@@ -185,7 +185,6 @@ async fn build_side(
     velo: Arc<velo::Velo>,
     tp: usize,
     agent_name_prefix: &str,
-    remote_instance_id: InstanceId,
     storage: StorageKind,
 ) -> Result<AsymmetricSide> {
     let layout_config = build_layout_config(tp);
@@ -237,7 +236,6 @@ async fn build_side(
         .g2_manager(g2_manager.clone())
         .g3_manager(g3_manager)
         .workers(worker_refs)
-        .remote_leaders(vec![remote_instance_id])
         .parallelism_template(template)
         .build()?;
     leader.register_handlers()?;
@@ -322,10 +320,8 @@ pub async fn create_asymmetric_leader_pair_with_workers(
     velo_puller.register_peer(velo_holder.peer_info())?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let puller_id = velo_puller.instance_id();
-    let holder_id = velo_holder.instance_id();
-    let holder = build_side(velo_holder, TP_HOLDER, "holder", puller_id, storage).await?;
-    let puller = build_side(velo_puller, TP_PULLER, "puller", holder_id, storage).await?;
+    let holder = build_side(velo_holder, TP_HOLDER, "holder", storage).await?;
+    let puller = build_side(velo_puller, TP_PULLER, "puller", storage).await?;
 
     Ok(AsymmetricPair { holder, puller })
 }

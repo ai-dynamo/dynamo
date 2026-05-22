@@ -610,8 +610,8 @@ impl ConnectorLeader {
             // leader built with `control.metrics = true` would silently log
             // a warning at register time and the module would never appear.
             .observability(self.runtime.observability().clone());
-        // Plumb the full Velo handle when available — `core/register_leader`
-        // uses `velo.discover_and_register_peer` (both messenger + streaming
+        // Plumb the full Velo handle when available — the remote-search
+        // `PeerResolver` uses `velo.register_peer` (both messenger + streaming
         // registries). Without this the streaming registry stays empty and
         // `attach_anchor` fails with "TCP streaming: peer <id> not registered".
         if let Some(velo) = self.runtime.velo() {
@@ -958,11 +958,12 @@ impl ConnectorLeader {
         // hub's HTTP→velo proxy reaches it through the same handler-name
         // strings, so nothing on the hub side changes.
 
-        // Log the instance_id for distributed discovery
-        // Operators can use this ID with the /register_leader endpoint on other instances
+        // Log the instance_id for distributed discovery. Peers are resolved on
+        // demand at pull time (PeerResolver → hub lookup → velo.register_peer);
+        // no manual registration step is required.
         tracing::info!(
             instance_id = %self.runtime.messenger().instance_id(),
-            "KVBM leader instance started - use this ID for register_leader on remote instances"
+            "KVBM leader instance started"
         );
 
         // Register with kvbm-hub for conditional disaggregation when the hub

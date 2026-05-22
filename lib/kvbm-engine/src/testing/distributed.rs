@@ -119,7 +119,6 @@ pub async fn create_instance_leader_pair(
         .g2_manager(g2_manager_a.clone())
         .g3_manager(g3_manager_a.clone())
         .workers(vec![]) // No workers for now (no transfers)
-        .remote_leaders(vec![messenger_b.instance_id()])
         .build()?;
 
     // Register handlers for A
@@ -132,7 +131,6 @@ pub async fn create_instance_leader_pair(
         .g2_manager(g2_manager_b.clone())
         .g3_manager(g3_manager_b.clone())
         .workers(vec![]) // No workers for now
-        .remote_leaders(vec![messenger_a.instance_id()])
         .build()?;
 
     // Register handlers for B
@@ -454,7 +452,6 @@ pub fn create_direct_workers(
 /// * `layout_config` - Configuration for worker G2 layouts
 /// * `storage` - Storage type for layouts
 /// * `messenger` - Messenger instance for leader communication
-/// * `remote_leaders` - Instance IDs of remote leaders
 ///
 /// # Returns
 /// TestInstanceLeaderWithWorkers with leader and worker infrastructure
@@ -466,7 +463,6 @@ pub async fn create_instance_leader_with_workers(
     layout_config: &LayoutConfig,
     storage: StorageKind,
     messenger: Arc<velo::Messenger>,
-    remote_leaders: Vec<InstanceId>,
     agent_name_prefix: &str,
 ) -> Result<TestInstanceLeaderWithWorkers> {
     // Create G2 and G3 managers
@@ -502,7 +498,6 @@ pub async fn create_instance_leader_with_workers(
         .g2_manager(g2_manager.clone())
         .g3_manager(g3_manager.clone())
         .workers(worker_refs)
-        .remote_leaders(remote_leaders)
         .build()?;
 
     // Register handlers
@@ -568,7 +563,6 @@ pub async fn create_instance_leader_pair_with_workers(
         layout_config,
         storage,
         messenger_a.clone(),
-        vec![messenger_b.instance_id()],
         "decode",
     )
     .await?;
@@ -581,7 +575,6 @@ pub async fn create_instance_leader_pair_with_workers(
         layout_config,
         storage,
         messenger_b.clone(),
-        vec![messenger_a.instance_id()],
         "prefill",
     )
     .await?;
