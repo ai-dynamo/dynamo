@@ -411,9 +411,24 @@ fn merge_decode_topology_constraints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::config::RouterConfigOverride;
-    use std::collections::{HashMap, HashSet};
+    use dynamo_kv_router::{
+        config::RouterConfigOverride,
+        protocols::{KvTransferEnforcement, WorkerId},
+    };
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        distributed::DistributedConfig,
+        pipeline::{AsyncEngine, PushRouter, ResponseStream, network::Ingress},
+        stream,
+    };
+    use futures::StreamExt;
+    use serde_json::json;
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Mutex,
+    };
 
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
 
     #[test]
@@ -489,6 +504,189 @@ mod tests {
                 assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
             }
         }
+    }
+
+    struct PrefillTestEngine;
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for PrefillTestEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            let response = Annotated::from_data(LLMEngineOutput {
+                disaggregated_params: Some(json!({"kv_transfer": "prefill-complete"})),
+                ..Default::default()
+            });
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter(vec![response])),
+                request.context(),
+            ))
+        }
+    }
+
+    struct CapturingDecodeEngine {
+        request: Arc<Mutex<Option<PreprocessedRequest>>>,
+    }
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for CapturingDecodeEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            *self.request.lock().unwrap() = Some(request.content().clone());
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter(Vec::new())),
+                request.context(),
+            ))
+        }
+    }
+
+    fn required_topology_runtime_config() -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig {
+            kv_transfer_domain: Some("zone".to_string()),
+            kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
+            ..Default::default()
+        };
+        config
+            .topology_domains
+            .insert("zone".to_string(), "us-east-1a".to_string());
+        config
+    }
+
+    fn prefill_request_with_user_constraints() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![1, 2, 3, 4])
+            .stop_conditions(crate::protocols::common::StopConditions {
+                max_tokens: Some(16),
+                ..Default::default()
+            })
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .routing(Some(RoutingHints {
+                routing_constraints: Some(RoutingConstraints {
+                    required_taints: HashSet::from(["user.required".to_string()]),
+                    preferred_taints: HashMap::from([("user.preferred".to_string(), 0.25)]),
+                }),
+                ..Default::default()
+            }))
+            .router_config_override(Some(RouterConfigOverride {
+                router_temperature: Some(0.7),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn generate_sync_prefill_adds_topology_constraints_to_decode_request() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let namespace = drt
+            .namespace(format!(
+                "prefill_router_generate_{}",
+                uuid::Uuid::new_v4().simple()
+            ))
+            .unwrap();
+        let component = namespace
+            .component("prefill_component".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate".to_string());
+
+        let ingress = Ingress::for_engine(Arc::new(PrefillTestEngine)).unwrap();
+        let endpoint_task = {
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move { endpoint.endpoint_builder().handler(ingress).start().await })
+        };
+
+        let client = endpoint.client().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+        let push_router =
+            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                client,
+                RouterMode::RoundRobin,
+            )
+            .await
+            .unwrap();
+
+        let model_manager = Arc::new(ModelManager::new());
+        model_manager.insert_runtime_configs_for_test(
+            endpoint.id(),
+            HashMap::<WorkerId, ModelRuntimeConfig>::from([(
+                worker_id,
+                required_topology_runtime_config(),
+            )]),
+        );
+
+        let prefill_router = PrefillRouter::disabled(model_manager, RouterMode::RoundRobin, true);
+        prefill_router.endpoint_id.set(endpoint.id()).ok().unwrap();
+        prefill_router
+            .prefill_router
+            .set(InnerPrefillRouter::SimpleRouter(Arc::new(push_router)))
+            .ok()
+            .unwrap();
+        prefill_router.activated.store(true, Ordering::Release);
+
+        let captured_decode_request = Arc::new(Mutex::new(None));
+        let decode_engine = Arc::new(CapturingDecodeEngine {
+            request: captured_decode_request.clone(),
+        });
+        let request = Context::with_id(
+            prefill_request_with_user_constraints(),
+            "generate-sync-prefill-topology".to_string(),
+        );
+
+        let mut response = prefill_router
+            .generate(request, decode_engine)
+            .await
+            .unwrap();
+        while response.next().await.is_some() {}
+
+        let decode_request = captured_decode_request.lock().unwrap().take().unwrap();
+        let routing = decode_request.routing.as_ref().unwrap();
+        assert_eq!(routing.prefill_worker_id, Some(worker_id));
+        assert_eq!(decode_request.stop_conditions.max_tokens, Some(16));
+
+        let prefill_result = decode_request.prefill_result.as_ref().unwrap();
+        assert_eq!(
+            prefill_result.disaggregated_params,
+            json!({"kv_transfer": "prefill-complete"})
+        );
+
+        let constraints = routing.routing_constraints.as_ref().unwrap();
+        assert!(constraints.required_taints.contains("user.required"));
+        assert!(
+            constraints
+                .required_taints
+                .contains("dynamo.topology/zone=us-east-1a")
+        );
+        assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
+
+        let override_config = decode_request.router_config_override.as_ref().unwrap();
+        assert_eq!(override_config.overlap_score_credit, Some(0.0));
+        assert_eq!(override_config.assume_kv_reuse, Some(false));
+        assert_eq!(override_config.track_prefill_tokens, Some(false));
+        assert_eq!(override_config.router_temperature, Some(0.7));
+
+        rt.shutdown();
+        endpoint_task.await.unwrap().unwrap();
     }
 
     // -- Prefill death handling tests --
