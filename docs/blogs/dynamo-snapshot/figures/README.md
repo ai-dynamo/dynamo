@@ -38,10 +38,12 @@ plotted boundary starts at that first worker log.
 | `k8s_checkpoint_restore_lifecycle.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `worker_agent_quiesce_resume_sequence.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `kv_cache_unmap_release.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
-| `preadv_serial_before.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `aio_pipeline_after.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `gms_checkpoint_restore_flow.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
 | `gms_combined_dataflow.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
+| `hero.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. |
+| `scoreboard.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. Numbers come from the bench TSVs above (cold-start TSV + the four restore TSVs). |
+| `restore_compare.svg` | Hand-authored schematic SVG; the checked-in SVG is the source. Numbers come from the cold-start TSV and the two `regular_restore_*` TSVs. |
 
 `data/source_files.tsv` is the machine-readable source-file manifest for the
 benchmark figures.

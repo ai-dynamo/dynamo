@@ -148,13 +148,13 @@ On the same setup, we saw a massive improvement in CRIU restore time, and it is 
 
 | Model | Checkpoint size | CRIU (upstream) | CRIU (AIO) | CRIU (AIO + parallel memfd) | Speedup over upstream | SOL |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Qwen3 0.6B | 6.2 GiB | 6.8 s | 2.9 s | 2.4 s | 2.8x | 0.95 s|
+| Qwen3 0.6B | 6.2 GiB | 6.8 s | 2.9 s | 2.4 s | 2.9x | 0.95 s|
 | Qwen3 8B | 26 GiB | 24 s | 11 s | 4.7 s | 5.1x | 1.8 s|
 | Qwen3 14B | 47 GiB | 44 s | 19 s | 6.8 s | 6.5x | 3.5 s |
 | Qwen3 32B | 74 GiB | 69 s | 31 s | 9.9 s | 7.1x | 5.4 s|
-| Llama 3.3 70B FP8 | 86 GiB | 81 s | 36 s | 11 s | 7.5x | 6.5 s|
-| gpt-oss-120b | 129 GiB | 119 s | 54 s | 15 s | 7.9x | 11 s|
-| Qwen2.5 72B | 164 GiB | 126 s | 66 s | 20 s | 6.4x | 13 s |
+| Llama 3.3 70B FP8 | 86 GiB | 81 s | 36 s | 11 s | 7.4x | 6.5 s|
+| gpt-oss-120b | 129 GiB | 119 s | 54 s | 15 s | 7.7x | 11 s|
+| Qwen2.5 72B | 164 GiB | 126 s | 66 s | 20 s | 6.3x | 13 s |
 
 ![Optimized snapshot restore time after AIO and parallel memfd changes — significantly faster than cold start across all model sizes.](./figures/regular_restore.svg)
 

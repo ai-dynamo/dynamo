@@ -36,7 +36,8 @@
 <text class="num" x="502.0" y="224.0" text-anchor="middle">2.1s</text>
 <rect x="714.2" y="206" width="123.0" height="28" fill="#9a9a9a"/>
 <text class="num" x="775.7" y="224.0" text-anchor="middle">0.6s</text>
-<text class="total" x="849.2" y="239.0">2.8s</text>
+<rect x="849.4" y="206" width="7.9" height="28" fill="#c0c0c0"/>
+<text class="total" x="868.6" y="224.0">2.9s</text>
 <text class="model" x="40" y="352">Qwen3 8B</text>
 <text class="lane-label" x="245" y="394.0" text-anchor="end">snapshot agent</text>
 <text class="lane-label" x="245" y="442.0" text-anchor="end">GMS loader</text>
@@ -49,7 +50,8 @@
 <text class="num" x="514.1" y="394.0" text-anchor="middle">2.2s</text>
 <rect x="738.3" y="376" width="115.9" height="28" fill="#9a9a9a"/>
 <text class="num" x="796.2" y="394.0" text-anchor="middle">0.6s</text>
-<text class="total" x="866.1" y="409.0">2.9s</text>
+<rect x="867.1" y="376" width="17.9" height="28" fill="#c0c0c0"/>
+<text class="total" x="894.3" y="394.0">3.1s</text>
 <text class="model" x="40" y="522">gpt-oss-120b</text>
 <text class="lane-label" x="245" y="564.0" text-anchor="end">snapshot agent</text>
 <text class="lane-label" x="245" y="612.0" text-anchor="end">GMS loader</text>
@@ -62,13 +64,16 @@
 <text class="num" x="601.2" y="564.0" text-anchor="middle">3.1s</text>
 <rect x="911.9" y="546" width="144.4" height="28" fill="#9a9a9a"/>
 <text class="num" x="984.1" y="564.0" text-anchor="middle">0.7s</text>
-<text class="total" x="1068.3" y="579.0">3.9s</text>
-<rect x="398.5" y="680" width="12" height="12" fill="#5a5a5a"/>
-<text class="legend" x="416.5" y="690">agent setup</text>
-<rect x="511.5" y="680" width="12" height="12" fill="#7a7a7a"/>
-<text class="legend" x="529.5" y="690">CRIU restore</text>
-<rect x="631.5" y="680" width="12" height="12" fill="#9a9a9a"/>
-<text class="legend" x="649.5" y="690">CUDA restore</text>
-<rect x="751.5" y="680" width="12" height="12" fill="#9ed649"/>
-<text class="legend" x="769.5" y="690">GMS load weights</text>
+<rect x="1083.0" y="546" width="5.3" height="28" fill="#c0c0c0"/>
+<text class="total" x="1099.5" y="564.0">4.1s</text>
+<rect x="346.5" y="680" width="12" height="12" fill="#5a5a5a"/>
+<text class="legend" x="364.5" y="690">agent setup</text>
+<rect x="459.5" y="680" width="12" height="12" fill="#7a7a7a"/>
+<text class="legend" x="477.5" y="690">CRIU restore</text>
+<rect x="579.5" y="680" width="12" height="12" fill="#9a9a9a"/>
+<text class="legend" x="597.5" y="690">CUDA restore</text>
+<rect x="699.5" y="680" width="12" height="12" fill="#c0c0c0"/>
+<text class="legend" x="717.5" y="690">wake / remap</text>
+<rect x="816.5" y="680" width="12" height="12" fill="#9ed649"/>
+<text class="legend" x="834.5" y="690">GMS load weights</text>
 </svg>
