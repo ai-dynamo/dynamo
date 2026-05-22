@@ -423,7 +423,8 @@ mod tests {
         // Present but disabled → Ok even without indexer.
         let disabled = RemoteSearch::default();
         assert!(
-            validate_remote_search_availability(Some(&disabled), Some(&handshake_with(&[]))).is_ok(),
+            validate_remote_search_availability(Some(&disabled), Some(&handshake_with(&[])))
+                .is_ok(),
             "disabled remote_search must not error even without indexer"
         );
     }

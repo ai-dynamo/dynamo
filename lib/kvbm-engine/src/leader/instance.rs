@@ -47,9 +47,8 @@ use super::{
     consolidator::{ConsolidatorCell, ConsolidatorParams, new_cell, spawn_into_cell},
     discovery::RemoteDiscoveryHandle,
     dispatch::{PullRef, WirePullOptions, plan_pull},
-    remote_search,
     parallelism::{ParallelismTemplate, stamp_parallelism_descriptors},
-    stage_g3_to_g2,
+    remote_search, stage_g3_to_g2,
     velo::{ExportMetadataCallback, VeloLeaderService},
 };
 
@@ -1851,7 +1850,6 @@ impl Leader for InstanceLeader {
             && !has_remote_leaders
             && !local_covers_all;
 
-
         // Host-bypass short-circuit: when G2 is intentionally unconfigured we
         // never want to take the AsyncSession + stage_g3_to_g2 path. Return
         // immediately with both G2 (typically empty) and G3 blocks attached
@@ -2335,7 +2333,9 @@ mod tests {
     fn some_hashes(n: usize) -> Vec<SequenceHash> {
         // Distinct, deterministic PLHs; none are resident in the fresh G2, so
         // the local prefix match is empty and the whole range is "remote".
-        (0..n as u64).map(|i| SequenceHash::new(i, None, i)).collect()
+        (0..n as u64)
+            .map(|i| SequenceHash::new(i, None, i))
+            .collect()
     }
 
     /// Below the block threshold, the driver must not consult discovery and
@@ -2363,7 +2363,10 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 0, "discovery must be skipped");
         assert!(
-            matches!(async_session.status(), OnboardingStatus::Complete { matched_blocks: 0 }),
+            matches!(
+                async_session.status(),
+                OnboardingStatus::Complete { matched_blocks: 0 }
+            ),
             "empty local G2 → Complete{{0}}, got {:?}",
             async_session.status()
         );
@@ -2396,7 +2399,10 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1, "discovery consulted once");
         assert!(
-            matches!(async_session.status(), OnboardingStatus::Complete { matched_blocks: 0 }),
+            matches!(
+                async_session.status(),
+                OnboardingStatus::Complete { matched_blocks: 0 }
+            ),
             "discovery miss degrades to local match, got {:?}",
             async_session.status()
         );
@@ -2447,7 +2453,10 @@ mod tests {
 
         // Wait until the driver is parked inside discovery, then cancel.
         started.notified().await;
-        assert!(matches!(async_session.status(), OnboardingStatus::Searching));
+        assert!(matches!(
+            async_session.status(),
+            OnboardingStatus::Searching
+        ));
 
         leader.release_session(session_id);
 

@@ -237,7 +237,6 @@ impl ConnectorLeader {
         self.disagg_client.get()
     }
 
-
     /// Whichever [`HubClient`] this leader registered with, regardless of which
     /// feature path ran. The three registration paths stash it differently
     /// (kv-index-only, standalone-P2P, or folded into the CD client), so this
@@ -876,7 +875,13 @@ impl ConnectorLeader {
                 match count {
                     None => crate::audit!("gnmt_pending", request_id, num_computed_tokens),
                     Some(n) => {
-                        crate::audit!("gnmt_matched", request_id, num_computed_tokens, matched_tokens = n, async_load = actual_async)
+                        crate::audit!(
+                            "gnmt_matched",
+                            request_id,
+                            num_computed_tokens,
+                            matched_tokens = n,
+                            async_load = actual_async
+                        )
                     }
                 }
                 Ok((count, actual_async))

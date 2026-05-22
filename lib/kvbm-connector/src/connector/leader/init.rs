@@ -1199,15 +1199,12 @@ impl ConnectorLeader {
                 .velo()
                 .context("remote_search requires a velo-enabled runtime (got bare Messenger)")?
                 .clone();
-            let peer_resolver = super::p2p::peer_resolver::HubPeerResolver::new(
-                Arc::clone(&hub),
-                velo,
-            ) as Arc<dyn super::p2p::peer_resolver::PeerResolver>;
-            let discovery: kvbm_engine::leader::RemoteDiscoveryHandle =
-                Arc::new(super::remote_search::HubRemoteDiscovery::new(
-                    client,
-                    peer_resolver,
-                ));
+            let peer_resolver =
+                super::p2p::peer_resolver::HubPeerResolver::new(Arc::clone(&hub), velo)
+                    as Arc<dyn super::p2p::peer_resolver::PeerResolver>;
+            let discovery: kvbm_engine::leader::RemoteDiscoveryHandle = Arc::new(
+                super::remote_search::HubRemoteDiscovery::new(client, peer_resolver),
+            );
             leader.set_remote_discovery(discovery);
             tracing::info!("remote-search discovery injected into leader");
         }

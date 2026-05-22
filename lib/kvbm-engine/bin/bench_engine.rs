@@ -101,11 +101,12 @@ use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
 /// fast path (matching shapes + matching tags) or invokes a transform
 /// kernel (mismatching tags — e.g. operational → universal). LW +
 /// Universal is rejected at builder time, so the enum omits it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
 enum BenchLayout {
     /// Fully contiguous, `KvBlockLayout::Unknown` (legacy untagged path).
+    #[default]
     Fc,
     /// Layer-separate (block-first), `KvBlockLayout::Unknown`.
     Lw,
@@ -121,12 +122,6 @@ enum BenchLayout {
     /// an operational source (e.g. `lw-nhd`) to measure the
     /// transform-kernel cost.
     FcUniversal,
-}
-
-impl Default for BenchLayout {
-    fn default() -> Self {
-        Self::Fc
-    }
 }
 
 impl BenchConfig {
@@ -628,13 +623,11 @@ fn spawn_worker_thread(
                     format_cpu_set(&cpus)
                 );
                 pin_thread_to_cpus(&cpus);
+            } else if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
+                eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
+                let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
             } else {
-                if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
-                    eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
-                    let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
-                } else {
-                    eprintln!("[GPU {device_id}] No NUMA pinning (node unknown)");
-                }
+                eprintln!("[GPU {device_id}] No NUMA pinning (node unknown)");
             }
 
             // Build tokio runtime on this NUMA-pinned thread
