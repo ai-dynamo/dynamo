@@ -7,6 +7,20 @@
 ########## Runtime Image #########
 ##################################
 
+# Workspace transport stage: gather all workspace contents so the runtime
+# pulls them in one COPY layer instead of nine. Reduces overlayfs depth on
+# top of the 226-layer upstream TRT-LLM base.
+FROM scratch AS workspace_files
+COPY --chmod=775 tests /tests
+COPY --chmod=775 examples /examples
+COPY --chmod=775 deploy /deploy
+COPY --chmod=775 dev /dev
+COPY --chmod=775 components/src/dynamo/common /components/src/dynamo/common
+COPY --chmod=775 components/src/dynamo/frontend /components/src/dynamo/frontend
+COPY --chmod=775 components/src/dynamo/trtllm /components/src/dynamo/trtllm
+COPY --chmod=775 components/src/dynamo/mocker /components/src/dynamo/mocker
+COPY --chmod=775 lib /lib
+
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
 ARG ENABLE_KVBM
@@ -119,18 +133,9 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 
 USER dynamo
 
-# Copy the workspace surface needed by trtllm pre-merge tests.
-# Keep optional framework trees out of /workspace so the upstream runtime does
-# not look like a fully-expanded generic image.
-COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
-COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
-COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
-COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/trtllm /workspace/components/src/dynamo/trtllm
-COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
-COPY --chmod=775 --chown=dynamo:0 lib /workspace/lib
+# Copy the workspace surface needed by trtllm pre-merge tests in a single
+# layer (see workspace_files stage above).
+COPY --chmod=775 --chown=dynamo:0 --from=workspace_files / /workspace/
 
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
