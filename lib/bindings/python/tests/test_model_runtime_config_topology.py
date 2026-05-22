@@ -41,3 +41,17 @@ def test_model_runtime_config_rejects_invalid_topology_policy_values():
 
     with pytest.raises(ValueError, match="kv_transfer_enforcement"):
         runtime_config.kv_transfer_enforcement = "fallback"
+
+
+@pytest.mark.unit
+@pytest.mark.none
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_model_runtime_config_topology_domains_setter_is_atomic():
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.topology_domains = {"zone": "us-east-1a"}
+
+    with pytest.raises(TypeError):
+        runtime_config.topology_domains = {"rack": "rack-22", 1: "us-west-2a"}
+
+    assert runtime_config.topology_domains == {"zone": "us-east-1a"}

@@ -274,12 +274,13 @@ impl ModelRuntimeConfig {
 
     #[setter]
     fn set_topology_domains(&mut self, topology_domains: &Bound<'_, PyDict>) -> PyResult<()> {
-        self.inner.topology_domains.clear();
+        let mut new_topology_domains = HashMap::new();
         for (key, value) in topology_domains.iter() {
             let key_str: String = key.extract()?;
             let value_str: String = value.extract()?;
-            self.inner.topology_domains.insert(key_str, value_str);
+            new_topology_domains.insert(key_str, value_str);
         }
+        self.inner.topology_domains = new_topology_domains;
         Ok(())
     }
 
