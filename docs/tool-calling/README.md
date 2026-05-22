@@ -26,16 +26,16 @@ registry does not list a parser for your model.
 
 ## Why Dynamo implements tool-call and reasoning parsers
 
-In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call parsing and 
-reasoning parsing happens in the engine's frontend server, with subtle 
-behavioral differences across each. Since Dynamo orchestrates efficient 
+In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call parsing and
+reasoning parsing happens in the engine's frontend server, with subtle
+behavioral differences across each. Since Dynamo orchestrates efficient
 routing and tokenization, it connects directly to each engine and circumvents
 each engine's frontend server to avoid redundant work.
 
 Dynamo therefore implements tool-call parsing and reasoning parsing in its frontend as a
 framework-agnostic Rust layer. This gives Dynamo one tested OpenAI-compatible
-contract across vLLM, SGLang, TRTLLM, and other workers, while keeping the serving 
-hot path highly concurrent and scalable, avoiding Python GIL bottlenecks. 
+contract across vLLM, SGLang, TRTLLM, and other workers, while keeping the serving
+hot path highly concurrent and scalable, avoiding Python GIL bottlenecks.
 
 ## Troubleshooting
 
