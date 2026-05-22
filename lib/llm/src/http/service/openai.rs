@@ -1156,6 +1156,7 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 Some(ChatCompletionMessageContent::Parts(p)) => p.is_empty(),
             };
             c.finish_reason.is_none()
+                && c.logprobs.is_none()
                 && content_empty
                 && function_call.is_none()
                 && tool_calls.is_none()
@@ -4615,8 +4616,8 @@ mod tests {
     #[test]
     fn test_chat_predicate_filters_text_empty_string() {
         use dynamo_protocols::types::{
-            ChatCompletionMessageContent, ChatCompletionResponseContentPart,
-            ChatCompletionResponseContentPartText,
+            ChatChoiceLogprobs, ChatCompletionMessageContent, ChatCompletionResponseContentPart,
+            ChatCompletionResponseContentPartText, ChatCompletionTokenLogprob,
         };
 
         // `Text("")` arises during multi-byte UTF-8 token assembly and must be
@@ -4629,8 +4630,7 @@ mod tests {
 
         // Structurally empty multimodal `Parts(vec![])` is also empty.
         let mut resp = make_delta(None, None, None, None, None, None, None, None);
-        resp.inner.choices[0].delta.content =
-            Some(ChatCompletionMessageContent::Parts(Vec::new()));
+        resp.inner.choices[0].delta.content = Some(ChatCompletionMessageContent::Parts(Vec::new()));
         assert!(
             is_empty_stream_response(&resp),
             "Parts(vec![]) delta should be filtered as empty",
@@ -4662,6 +4662,23 @@ mod tests {
         assert!(
             !is_empty_stream_response(&resp),
             "Text(\"\") + finish_reason must not be filtered",
+        );
+
+        // Per-token logprobs can arrive while content is still `Text("")` during
+        // multi-byte assembly; that payload is meaningful and must survive.
+        let mut resp = make_delta(Some(""), None, None, None, None, None, None, None);
+        resp.inner.choices[0].logprobs = Some(ChatChoiceLogprobs {
+            content: Some(vec![ChatCompletionTokenLogprob {
+                token: "h".to_string(),
+                logprob: -0.5,
+                bytes: Some(vec![104]),
+                top_logprobs: vec![],
+            }]),
+            refusal: None,
+        });
+        assert!(
+            !is_empty_stream_response(&resp),
+            "Text(\"\") + logprobs must not be filtered",
         );
     }
 
