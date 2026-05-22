@@ -14,20 +14,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import signal
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gpu_memory_service.cli.snapshot.env_args import arg_or_env
 from gpu_memory_service.common.cuda_utils import list_devices
 from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.snapshot.backends.sharded_ssd import (
-    GMS_SHARDED_SSD_ROOTS_ENV,
-    parse_sharded_ssd_roots,
-)
+from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 from gpu_memory_service.snapshot.transfer import (
+    CHECKPOINT_DIR_TRANSFER_BACKENDS,
     DEFAULT_TRANSFER_BACKEND,
     TRANSFER_BACKEND_CHOICES,
 )
@@ -37,10 +32,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-GMS_CHECKPOINT_DIR_ENV = "GMS_CHECKPOINT_DIR"
-GMS_LOAD_WORKERS_ENV = "GMS_LOAD_WORKERS"
-GMS_TRANSFER_BACKEND_ENV = "GMS_TRANSFER_BACKEND"
 
 
 def _load_device(
@@ -79,80 +70,47 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint-dir",
         default=None,
-        help=f"Checkpoint directory. Falls back to {GMS_CHECKPOINT_DIR_ENV}.",
+        help=(
+            "Checkpoint directory. Required for directory-backed transfer "
+            f"backends: {', '.join(CHECKPOINT_DIR_TRANSFER_BACKENDS)}."
+        ),
     )
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=None,
-        help=f"Shard load workers per device. Falls back to {GMS_LOAD_WORKERS_ENV}.",
+        default=8,
+        help="Shard load workers per device.",
     )
     parser.add_argument(
         "--transfer-backend",
         choices=TRANSFER_BACKEND_CHOICES,
-        default=None,
-        help=(
-            f"Restore transfer backend. Falls back to {GMS_TRANSFER_BACKEND_ENV}; "
-            f"default is {DEFAULT_TRANSFER_BACKEND!r}."
-        ),
+        default=DEFAULT_TRANSFER_BACKEND,
+        help=f"Restore transfer backend. Default is {DEFAULT_TRANSFER_BACKEND!r}.",
     )
     parser.add_argument(
         "--sharded-ssd-roots",
-        default=None,
+        default="",
         help=(
-            "Comma-separated SSD roots for the sharded-ssd restore backend. "
-            f"Falls back to {GMS_SHARDED_SSD_ROOTS_ENV}."
+            "Comma-separated SSD roots for the sharded-ssd restore backend."
         ),
     )
     return parser
 
 
-def _validate_transfer_backend(
-    parser: argparse.ArgumentParser,
-    backend: str,
-) -> str:
-    if backend not in TRANSFER_BACKEND_CHOICES:
-        parser.error(
-            f"--transfer-backend must be one of {', '.join(TRANSFER_BACKEND_CHOICES)} "
-            f"when {GMS_TRANSFER_BACKEND_ENV} is set"
-        )
-    return backend
-
-
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    checkpoint_dir = arg_or_env(
-        parser,
-        args.checkpoint_dir,
-        GMS_CHECKPOINT_DIR_ENV,
-        required=True,
-        required_flag="--checkpoint-dir",
-    )
-    max_workers = arg_or_env(
-        parser,
-        args.max_workers,
-        GMS_LOAD_WORKERS_ENV,
-        default=8,
-        coerce=int,
-    )
-    transfer_backend = _validate_transfer_backend(
-        parser,
-        arg_or_env(
-            parser,
-            args.transfer_backend,
-            GMS_TRANSFER_BACKEND_ENV,
-            default=DEFAULT_TRANSFER_BACKEND,
-        ),
-    )
-    sharded_ssd_roots = parse_sharded_ssd_roots(
-        arg_or_env(
-            parser,
-            args.sharded_ssd_roots,
-            GMS_SHARDED_SSD_ROOTS_ENV,
-            default="",
+    if (
+        args.transfer_backend in CHECKPOINT_DIR_TRANSFER_BACKENDS
+        and not args.checkpoint_dir
+    ):
+        parser.error(
+            f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"
         )
-    )
+    checkpoint_dir = args.checkpoint_dir
+    max_workers = args.max_workers
+    transfer_backend = args.transfer_backend
+    sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
     logger.info(
         "Starting GMS load: transfer_backend=%s max_workers=%d sharded_ssd_roots=%s",
         transfer_backend,
@@ -180,7 +138,6 @@ def main(argv: list[str] | None = None) -> None:
             logger.info("Device %d load complete", dev)
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     while True:
         time.sleep(3600)

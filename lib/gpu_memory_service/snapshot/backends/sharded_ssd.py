@@ -23,7 +23,6 @@ from gpu_memory_service.snapshot.transfer import (
 
 logger = logging.getLogger(__name__)
 
-GMS_SHARDED_SSD_ROOTS_ENV = "GMS_SHARDED_SSD_ROOTS"
 SHARDED_SSD_ROOTS_CONFIG_KEY = "sharded_ssd_roots"
 
 
@@ -60,7 +59,7 @@ def _normalize_roots(values: Sequence[str]) -> List[str]:
 def _roots_from_config(config: Mapping[str, Any]) -> List[str]:
     configured = config.get(SHARDED_SSD_ROOTS_CONFIG_KEY)
     if configured is None:
-        return parse_sharded_ssd_roots(os.environ.get(GMS_SHARDED_SSD_ROOTS_ENV))
+        return []
     if isinstance(configured, str):
         return parse_sharded_ssd_roots(configured)
     return _normalize_roots(configured)
@@ -88,7 +87,7 @@ def _group_sources_by_root(
         if root is None:
             raise RuntimeError(
                 f"{SHARDED_SSD_TRANSFER_BACKEND} source path {file_path!r} is not "
-                f"under any {GMS_SHARDED_SSD_ROOTS_ENV} root: {list(roots)}"
+                f"under any configured sharded SSD root: {list(roots)}"
             )
         groups.setdefault(root, []).append((file_path, grouped_sources))
     for grouped_paths in groups.values():
@@ -108,7 +107,7 @@ class ShardedSSDTransferBackend(NixlPosixStagingTransferBackend):
         if not self._roots:
             raise RuntimeError(
                 f"{SHARDED_SSD_TRANSFER_BACKEND} requires "
-                f"{GMS_SHARDED_SSD_ROOTS_ENV}=<root0>,<root1>,..."
+                f"{SHARDED_SSD_ROOTS_CONFIG_KEY}=<root0>,<root1>,..."
             )
         logger.info(
             "%s initialized with %d root(s) using NIXL POSIX staging",

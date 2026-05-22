@@ -133,7 +133,7 @@ class _NixlPosixStagingTransferSession:
         if self._warn_under_parallelized and worker_count < len(work_groups):
             logger.warning(
                 "%s has %d active %s groups but only %d workers; "
-                "increase GMS_LOAD_WORKERS for full parallelism",
+                "increase --max-workers for full parallelism",
                 self._backend_name,
                 len(work_groups),
                 self._group_kind,

@@ -16,11 +16,9 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gpu_memory_service.cli.snapshot.env_args import arg_or_env
 from gpu_memory_service.common.cuda_utils import list_devices
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
-    GMS_SHARDED_SSD_ROOTS_ENV,
     device_sharded_ssd_roots,
     parse_sharded_ssd_roots,
 )
@@ -36,11 +34,6 @@ logger = logging.getLogger(__name__)
 # and failing the Job. Without a bound, an engine that crashes before commit
 # would leave the saver blocked indefinitely and the Job stuck Running.
 DEFAULT_SAVE_LOCK_TIMEOUT_MS = 30 * 60 * 1000  # 30 minutes
-
-GMS_CHECKPOINT_DIR_ENV = "GMS_CHECKPOINT_DIR"
-GMS_SAVE_LOCK_TIMEOUT_MS_ENV = "GMS_SAVE_LOCK_TIMEOUT_MS"
-GMS_SAVE_WORKERS_ENV = "GMS_SAVE_WORKERS"
-GMS_SHARD_SIZE_BYTES_ENV = "GMS_SHARD_SIZE_BYTES"
 
 
 def _save_device(
@@ -84,40 +77,33 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint-dir",
         default=None,
-        help=f"Checkpoint directory. Falls back to {GMS_CHECKPOINT_DIR_ENV}.",
+        help="Checkpoint directory for directory-backed save outputs.",
     )
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=None,
-        help=f"Shard save workers per device. Falls back to {GMS_SAVE_WORKERS_ENV}.",
+        default=8,
+        help="Shard save workers per device.",
     )
     parser.add_argument(
         "--save-lock-timeout-ms",
         type=int,
-        default=None,
+        default=DEFAULT_SAVE_LOCK_TIMEOUT_MS,
         help=(
-            "Timeout for acquiring the GMS RO lock before save. Falls back to "
-            f"{GMS_SAVE_LOCK_TIMEOUT_MS_ENV}; default is "
-            f"{DEFAULT_SAVE_LOCK_TIMEOUT_MS}."
+            "Timeout for acquiring the GMS RO lock before save. "
+            f"Default is {DEFAULT_SAVE_LOCK_TIMEOUT_MS}."
         ),
     )
     parser.add_argument(
         "--shard-size-bytes",
         type=int,
-        default=None,
-        help=(
-            "Shard size in bytes. Falls back to "
-            f"{GMS_SHARD_SIZE_BYTES_ENV}; default is 4 GiB."
-        ),
+        default=4 * 1024**3,
+        help="Shard size in bytes. Default is 4 GiB.",
     )
     parser.add_argument(
         "--sharded-ssd-roots",
-        default=None,
-        help=(
-            "Comma-separated SSD roots for sharded prototype saves. "
-            f"Falls back to {GMS_SHARDED_SSD_ROOTS_ENV}."
-        ),
+        default="",
+        help="Comma-separated SSD roots for sharded prototype saves.",
     )
     return parser
 
@@ -125,42 +111,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    checkpoint_dir = arg_or_env(
-        parser,
-        args.checkpoint_dir,
-        GMS_CHECKPOINT_DIR_ENV,
-        required=True,
-        required_flag="--checkpoint-dir",
-    )
-    max_workers = arg_or_env(
-        parser,
-        args.max_workers,
-        GMS_SAVE_WORKERS_ENV,
-        default=8,
-        coerce=int,
-    )
-    lock_timeout_ms = arg_or_env(
-        parser,
-        args.save_lock_timeout_ms,
-        GMS_SAVE_LOCK_TIMEOUT_MS_ENV,
-        default=DEFAULT_SAVE_LOCK_TIMEOUT_MS,
-        coerce=int,
-    )
-    shard_size_bytes = arg_or_env(
-        parser,
-        args.shard_size_bytes,
-        GMS_SHARD_SIZE_BYTES_ENV,
-        default=4 * 1024**3,
-        coerce=int,
-    )
-    sharded_ssd_roots = parse_sharded_ssd_roots(
-        arg_or_env(
-            parser,
-            args.sharded_ssd_roots,
-            GMS_SHARDED_SSD_ROOTS_ENV,
-            default="",
-        )
-    )
+    if not args.checkpoint_dir:
+        parser.error("--checkpoint-dir is required for directory-backed saves")
+    checkpoint_dir = args.checkpoint_dir
+    assert checkpoint_dir is not None
+    max_workers = args.max_workers
+    lock_timeout_ms = args.save_lock_timeout_ms
+    shard_size_bytes = args.shard_size_bytes
+    sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
 
     devices = list_devices()
     logger.info(

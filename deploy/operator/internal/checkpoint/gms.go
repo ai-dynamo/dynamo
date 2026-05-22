@@ -7,7 +7,6 @@ package checkpoint
 
 import (
 	"fmt"
-	"path/filepath"
 
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -20,10 +19,6 @@ const (
 
 	gmsCheckpointLoaderModule = "gpu_memory_service.cli.snapshot.loader"
 	gmsCheckpointSaverModule  = "gpu_memory_service.cli.snapshot.saver"
-
-	// envCheckpointDir is the environment variable name for the GMS
-	// checkpoint artifact directory on the snapshot PVC.
-	envCheckpointDir = "GMS_CHECKPOINT_DIR"
 )
 
 // EnsureGMSRestoreSidecars adds the GMS server init sidecar and loader.
@@ -49,7 +44,6 @@ func EnsureGMSRestoreSidecars(
 
 	loader := gms.Container(GMSLoaderContainer, gmsCheckpointLoaderModule, mainContainer.Image)
 	loader.VolumeMounts = append(loader.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
-	loader.Env = append(loader.Env, corev1.EnvVar{Name: envCheckpointDir, Value: resolveGMSArtifactDir(storage)})
 	podSpec.Containers = append(podSpec.Containers, loader)
 }
 
@@ -71,23 +65,11 @@ func EnsureGMSCheckpointJobSidecars(
 		return fmt.Errorf("gms checkpoint jobs require resolved checkpoint storage")
 	}
 
-	gmsArtifactDir := resolveGMSArtifactDir(storage)
-
 	gms.EnsureServerSidecar(podSpec, mainContainer)
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
 
 	saver := gms.Container(GMSSaverContainer, gmsCheckpointSaverModule, mainContainer.Image)
 	saver.VolumeMounts = append(saver.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
-	saver.Env = append(saver.Env, corev1.EnvVar{Name: envCheckpointDir, Value: gmsArtifactDir})
 	podSpec.Containers = append(podSpec.Containers, saver)
 	return nil
-}
-
-func resolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
-	// GMS data lives under /checkpoints/gms/<hash>/versions/<version>
-	// separate from the CRIU tree (/checkpoints/<hash>/versions/<version>)
-	// so the non-root saver can create directories at the PVC root.
-	artifactVersion := filepath.Base(storage.Location)
-	checkpointID := filepath.Base(filepath.Dir(filepath.Dir(storage.Location)))
-	return filepath.Join(storage.BasePath, "gms", checkpointID, "versions", artifactVersion)
 }
