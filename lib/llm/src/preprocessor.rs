@@ -2051,7 +2051,8 @@ impl OpenAIPreprocessor {
         // decode the parsers silently produce empty reasoning_content /
         // tool_calls.
         //
-        // - gemma4: `<|think|>` markers (reasoning + tool-call).
+        // - gemma4: `<|think|>` prompt trigger plus parser-visible
+        //   `<|channel>` / `<channel|>` reasoning markers and tool-call markers.
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).

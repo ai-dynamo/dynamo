@@ -338,6 +338,25 @@ impl ReasoningParser for BasicReasoningParser {
             reasoning_text: accumulated_reasoning,
         }
     }
+
+    fn finish_reasoning_stream(&mut self) -> ParserResult {
+        if self._buffer.is_empty() {
+            return ParserResult::default();
+        }
+
+        let buffered = std::mem::take(&mut self._buffer);
+        if self._in_reasoning {
+            ParserResult {
+                normal_text: String::new(),
+                reasoning_text: buffered,
+            }
+        } else {
+            ParserResult {
+                normal_text: buffered,
+                reasoning_text: String::new(),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
