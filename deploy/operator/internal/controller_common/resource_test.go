@@ -24,8 +24,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/bsm/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -423,14 +421,102 @@ func TestGetSpecChangeResult(t *testing.T) {
 	}
 }
 
+func TestGetSpecChangeResult_AnnotationOnlyForEquivalentSpec(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	current := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "worker",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(1),
+			},
+		},
+	}
+	desired := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "worker",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(1),
+			},
+		},
+	}
+	current.SetGeneration(7)
+
+	result, err := GetSpecChangeResult(current, desired)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(result.NeedsUpdate).To(gomega.BeTrue())
+	g.Expect(result.SpecNeedsUpdate).To(gomega.BeFalse())
+	g.Expect(result.NewGeneration).To(gomega.Equal(int64(7)))
+	g.Expect(result.NewHash).ToNot(gomega.BeNil())
+}
+
+func TestGetSpecChangeResult_OrderOnlyManualDriftNeedsSpecUpdate(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	desired := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "worker",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"template": map[string]interface{}{
+					"spec": map[string]interface{}{
+						"initContainers": []interface{}{
+							map[string]interface{}{"name": "setup", "image": "busybox"},
+							map[string]interface{}{"name": "migrate", "image": "busybox"},
+						},
+						"containers": []interface{}{
+							map[string]interface{}{"name": "main", "image": "worker:v1"},
+						},
+					},
+				},
+			},
+		},
+	}
+	current := desired.DeepCopy()
+	current.SetGeneration(6)
+	current.Object["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["initContainers"] = []interface{}{
+		map[string]interface{}{"name": "migrate", "image": "busybox"},
+		map[string]interface{}{"name": "setup", "image": "busybox"},
+	}
+	desiredHash, err := GetSpecHash(desired)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	currentHash, err := GetSpecHash(current)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(currentHash).To(gomega.Equal(desiredHash), "canonical hash must reproduce the historical blind spot")
+	current.SetAnnotations(map[string]string{
+		NvidiaAnnotationHashKey:       desiredHash,
+		NvidiaAnnotationGenerationKey: "5",
+	})
+
+	result, err := GetSpecChangeResult(current, desired)
+	g.Expect(err).ToNot(gomega.HaveOccurred())
+	g.Expect(result.NeedsUpdate).To(gomega.BeTrue())
+	g.Expect(result.SpecNeedsUpdate).To(gomega.BeTrue())
+	g.Expect(result.ManualChangeDetected).To(gomega.BeTrue())
+	g.Expect(result.NewGeneration).To(gomega.Equal(int64(7)))
+}
+
 func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 	tests := []struct {
 		name                       string
 		currentGeneration          int64
 		lastAppliedGeneration      string // empty string means annotation not set
-		lastAppliedHash            string // empty string means annotation not set, "match" means compute from desired
+		lastAppliedHash            string // empty string means annotation not set, "match" means compute from current
 		desiredReplicas            int64  // different from current (2) means hash will differ
 		expectNeedsUpdate          bool
+		expectSpecNeedsUpdate      bool
 		expectManualChangeDetected bool
 		expectNewGeneration        int64 // 0 means don't check
 	}{
@@ -443,35 +529,33 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			expectNeedsUpdate:     false,
 		},
 		{
-			name:                       "manual change detected - generation increased",
+			name:                       "generation increased but spec is equivalent - annotations only",
 			currentGeneration:          7,
 			lastAppliedGeneration:      "5",
 			lastAppliedHash:            "match",
 			desiredReplicas:            2,
 			expectNeedsUpdate:          true,
-			expectManualChangeDetected: true,
-			expectNewGeneration:        8, // current(7) + 1
+			expectManualChangeDetected: false,
+			expectNewGeneration:        7,
 		},
 		{
 			// Upgrade scenario: hash matches but no generation annotation yet.
-			// We do a full update to ensure spec is correct (could have been manual edits
-			// before we added generation tracking).
-			name:                  "missing generation annotation - full update for safety",
+			name:                  "missing generation annotation - annotations only when spec is equivalent",
 			currentGeneration:     5,
 			lastAppliedGeneration: "", // missing
 			lastAppliedHash:       "match",
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectNewGeneration:   6, // current + 1
+			expectNewGeneration:   5,
 		},
 		{
-			name:                  "missing hash annotation - needs full update",
+			name:                  "missing hash annotation - annotations only when spec is equivalent",
 			currentGeneration:     5,
 			lastAppliedGeneration: "5",
 			lastAppliedHash:       "", // missing
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectNewGeneration:   6, // current(5) + 1
+			expectNewGeneration:   5,
 		},
 		{
 			name:                  "hash changed - needs full update",
@@ -480,25 +564,26 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			lastAppliedHash:       "match",
 			desiredReplicas:       3, // different from current (2)
 			expectNeedsUpdate:     true,
+			expectSpecNeedsUpdate: true,
 			expectNewGeneration:   6, // current(5) + 1
 		},
 		{
-			name:                  "corrupted generation annotation - needs full update",
+			name:                  "corrupted generation annotation - annotations only when spec is equivalent",
 			currentGeneration:     5,
 			lastAppliedGeneration: "invalid",
 			lastAppliedHash:       "match",
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectNewGeneration:   6, // current(5) + 1
+			expectNewGeneration:   5,
 		},
 		{
-			name:                  "both annotations missing - needs full update",
+			name:                  "both annotations missing - annotations only when spec is equivalent",
 			currentGeneration:     5,
 			lastAppliedGeneration: "",
 			lastAppliedHash:       "",
 			desiredReplicas:       2,
 			expectNeedsUpdate:     true,
-			expectNewGeneration:   6, // current(5) + 1
+			expectNewGeneration:   5,
 		},
 		{
 			name:                       "manual change with hash also changed",
@@ -507,6 +592,7 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			lastAppliedHash:            "match",
 			desiredReplicas:            3, // different
 			expectNeedsUpdate:          true,
+			expectSpecNeedsUpdate:      true,
 			expectManualChangeDetected: false, // hash change takes precedence
 			expectNewGeneration:        8,
 		},
@@ -580,6 +666,7 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			result, err := GetSpecChangeResult(current, desired)
 			g.Expect(err).To(gomega.BeNil())
 			g.Expect(result.NeedsUpdate).To(gomega.Equal(tt.expectNeedsUpdate), "NeedsUpdate mismatch")
+			g.Expect(result.SpecNeedsUpdate).To(gomega.Equal(tt.expectSpecNeedsUpdate), "SpecNeedsUpdate mismatch")
 			g.Expect(result.ManualChangeDetected).To(gomega.Equal(tt.expectManualChangeDetected), "ManualChangeDetected mismatch")
 			if tt.expectNewGeneration != 0 {
 				g.Expect(result.NewGeneration).To(gomega.Equal(tt.expectNewGeneration), "NewGeneration mismatch")
@@ -642,111 +729,6 @@ func TestCopySpec(t *testing.T) {
 
 	g := gomega.NewGomegaWithT(t)
 	g.Expect(dst).To(gomega.Equal(expected))
-}
-
-func TestGetResourcesConfig(t *testing.T) {
-	tests := []struct {
-		name               string
-		resources          *v1alpha1.Resources
-		expectedGPULimit   corev1.ResourceName
-		expectedGPUValue   string
-		expectedGPURequest corev1.ResourceName
-		expectedGPUReqVal  string
-		expectError        bool
-	}{
-		{
-			name: "limits.gpu defined with no gpuType",
-			resources: &v1alpha1.Resources{
-				Limits: &v1alpha1.ResourceItem{
-					GPU: "4",
-				},
-			},
-			expectedGPULimit: corev1.ResourceName(consts.KubeResourceGPUNvidia),
-			expectedGPUValue: "4",
-			expectError:      false,
-		},
-		{
-			name: "limits.gpu defined with custom gpuType",
-			resources: &v1alpha1.Resources{
-				Limits: &v1alpha1.ResourceItem{
-					GPU:     "8",
-					GPUType: "gpu.custom-type.com/test",
-				},
-			},
-			expectedGPULimit: corev1.ResourceName("gpu.custom-type.com/test"),
-			expectedGPUValue: "8",
-			expectError:      false,
-		},
-		{
-			name: "requests.gpu defined with no gpuType",
-			resources: &v1alpha1.Resources{
-				Requests: &v1alpha1.ResourceItem{
-					GPU: "4",
-				},
-			},
-			expectedGPURequest: corev1.ResourceName(consts.KubeResourceGPUNvidia),
-			expectedGPUReqVal:  "4",
-			expectError:        false,
-		},
-		{
-			name: "requests.gpu defined with custom gpuType",
-			resources: &v1alpha1.Resources{
-				Requests: &v1alpha1.ResourceItem{
-					GPU:     "8",
-					GPUType: "gpu.custom-type.com/test",
-				},
-			},
-			expectedGPURequest: corev1.ResourceName("gpu.custom-type.com/test"),
-			expectedGPUReqVal:  "8",
-			expectError:        false,
-		},
-		{
-			name: "both limits.gpu and requests.gpu defined",
-			resources: &v1alpha1.Resources{
-				Limits: &v1alpha1.ResourceItem{
-					GPU: "8",
-				},
-				Requests: &v1alpha1.ResourceItem{
-					GPU: "8",
-				},
-			},
-			expectedGPULimit:   corev1.ResourceName(consts.KubeResourceGPUNvidia),
-			expectedGPUValue:   "8",
-			expectedGPURequest: corev1.ResourceName(consts.KubeResourceGPUNvidia),
-			expectedGPUReqVal:  "8",
-			expectError:        false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			g := gomega.NewGomegaWithT(t)
-
-			result, err := GetResourcesConfig(tt.resources)
-
-			if tt.expectError {
-				g.Expect(err).To(gomega.HaveOccurred())
-				return
-			}
-
-			g.Expect(err).To(gomega.BeNil())
-			g.Expect(result).ToNot(gomega.BeNil())
-
-			if tt.expectedGPULimit != "" {
-				g.Expect(result.Limits).ToNot(gomega.BeNil())
-				gpuQuantity, exists := result.Limits[tt.expectedGPULimit]
-				g.Expect(exists).To(gomega.BeTrue(), "GPU resource %s should exist in limits", tt.expectedGPULimit)
-				g.Expect(gpuQuantity.String()).To(gomega.Equal(tt.expectedGPUValue))
-			}
-
-			if tt.expectedGPURequest != "" {
-				g.Expect(result.Requests).ToNot(gomega.BeNil())
-				gpuQuantity, exists := result.Requests[tt.expectedGPURequest]
-				g.Expect(exists).To(gomega.BeTrue(), "GPU resource %s should exist in requests", tt.expectedGPURequest)
-				g.Expect(gpuQuantity.String()).To(gomega.Equal(tt.expectedGPUReqVal))
-			}
-		})
-	}
 }
 
 func TestAppendUniqueImagePullSecrets(t *testing.T) {

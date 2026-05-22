@@ -220,6 +220,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-lock"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
+dependencies = [
+ "event-listener",
+ "event-listener-strategy",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-nats"
 version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2218,6 +2229,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "diff"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2323,9 +2340,16 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "opentelemetry",
+ "parking_lot",
+ "prometheus",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2333,10 +2357,10 @@ name = "dynamo-bench"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "bytemuck",
  "chrono",
  "clap 4.6.1",
  "crossbeam-channel",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-mocker",
  "dynamo-tokens",
@@ -2370,10 +2394,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-config"
+name = "dynamo-data-gen"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
+ "dynamo-tokens",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dynamo-kv-hashing"
+version = "1.2.0"
+dependencies = [
+ "derive_builder",
+ "dynamo-tokens",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2440,7 +2482,6 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-bench",
- "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2471,6 +2512,7 @@ dependencies = [
  "mockito",
  "modelexpress-client",
  "modelexpress-common",
+ "moka",
  "ndarray 0.16.1",
  "nix 0.26.4",
  "nixl-sys",
@@ -2540,6 +2582,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
@@ -2556,6 +2599,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "slotmap",
  "tempfile",
  "tokio",
@@ -2581,6 +2625,7 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "rand 0.9.4",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2644,14 +2689,12 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
  "educe",
  "either",
  "etcd-client",
  "figment",
  "futures",
  "humantime",
- "hyper-util",
  "jsonschema",
  "k8s-openapi",
  "kube",
@@ -4603,6 +4646,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "kvbm-consolidator"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "dynamo-kv-hashing",
+ "dynamo-kv-router",
+ "dynamo-tokens",
+ "futures",
+ "insta",
+ "kvbm-logical",
+ "portpicker",
+ "pretty_assertions",
+ "proptest",
+ "rmp-serde",
+ "rstest 0.26.1",
+ "serde",
+ "tempfile",
+ "tmq",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-test",
+]
+
+[[package]]
 name = "kvbm-engine"
 version = "1.2.0"
 dependencies = [
@@ -4661,6 +4731,7 @@ dependencies = [
  "async-stream",
  "bincode 2.0.1",
  "bytes",
+ "criterion 0.5.1",
  "derive_builder",
  "dynamo-tokens",
  "futures",
@@ -4679,6 +4750,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-mutex",
  "tracing-subscriber",
  "xxhash-rust",
 ]
@@ -5129,9 +5201,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
 dependencies = [
  "memo-map",
  "serde",
@@ -5140,9 +5212,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45092d80391870622fcf3bd82f5d2af18f99533ea60debb4bc9db0c76f0e809a"
+checksum = "99df5123c54391e2a228014c1dbbd85a3dab08a25e776c810526f2f47542b3de"
 dependencies = [
  "minijinja",
  "serde",
@@ -5267,6 +5339,26 @@ dependencies = [
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
+]
+
+[[package]]
+name = "moka"
+version = "0.12.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "957228ad12042ee839f93c8f257b62b4c0ab5eaae1d4fa60de53b27c9d7c5046"
+dependencies = [
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "equivalent",
+ "event-listener",
+ "futures-util",
+ "parking_lot",
+ "portable-atomic",
+ "smallvec",
+ "tagptr",
+ "uuid",
 ]
 
 [[package]]
@@ -6456,6 +6548,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "portpicker"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be97d76faf1bfab666e1375477b23fde79eccf0276e9b63b92a39d676a889ba9"
+dependencies = [
+ "rand 0.8.6",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6477,6 +6578,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "pretty_assertions"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d"
+dependencies = [
+ "diff",
+ "yansi",
 ]
 
 [[package]]
@@ -8422,6 +8533,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tagptr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9190,6 +9307,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-mutex"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ab88ec7082243b1c0b6087242d8d52d07fefc7c5bd1961f1ad50c6853faac76"
+dependencies = [
+ "autocfg",
+ "lock_api",
+ "parking_lot",
+]
+
+[[package]]
 name = "tracing-opentelemetry"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9235,6 +9363,27 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
+]
+
+[[package]]
+name = "tracing-test"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19a4c448db514d4f24c5ddb9f73f2ee71bfb24c526cf0c570ba142d1119e0051"
+dependencies = [
+ "tracing-core",
+ "tracing-subscriber",
+ "tracing-test-macro",
+]
+
+[[package]]
+name = "tracing-test-macro"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad06847b7afb65c7866a36664b75c40b895e318cea4f71299f013fb22965329d"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

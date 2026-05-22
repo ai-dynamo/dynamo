@@ -9,11 +9,12 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 import pybase64
 import sglang as sgl
+from PIL.Image import Image as PILImage
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -155,6 +156,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         publisher: Optional[DynamoSglangPublisher] = None,
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
+        enable_frontend_decoding: bool = False,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -164,6 +166,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             publisher: Metrics publisher for the worker.
             shutdown_event: Optional event to signal shutdown.
             generate_endpoint: The endpoint handle for discovery registration.
+            enable_frontend_decoding: If True, multimodal images arrive as
+                ``Decoded`` variants over NIXL RDMA from the Rust frontend
+                and must be read+converted to PIL before passing to SGLang.
+                Off by default; the worker keeps the URL-string fast path.
         """
         super().__init__(
             engine,
@@ -180,12 +186,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self._routed_experts_kwargs: Dict[
             str, Any
         ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        self._enable_frontend_decoding = enable_frontend_decoding
+        self._image_loader: Optional[ImageLoader] = None
+        if self._enable_frontend_decoding:
+            # Lazy-inits a NIXL connector internally for Decoded variants.
+            self._image_loader = ImageLoader(enable_frontend_decoding=True)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
             )
         else:
-            logging.info("Decode worker handler initialized (aggregated mode)")
+            mode = "frontend-decoded" if self._enable_frontend_decoding else "standard"
+            logging.info(f"Decode worker handler initialized (aggregated mode, {mode})")
 
     @staticmethod
     def _resolve_routed_experts_kwargs(engine: Any, server_args: Any) -> Dict[str, Any]:
@@ -449,7 +461,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"room={bootstrap_info['bootstrap_room']}"
             )
 
-            trace_header = build_trace_headers(context) if self.enable_trace else None
+            trace_header = context.trace_headers() if self.enable_trace else None
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
@@ -492,10 +504,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
-            image_data = _extract_media_urls(mm_data, "image_url")
             video_data = _extract_media_urls(mm_data, "video_url")
 
-            trace_header = build_trace_headers(context) if self.enable_trace else None
+            image_data: list[str] | list[PILImage] | None
+            if self._enable_frontend_decoding:
+                # Invariant from __init__: _image_loader is non-None iff
+                # _enable_frontend_decoding is True. Assert narrows the
+                # Optional for the type checker without runtime branching.
+                assert self._image_loader is not None
+                image_items = mm_data.get("image_url") or []
+                if image_items:
+                    image_data = await self._image_loader.load_image_batch(image_items)
+                else:
+                    image_data = None
+            else:
+                image_data = _extract_media_urls(mm_data, "image_url")
+
+            trace_header = context.trace_headers() if self.enable_trace else None
 
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}

@@ -68,6 +68,13 @@ BASE_PORT_BOOTSTRAP = 10100  # Base port for disagg bootstrap rendezvous
 BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
+ROUTER_OVERLOAD_DEBUG_DYN_LOG = (
+    "info,"
+    "dynamo_llm::discovery::worker_monitor=debug,"
+    "dynamo_llm::kv_router=debug,"
+    "dynamo_runtime::pipeline::network::egress::push_router=debug,"
+    "dynamo_llm::mocker=debug"
+)
 PLANNER_PROFILE_DATA_DIR = (
     Path(__file__).resolve().parents[2]
     / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
@@ -79,6 +86,25 @@ ROUTER_AIC_CONFIG = {
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
+ROUTER_OVERLOAD_503_CASES = (
+    pytest.param(
+        {
+            "blocks_threshold": 0.2,
+            "max_tokens": 50,
+        },
+        id="decode-blocks",
+    ),
+    pytest.param(
+        {
+            "blocks_threshold": "None",
+            "tokens_threshold": 1,
+            "tokens_threshold_frac": "None",
+            "router_queue_threshold": "None",
+            "max_tokens": 1,
+        },
+        id="prefill-tokens",
+    ),
+)
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
     "Flaky on CI: tcp nondurable round-robin mocker router path timed out"
 )
@@ -1066,11 +1092,18 @@ def test_mocker_two_kv_router(
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
+@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_503_CASES)
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
-    request, runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    durable_kv_events,
+    monkeypatch,
+    overload_config,
 ):
     """Test that KV router returns 503 when mocker workers are overloaded."""
+    monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
     logger.info("Starting mocker KV router overload test for 503 status")
     # Create mocker args dictionary with limited resources - use local indexer (NATS Core mode)
     mocker_args = {
@@ -1095,7 +1128,7 @@ def test_mocker_kv_router_overload_503(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
-            blocks_threshold=0.2,
+            **overload_config,
         )
 
 
@@ -1307,24 +1340,35 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,zmq_kv_events,use_remote_indexer",
+    "durable_kv_events,use_kv_events,zmq_kv_events,use_remote_indexer,router_predicted_ttl_secs",
     [
-        (True, True, False, False),  # JetStream mode with KV events
-        (False, True, False, False),  # NATS Core mode with local indexer (default)
-        (False, True, False, True),  # NATS Core mode with a served remote indexer
-        (False, False, False, False),  # Approximate mode (--no-kv-events)
+        (True, True, False, False, None),  # JetStream mode with KV events
+        (
+            False,
+            True,
+            False,
+            False,
+            None,
+        ),  # NATS Core mode with local indexer (default)
+        (False, True, False, False, 5.0),  # NATS Core mode with local side indexer
+        (False, True, False, True, None),  # NATS Core mode with a served remote indexer
+        (False, True, False, True, 5.0),  # Remote indexer plus local side indexer
+        (False, False, False, False, None),  # Approximate mode (--no-kv-events)
         (
             False,
             False,
             False,
             True,
+            None,
         ),  # Approximate mode with a singleton served remote indexer
-        (False, True, True, False),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
+        (False, True, True, False, None),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
     ],
     ids=[
         "jetstream",
         "nats_core",
+        "nats_core_predict_on_route",
         "nats_core_remote",
+        "nats_core_remote_predict_on_route",
         "no_kv_events",
         "no_kv_events_remote",
         "zmq",
@@ -1340,6 +1384,7 @@ def test_router_decisions(
     request_plane,
     zmq_kv_events,
     use_remote_indexer,
+    router_predicted_ttl_secs,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
@@ -1353,10 +1398,11 @@ def test_router_decisions(
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s",
+        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s",
         durable_kv_events,
         use_kv_events,
         use_remote_indexer,
+        router_predicted_ttl_secs,
     )
 
     # Create mocker args dictionary with dp_size=4
@@ -1387,6 +1433,7 @@ def test_router_decisions(
                 use_kv_events=use_kv_events,
                 test_dp_rank=True,
                 request_plane=request_plane,
+                router_predicted_ttl_secs=router_predicted_ttl_secs,
             )
             return
 
@@ -1402,6 +1449,7 @@ def test_router_decisions(
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             standalone_indexer_url=mockers.standalone_indexer_url,
+            router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
 
 

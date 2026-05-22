@@ -41,7 +41,7 @@ pub enum KvRouterError {
 
 /// Shared structural anchor used by branch-sharded routing when a routed
 /// subtree starts on a different shard from its parent prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct AnchorRef {
     pub anchor_id: ExternalSequenceBlockHash,
     pub anchor_local_hash: LocalBlockHash,
@@ -50,7 +50,7 @@ pub struct AnchorRef {
 
 /// Worker task payload that installs an [`AnchorRef`] into a shard-local
 /// backend before dependent suffix events are applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct AnchorTask {
     pub anchor_id: ExternalSequenceBlockHash,
     pub anchor_local_hash: LocalBlockHash,
@@ -66,6 +66,8 @@ pub struct AnchorTask {
 pub struct WorkerKvQueryRequest {
     /// The worker ID of the worker to query.
     pub worker_id: WorkerId,
+    /// Data-parallel rank owned by this worker query endpoint.
+    pub dp_rank: DpRank,
 
     /// Start event ID (inclusive). If `None`, dumps entire tree.
     pub start_event_id: Option<u64>,

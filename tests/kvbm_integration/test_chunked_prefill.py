@@ -118,6 +118,8 @@ def tester(llm_server_kvbm):  # noqa: F811
     ],
     indirect=True,
 )
+@pytest.mark.profiled_vram_gib(3.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
 @pytest.mark.timeout(140)  # 4x measured (~34s), rounded up
 def test_chunked_prefill_offload(tester, llm_server_kvbm):  # noqa: F811
     """

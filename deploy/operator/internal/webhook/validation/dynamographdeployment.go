@@ -33,6 +33,7 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -100,6 +101,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 
 	// Validate topology constraints
 	if err := v.validateTopologyConstraints(ctx); err != nil {
+		return nil, err
+	}
+
+	// Validate KV transfer policy
+	if err := v.validateKvTransferPolicy(); err != nil {
 		return nil, err
 	}
 
@@ -396,7 +402,7 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 //
 // The combined length of these names must not exceed 45 characters.
 func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
-	pcsName := dynamo.PCSNameForDGD(v.deployment.Name, v.deployment.Spec.Services)
+	pcsName := dynamo.PCSNameForAlphaDGDServices(v.deployment.Name, v.deployment.Spec.Services)
 	lowerServiceName := strings.ToLower(serviceName)
 
 	isMultinode := service.GetNumberOfNodes() > 1
@@ -904,6 +910,64 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 	}
 
 	return nil
+}
+
+// validateKvTransferPolicy validates the spec.experimental.kvTransferPolicy
+// configuration when set. In this phase only the `labelKey` path is supported
+// (clusterTopologyName is added in a future PR).
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
+	if v.deployment.Spec.Experimental == nil {
+		return nil
+	}
+	kvt := v.deployment.Spec.Experimental.KvTransferPolicy
+	if kvt == nil {
+		return nil
+	}
+
+	var errs []error
+	const fieldPath = "spec.experimental.kvTransferPolicy"
+
+	// labelKey is required (only supported path in this phase)
+	if kvt.LabelKey == "" {
+		errs = append(errs, fmt.Errorf("%s.labelKey is required", fieldPath))
+	} else if labelKeyErrs := k8svalidation.IsQualifiedName(kvt.LabelKey); len(labelKeyErrs) > 0 {
+		errs = append(errs, fmt.Errorf("%s.labelKey %q is not a valid Kubernetes label key: %s",
+			fieldPath, kvt.LabelKey, strings.Join(labelKeyErrs, "; ")))
+	}
+
+	// domain is required and must be a valid topology domain format
+	if kvt.Domain == "" {
+		errs = append(errs, fmt.Errorf("%s.domain is required", fieldPath))
+	} else if !nvidiacomv1alpha1.IsValidTopologyDomainFormat(kvt.Domain) {
+		errs = append(errs, fmt.Errorf("%s.domain %q is not a valid topology domain; "+
+			"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", fieldPath, kvt.Domain))
+	}
+
+	enforcement := kvt.Enforcement
+	if enforcement == "" {
+		enforcement = nvidiacomv1alpha1.KvTransferEnforcementRequired
+	}
+	if enforcement != nvidiacomv1alpha1.KvTransferEnforcementRequired &&
+		enforcement != nvidiacomv1alpha1.KvTransferEnforcementPreferred {
+		errs = append(errs, fmt.Errorf("%s.enforcement %q is invalid; "+
+			"must be \"required\" or \"preferred\"", fieldPath, kvt.Enforcement))
+	}
+
+	if enforcement == nvidiacomv1alpha1.KvTransferEnforcementPreferred && kvt.PreferredWeight == nil {
+		errs = append(errs, fmt.Errorf("%s.preferredWeight is required when enforcement is \"preferred\"", fieldPath))
+	}
+
+	if kvt.PreferredWeight != nil {
+		if *kvt.PreferredWeight < 0 || *kvt.PreferredWeight > 1 {
+			errs = append(errs, fmt.Errorf("%s.preferredWeight %g is invalid; "+
+				"must be >= 0 and <= 1", fieldPath, *kvt.PreferredWeight))
+		}
+		if enforcement == nvidiacomv1alpha1.KvTransferEnforcementRequired {
+			errs = append(errs, fmt.Errorf("%s.preferredWeight must not be set when enforcement is \"required\"", fieldPath))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // validateFailoverRequiresDiscoveryMode checks that when any service has

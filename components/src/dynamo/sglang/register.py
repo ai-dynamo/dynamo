@@ -4,21 +4,47 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, List, Optional
 
 import sglang as sgl
 from sglang.srt.environ import envs
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
-from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.common.utils.topology import apply_topology_config
+from dynamo.llm import (
+    MediaDecoder,
+    MediaFetcher,
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    register_model,
+)
 from dynamo.sglang._compat import get_scheduler_info
+from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+
+
+def _build_media_decoder_and_fetcher():
+    """Construct MediaDecoder/MediaFetcher for frontend-decoded multimodal.
+
+    Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
+    """
+    media_decoder = MediaDecoder()
+    media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+
+    media_fetcher = MediaFetcher()
+    media_fetcher.timeout_ms(30000)
+    allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+    media_fetcher.allow_direct_ip(allow_internal)
+    media_fetcher.allow_direct_port(allow_internal)
+
+    return media_decoder, media_fetcher
 
 
 async def _register_model_with_runtime_config(
@@ -53,6 +79,13 @@ async def _register_model_with_runtime_config(
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
 
+    # Configure the Rust frontend's media decoder so it ships pre-decoded
+    # images via NIXL RDMA instead of forwarding raw URLs / base64 to us.
+    media_decoder = None
+    media_fetcher = None
+    if getattr(dynamo_args, "frontend_decoding", False):
+        media_decoder, media_fetcher = _build_media_decoder_and_fetcher()
+
     try:
         await register_model(
             input_type,
@@ -64,6 +97,8 @@ async def _register_model_with_runtime_config(
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -75,49 +110,11 @@ async def _register_model_with_runtime_config(
 def _get_bootstrap_info_for_config(
     engine: sgl.Engine,
 ) -> tuple[Optional[str], Optional[int]]:
-    """Extract bootstrap host and port from SGLang engine for config registration.
+    """Thin wrapper for the shared `_disagg.compute_bootstrap_address`,
+    kept for source-compat with this module's callers."""
+    from dynamo.sglang._disagg import compute_bootstrap_address
 
-    Args:
-        engine: The SGLang engine instance.
-
-    Returns:
-        Tuple of (bootstrap_host, bootstrap_port), or (None, None) if not available.
-    """
-    try:
-        inner_tm = engine.tokenizer_manager
-        bootstrap_port = getattr(
-            inner_tm.server_args, "disaggregation_bootstrap_port", None
-        )
-
-        if bootstrap_port is None:
-            return None, None
-
-        if inner_tm.server_args.dist_init_addr:
-            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
-            resolved = dist_init.resolved()
-            bootstrap_host = (
-                NetworkAddress(resolved.host, bootstrap_port)
-                .to_host_port_str()
-                .rsplit(":", 1)[0]
-            )
-            logging.info(
-                f"Resolved bootstrap host '{dist_init.host}' -> '{resolved.host}' "
-                f"({'IPv6' if resolved.is_ipv6 else 'IPv4'})"
-            )
-        else:
-            # get_local_ip_auto() tries IPv4 first, then IPv6. For explicit control,
-            # set SGLANG_HOST_IP env var (use bracketed format for IPv6: [addr])
-            local_ip = get_local_ip_auto()
-            local_addr = NetworkAddress(local_ip, bootstrap_port)
-            bootstrap_host = local_addr.to_host_port_str().rsplit(":", 1)[0]
-            logging.info(
-                f"Using auto-detected local IP: {local_ip} "
-                f"({'IPv6' if local_addr.is_ipv6 else 'IPv4'})"
-            )
-        return bootstrap_host, bootstrap_port
-    except Exception as e:
-        logging.warning(f"Failed to get bootstrap info: {e}")
-        return None, None
+    return compute_bootstrap_address(engine)
 
 
 def _parse_hicache_storage_extra_config(
@@ -281,6 +278,26 @@ async def _get_runtime_config(
     runtime_config.data_parallel_size = dp_size
     if dp_size > 1:
         logging.info(f"Registering with data_parallel_size={dp_size}")
+
+    worker_group_id = get_sglang_worker_group_id(server_args)
+    if worker_group_id is not None:
+        try:
+            runtime_config.set_engine_specific(
+                SGLANG_WORKER_GROUP_ID_KEY,
+                json.dumps(worker_group_id),
+            )
+            logging.info(
+                "Published SGLang worker group metadata for KV attribution: %s",
+                worker_group_id,
+            )
+        except Exception as e:
+            logging.warning(
+                "Failed to attach SGLang worker group metadata to registration: %s",
+                e,
+            )
+
+    # Set topology and KV transfer policy for topology-aware routing
+    apply_topology_config(runtime_config)
 
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)

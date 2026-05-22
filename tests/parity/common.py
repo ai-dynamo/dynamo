@@ -36,9 +36,18 @@ class ParseResult:
 
 
 def _normalize_normal_text(v: Any) -> Any:
-    """Treat empty string and None as equivalent — Dynamo emits "", vLLM emits None
-    when the model produced no narration text. Both express the same semantic."""
-    if v == "" or v is None:
+    """Treat any whitespace-only or None value as equivalent for comparison.
+
+    Engines disagree on the carrier for "no narration":
+      * Dynamo emits ``""`` (or ``"\\n"`` carried through between back-to-back
+        tool-call envelopes — see DSML PARSER.batch.2.b).
+      * vLLM emits ``None``.
+      * SGLang emits ``""``.
+
+    All three express the same semantic and should compare equal."""
+    if v is None:
+        return None
+    if isinstance(v, str) and v.strip() == "":
         return None
     return v
 
@@ -68,3 +77,19 @@ def decode_arguments(args: Any) -> Any:
         return json.loads(args)
     except (json.JSONDecodeError, TypeError):
         return args
+
+
+def decode_stream_calls(
+    stream_calls: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    calls = []
+    for _, call in sorted(stream_calls.items()):
+        if not call.get("name") and not call.get("arguments"):
+            continue
+        calls.append(
+            {
+                "name": call.get("name") or "",
+                "arguments": decode_arguments(call.get("arguments") or ""),
+            }
+        )
+    return calls

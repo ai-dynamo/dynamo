@@ -377,6 +377,11 @@ pub mod llm {
 
     /// Agent trace configuration
     pub mod agent_trace {
+        /// Master switch. Truthy enables tracing with defaults for sinks,
+        /// output path, and the ZMQ tool-event endpoint; other variables below
+        /// override individual knobs.
+        pub const DYN_AGENT_TRACE: &str = "DYN_AGENT_TRACE";
+
         /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
         pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
 
@@ -424,6 +429,13 @@ pub mod model {
 
         /// Model Express cache path
         pub const MODEL_EXPRESS_CACHE_PATH: &str = "MODEL_EXPRESS_CACHE_PATH";
+
+        /// Disable shared-storage mode for the Model Express client. When set,
+        /// the client streams model files from the server over gRPC instead of
+        /// relying on a shared filesystem path. Required when the Model Express
+        /// server and worker pods do not share a filesystem (e.g. RWO PVCs,
+        /// cross-namespace deployments). Set to "1" or "true" to enable.
+        pub const MODEL_EXPRESS_NO_SHARED_STORAGE: &str = "MODEL_EXPRESS_NO_SHARED_STORAGE";
     }
 
     /// Hugging Face configuration
@@ -445,6 +457,9 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
+    pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
+
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     pub const DYN_ROUTER_QUEUE_THRESHOLD: &str = "DYN_ROUTER_QUEUE_THRESHOLD";
@@ -640,6 +655,7 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE,
             llm::agent_trace::DYN_AGENT_TRACE_SINKS,
             llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
             llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
@@ -653,11 +669,13 @@ mod tests {
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
+            model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
+            router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             // TCP Response Stream

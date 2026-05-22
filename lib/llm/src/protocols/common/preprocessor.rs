@@ -7,7 +7,7 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
-    protocols::{BlockExtraInfo, WorkerId},
+    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +68,10 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
 
+    /// Request routing constraints used for worker compatibility and soft preference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_constraints: Option<RoutingConstraints>,
+
     /// Session control for subagent KV isolation and sticky routing.
     /// Contains session_id (for affinity) and optional action (open/close).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,9 +90,24 @@ pub struct BootstrapInfo {
     pub bootstrap_room: u64,
 }
 
+/// Directional pointer to a predecessor worker's `engine.generate` span.
+/// Used for prefill→decode handoff, migration retries, and multi-modal
+/// pipelines — wherever a downstream worker should render an OTel `Link`
+/// back to a previous worker that handled (or attempted) the same
+/// request. Framework-owned; engines do not read or write this.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TraceLink {
+    /// W3C trace_id of the predecessor span (32 hex chars).
+    pub trace_id: String,
+    /// W3C span_id of the predecessor span (16 hex chars).
+    pub span_id: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillResult {
-    /// Disaggregated execution parameters
+    /// Disaggregated execution parameters. Engine-owned; the framework
+    /// reads this through to the underlying inference engine without
+    /// interpretation.
     pub disaggregated_params: serde_json::Value,
     /// Prompt token details produced during prefill
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,7 +143,13 @@ pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalDat
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
 pub struct PreprocessedRequest {
-    /// ID of the model to use
+    /// ID of the model to use.
+    ///
+    /// `serde(default)` so canary payloads from the runtime's
+    /// `HealthCheckManager` deserialize without carrying a model name —
+    /// real traffic always has this set by the preprocessor; only the
+    /// in-process canary path is allowed to omit it.
+    #[serde(default)]
     pub model: String,
 
     /// Type of prompt
@@ -147,21 +172,25 @@ pub struct PreprocessedRequest {
     pub mm_routing_info: Option<MmRoutingInfo>,
 
     /// StopConditions are conditions that the inference engine will use to stop generation.
+    #[serde(default)]
     pub stop_conditions: StopConditions,
 
     /// SamplingOptions directs the inference engine to use sampling instead of greedy decoding.
     /// More documentation on how and on the order in which sampling options are applied
     /// are needed.
+    #[serde(default)]
     pub sampling_options: SamplingOptions,
 
     /// OutputOptions are options that control the output of the inference engine such as whether
     /// to return log probabilities, or whether to skip special tokens in output.
+    #[serde(default)]
     pub output_options: OutputOptions,
 
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.
     /// TODO - refactor this to a better location
     #[builder(default)]
+    #[serde(default)]
     pub eos_token_ids: Vec<TokenIdType>,
 
     /// The computed checksum of the Model Deployment Card (MDC).
@@ -170,6 +199,7 @@ pub struct PreprocessedRequest {
 
     /// User requested annotations for the request
     #[builder(default)]
+    #[serde(default)]
     pub annotations: Vec<String>,
 
     /// Routing hints for worker targeting (backend_instance_id, prefill/decode worker IDs, dp_rank)
@@ -185,6 +215,15 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
+
+    /// Directional link to a predecessor worker's `engine.generate` span.
+    /// Set by `PrefillRouter` on the decode side (prefill→decode handoff)
+    /// and by the migration `RetryManager` on retry attempts. Framework-
+    /// owned — engines must not read or write. Consumed by `EngineAdapter`
+    /// at request start to record an OTel `Link` on its `engine.generate`.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_link: Option<TraceLink>,
 
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
@@ -216,6 +255,23 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(skip)]
     pub tracker: Option<Arc<RequestTracker>>,
+
+    /// Set by the runtime's `HealthCheckManager` when this request originated
+    /// from a canary probe. Engines may use it in `generate()` to bypass
+    /// cross-worker coordination (KV transfer, bootstrap handshake,
+    /// `require_prefill_result`) and run local-only. The wire-format key
+    /// is `_HEALTH_CHECK` so the canary payload built by
+    /// `dynamo.common.backend.health_check.build_health_check_payload`
+    /// (and the legacy `HealthCheckPayload` base class) round-trips through
+    /// this field. Skipped from serialization when false so normal traffic
+    /// doesn't carry the marker.
+    #[builder(default)]
+    #[serde(
+        default,
+        rename = "_HEALTH_CHECK",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_probe: bool,
 }
 
 impl PreprocessedRequest {
@@ -290,5 +346,57 @@ impl PreprocessedEmbeddingRequest {
 impl PreprocessedEmbeddingRequest {
     pub fn builder() -> PreprocessedEmbeddingRequestBuilder {
         PreprocessedEmbeddingRequestBuilder::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Covers the `is_probe` serde contract end-to-end: `rename = "_HEALTH_CHECK"`,
+    /// `default`, and `skip_serializing_if`. Each assertion targets a distinct
+    /// attribute; if any is removed the test fails.
+    #[test]
+    fn is_probe_serde_round_trip() {
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+
+        // skip_serializing_if: default (false) is omitted.
+        assert!(!req.is_probe);
+        let normal = serde_json::to_string(&req).unwrap();
+        assert!(!normal.contains("_HEALTH_CHECK"), "got: {normal}");
+        // default: absent marker round-trips to false.
+        let back: PreprocessedRequest = serde_json::from_str(&normal).unwrap();
+        assert!(!back.is_probe);
+
+        // rename: true serializes as `_HEALTH_CHECK` and round-trips.
+        req.is_probe = true;
+        let probe = serde_json::to_string(&req).unwrap();
+        assert!(probe.contains("\"_HEALTH_CHECK\":true"), "got: {probe}");
+        let back: PreprocessedRequest = serde_json::from_str(&probe).unwrap();
+        assert!(back.is_probe);
+    }
+
+    /// Canary payloads carry only engine-relevant fields. All other required
+    /// fields (`model`, `stop_conditions`, `sampling_options`, etc.) must
+    /// pick up `serde(default)` so the runtime's `JsonProbeAdapter` can
+    /// deserialize without rewriting the JSON. Regression guard against the
+    /// "missing field" failures the smoke tests hit.
+    #[test]
+    fn minimal_canary_payload_deserializes() {
+        let req: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1],
+            "_HEALTH_CHECK": true,
+        }))
+        .unwrap();
+        assert_eq!(req.token_ids, vec![1]);
+        assert!(req.is_probe);
+        assert_eq!(req.model, "");
     }
 }

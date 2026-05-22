@@ -24,12 +24,19 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - nodes
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
   - create
   - delete
   - get
   - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -39,6 +46,7 @@ rules:
   - deletecollection
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - apps
