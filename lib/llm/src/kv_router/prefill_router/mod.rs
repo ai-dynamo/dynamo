@@ -319,15 +319,19 @@ impl
                 {
                     self.model_manager
                         .get_kv_transfer_routing_constraints(eid, wid)?
-                } else if let Some(eid) = endpoint_id
-                    && self
-                        .model_manager
-                        .has_kv_transfer_required_routing_policy(eid)
-                {
-                    return Err(anyhow::anyhow!(
-                        "prefill worker id unavailable after prefill; cannot derive KV transfer topology constraints for endpoint {eid}"
-                    ));
                 } else {
+                    // TODO: Make synchronous prefill completion always report the exact
+                    // prefill worker id. Required KV-transfer policy needs that id to derive
+                    // decode constraints, so fail closed until attribution is authoritative.
+                    if let Some(eid) = endpoint_id
+                        && self
+                            .model_manager
+                            .has_kv_transfer_required_routing_policy(eid)
+                    {
+                        return Err(anyhow::anyhow!(
+                            "prefill worker id unavailable after prefill; cannot derive KV transfer topology constraints for endpoint {eid}"
+                        ));
+                    }
                     None
                 };
 
