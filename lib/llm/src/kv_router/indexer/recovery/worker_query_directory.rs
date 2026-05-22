@@ -83,13 +83,13 @@ impl WorkerQueryEndpointDirectory {
         endpoint_id: &EndpointInstanceId,
     ) -> bool {
         let key = (worker_id, dp_rank);
-        let should_remove = self
-            .targets
-            .get(&key)
-            .is_some_and(|target| target.value().endpoint_instance_id() == *endpoint_id);
-        if should_remove {
-            self.targets.remove(&key);
+        let dashmap::mapref::entry::Entry::Occupied(entry) = self.targets.entry(key) else {
+            return false;
+        };
+        if entry.get().endpoint_instance_id() != *endpoint_id {
+            return false;
         }
-        should_remove
+        entry.remove();
+        true
     }
 }
