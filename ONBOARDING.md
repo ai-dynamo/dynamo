@@ -1,236 +1,223 @@
-# Onboarding: KVBM Remote Search — run the smoke & understand it
+# KVBM Remote Search — bring up the smoke by hand
 
-Welcome. Your task: **manually bring up the remote-search smoke test and confirm it passes**,
-then understand what it proves. This doc gets you from a fresh checkout to a green run plus a
-rendered trace, then explains how the feature works and points at the code.
+Goal: stand up the remote-search path manually with explicit commands (no smoke-skill wrappers),
+drive it, and read the trace that proves it works.
 
----
+**What it does:** a KVBM instance, on a cold-cache request, asks the **hub's KV indexer** which
+*other* instance already holds the prompt's KV blocks, opens a **transfer session** on that holder,
+and **RDMA-pulls** the blocks into its own local cache instead of recomputing them. The request
+**stalls** on the search/pull, then prefills the uncached tail + decodes.
 
-## 0. What the feature is (one paragraph)
-
-A KVBM instance, on a cold-cache request, asks the **hub's KV indexer** which *other* instance
-already holds the prompt's KV blocks, opens a **transfer session** on that holder, and
-**RDMA-pulls** the blocks into its own local G2 (host) cache — instead of recomputing them. It is
-the engine leader driving an out-of-band pull during `get_num_new_matched_tokens` (GNMT). The
-request **stalls** on the search/pull, then prefills the uncached tail + decodes normally.
-
-The smoke stands up **two plain aggregated vLLM instances (A, B)** + a **hub running `indexer` +
-`p2p`**. Warm A (it computes + indexes its blocks). Then hit B cold with the same prompt — B
-remote-searches, finds A, pulls A's blocks, and decodes. We assert the transfer happened and that
-B's output equals A's.
+You'll run: **hub** (indexer + p2p) + **two aggregated vLLM instances A and B**. Warm A → it
+computes + indexes its blocks. Hit B cold with the same prompt → B finds A, pulls A's blocks,
+decodes. Same output, no recompute.
 
 ---
 
-## 1. Prerequisites
+## Prereqs
 
-- A Linux box with **one NVIDIA GPU** and the CUDA toolkit at `/usr/local/cuda`.
-  The model is tiny (Qwen3-0.6B); any modern datacenter GPU works. Two instances share **one** GPU.
-- This repo checked out. All paths below are relative to the worktree root
-  (`.../dynamo/.claude/worktrees/hub` here; adjust to your checkout).
-- `git`, `cargo` (Rust toolchain), Python, `uv`, `curl`. `patchelf` optional (a warning only).
-
----
-
-## 2. One-time setup: the `.sandbox` venv
-
-The smoke drives raw `vllm.entrypoints.openai.api_server` from an isolated venv at `./.sandbox`
-(torch + cu13x, a vLLM nightly, nixl). If `./.sandbox/bin/python3` already exists, skip this.
-
-Otherwise build it (this is the slow part, ~15–30 min):
+- Linux + NVIDIA GPU(s), CUDA toolkit at `/usr/local/cuda`. Model is Qwen3-0.6B (tiny).
+- A built `.sandbox` venv at the repo root (torch / vLLM nightly / nixl). If it's missing, build it
+  once: `/dynamo:kvbm:sandbox-venv --fresh` (slow, one-time).
+- `REPO=` your worktree root. Everything below is relative to it.
 
 ```bash
-# From the worktree root. This is a user-invocable skill:
-/dynamo:kvbm:sandbox-venv --fresh
+REPO=$(pwd)            # run from the worktree root
+LOGS=/tmp/rs           # where logs + trace land
+mkdir -p "$LOGS"
 ```
 
-> ⚠️ **Never point `KVBM_VENV` at another worktree's `.sandbox`** — `maturin develop` would
-> overwrite that venv's `kvbm` `.so` with this branch's build.
-
 ---
 
-## 3. Build the artifacts
+## Build (2 artifacts)
 
-Two things must be built from *this branch's* Rust:
-
-**a) The connector Python extension (`.so`)** — this is what vLLM loads. Rebuild it after any Rust
-change to `kvbm-connector` / `kvbm-engine` / `kvbm-config`:
+**1. The connector Python extension** (what vLLM loads). Rebuild after any Rust change in
+`kvbm-connector` / `kvbm-engine` / `kvbm-config`:
 
 ```bash
-source .sandbox/bin/activate
+source "$REPO/.sandbox/bin/activate"
 export CUDA_PATH=/usr/local/cuda CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH KVBM_REQUIRE_CUDA=1
-( cd lib/bindings/kvbm && maturin develop --release --features v2 )
-# maturin's pip step rolls nccl back to satisfy vllm's pin; re-bump it:
+( cd "$REPO/lib/bindings/kvbm" && maturin develop --release --features v2 )
+# maturin's pip step downgrades nccl to satisfy vLLM's pin; restore it:
 uv pip install --force-reinstall --no-deps 'nvidia-nccl-cu13>=2.29'
 ```
+Success = `🛠 Installed kvbm-1.2.0`. (A `patchelf` rpath warning is fine — `LD_LIBRARY_PATH` below
+covers nixl.)
 
-Look for `🛠 Installed kvbm-1.2.0`. (A `patchelf` rpath warning is harmless — `LD_LIBRARY_PATH`
-in the launcher handles nixl.) The user-invocable shortcut is `/dynamo:kvbm:maturin-dev` (note:
-this branch's bindings only have the `v2` feature, **not** `v1`).
-
-**b) `kvbm_hub` + `kvbmctl`** — built automatically by the smoke's hub launcher, but you can
-prebuild: `cargo build --bin kvbm_hub --bin kvbmctl`.
-
----
-
-## 4. Run the smoke
+**2. The hub binary** (release):
 
 ```bash
-# Spark / GB10 (default profile): just run it.
-bash .claude/skills/remote-search-smoke/remote-search-smoke.sh
-
-# Any OTHER single GPU (H100/A100/L40/…): use the h100-a100 profile for the model/sizing,
-# but LOWER the per-instance GPU memory so TWO 0.6B instances fit on ONE GPU:
-KVBM_HARDWARE_PROFILE=h100-a100 KVBM_GPU_MEMORY_UTILIZATION=0.25 \
-  bash .claude/skills/remote-search-smoke/remote-search-smoke.sh
+cargo build -p kvbm-hub --bin kvbm_hub --release
 ```
-
-Why the override: the `h100-a100` profile defaults to `0.70` GPU memory util *per instance* — two
-of those on one GPU OOMs. `0.25` is plenty for Qwen3-0.6B ×2. (The default `spark-gb10` profile is
-already `0.15`.) Profiles live in `.claude/skills/disagg-bringup/hardware-profiles.sh`
-(valid: `spark-gb10`, `h100-a100`, `custom`).
-
-Useful knobs: `KVBM_GPU_MEMORY_UTILIZATION`, `KVBM_VLLM_READY_TIMEOUT` (default 300s),
-`RUST_LOG` (defaults to `info,kvbm_connector=debug,kvbm_engine=debug,kvbm_audit=info`).
-
-The run takes a few minutes (model load dominates). Logs + the trace land in a fresh
-`/tmp/kvbm-experiments/<ts>-remote-search/` dir (printed as `EXP=…`).
 
 ---
 
-## 5. What success looks like
+## Run
 
-Last lines should read `remote-search smoke PASSED`. The script prints B's per-request **timeline**
-and renders `trace.html`. A passing timeline on B looks like:
+Four terminals. Each `tee`s to a log file in `$LOGS` **and** your screen — the trace renderer reads
+`hub.log`, `instance_a.log`, `instance_b.log` from that dir.
 
-```
-gnmt_pending           request="cmpl-…"            ← request STALLS: a find/search is in flight
-transfer_pull_started  session=… source=<A's id>   ← RDMA pull from A begins
-  …repeated gnmt_pending while vLLM re-polls…        ← the stall, visibly waiting
-transfer_pull_completed pulled=3                    ← 3 blocks landed in B's local G2
-gnmt_matched           matched_tokens=48 async_load=true  ← stall resolves to an external match
-onboard_start          num_external_tokens=48       ← G2→G1 onboard begins
-onboard_complete       ok=true                      ← KV in GPU; request runnable
-request_finished                                    ← remaining prefill + decode done
-```
+Shared connector config (identical for A and B) — this is the whole feature switch
+(`remote_search.enabled: true`, hub features `indexer` + `p2p`):
 
-The script also asserts:
-- **A skipped remote search on its warm (2nd) request** — `transfer_pull_started` count on A is 0
-  (A holds the blocks locally; it must not pull, least of all from itself).
-- **B's decode == A's golden decode** — same prompt, greedy (`temperature=0`), so identical text
-  proves the *pulled* KV is correct, not just present.
-
-Open the trace:
 ```bash
-xdg-open /tmp/kvbm-experiments/<ts>-remote-search/trace.html   # 3 lanes: A | Hub | B
+export NIXL=$(ls -d "$REPO"/.sandbox/lib/python*/site-packages/.nixl_cu1*.mesonpy.libs | head -1)
+export KVCFG='{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_module_path":"kvbm.v2.vllm.connector","kv_connector_extra_config":{"default":{"block_layout":"operational"},"leader":{"hub":{"url":"http://127.0.0.1:1337","features":["indexer","p2p"]},"max_seq_len":1024,"cache":{"host":{"cache_size_gb":2.0}},"remote_search":{"enabled":true}},"worker":{"nixl":{"backends":{"UCX":{},"POSIX":{}}}}}}'
 ```
-Click a `request_id` in the sidebar to filter to B's request and read the timeline top-to-bottom.
+
+### Terminal 0 — hub (indexer + p2p)
+
+```bash
+RUST_LOG=info,kvbm_hub=info "$REPO"/target/release/kvbm_hub \
+  --discovery-port 1337 --control-port 8337 --velo-port 1338 \
+  --block-size 16 --max-seq-len 1024 --layout operational \
+  --kv-index-advertise-host 127.0.0.1 \
+  --features indexer,p2p --g2-memory 4 \
+  2>&1 | tee "$LOGS/hub.log"
+```
+Wait until `curl -s http://127.0.0.1:8337/health` returns `ok`.
+
+### Terminal 1 — instance A (GPU 0, port 8000)
+
+```bash
+source "$REPO/.sandbox/bin/activate"
+CUDA_VISIBLE_DEVICES=0 \
+DYN_KVBM_CPU_CACHE_GB=2 VLLM_ATTENTION_BACKEND=FLASH_ATTN KVBM_SKIP_VLLM_VERSION_CHECK=1 \
+LD_LIBRARY_PATH="$NIXL:$NIXL/plugins" NIXL_PLUGIN_DIR="$NIXL/plugins" \
+RUST_LOG=info,kvbm_connector=debug,kvbm_engine=debug,kvbm_audit=info \
+python3 -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B \
+  --max-num-seqs 8 --gpu-memory-utilization 0.9 \
+  --enable-chunked-prefill --no-enable-prefix-caching \
+  --port 8000 --block-size 16 --max-model-len 1024 \
+  --kv-transfer-config "$KVCFG" \
+  2>&1 | tee "$LOGS/instance_a.log"
+```
+Ready when `curl -s http://127.0.0.1:8000/v1/models` succeeds. In the log you should see
+`standalone P2P participation registered with hub`, `remote-search discovery injected into leader`,
+and `indexer publisher wired`.
+
+### Terminal 2 — instance B (GPU 1, port 8001)
+
+Same as A, but **`CUDA_VISIBLE_DEVICES=1`**, **`--port 8001`**, tee to `instance_b.log`:
+
+```bash
+source "$REPO/.sandbox/bin/activate"
+CUDA_VISIBLE_DEVICES=1 \
+DYN_KVBM_CPU_CACHE_GB=2 VLLM_ATTENTION_BACKEND=FLASH_ATTN KVBM_SKIP_VLLM_VERSION_CHECK=1 \
+LD_LIBRARY_PATH="$NIXL:$NIXL/plugins" NIXL_PLUGIN_DIR="$NIXL/plugins" \
+RUST_LOG=info,kvbm_connector=debug,kvbm_engine=debug,kvbm_audit=info \
+python3 -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B \
+  --max-num-seqs 8 --gpu-memory-utilization 0.9 \
+  --enable-chunked-prefill --no-enable-prefix-caching \
+  --port 8001 --block-size 16 --max-model-len 1024 \
+  --kv-transfer-config "$KVCFG" \
+  2>&1 | tee "$LOGS/instance_b.log"
+```
+
+> Only one GPU? Put both on `CUDA_VISIBLE_DEVICES=0` and set `--gpu-memory-utilization 0.4` on each
+> (the model is tiny, both fit easily).
+
+### Terminal 3 — drive it
+
+```bash
+PROMPT='The quick brown fox jumps over the lazy dog and then keeps on running through the meadow until it reaches the river where it finally stops to drink some water and rest for a while before continuing its journey home through the forest path under a bright sky.'
+req() { curl -m120 -sS -X POST "http://127.0.0.1:$1/v1/completions" -H 'Content-Type: application/json' \
+  -d "{\"model\":\"Qwen/Qwen3-0.6B\",\"prompt\":\"$PROMPT\",\"max_tokens\":8,\"temperature\":0}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["text"])'; }
+
+req 8000   # req 1 → A : cold, A computes + offloads to its cache, blocks get indexed on the hub
+req 8000   # req 2 → A : warm, A holds all blocks → MUST skip remote search (it's the golden output)
+req 8001   # req 3 → B : cold locally → B remote-searches, finds A, pulls A's blocks, decodes
+```
+
+All three print the **same** text (greedy decode, `temperature=0`). req 3 matching req 2 proves the
+*pulled* KV is correct, not just present. Expected here: `" This is the story of a fox that"`.
 
 ---
 
-## 6. How it works, and where the trace shows each step
+## Read the trace
 
-The whole flow happens inside **one `get_num_new_matched_tokens` (GNMT) request lifecycle** on B.
-The leader runs in vLLM's EngineCore subprocess; its `kvbm_audit` events surface in the instance
-log (hence `kvbm_audit=info` in `RUST_LOG`).
+The audit parser is **self-contained** (Python stdlib only). Point it at `$LOGS`:
 
-| Step | What happens | Trace marker (lane) | Code |
+```bash
+python3 "$REPO/.claude/skills/disagg-trace/p2p-trace.py" "$LOGS"
+# → writes $LOGS/trace.html  (3 lanes: A | Hub | B; click a request_id to filter)
+```
+
+For a quick text timeline of B's request without the HTML:
+
+```bash
+grep -aE 'kvbm_audit.*event="(gnmt_pending|gnmt_matched|transfer_pull_started|transfer_pull_completed|onboard_complete|request_finished)"' "$LOGS/instance_b.log" \
+ | sed -E 's/.*([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+).*event="([a-z_]+)"(.*)/\1  \2 \3/'
+```
+
+A passing B timeline (the real thing, captured on a GB10):
+
+```
+17:30:20.227  gnmt_pending           request="cmpl-…8e89ede4"          ← request STALLS: a find is in flight
+17:30:20.231  transfer_pull_started  session=3f78… source=ab31…(= A)   ← RDMA pull from A begins
+   …~20× gnmt_pending while vLLM re-polls and waits…
+17:30:20.249  transfer_pull_completed pulled=3                          ← 3 blocks landed in B's cache
+17:30:20.250  gnmt_matched           matched_tokens=48 async_load=true  ← stall resolves to a match
+17:30:20.251  onboard_complete       ok=true                           ← KV copied to GPU; request runnable
+17:30:20.312  request_finished                                          ← remaining prefill + decode done
+```
+
+On **A** you'll see the holder side and the warm-skip:
+```
+grep -ac 'event="transfer_session_opened"' "$LOGS/instance_a.log"   # >= 1  (A serves B's pull)
+grep -ac 'event="transfer_pull_started"'   "$LOGS/instance_a.log"   #   0   (A never pulls; it holds the blocks)
+```
+
+---
+
+## How it works (and where the trace shows it)
+
+Everything happens inside **one `get_num_new_matched_tokens` (GNMT) request lifecycle on B**. The
+leader runs in vLLM's EngineCore subprocess; its `kvbm_audit` events land in the instance log (hence
+`kvbm_audit=info` in `RUST_LOG`).
+
+| Step | What | Trace marker (lane) | Code |
 |---|---|---|---|
-| 1. Cold match | vLLM calls GNMT. Local G2 match is empty → there are remote blocks to find. | `gnmt_pending` (B) | `mod.rs:811` GNMT; `search.rs:225` `process_match` |
-| 2. Search spawned | The engine's `find_matches_with_options` spawns the remote-search driver and returns an async session; GNMT returns `(None,false)` → vLLM **re-polls** (the stall). | (driver starts) | `instance.rs:2204` / `:2267` `use_indexer_search` |
-| 3. Discover | Driver asks the hub indexer who holds the missing hashes; filters out its own id; resolves the candidate peer. | (hub lane RPC) | `remote_search.rs:107` `search`; `:132` self-filter; connector impl `remote_search.rs:38`; hub `client.rs:59` `find_blocks` |
-| 4. Open + pull | Driver `open_session` on A (holder pins its G2 prefix), then `pull_from_session` RDMA-copies into B's local G2 and registers the blocks, then `close_session`. | `transfer_session_opened` (A), `transfer_pull_started` / `transfer_pull_completed` (B) | `remote_search.rs:161` `pull_from`; engine `transfer.rs:364` `open_transfer_session`, `:512` `pull_from_session` |
-| 5. Match resolves | Driver re-matches local G2 (now warm) and sets the session `Complete`; next GNMT poll returns `(Some(n), true)`. | `gnmt_matched matched_tokens=…` (B) | `mod.rs:879` |
-| 6. Onboard | `update_state_after_alloc` copies the matched G2 blocks → G1 (GPU). | `onboard_start` / `onboard_complete` (B) | `onboard.rs:385` |
-| 7. Compute | Request runs: prefill the uncached tail + decode. Ends at `request_finished`. | `request_finished` (B) | `finish.rs:29` |
+| 1 | vLLM calls GNMT; local cache is cold → there are remote blocks. GNMT returns `(None,false)`, vLLM **re-polls** (the stall). | `gnmt_pending` (B) | `lib/kvbm-connector/src/connector/leader/mod.rs:811` (GNMT), `:879` (audit); `…/search.rs:225` `process_match` |
+| 2 | Engine spawns the remote-search driver. | (driver start) | `lib/kvbm-engine/src/leader/instance.rs:2204` `find_matches_with_options`; `:2267` `use_indexer_search`; `:2264` `local_covers_all` (warm short-circuit) |
+| 3 | Driver asks the hub indexer who holds the missing hashes, **filters out its own id**, resolves the peer. | (hub RPC) | `lib/kvbm-engine/src/leader/remote_search.rs:107` `search`, `:132` self-filter; connector impl `…/connector/leader/remote_search.rs:38`; hub `lib/kvbm-hub/src/features/indexer/client.rs:59` `find_blocks` |
+| 4 | `open_session` on A (holder pins its blocks) → `pull_from_session` RDMA-copies into B + registers → `close_session`. | `transfer_session_opened` (A); `transfer_pull_started` / `…_completed` (B) | `…/remote_search.rs:161` `pull_from`; engine `…/leader/control/modules/transfer.rs:364` `open_transfer_session`, `:512` `pull_from_session` |
+| 5 | Driver re-matches local cache (now warm), marks the session `Complete`; next GNMT poll returns `(Some(n), true)`. | `gnmt_matched matched_tokens=…` (B) | `…/connector/leader/mod.rs:879` |
+| 6 | KV copied cache→GPU. | `onboard_complete` (B) | `…/connector/leader/onboard.rs:385` |
+| 7 | Request runs: prefill the uncached tail + decode. | `request_finished` (B) | `…/connector/leader/finish.rs:29` |
 
-**Key design points to internalize:**
-
-- **The request stalls; it does not recompute cold.** `(None,false)` from GNMT means "find still
-  running" — vLLM re-polls each scheduler step. The repeated `gnmt_pending` rows bracketing the
-  pull are that stall. Resolution is `gnmt_matched`.
-- **Engine owns the state; the connector is thin.** The connector only injects a *discovery*
-  implementation; the search/pull/cancel state machine lives in the engine. Because the engine
-  registers the session, request cancellation (`release_session`) cleanly tears down an in-flight
-  pull (`instance.rs:1241`).
-- **Warm requests skip remote search entirely.** If the synchronous local G2 match already covers
-  the whole prefix (`local_covers_all`, `instance.rs:2264`), the engine returns `Ready` — no driver,
-  no discovery, no self-pull. That's why A's 2nd request shows zero pulls.
-- **Threshold.** A search is issued only when remaining full remote blocks `>= min_remote_blocks`.
-  `remote_search.min_remote_tokens = None` ⇒ "any remote match" (≥1 block); `Some(n)` ⇒ `⌈n/bs⌉`
-  blocks. `remote_search.rs` config `min_remote_blocks` at `remote_search.rs:54`.
-- **Feature requirements.** Remote search needs the hub to offer **both** `indexer` (discovery)
-  and `p2p` (the transfer plane). Enforced at startup: `hub_handshake.rs:71`
+**Things to internalize:**
+- **It stalls; it does not recompute cold.** `(None,false)` = "find still running" → vLLM re-polls
+  each scheduler step. The run of `gnmt_pending` rows around the pull is that stall.
+- **Engine owns the state; the connector just injects discovery.** Because the session is engine-
+  registered, cancelling a request (`release_session`) cleanly tears down an in-flight pull
+  (`…/leader/instance.rs:1241`).
+- **A warm request skips remote search entirely.** If the local match already covers the whole
+  prefix (`local_covers_all`), the engine returns `Ready` — no driver, no discovery, no self-pull.
+  That's why req 2 → A shows zero pulls.
+- **Both hub features are required.** Remote search needs `indexer` (discovery) **and** `p2p` (the
+  pull). Enforced at startup: `…/connector/leader/hub_handshake.rs:71`
   `validate_remote_search_availability`.
+- **Threshold.** `remote_search.min_remote_tokens`: omitted ⇒ "any remote match" (≥1 block);
+  `N` ⇒ `⌈N/block_size⌉` blocks. `lib/kvbm-config/src/remote_search.rs:54`.
 
 ---
 
-## 7. Config: how remote search is turned on
+## If something's off
 
-It's a connector-side `KvbmConfig` field, rendered into vLLM's `--kv-transfer-config` by `kvbmctl`
-from the live hub. In the smoke it's seeded into the hub's base config
-(`start-hub.sh`, `KVBM_HUB_KVBM` → `leader.remote_search.enabled=true`) so every connector inherits
-it. The rendered blob carries `"leader": { …, "remote_search": { "enabled": true }, "hub": {
-"features": ["indexer","p2p"] } }`. Optional tuning: `leader.remote_search.min_remote_tokens=<N>`.
+- A/B never serve `/v1/models` → read its log; usually a CUDA/import issue (rebuild the `.so` + the
+  nccl re-bump) or the wrong `NIXL` path.
+- B never pulls (`transfer_pull_completed` absent) → confirm both logged `standalone P2P
+  participation registered` + `remote-search discovery injected`, and the hub serves `indexer,p2p`
+  (`curl -s http://127.0.0.1:1337/v1/config`). If the hub lacked `p2p`, startup fails fast.
+- Stale procs / port-in-use (`kvbm_hub` won't bind 1337/8337) → `pkill -9 -f kvbm_hub; pkill -9 -f
+  vllm.entrypoints.openai` and retry.
 
-Struct: `lib/kvbm-config/src/remote_search.rs:30`.
+## Mental model
 
----
-
-## 8. Code map (for deeper review)
-
-**Smoke harness** — `.claude/skills/remote-search-smoke/`
-- `start-hub.sh` — hub with `KVBM_HUB_FEATURES=indexer,p2p` + remote_search seeded.
-- `launch-instance.sh` — one aggregated vLLM + KVBM v2 connector; renders config via `kvbmctl`.
-- `remote-search-smoke.sh` — the driver + assertions + trace render.
-- Trace renderer: `.claude/skills/disagg-trace/p2p-trace.py`.
-
-**Config** — `lib/kvbm-config/src/remote_search.rs`
-
-**Engine (owns the state machine)**
-- `lib/kvbm-engine/src/leader/discovery.rs:38` — `RemoteBlockDiscovery` trait + `RemoteCandidates`
-  (the seam; engine must not depend on the hub).
-- `lib/kvbm-engine/src/leader/remote_search.rs` — `RemoteSearchDriver`: `search` (`:107`),
-  self-filter (`:132`), `pull_from` (`:161`), watchdog + degrade-to-local.
-- `lib/kvbm-engine/src/leader/instance.rs:2204` — `find_matches_with_options`: gate
-  (`use_indexer_search` `:2267`), warm short-circuit (`local_covers_all` `:2264`), driver spawn,
-  cancellation (`release_session` `:1241`).
-- `lib/kvbm-engine/src/leader/control/modules/transfer.rs` — the transfer control plane:
-  `open_transfer_session` (`:364`, holder), `pull_from_session` (`:512`, puller→local G2).
-
-**Connector (thin: discovery impl + injection + request-scoped audit)**
-- `lib/kvbm-connector/src/connector/leader/remote_search.rs:38` — `HubRemoteDiscovery` over the
-  hub `IndexerLookupClient` + `HubPeerResolver`.
-- `lib/kvbm-connector/src/connector/leader/init.rs:1212` — discovery injected into the leader.
-- `lib/kvbm-connector/src/connector/leader/mod.rs:811` — `get_num_new_matched_tokens` (+ `gnmt_*`
-  audit `:879`).
-- `lib/kvbm-connector/src/connector/leader/search.rs:225` — `process_match` / shard reconciliation.
-- `lib/kvbm-connector/src/connector/leader/onboard.rs:385` — onboard audit markers.
-- `lib/kvbm-connector/src/connector/leader/finish.rs:29` — `request_finished` audit.
-- `lib/kvbm-connector/src/connector/leader/hub_handshake.rs:71` — feature validation.
-
-**Hub** — `lib/kvbm-hub/src/features/indexer/client.rs:59` (`find_blocks`).
-
----
-
-## 9. Troubleshooting
-
-- **Instance never reaches `/v1/models`** → read `instance_a.log` / `instance_b.log`. Common: OOM
-  (lower `KVBM_GPU_MEMORY_UTILIZATION`), or `import kvbm` failing (rebuild the `.so`, re-bump nccl).
-- **`remote-search smoke` fails at "no blocks indexed"** → A's index publisher didn't wire; check
-  A's log for `indexer publisher wired`. Confirm the hub serves `indexer` (`curl
-  http://127.0.0.1:1337/v1/config`).
-- **B never pulls (`transfer_pull_completed` 0)** → confirm both instances logged `standalone P2P
-  participation registered with hub` and `remote-search discovery injected into leader`. If the
-  hub lacks `p2p`, startup should have failed fast (that's the validation in §6).
-- **`audit` events missing from the log** → ensure `RUST_LOG` includes `kvbm_audit=info` (the
-  smoke sets this by default).
-- **Stale processes / GPU busy** → the smoke kills stale `vllm`/`kvbm_hub` at start; if wedged,
-  `pkill -9 -f vllm.entrypoints.openai; pkill -9 -f kvbm_hub`.
-
----
-
-## 10. Quick mental model
-
-> Indexer = "**who** has these blocks." P2P transfer plane = "**pull** them." Remote search =
-> the leader wiring those two together during GNMT, stalling the request until the KV is local.
-> Warm requests skip it; cancellation tears it down; both features must be on the hub.
+> Indexer = **who** has the blocks. P2P transfer plane = **pull** them. Remote search wires those
+> two together during GNMT and stalls the request until the KV is local. Warm requests skip it;
+> cancellation tears it down; both features must be on the hub.
