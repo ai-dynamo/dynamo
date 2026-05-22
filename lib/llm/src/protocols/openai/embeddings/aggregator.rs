@@ -83,7 +83,7 @@ mod tests {
         let embedding = dynamo_protocols::types::Embedding {
             index: 0,
             object: "embedding".to_string(),
-            embedding: vec![0.1, 0.2, 0.3],
+            embedding: dynamo_protocols::types::EmbeddingVector::Float(vec![0.1, 0.2, 0.3]),
         };
 
         let annotated = create_test_embedding_response(vec![embedding.clone()], 10, 10);
@@ -95,7 +95,10 @@ mod tests {
         let response = result.unwrap();
         assert_eq!(response.inner.data.len(), 1);
         assert_eq!(response.inner.data[0].index, 0);
-        assert_eq!(response.inner.data[0].embedding, vec![0.1, 0.2, 0.3]);
+        assert_eq!(
+            response.inner.data[0].embedding,
+            dynamo_protocols::types::EmbeddingVector::Float(vec![0.1, 0.2, 0.3])
+        );
         assert_eq!(response.inner.usage.prompt_tokens, 10);
         assert_eq!(response.inner.usage.total_tokens, 10);
     }
@@ -105,13 +108,13 @@ mod tests {
         let embedding1 = dynamo_protocols::types::Embedding {
             index: 0,
             object: "embedding".to_string(),
-            embedding: vec![0.1, 0.2, 0.3],
+            embedding: dynamo_protocols::types::EmbeddingVector::Float(vec![0.1, 0.2, 0.3]),
         };
 
         let embedding2 = dynamo_protocols::types::Embedding {
             index: 1,
             object: "embedding".to_string(),
-            embedding: vec![0.4, 0.5, 0.6],
+            embedding: dynamo_protocols::types::EmbeddingVector::Float(vec![0.4, 0.5, 0.6]),
         };
 
         let annotated1 = create_test_embedding_response(vec![embedding1.clone()], 5, 5);
@@ -139,5 +142,45 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Test error"));
+    }
+
+    #[tokio::test]
+    async fn test_base64_embeddings_aggregate() {
+        // Regression for DIS-2099: the aggregator must accept a base64
+        // string payload on `data[].embedding`. Before the response type
+        // was owned, this shape was rejected during deserialization with
+        // "invalid type: string ..., expected a sequence".
+        let embedding = dynamo_protocols::types::Embedding {
+            index: 0,
+            object: "embedding".to_string(),
+            embedding: dynamo_protocols::types::EmbeddingVector::Base64(
+                "AAAAAAAAgD8AAABA".to_string(), // [0.0, 1.0, 2.0] as little-endian f32 bytes
+            ),
+        };
+        let annotated = create_test_embedding_response(vec![embedding], 3, 3);
+
+        // Round-trip through serde to prove the wire format also matches:
+        // the Python handler emits JSON, the aggregator deserializes it.
+        let json = serde_json::to_string(&annotated.data.as_ref().unwrap()).unwrap();
+        let parsed: NvCreateEmbeddingResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.inner.data.len(), 1);
+        match &parsed.inner.data[0].embedding {
+            dynamo_protocols::types::EmbeddingVector::Base64(s) => {
+                assert_eq!(s, "AAAAAAAAgD8AAABA");
+            }
+            other => panic!("expected base64 variant, got {:?}", other),
+        }
+
+        let stream = stream::iter(vec![annotated]);
+        let result = NvCreateEmbeddingResponse::from_annotated_stream(Box::pin(stream)).await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.inner.data.len(), 1);
+        match &response.inner.data[0].embedding {
+            dynamo_protocols::types::EmbeddingVector::Base64(s) => {
+                assert_eq!(s, "AAAAAAAAgD8AAABA");
+            }
+            other => panic!("expected base64 variant, got {:?}", other),
+        }
     }
 }

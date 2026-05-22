@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import inspect
 import logging
 import os
 
 # MM kwargs NIXL transfer (frontend → backend pre-rendered path)
 import pickle
+import struct
 import tempfile
 import threading
 import time
@@ -2880,9 +2882,12 @@ class EmbeddingWorkerHandler:
         The Rust frontend forwards the request dict directly. Expected keys:
         ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``.
         Optional ``dimensions`` (Matryoshka truncation; first N floats of each
-        embedding). ``encoding_format=base64`` is not yet supported end-to-end
-        (the Rust response type rejects strings); tracked as a separate
-        follow-up.
+        embedding). Optional ``encoding_format`` (``"float"`` -- default --
+        or ``"base64"``); when ``"base64"`` is requested, each per-input
+        vector is serialized as a base64-encoded string of little-endian
+        ``f32`` bytes per the OpenAI spec, applied after any
+        ``dimensions`` truncation so the byte count matches the requested
+        dimensionality.
         """
         # Lazy import to avoid pulling PoolingParams into handlers.py at module
         # load time for non-embedding workers.
@@ -2911,6 +2916,13 @@ class EmbeddingWorkerHandler:
             )
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
+
+        encoding_format = request.get("encoding_format", "float")
+        if encoding_format not in ("float", "base64"):
+            raise ValueError(
+                f"Invalid 'encoding_format' value {encoding_format!r}; "
+                "expected 'float' or 'base64'"
+            )
 
         pooling_params = PoolingParams()
         # Use the per-request context id (same as the chat/completion paths
@@ -2954,10 +2966,16 @@ class EmbeddingWorkerHandler:
                     )
                 embedding = embedding[:dimensions]
 
+            embedding_payload: Any
+            if encoding_format == "base64":
+                embedding_payload = _encode_floats_to_base64(embedding)
+            else:
+                embedding_payload = embedding
+
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": embedding,
+                    "embedding": embedding_payload,
                     "index": idx,
                 }
             )
@@ -3069,3 +3087,16 @@ def _pooling_output_to_list(data: Any) -> list[float]:
         f"Unsupported PoolingOutput.data type {type(data).__name__}; "
         "expected torch.Tensor or list"
     )
+
+
+def _encode_floats_to_base64(floats: list[float]) -> str:
+    """Encode an embedding vector as a base64 string per the OpenAI
+    ``encoding_format=base64`` spec: raw little-endian ``float32`` bytes
+    are concatenated and base64-encoded with the standard alphabet.
+
+    Mirrors the Rust ``encode_floats_to_base64`` helper in
+    ``lib/llm/src/preprocessor.rs`` so the two backend code paths
+    produce identical bytes for the same input.
+    """
+    packed = struct.pack(f"<{len(floats)}f", *floats)
+    return base64.b64encode(packed).decode("ascii")

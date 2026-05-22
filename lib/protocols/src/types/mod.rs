@@ -10,6 +10,7 @@
 pub mod anthropic;
 mod chat;
 mod completion;
+mod embeddings;
 pub mod realtime;
 pub mod responses;
 
@@ -17,10 +18,14 @@ pub mod responses;
 pub use chat::*;
 pub use completion::*;
 
-// --- Upstream re-exports (types-only, no HTTP client) ---
+// Embeddings: request side + EmbeddingInput / EmbeddingUsage /
+// EncodingFormat re-exported from async-openai inside the local module;
+// the response side (Embedding, CreateEmbeddingResponse) is owned so
+// the per-input embedding can be either a float vector or a base64
+// string per the OpenAI `encoding_format` spec.
+pub use embeddings::*;
 
-// Embeddings (full re-export)
-pub use async_openai::types::embeddings::*;
+// --- Upstream re-exports (types-only, no HTTP client) ---
 
 // Images
 pub use async_openai::types::images::*;

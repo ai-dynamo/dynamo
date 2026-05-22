@@ -79,6 +79,19 @@ pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
+/// Encode a slice of `f32` values as a base64 string per the OpenAI
+/// `encoding_format=base64` spec: the raw little-endian byte
+/// representation of each `f32` is concatenated and the resulting byte
+/// buffer is base64-encoded with the standard alphabet.
+fn encode_floats_to_base64(floats: &[f32]) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let mut bytes = Vec::with_capacity(floats.len() * std::mem::size_of::<f32>());
+    for f in floats {
+        bytes.extend_from_slice(&f.to_le_bytes());
+    }
+    STANDARD.encode(&bytes)
+}
+
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
 pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
@@ -1904,6 +1917,15 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<EmbeddingsEngineOutput>> + Send + 'static,
     {
+        // Honor the OpenAI `encoding_format` field. The default is `Float`;
+        // `Base64` encodes the raw little-endian f32 bytes of each
+        // per-input vector. The engine always returns floats, so the
+        // base64 path runs at the postprocessor seam where we still have
+        // the original request shape in scope.
+        let encode_base64 = matches!(
+            original_request.inner.encoding_format,
+            Some(dynamo_protocols::types::EncodingFormat::Base64)
+        );
         stream.map(move |output| {
             output.map_data(|engine_output| {
                 // Convert engine output to OpenAI response format
@@ -1911,10 +1933,20 @@ impl OpenAIPreprocessor {
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| dynamo_protocols::types::Embedding {
-                        index: index as u32,
-                        object: "embedding".to_string(),
-                        embedding: embedding.into_iter().map(|f| f as f32).collect(),
+                    .map(|(index, embedding)| {
+                        let floats: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
+                        let value = if encode_base64 {
+                            dynamo_protocols::types::EmbeddingVector::Base64(
+                                encode_floats_to_base64(&floats),
+                            )
+                        } else {
+                            dynamo_protocols::types::EmbeddingVector::Float(floats)
+                        };
+                        dynamo_protocols::types::Embedding {
+                            index: index as u32,
+                            object: "embedding".to_string(),
+                            embedding: value,
+                        }
                     })
                     .collect();
 
