@@ -583,8 +583,12 @@ def setup_vllm_engine(
     )
     load_time = time.time() - start_time
 
-    # Record model load time
-    component_gauges.set_model_load_time(load_time)
+    # Record model load time. ``component_gauges`` is None on the
+    # embedding-worker path -- pooling engines have no chat-shaped gauges
+    # registered (DIS-2107), so model_load_time has no collector to
+    # publish to. Skip rather than fabricating a zero-valued sample.
+    if component_gauges is not None:
+        component_gauges.set_model_load_time(load_time)
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 

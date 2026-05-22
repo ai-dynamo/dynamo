@@ -91,6 +91,14 @@ class _NoopStatLogger(StatLoggerBase):
     chat-shaped publish path (KV cache usage, scheduler gauges) has no
     meaning on a pooling engine."""
 
+    def __init__(self) -> None:
+        # vLLM's ``StatLoggerBase`` declares ``__init__`` as abstract, so
+        # subclasses must provide one even when they hold no state.
+        # Without this, instantiation raises ``TypeError: Can't
+        # instantiate abstract class _NoopStatLogger without an
+        # implementation for abstract method '__init__'``.
+        pass
+
     def record(
         self,
         scheduler_stats: Optional[SchedulerStats],
