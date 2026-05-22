@@ -46,6 +46,8 @@ Single-pass profiling (no binary search, just measure one run using default RAM)
 The report is written to stdout after the test finishes.
 The raw CSV samples are saved to ``--csv`` if specified.
 Use ``--no-recommend`` to suppress the marker recommendation section.
+Use ``--json-out PATH`` to emit a structured JSON summary (schema_version=1)
+for automation (see ``_write_json_payload`` for the schema).
 """
 
 import argparse
@@ -829,6 +831,70 @@ def _run_once(
     return rc, wall_secs, reports, sampler.samples, captured_stdout
 
 
+def _detect_framework(pytest_args: list[str]) -> str:
+    """Best-effort framework detection for the structured JSON output."""
+    if _is_sglang_test(pytest_args):
+        return "sglang"
+    if _is_trtllm_test(pytest_args):
+        return "trtllm"
+    return "vllm"
+
+
+def _extract_pytest_nodeid(pytest_args: list[str]) -> str:
+    """First positional arg (typically the pytest nodeid)."""
+    for a in pytest_args:
+        if not a.startswith("-"):
+            return a
+    return ""
+
+
+def _write_json_payload(
+    path: str,
+    *,
+    nodeid: str,
+    status: str,
+    framework: str,
+    wall_secs: float | None = None,
+    num_runs: int = 0,
+    model: str | None = None,
+    recommendations: "list[MarkerRecommendation] | None" = None,
+    warnings: list[str] | None = None,
+    gpu_reports: "list[GpuReport] | None" = None,
+    error: str | None = None,
+) -> None:
+    """Emit a structured JSON summary of this profile run.
+
+    Consumed by the dynamo-profiler bot. Bump ``schema_version`` on any
+    breaking change to the contract.
+    """
+    payload: dict = {
+        "schema_version": 1,
+        "nodeid": nodeid,
+        "status": status,
+        "framework": framework,
+        "wall_secs": wall_secs,
+        "num_runs": num_runs,
+        "model": model,
+        "recommendations": [
+            {"marker": r.marker, "reason": r.reason} for r in (recommendations or [])
+        ],
+        "warnings": list(warnings or []),
+        "gpu_reports": [
+            {
+                "gpu_idx": r.gpu_idx,
+                "peak_mib": r.peak_mib,
+                "baseline_mib": r.baseline_mib,
+                "leaked_mib": r.leaked_mib,
+            }
+            for r in (gpu_reports or [])
+        ],
+    }
+    if error:
+        payload["error"] = error
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+
 def _find_min_vram(
     pytest_args: list[str],
     interval: float = 0.1,
@@ -838,6 +904,7 @@ def _find_min_vram(
     csv_path: str | None = None,
     kv_bytes_mode: bool = False,
     gpu_indices: list[int] | None = None,
+    json_out: str | None = None,
 ) -> int:
     """Binary search to find the minimum VRAM a test needs.
 
@@ -1009,6 +1076,16 @@ def _find_min_vram(
             else "test broken (not OOM)"
         )
         print(f"  [FAIL] Cannot determine minimum KV cache: {reason}.")
+        if json_out:
+            _write_json_payload(
+                json_out,
+                nodeid=_extract_pytest_nodeid(pytest_args),
+                status="failed",
+                framework=_detect_framework(pytest_args),
+                model=model_name,
+                gpu_reports=reports,
+                error=f"validation run failed: {reason}",
+            )
         return rc
 
     peak_mib = max((r.peak_mib for r in reports), default=0)
@@ -1334,8 +1411,12 @@ def _find_min_vram(
     requested_trtllm_kv_tokens = safe_tokens if is_trtllm else None
     requested_vllm_kv_cache_bytes = safe_kv_bytes if kv_bytes_mode else None
     min_kv_value = int(last_pass_value)
+    recs: list[MarkerRecommendation] = []
+    warnings: list[str] = []
+    avg_pass_wall = (
+        sum(pass_wall_times) / len(pass_wall_times) if pass_wall_times else 0.0
+    )
     if recommend:
-        avg_pass_wall = sum(pass_wall_times) / len(pass_wall_times)
         recs, warnings = _recommend_markers(
             last_pass_reports,
             avg_pass_wall,
@@ -1351,6 +1432,20 @@ def _find_min_vram(
     if csv_path and last_pass_samples:
         _write_csv(last_pass_samples, csv_path)
         print(f"Raw samples (last passing run) written to {csv_path}")
+
+    if json_out:
+        _write_json_payload(
+            json_out,
+            nodeid=_extract_pytest_nodeid(pytest_args),
+            status="ok",
+            framework=_detect_framework(pytest_args),
+            wall_secs=avg_pass_wall,
+            num_runs=len(pass_wall_times),
+            model=model_name,
+            recommendations=recs,
+            warnings=warnings,
+            gpu_reports=last_pass_reports,
+        )
 
     return 0
 
@@ -1421,6 +1516,14 @@ def main(argv: list[str] | None = None) -> int:
         "tests where the launch script pins workers to separate GPUs, pass all "
         "indices (e.g. --gpus 0,1) so the subprocess can see them.",
     )
+    parser.add_argument(
+        "--json-out",
+        metavar="PATH",
+        default=None,
+        help="Write a structured JSON summary (schema_version=1) of the profile "
+        "result and marker recommendations to PATH. Intended for automation "
+        "(e.g. the dynamo-profiler bot).",
+    )
 
     raw = argv if argv is not None else sys.argv[1:]
 
@@ -1477,6 +1580,7 @@ def main(argv: list[str] | None = None) -> int:
             csv_path=args.csv,
             kv_bytes_mode=args.kv_bytes,
             gpu_indices=gpu_indices,
+            json_out=args.json_out,
         )
 
     model_name = _extract_model_from_markers(pytest_args)
@@ -1494,6 +1598,8 @@ def main(argv: list[str] | None = None) -> int:
 
     _print_report(reports, rc, wall_secs, model_name=model_name)
 
+    recs: list[MarkerRecommendation] = []
+    warnings: list[str] = []
     if not args.no_recommend and reports:
         requested_sglang_kv_tokens = None
         requested_trtllm_kv_tokens = None
@@ -1514,7 +1620,47 @@ def main(argv: list[str] | None = None) -> int:
         _write_csv(samples, args.csv)
         print(f"Raw samples written to {args.csv}")
 
+    if args.json_out:
+        _write_json_payload(
+            args.json_out,
+            nodeid=_extract_pytest_nodeid(pytest_args),
+            status="ok" if rc == 0 else "failed",
+            framework=_detect_framework(pytest_args),
+            wall_secs=wall_secs,
+            num_runs=1,
+            model=model_name,
+            recommendations=recs,
+            warnings=warnings,
+            gpu_reports=reports,
+            error=None if rc == 0 else f"pytest exit code {rc}",
+        )
+
     return rc
+
+
+def _emit_failure_json_on_crash(argv: list[str], exc: BaseException) -> None:
+    """If --json-out was given on the command line, ensure a failed payload
+    is written even when main() raises (NVML errors, validation errors, etc.).
+    The bot relies on every dispatched run producing exactly one JSON file.
+    """
+    try:
+        idx = argv.index("--json-out")
+    except ValueError:
+        return
+    if idx + 1 >= len(argv):
+        return
+    json_out = argv[idx + 1]
+    pytest_args = argv[idx + 2 :]
+    try:
+        _write_json_payload(
+            json_out,
+            nodeid=_extract_pytest_nodeid(pytest_args),
+            status="failed",
+            framework=_detect_framework(pytest_args),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    except Exception:  # noqa: BLE001 — last-ditch crash handler
+        pass
 
 
 if __name__ == "__main__":
@@ -1525,4 +1671,10 @@ if __name__ == "__main__":
     ):
         print("ERROR: profile_pytest.py must not run in CI.", file=sys.stderr)
         raise SystemExit(1)
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except BaseException as _exc:  # noqa: BLE001 — propagate after recording
+        _emit_failure_json_on_crash(sys.argv[1:], _exc)
+        raise
