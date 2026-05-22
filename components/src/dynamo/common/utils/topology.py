@@ -140,9 +140,11 @@ def read_topology_config(
     if enabled != "true":
         return TopologyConfig()
 
-    kv_transfer_domain, kv_transfer_enforcement, kv_transfer_preferred_weight = (
-        _read_kv_transfer_policy()
-    )
+    (
+        kv_transfer_domain,
+        kv_transfer_enforcement,
+        kv_transfer_preferred_weight,
+    ) = _read_kv_transfer_policy()
 
     mount_path = os.environ.get(_TOPOLOGY_MOUNT_PATH_VAR, _DEFAULT_MOUNT_PATH)
     topology_mount_path = Path(mount_path)

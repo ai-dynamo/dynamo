@@ -313,7 +313,6 @@ impl ModelRuntimeConfig {
             return Ok(());
         };
 
-        let kv_transfer_enforcement = kv_transfer_enforcement;
         self.inner.kv_transfer_enforcement = match kv_transfer_enforcement.as_str() {
             "" => None,
             "required" => Some(RsKvTransferEnforcement::Required),
