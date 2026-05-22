@@ -27,7 +27,7 @@ use crate::proto::v1::{
     HealthCheckRequest, sglang_service_client::SglangServiceClient,
 };
 use crate::sampling::{build_sampling_params, parse_finish_reason};
-use crate::server_info::{extract_context_length_from_model_info, parse_server_info};
+use crate::server_info::parse_server_info;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const SCHEDULER_READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -35,8 +35,7 @@ const SCHEDULER_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct SglangBridge {
     grpc_endpoint: String,
     disaggregation_mode: DisaggregationMode,
-    bootstrap_host: OnceCell<String>,
-    bootstrap_port: OnceCell<u16>,
+    bootstrap: OnceCell<(String, u16)>,
     client: OnceCell<SglangServiceClient<Channel>>,
     health_check_task: OnceCell<JoinHandle<()>>,
 }
@@ -52,8 +51,7 @@ impl SglangBridge {
         let engine = SglangBridge {
             grpc_endpoint: args.sglang_grpc_endpoint,
             disaggregation_mode: args.common.disaggregation_mode,
-            bootstrap_host: OnceCell::new(),
-            bootstrap_port: OnceCell::new(),
+            bootstrap: OnceCell::new(),
             client: OnceCell::new(),
             health_check_task: OnceCell::new(),
         };
@@ -81,7 +79,6 @@ impl LLMEngine for SglangBridge {
             .map_err(|e| backend_error(format!("connect {}: {e}", self.grpc_endpoint)))?;
         let mut client = SglangServiceClient::new(channel);
 
-        // gRPC port binds ~30-60s before the scheduler is ready; poll until healthy.
         let mut backoff = Duration::from_millis(500);
         loop {
             if client
@@ -127,8 +124,7 @@ impl LLMEngine for SglangBridge {
                 backend_error("GetServerInfo.disaggregation_bootstrap_port missing")
             })?;
             let host = info.bootstrap_host.unwrap_or_else(|| "127.0.0.1".to_string());
-            let _ = self.bootstrap_host.set(host);
-            let _ = self.bootstrap_port.set(port);
+            let _ = self.bootstrap.set((host, port));
         }
 
         self.client
@@ -150,17 +146,28 @@ impl LLMEngine for SglangBridge {
             "sglang_bridge connected"
         );
 
+        let context_length = serde_json::from_str::<serde_json::Value>(&model_info.json_info)
+            .ok()
+            .and_then(|v| {
+                v.get("max_context_length")
+                    .or_else(|| v.get("context_length"))
+                    .and_then(|n| n.as_u64())
+            })
+            .filter(|&n| n > 0 && n <= u32::MAX as u64)
+            .map(|n| n as u32);
+
+        let (bootstrap_host, bootstrap_port) = self.bootstrap.get().cloned().unzip();
         Ok(EngineConfig {
             model: model_path,
             served_model_name: Some(served_model_name),
-            context_length: extract_context_length_from_model_info(&model_info.json_info),
+            context_length,
             kv_cache_block_size: info.page_size,
             total_kv_blocks,
             max_num_seqs: info.max_running_requests,
             max_num_batched_tokens: info.max_prefill_tokens.or(info.max_total_num_tokens),
             data_parallel_size: info.dp_size,
-            bootstrap_host: self.bootstrap_host.get().cloned(),
-            bootstrap_port: self.bootstrap_port.get().copied(),
+            bootstrap_host,
+            bootstrap_port,
             ..Default::default()
         })
     }
@@ -272,27 +279,20 @@ impl SglangBridge {
         }))
     }
 
-    /// SGLang prefill doesn't emit gRPC output until decode pulls KV via
-    /// NIXL/Mooncake; awaiting it here would deadlock the prefill router.
-    /// Yield one bootstrap chunk synchronously and drain the RPC in the
-    /// background just to keep it alive.
+    /// Yields one bootstrap chunk synchronously; the RPC drains in the
+    /// background since SGLang prefill blocks until decode pulls KV.
     async fn generate_prefill(
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let mut client = self.client_or_err()?;
-        let bootstrap_host = self
-            .bootstrap_host
+        let (bootstrap_host, bootstrap_port) = self
+            .bootstrap
             .get()
-            .ok_or_else(|| backend_error("prefill: bootstrap_host not initialised"))?
+            .ok_or_else(|| backend_error("prefill: bootstrap not initialised"))?
             .clone();
-        let bootstrap_port = *self
-            .bootstrap_port
-            .get()
-            .ok_or_else(|| backend_error("prefill: bootstrap_port not initialised"))?;
-        // Honour a router-supplied room (carries dp_rank in upper bits),
-        // otherwise mint a fresh 63-bit room.
+        // Honour a router-supplied room (carries dp_rank), else mint a fresh 63-bit room.
         let bootstrap_room: i64 = request
             .bootstrap_info
             .as_ref()

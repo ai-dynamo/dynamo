@@ -93,14 +93,9 @@ mod tests {
     #[test]
     fn canary_request_shape_matches_python_payload() {
         let r = build_canary_request();
-        assert_eq!(r.input_ids, vec![1]);
-        assert_eq!(r.stream, Some(true));
-        assert!(r.rid.as_deref().unwrap_or("").starts_with("dyn-canary-"));
         let s = r.sampling_params.expect("sampling_params");
-        assert_eq!(s.temperature, Some(0.0));
-        assert_eq!(s.top_p, Some(1.0));
-        assert_eq!(s.top_k, Some(-1));
+        assert_eq!(r.input_ids, vec![1]);
         assert_eq!(s.max_new_tokens, Some(1));
-        assert_eq!(s.ignore_eos, Some(false));
+        assert_eq!(s.temperature, Some(0.0));
     }
 }

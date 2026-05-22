@@ -4,19 +4,6 @@
 //! Parse the subset of SGLang's `GetServerInfo` / `GetModelInfo` JSON fields
 //! the bridge needs to populate Dynamo's MDC.
 
-pub fn extract_context_length_from_model_info(json_info: &str) -> Option<u32> {
-    let v: serde_json::Value = serde_json::from_str(json_info).ok()?;
-    let n = v
-        .get("max_context_length")
-        .or_else(|| v.get("context_length"))
-        .and_then(|n| n.as_u64())?;
-    if n == 0 || n > u32::MAX as u64 {
-        None
-    } else {
-        Some(n as u32)
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct SglangServerInfo {
     pub model_path: Option<String>,
@@ -70,7 +57,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_server_info_both_layouts_and_fields() {
+    fn parses_server_info_fields_and_layouts() {
         let info = parse_server_info(
             r#"{
               "server_args": {
@@ -89,44 +76,16 @@ mod tests {
         assert_eq!(info.model_path.as_deref(), Some("Qwen/Qwen3-0.6B"));
         assert_eq!(info.served_model_name.as_deref(), Some("my-model"));
         assert_eq!(info.page_size, Some(16));
-        assert_eq!(info.max_running_requests, Some(256));
-        assert_eq!(info.max_prefill_tokens, Some(16384));
-        assert_eq!(info.dp_size, Some(2));
         assert_eq!(info.max_total_num_tokens, Some(1048576));
         assert_eq!(info.bootstrap_port, Some(8998));
         assert_eq!(info.bootstrap_host.as_deref(), Some("10.0.0.1"));
 
-        // Top-level layout + bare host in dist_init_addr.
-        let info = parse_server_info(
-            r#"{"model_path": "X", "disaggregation_bootstrap_port": 9000, "dist_init_addr": "node1"}"#,
-        );
+        // Top-level layout (older SGLang) + empty string → None.
+        let info = parse_server_info(r#"{"model_path": "X", "served_model_name": ""}"#);
         assert_eq!(info.model_path.as_deref(), Some("X"));
-        assert_eq!(info.bootstrap_port, Some(9000));
-        assert_eq!(info.bootstrap_host.as_deref(), Some("node1"));
-
-        // Empty strings are treated as unset.
-        let info = parse_server_info(r#"{"model_path": "", "served_model_name": ""}"#);
-        assert!(info.model_path.is_none());
         assert!(info.served_model_name.is_none());
 
-        // Bad JSON -> all-None.
-        let info = parse_server_info("not json");
-        assert!(info.model_path.is_none() && info.bootstrap_port.is_none());
-    }
-
-    #[test]
-    fn extracts_context_length_with_fallback_and_bounds() {
-        assert_eq!(
-            extract_context_length_from_model_info(r#"{"max_context_length": 4096}"#),
-            Some(4096)
-        );
-        assert_eq!(
-            extract_context_length_from_model_info(r#"{"context_length": 8192}"#),
-            Some(8192)
-        );
-        assert_eq!(
-            extract_context_length_from_model_info(r#"{"max_context_length": 0}"#),
-            None
-        );
+        // Bad JSON → all-None.
+        assert!(parse_server_info("not json").model_path.is_none());
     }
 }

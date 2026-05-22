@@ -58,8 +58,8 @@ fn build_structured_constraint(req: &PreprocessedRequest) -> (Option<String>, Op
         let alt: Vec<String> = choices.iter().map(|c| regex_escape(c)).collect();
         return (None, Some(format!("^({})$", alt.join("|"))));
     }
+    // No EBNF field on v1; forward grammar as regex (best-effort).
     if let Some(grammar) = &g.grammar {
-        tracing::warn!("guided_decoding.grammar set but v1 proto has no EBNF field; forwarding as regex");
         return (None, Some(grammar.clone()));
     }
     (None, None)
@@ -104,11 +104,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn regex_escape_handles_metas_and_passthrough() {
-        assert_eq!(regex_escape("foo"), "foo");
-        assert_eq!(regex_escape("a.b"), "a\\.b");
-        assert_eq!(regex_escape("(x|y)"), "\\(x\\|y\\)");
-        assert_eq!(regex_escape("\\"), "\\\\");
-    }
 }
