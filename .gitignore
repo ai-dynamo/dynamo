@@ -2,7 +2,6 @@
 .vs/
 .vscode/
 .helix
-.worktrees/
 issues/
 plans/
 *rendered.Dockerfile
@@ -48,7 +47,6 @@ CMakeCache.txt
 # Test artifacts and output directories
 *.shakespeare.txt
 test_determinism_*/
-artifacts/
 
 **/__pycache__
 **/venv
