@@ -40,15 +40,8 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
-# Native NIXL SDK + UCX from dynamo's wheel_builder. The dynamo Rust wheel is
-# built in runtime_wheel_builder without NIXL headers, so nixl-sys falls back
-# to stubs that dlopen("libnixl_capi.so") by bare name at runtime (see
-# ai-dynamo/nixl src/bindings/rust/stubs.cpp). The upstream lmsysorg/sglang
-# image ships libnixl_capi.so only under .nixl_cu*.mesonpy.libs/, a path not
-# on the dynamic linker's search list — the dlopen happens to succeed on
-# cu12.9 and fails on cu13.0. Mirror vllm_runtime / trtllm_runtime: drop our
-# own NIXL SDK onto a system path and ldconfig so dlopen resolves the same
-# way across all CUDA variants and any future upstream image change.
+# Stage NIXL SDK + UCX on the system linker path so the stub-built nixl-sys
+# can dlopen libnixl_capi.so at runtime; mirrors vllm_runtime / trtllm_runtime.
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 
