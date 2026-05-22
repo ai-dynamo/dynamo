@@ -12,7 +12,7 @@ documented in `body-shape.md` §Known-Issue Entry Shape.
 ### XML-Tag Pitfall in YAML Description
 
 **Symptom:** `astra-skill-eval evaluate ... --static` fails with an XML
-parse error against the `description:` field, or `check-frontmatter.sh`
+parse error against the `description:` field, or `check-frontmatter.py`
 rejects the description with "XML-like placeholder detected".
 
 **Root cause:** Angle-bracket placeholders inside the YAML folded scalar
@@ -39,7 +39,7 @@ description: >-
 **Verify:**
 
 ```bash
-bash scripts/check-frontmatter.sh path/to/SKILL.md
+python3 scripts/check-frontmatter.py path/to/SKILL.md
 astra-skill-eval evaluate path/to/skill-dir --static  # if available
 ```
 

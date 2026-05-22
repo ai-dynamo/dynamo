@@ -5,7 +5,7 @@
 
 Strict spec for the YAML frontmatter that opens every `SKILL.md` under
 `.agents/skills/dynamo-<name>/`. Validated mechanically by
-`scripts/check-frontmatter.sh`.
+`scripts/check-frontmatter.py`.
 
 ## Required Fields
 
@@ -105,7 +105,7 @@ tools:
 | Symptom | Cause | Fix |
 |---|---|---|
 | NV-ACES Tier 1 reports XML parse error on `description`. | Angle-bracket placeholder inside the folded scalar. | Replace `<backend>` with `backend`, `<model>` with `model`, etc. |
-| `check-frontmatter.sh` reports name mismatch. | `name:` value does not match the parent directory. | Rename one or the other so they match exactly. |
-| `check-frontmatter.sh` reports missing tag. | `tags:` list does not include `dynamo` or the lifecycle stage. | Add both. The validator enforces both. |
-| `check-frontmatter.sh` reports `version` malformed. | Used a calendar version, a git SHA, or something not matching `\d+\.\d+\.\d+`. | Use `MAJOR.MINOR.PATCH` matching the Dynamo release line. |
-| `check-frontmatter.sh` reports `description` too short or too long. | Outside the 50-500 char range. | Tighten or expand; aim for ~300-450 chars in practice. |
+| `check-frontmatter.py` reports name mismatch. | `name:` value does not match the parent directory. | Rename one or the other so they match exactly. |
+| `check-frontmatter.py` reports missing tag. | `tags:` list does not include `dynamo` or the lifecycle stage. | Add both. The validator enforces both. |
+| `check-frontmatter.py` reports `version` malformed. | Used a calendar version, a git SHA, or something not matching `\d+\.\d+\.\d+`. | Use `MAJOR.MINOR.PATCH` matching the Dynamo release line. |
+| `check-frontmatter.py` reports `description` too short or too long. | Outside the 50-500 char range. | Tighten or expand; aim for ~300-450 chars in practice. |

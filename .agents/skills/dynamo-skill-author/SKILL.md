@@ -85,7 +85,7 @@ to every decision point.
 
 ```
 bash scripts/validate-skill.sh -d .agents/skills/dynamo-<name>
-bash scripts/check-frontmatter.sh .agents/skills/dynamo-<name>/SKILL.md
+python3 scripts/check-frontmatter.py .agents/skills/dynamo-<name>/SKILL.md
 shellcheck .agents/skills/dynamo-<name>/scripts/*.sh
 ls .agents/skills/
 cat .agents/skills/dynamo-<name>/SKILL.md
@@ -273,7 +273,7 @@ open.
 
 ```bash
 # 1. Frontmatter parses and required fields present.
-bash scripts/check-frontmatter.sh .agents/skills/dynamo-<your-name>/SKILL.md
+python3 scripts/check-frontmatter.py .agents/skills/dynamo-<your-name>/SKILL.md
 
 # 2. Every script passes shellcheck with no warnings.
 shellcheck .agents/skills/dynamo-<your-name>/scripts/*.sh
@@ -374,14 +374,14 @@ git -C dynamo checkout release/1.2.0  # or the release line you target
 |---|---|---|
 | `scripts/scaffold-skill.sh` | Create a new skill directory under `.agents/skills/dynamo-<name>/` by copying from a sibling skill with frontmatter reset and placeholders inserted. | `-n <new-name>`, `-s <sibling>`, `-v <version>` (default `1.2.0`), `-d <skills-root>` (default `.agents/skills`) |
 | `scripts/validate-skill.sh` | Run shellcheck, YAML parse, cross-link audit, and length budget against an authored skill directory. Exits non-zero on any failure. | `-d <skill-dir>` |
-| `scripts/check-frontmatter.sh` | Strict frontmatter validator. Verifies required fields, valid `version`, no XML tags in `description`, valid `tags` set. | `<path-to-SKILL.md>` |
+| `scripts/check-frontmatter.py` | Strict frontmatter validator. Verifies required fields, valid `version`, no XML tags in `description`, valid `tags` set. | `<path-to-SKILL.md>` |
 
 Invocation via the agentskills.io `run_script` protocol:
 
 ```python
 run_script("scripts/scaffold-skill.sh", args=["-n", "dynamo-install", "-s", "dynamo-deploy"])
 run_script("scripts/validate-skill.sh", args=["-d", ".agents/skills/dynamo-install"])
-run_script("scripts/check-frontmatter.sh", args=[".agents/skills/dynamo-install/SKILL.md"])
+run_script("scripts/check-frontmatter.py", args=[".agents/skills/dynamo-install/SKILL.md"])
 ```
 
 Equivalent direct invocation:
@@ -393,7 +393,7 @@ bash .agents/skills/dynamo-skill-author/scripts/scaffold-skill.sh \
 bash .agents/skills/dynamo-skill-author/scripts/validate-skill.sh \
     -d .agents/skills/dynamo-install
 
-bash .agents/skills/dynamo-skill-author/scripts/check-frontmatter.sh \
+python3 .agents/skills/dynamo-skill-author/scripts/check-frontmatter.py \
     .agents/skills/dynamo-install/SKILL.md
 ```
 
@@ -430,4 +430,4 @@ proceed if:
 - [references/known-issues.md](references/known-issues.md) — authoring pitfalls observed during the first seven skills (XML-tag pitfall, non-existent feature claim, premature meta-skill expansion, NV-ACES sub-90 lift).
 - [scripts/scaffold-skill.sh](scripts/scaffold-skill.sh) — scaffold a new skill directory from a sibling.
 - [scripts/validate-skill.sh](scripts/validate-skill.sh) — run all four local validators against an authored skill.
-- [scripts/check-frontmatter.sh](scripts/check-frontmatter.sh) — strict frontmatter validator.
+- [scripts/check-frontmatter.py](scripts/check-frontmatter.py) — strict frontmatter validator.

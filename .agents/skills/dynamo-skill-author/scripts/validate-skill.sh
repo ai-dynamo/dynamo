@@ -73,15 +73,15 @@ fi
 
 # 2. Frontmatter parse + required fields.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CHECK_FM="$SCRIPT_DIR/check-frontmatter.sh"
+CHECK_FM="$SCRIPT_DIR/check-frontmatter.py"
 if [ -f "$CHECK_FM" ]; then
-    if bash "$CHECK_FM" "$SKILL_MD" >/dev/null 2>&1; then
+    if python3 "$CHECK_FM" "$SKILL_MD" >/dev/null 2>&1; then
         pass "frontmatter" "parses; required fields present"
     else
-        fail "frontmatter" "validation failed (run: bash '$CHECK_FM' '$SKILL_MD' for details)"
+        fail "frontmatter" "validation failed (run: python3 '$CHECK_FM' '$SKILL_MD' for details)"
     fi
 else
-    warn "frontmatter" "check-frontmatter.sh not found alongside this script"
+    warn "frontmatter" "check-frontmatter.py not found alongside this script"
 fi
 
 # 3. Cross-link audit. Matches actual markdown links and `bash ./scripts/...`
