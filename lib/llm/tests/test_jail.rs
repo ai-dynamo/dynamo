@@ -3589,7 +3589,10 @@ fahrenheit
                     })
                 })
                 .sum();
-            assert_eq!(tool_call_count, 0, "{label}: strict MiniMax must not recover a call");
+            assert_eq!(
+                tool_call_count, 0,
+                "{label}: strict MiniMax must not recover a call"
+            );
 
             let content = test_utils::reconstruct_content(&results);
             assert!(
