@@ -79,6 +79,7 @@ pub enum DisaggregationMode {
     Aggregated = 1,
     Prefill = 2,
     Decode = 3,
+    Encode = 4,
 }
 
 impl From<DisaggregationMode> for RsDisaggregationMode {
@@ -87,6 +88,7 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
             DisaggregationMode::Aggregated => RsDisaggregationMode::Aggregated,
             DisaggregationMode::Prefill => RsDisaggregationMode::Prefill,
             DisaggregationMode::Decode => RsDisaggregationMode::Decode,
+            DisaggregationMode::Encode => RsDisaggregationMode::Encode,
         }
     }
 }
@@ -274,6 +276,7 @@ impl WorkerConfig {
         runtime = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
         health_check_payload = None,
+        route_to_encoder = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -295,6 +298,7 @@ impl WorkerConfig {
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
         health_check_payload: Option<PyObject>,
+        route_to_encoder: bool,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -341,6 +345,7 @@ impl WorkerConfig {
                 disaggregation_mode: disaggregation_mode.into(),
                 health_check_payload,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
+                route_to_encoder,
             },
         })
     }
