@@ -22,6 +22,8 @@ spec:
           env:
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
+            - name: HF_XET_RECONSTRUCTION_DOWNLOAD_BUFFER_LIMIT
+              value: "16GB"
             # Optional: create with: kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<token> -n <namespace>
             - name: HF_TOKEN
               valueFrom:
@@ -35,6 +37,13 @@ spec:
               pip install --no-cache-dir huggingface_hub==1.11.0
               hf download nvidia/DeepSeek-R1-FP4 --local-dir /model-cache/deepseek-r1-fp4
               hf download deepseek-ai/DeepSeek-R1 --local-dir /model-cache/deepseek-r1
+          resources:
+            requests:
+              cpu: "2"
+              memory: "128Gi"
+            limits:
+              cpu: "8"
+              memory: "128Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache

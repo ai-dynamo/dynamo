@@ -28,6 +28,8 @@ spec:
               value: /model-store
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
+            - name: HF_XET_RECONSTRUCTION_DOWNLOAD_BUFFER_LIMIT
+              value: "16GB"
             - name: MODEL_REVISION
               value: aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df
           args:
@@ -35,6 +37,13 @@ spec:
               set -eux
               pip install --no-cache-dir huggingface_hub==1.11.0
               hf download $MODEL_NAME --revision $MODEL_REVISION
+          resources:
+            requests:
+              cpu: "2"
+              memory: "32Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
