@@ -548,8 +548,22 @@ impl<
                 request.effective_overlap_blocks = effective_overlap_blocks;
                 request.effective_cached_tokens = effective_cached_tokens;
             }
+            let admit_now = Instant::now();
+            if self.all_workers_prefill_busy(threshold, request.eligibility(), admit_now) {
+                let isl_tokens = request.isl_tokens;
+                self.pending.push(QueueEntry {
+                    key: entry.key,
+                    request,
+                    enqueue_at: entry.enqueue_at,
+                    block_hashes: entry.block_hashes,
+                });
+                self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
+                self.pending_isl_tokens
+                    .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
+                break;
+            }
             tracing::debug!("scheduling request from pending queue");
-            self.admit_one(request, decay_now);
+            self.admit_one(request, admit_now);
         }
     }
 
@@ -1040,6 +1054,44 @@ mod tests {
         }
     }
 
+    struct BlockingRefresher {
+        calls: AtomicUsize,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        response: RefreshedOverlap,
+    }
+
+    impl BlockingRefresher {
+        fn new(response: RefreshedOverlap) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                response,
+            }
+        }
+
+        async fn wait_for_calls(&self, target: usize) {
+            while self.calls.load(Ordering::Relaxed) < target {
+                self.started.notified().await;
+            }
+        }
+
+        fn release_one(&self) {
+            self.release.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl OverlapScoresRefresh for BlockingRefresher {
+        async fn refresh(&self, _block_hashes: &[LocalBlockHash]) -> Option<RefreshedOverlap> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.started.notify_one();
+            self.release.notified().await;
+            Some(self.response.clone())
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     fn make_queue_with_refresher(
         num_workers: usize,
@@ -1055,6 +1107,64 @@ mod tests {
                 FcfsPolicy,
                 DefaultWorkerSelector,
                 CountingRefresher,
+            >,
+        >,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let queue = Arc::new(SchedulerQueue::new_with_overlap_refresh(
+            Arc::clone(&slots),
+            cfg_rx,
+            threshold_frac,
+            RouterQueueDepthTiers::unbounded_cap(),
+            block_size,
+            DefaultWorkerSelector::new(None, "test"),
+            FcfsPolicy,
+            None,
+            Some(refresher),
+            None,
+        ));
+
+        (queue, slots)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_blocking_refresher(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        refresher: Arc<BlockingRefresher>,
+    ) -> (
+        Arc<
+            SchedulerQueue<
+                NoopSequencePublisher,
+                SimpleWorkerConfig,
+                FcfsPolicy,
+                DefaultWorkerSelector,
+                BlockingRefresher,
             >,
         >,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
@@ -1887,6 +1997,81 @@ mod tests {
         assert_eq!(resp3.best_worker, WorkerWithDpRank::new(1, 0));
         assert_eq!(resp3.effective_overlap_blocks, 9.0);
         assert_eq!(resp3.cached_tokens, 144);
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_requeues_head_if_workers_become_busy_during_refresh() {
+        let block_size = 16u32;
+        let isl = 64usize;
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) =
+            make_queue_with_blocking_refresher(1, block_size, isl, Some(0.0), refresher.clone());
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.expect("rx1 dropped").expect("req-1 failed");
+
+        let (mut req2, mut rx2) = make_request("req-2", isl);
+        req2.effective_overlap_blocks
+            .insert(WorkerWithDpRank::new(0, 0), 4.0);
+        req2.effective_cached_tokens
+            .insert(WorkerWithDpRank::new(0, 0), 64);
+        queue
+            .enqueue_with_block_hashes(req2, Some(vec![LocalBlockHash(42)]))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots
+            .mark_prefill_completed(&"req-1".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"req-1".to_string(), decay_now()).unwrap();
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue.update().await;
+            })
+        };
+        refresher.wait_for_calls(1).await;
+
+        slots
+            .add_request(
+                SequenceRequest {
+                    request_id: "occupy-during-refresh".to_string(),
+                    token_sequence: None,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: Some(PrefillLoadHint {
+                        initial_effective_prefill_tokens: isl,
+                        expected_prefill_duration: None,
+                    }),
+                    worker: WorkerWithDpRank::new(0, 0),
+                    lora_name: None,
+                },
+                decay_now(),
+            )
+            .unwrap();
+
+        refresher.release_one();
+        update.await.unwrap();
+
+        assert_eq!(queue.pending_count(), 1, "request should be requeued");
+        assert!(
+            rx2.try_recv().is_err(),
+            "request must remain queued while worker became busy again"
+        );
+
+        slots
+            .mark_prefill_completed(&"occupy-during-refresh".to_string(), decay_now())
+            .unwrap();
+        slots
+            .free(&"occupy-during-refresh".to_string(), decay_now())
+            .unwrap();
+        queue.update().await;
+
+        let resp2 = rx2.await.expect("rx2 dropped").expect("req-2 failed");
+        assert_eq!(resp2.best_worker, WorkerWithDpRank::new(0, 0));
         assert_eq!(queue.pending_count(), 0);
     }
 }
