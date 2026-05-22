@@ -86,6 +86,11 @@ const (
 	EnvKvTransferEnforcement     = "DYN_KV_TRANSFER_ENFORCEMENT"
 	EnvKvTransferPreferredWeight = "DYN_KV_TRANSFER_PREFERRED_WEIGHT"
 
+	// Topology env vars (worker) injected when
+	// spec.experimental.kvTransferPolicy is configured.
+	EnvTopologyEnabled   = "DYN_TOPOLOGY_ENABLED"
+	EnvTopologyMountPath = "DYN_TOPOLOGY_MOUNT_PATH"
+
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
 	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"
