@@ -5,9 +5,9 @@ family: minimax_m2
 model_label: MiniMax 2.7
 mode: stream
 cases:
-  TOOLCALLING.stream.2:
+  PARSER.stream.2:
     description: Multiple tool calls split across multiple content chunks
-    ref: derived from TOOLCALLING.batch.2.a
+    ref: derived from PARSER.batch.2.a
     spec_ref: https://huggingface.co/MiniMaxAI/MiniMax-M2.7/blob/main/docs/tool_calling_guide.md#model-output-format
     chunks:
     - delta_text: '<minimax:'
