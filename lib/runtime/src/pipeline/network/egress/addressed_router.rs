@@ -21,10 +21,13 @@ use crate::metrics::request_plane::{
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
+use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
 use crate::pipeline::network::RequestType;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::StreamReceiver;
+use crate::pipeline::network::StreamSender;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
 use crate::pipeline::network::tcp;
@@ -292,21 +295,10 @@ impl AddressedPushRouter {
         // Register both halves on the response transport: a `send_stream`
         // (upstream → worker, carrying subsequent request frames) and a
         // `recv_stream` (worker → upstream, carrying response chunks).
-        let options = StreamOptions::builder()
-            .context(engine_ctx.clone())
-            .enable_request_stream(true)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        let pending_connections: PendingConnections = self.resp_transport.register(options).await;
-
-        let (pending_send_stream, pending_recv_stream) = match pending_connections.into_parts() {
-            (Some(send), Some(recv)) => (send, recv),
-            _ => {
-                panic!("Invalid data plane registration for a ManyIn/ManyOut transport");
-            }
-        };
+        let (pending_send_stream, pending_recv_stream) =
+            self.register_streams(engine_ctx.clone(), true, true).await;
+        let pending_send_stream = pending_send_stream.unwrap();
+        let pending_recv_stream = pending_recv_stream.unwrap();
 
         let (req_stream_conn_info, request_stream_provider) = pending_send_stream.into_parts();
         let (resp_stream_conn_info, response_stream_provider) = pending_recv_stream.into_parts();
@@ -511,6 +503,45 @@ impl AddressedPushRouter {
             self.resp_transport.cancel_send_stream(s).await;
         }
     }
+
+    /// Register the requested halves of a data-plane stream with the response
+    /// transport. Returns `(send_stream, recv_stream)` mirroring the
+    /// `PendingConnections::into_parts` shape — either side is `None` when not
+    /// requested. Asserts post-registration that the transport produced
+    /// exactly the requested shape; a mismatch is a transport-layer bug, not
+    /// a runtime error path.
+    async fn register_streams(
+        &self,
+        engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+        enable_request_stream: bool,
+        enable_response_stream: bool,
+    ) -> (
+        Option<RegisteredStream<StreamSender>>,
+        Option<RegisteredStream<StreamReceiver>>,
+    ) {
+        let options = StreamOptions::builder()
+            .context(engine_ctx)
+            .enable_request_stream(enable_request_stream)
+            .enable_response_stream(enable_response_stream)
+            .build()
+            .unwrap();
+
+        let pending: PendingConnections = self.resp_transport.register(options).await;
+        let (send_stream, recv_stream) = pending.into_parts();
+
+        assert_eq!(
+            send_stream.is_some(),
+            enable_request_stream,
+            "data-plane registration: request-stream presence does not match request"
+        );
+        assert_eq!(
+            recv_stream.is_some(),
+            enable_response_stream,
+            "data-plane registration: response-stream presence does not match request"
+        );
+
+        (send_stream, recv_stream)
+    }
 }
 
 #[async_trait::async_trait]
@@ -529,25 +560,11 @@ where
         let (request, address, instance_info) = addressed_request.into_parts();
         let engine_ctx = context.context();
 
-        // registration options for the data plane in a singe in / many out configuration
-        let options = StreamOptions::builder()
-            .context(engine_ctx.clone())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        // register our needs with the data plane
-        // todo - generalize this with a generic data plane object which hides the specific transports
-        let pending_connections: PendingConnections = self.resp_transport.register(options).await;
-
-        // validate and unwrap the RegisteredStream object
-        let pending_response_stream = match pending_connections.into_parts() {
-            (None, Some(recv_stream)) => recv_stream,
-            _ => {
-                panic!("Invalid data plane registration for a SingleIn/ManyOut transport");
-            }
-        };
+        // Register only the recv half on the data plane for a single-in /
+        // many-out transport.
+        let (_, pending_response_stream) =
+            self.register_streams(engine_ctx.clone(), false, true).await;
+        let pending_response_stream = pending_response_stream.unwrap();
 
         // separate out the connection info and the stream provider from the registered stream
         let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
