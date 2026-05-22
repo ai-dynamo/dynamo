@@ -67,20 +67,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /workspace
 
-# 1. Sanity check the libnixl/NIXL_PLUGIN_DIR paths exist (otherwise
-#    LD_PRELOAD silently logs "cannot be preloaded: ignored" and the hang
-#    returns at runtime). LD_PRELOAD entry 1 (libstdc++) is verified by the
-#    ln -sf below; entry 2 (libnixl) is verified here.
-# 2. Upstream's /etc/shinit_v2 prepends /usr/local/tensorrt/lib (and others)
-#    to LD_LIBRARY_PATH only when a shell starts. K8s spawns python3 directly,
-#    so register the paths with ldconfig instead.
-# 3. Upstream ships /usr/local/bin/etcd as a single binary; remove it so we
-#    can install dynamo_base's etcd directory at the same path below.
-# 4. Stable arch-independent symlink to the system libstdc++. LD_PRELOAD'd
-#    by the ENV above so external PyInstaller-bundled tools (e.g. NVIDIA's
-#    `jet` CI runner) that ship an older libstdc++ in their _MEI extraction
-#    dir don't shadow upstream's GCC 13.2 libstdc++ when they dlopen our
-#    libnixl / nvda_nixl libs. Drop this once jet stops bundling libstdc++.
+# Sanity-check libnixl exists, register TRT-LLM lib paths with ldconfig
+# (upstream's /etc/shinit_v2 only sets them for shells, not K8s python3),
+# swap upstream's single-binary etcd for dynamo_base's directory, and
+# symlink system libstdc++ to a stable path for LD_PRELOAD — keeps
+# PyInstaller-bundled tools (`jet`) from shadowing it with an older copy.
 RUN test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
     test -d "${NIXL_PLUGIN_DIR}" && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
