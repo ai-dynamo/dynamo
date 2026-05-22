@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated serving via the Rust sidecar bridge to SGLang's native gRPC
-# server. Mirrors agg.sh but routes the worker through dynamo.sglang_grpc,
-# which supervises one (sglang.launch_server, in-process bridge) pair.
+# Aggregated serving via the Rust bridge to SGLang's native gRPC server.
+# Three independent processes: dynamo.frontend, sglang.launch_server, and
+# dynamo.sglang_grpc (the bridge worker). Mirrors agg.sh's CLI surface.
 # GPUs: 1
 
 set -e
@@ -59,7 +59,7 @@ fi
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving (gRPC bridge)" "$MODEL" "$HTTP_PORT"
 
-# dynamo.frontend's sglang-grpc engine requires a local model dir, not an HF id.
+# dynamo.frontend's preprocessor needs a local model dir for the tokenizer.
 FRONTEND_MODEL_PATH="$(resolve_local_model_dir "$MODEL")"
 
 # run ingress
@@ -68,14 +68,10 @@ python3 -m dynamo.frontend \
     --model-name "$MODEL" \
     --model-path "$FRONTEND_MODEL_PATH" &
 
-# run worker: dynamo.sglang_grpc supervises one (sglang.launch_server, in-process bridge) pair.
-# Args before `--` go to the bridge; args after `--` go verbatim to sglang.launch_server.
-# The bridge discovers model_path + served_model_name from sglang's GetServerInfo,
-# so only --sglang-grpc-endpoint is needed on the bridge side.
-OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-python3 -m dynamo.sglang_grpc --spawn-sglang \
-    --sglang-grpc-endpoint "http://127.0.0.1:$SGLANG_GRPC_PORT" \
-    -- \
+# run sglang with the native gRPC server, tokenizer disabled (dynamo.frontend
+# is the sole tokenizer/detokenizer; the wire format carries token IDs).
+SGLANG_ENABLE_GRPC=1 \
+python3 -m sglang.launch_server \
     --enable-grpc \
     --grpc-port "$SGLANG_GRPC_PORT" \
     --port "$SGLANG_HTTP_PORT" \
@@ -85,6 +81,17 @@ python3 -m dynamo.sglang_grpc --spawn-sglang \
     --skip-tokenizer-init \
     --enable-metrics \
     "${EXTRA_ARGS[@]}" &
+
+echo "Waiting for SGLang gRPC (:$SGLANG_GRPC_PORT)..."
+if ! wait_for_port "$SGLANG_GRPC_PORT" 600; then
+    echo "ERROR: SGLang gRPC port :$SGLANG_GRPC_PORT did not open within 600s" >&2
+    exit 1
+fi
+
+# run bridge worker
+OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+python3 -m dynamo.sglang_grpc \
+    --sglang-grpc-endpoint "http://127.0.0.1:$SGLANG_GRPC_PORT" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
