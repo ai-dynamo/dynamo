@@ -7,7 +7,7 @@
 | done | Asset inventory CSV | `recipe-asset-inventory.csv` classifies every known recipe family and variant by asset type, variant role, traffic, evidence, and placeholders. |
 | done | Comparison-aware page pattern | Detail pages now distinguish comparison sets, alternative recipe sets, deployment recipes, and deploy-only sets. |
 | done | All known model pages created | 15 model-family pages are present in Fern navigation and linked from the catalog. |
-| in progress | Visual and click audit | Each page still needs the final JPEG/click pass after Fern check and local preview refresh. |
+| done | Visual and click audit | Remote Fern preview JPEGs were generated for the landing page and all 15 model pages; landing filters/reset and all detail-page action links passed click audit with no failures. |
 | open | Numeric results gaps | Several benchmark-backed recipes have perf.yaml but no checked-in expected-results table; pages now show placeholders instead of inventing metrics. |
 
 ## Porting Rules
