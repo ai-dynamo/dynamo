@@ -26,8 +26,21 @@ def check_module_available(module_name: str) -> bool:
 
 
 HAS_PYNVML = check_module_available("pynvml")
-HAS_GMS = check_module_available("gpu_memory_service")
 HAS_TORCH = check_module_available("torch")
+
+
+def _check_gms_usable() -> bool:
+    """Check if gpu_memory_service is fully importable (including dependencies)."""
+    try:
+        import gpu_memory_service  # noqa: F401
+        import msgspec  # noqa: F401
+
+        return True
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+
+HAS_GMS = _check_gms_usable()
 
 # CUDA availability requires torch to be importable first
 HAS_CUDA = False
