@@ -191,6 +191,11 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
+{% elif device == "cpu" %}
+# CPU NIXL is installed under lib/x86_64-linux-gnu (native meson convention, no CUDA).
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
 {% elif framework != "sglang" %}
 # Non-SGLang runtimes use the Dynamo-built NIXL install from wheel_builder.
 # Reset the same values already set in runtime (no harm).
@@ -367,7 +372,7 @@ RUN printf '%s\n' \
     '    echo ""' \
     'fi' >> /etc/bash.bashrc
 
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 {% else %}
