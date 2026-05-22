@@ -60,6 +60,9 @@ const (
 	CloudProviderAKS                = "aks"
 	CloudProviderOther              = "other"
 	CloudProviderUnknown            = "unknown"
+	LabelNVIDIARDMAPresent          = "nvidia.com/rdma.present"
+	LabelNFDRDMAAvailable           = "feature.node.kubernetes.io/rdma.available"
+	LabelNFDNetworkSRIOVCapable     = "feature.node.kubernetes.io/network-sriov.capable"
 )
 
 // --- Normalization helpers ---
@@ -384,7 +387,9 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	}
 
 	// Count only nodes with the same SKU as the selected best node,
-	// and detect RDMA on matching nodes only.
+	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
+	// cluster, this performs one Node read per matching node; that keeps a
+	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
@@ -402,7 +407,8 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 		}
 	}
 
-	// Detect InfiniBand presence
+	// InfiniBand operator pods are a stronger cluster-wide RDMA signal than
+	// generic node labels, so they intentionally refine the transport type.
 	ib := detectIBPods(ctx, k8sClient)
 	if ib {
 		rdmaType = "infiniband"
@@ -837,22 +843,47 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
 
-	// Count only nodes with the same SKU as the selected best node.
+	// Count only nodes with the same SKU as the selected best node,
+	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
+	// cluster, this performs one Node read per matching node; that keeps a
+	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
+	var rdmaDetected bool
+	var rdmaType string
 	for _, n := range allNodes {
 		if n.sku == bestSKU {
 			nodesWithGPUs++
+			if !rdmaDetected {
+				rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.info.NodeName)
+				if rdma {
+					rdmaDetected = true
+					rdmaType = rType
+				}
+			}
 		}
 	}
+
+	// InfiniBand operator pods are a stronger cluster-wide RDMA signal than
+	// generic node labels, so they intentionally refine the transport type.
+	ib := detectIBPods(ctx, k8sClient)
+	if ib {
+		rdmaType = "infiniband"
+		rdmaDetected = true
+	}
+
 	bestNode.System = bestSKU
 	bestNode.NodesWithGPUs = nodesWithGPUs
+	bestNode.RDMAEnabled = rdmaDetected
+	bestNode.RDMAType = rdmaType
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestNode.GPUsPerNode,
 		"nodesWithGPUs", bestNode.NodesWithGPUs,
 		"totalGpus", bestNode.GPUsPerNode*bestNode.NodesWithGPUs,
 		"model", bestNode.Model,
 		"vram", bestNode.VRAMPerGPU,
-		"system", bestNode.System)
+		"system", bestNode.System,
+		"rdma", bestNode.RDMAEnabled,
+		"rdmaType", bestNode.RDMAType)
 	return bestNode, nil
 }
 
@@ -1104,6 +1135,7 @@ func isAWSInstanceType(instanceType string) bool {
 // Detection logic:
 //   - Checks node labels:
 //   - "nvidia.com/rdma.present" = "true" → RDMA detected
+//   - "feature.node.kubernetes.io/rdma.available" = "true" → RDMA detected
 //   - "feature.node.kubernetes.io/network-sriov.capable" = "true" → SR-IOV detected
 //
 // Parameters:
@@ -1120,10 +1152,13 @@ func detectRDMAFromNode(ctx context.Context, k8sClient client.Reader, nodeName s
 		return false, strNone
 	}
 	labels := node.Labels
-	if labels["nvidia.com/rdma.present"] == "true" {
+	if labels[LabelNVIDIARDMAPresent] == "true" {
 		return true, "rdma"
 	}
-	if labels["feature.node.kubernetes.io/network-sriov.capable"] == "true" {
+	if labels[LabelNFDRDMAAvailable] == "true" {
+		return true, "rdma"
+	}
+	if labels[LabelNFDNetworkSRIOVCapable] == "true" {
 		return true, "sriov"
 	}
 	return false, strNone
