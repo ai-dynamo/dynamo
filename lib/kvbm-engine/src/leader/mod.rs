@@ -29,7 +29,7 @@ pub use instance::InstanceLeader;
 pub use kvbm_consolidator::{ConsolidatorHandle, EventSource};
 pub use onboarding::*;
 pub use staging::{StagingResult, stage_g3_to_g2};
-pub use state::{LeaderState, RemoteLeaderInfo, route_local_to_remote};
+pub use state::route_local_to_remote;
 pub use transport::MetadataTransport;
 pub use types::*;
 pub use velo::VeloLeaderService;

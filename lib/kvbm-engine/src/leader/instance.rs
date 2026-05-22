@@ -577,13 +577,12 @@ impl InstanceLeader {
         self.object_client.clone()
     }
 
-    /// Add a remote leader to the search list.
+    /// Record a peer leader instance ID in the registry surfaced by the
+    /// `register_leader` control RPC.
     ///
-    /// Tracks peer leader instance IDs for the upcoming async remote-search
-    /// path. (Peer-leader search is not currently wired into
-    /// `find_matches_with_options`.) Allows adding remote leaders after
-    /// construction (e.g., when instance IDs are only known after cluster
-    /// setup).
+    /// This is a bookkeeping list only: `find_matches_with_options` no longer
+    /// consults static peer leaders (remote search is hub-indexer driven, and
+    /// remote worker metadata is fetched on demand via `ensure_remote_metadata`).
     pub fn add_remote_leader(&self, instance_id: InstanceId) {
         let mut remote_leaders = self.remote_leaders.write().unwrap();
         if !remote_leaders.contains(&instance_id) {
@@ -591,13 +590,7 @@ impl InstanceLeader {
         }
     }
 
-    /// Set all remote leaders at once.
-    pub fn set_remote_leaders(&self, instance_ids: Vec<InstanceId>) {
-        let mut remote_leaders = self.remote_leaders.write().unwrap();
-        *remote_leaders = instance_ids;
-    }
-
-    /// Get the list of remote leader instance IDs.
+    /// Get the list of registered remote leader instance IDs.
     pub fn remote_leaders(&self) -> Vec<InstanceId> {
         self.remote_leaders.read().unwrap().clone()
     }
@@ -1823,8 +1816,6 @@ impl Leader for InstanceLeader {
             Vec::new()
         };
 
-        let has_remote_leaders = !self.remote_leaders.read().unwrap().is_empty();
-        let has_object_client = self.object_client.is_some();
         let has_discovery = self.remote_discovery.get().is_some();
         let local_g2_count = matched_g2_blocks.len();
         let local_g3_count = matched_g3_blocks.len();
@@ -1839,15 +1830,12 @@ impl Leader for InstanceLeader {
 
         // Hub-indexer remote search (the transfer-plane driver) runs only when
         // discovery is injected, the local G2 prefix is incomplete, and there
-        // are no local G3 hits to stage. The legacy peer-leader / G4-object
-        // search path has been removed; cases it used to handle now degrade to
-        // the local match (or local G3→G2 staging). The G4/object-storage search
-        // machinery is parked in `leader::search` and is not wired in yet.
+        // are no local G3 hits to stage (local G3 stages via the AsyncSession
+        // path below). The legacy static peer-leader / G4-object search path was
+        // removed, so its deferral gates went with it.
         let use_indexer_search = options.search_remote
             && has_discovery
             && matched_g3_blocks.is_empty()
-            && !has_object_client
-            && !has_remote_leaders
             && !local_covers_all;
 
         // Host-bypass short-circuit: when G2 is intentionally unconfigured we
