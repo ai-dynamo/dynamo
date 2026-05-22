@@ -117,6 +117,7 @@ pub(crate) fn generate_trace_worker_artifacts(
     Ok(artifacts)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -125,9 +126,17 @@ pub(crate) fn simulate_trace(
     num_workers: usize,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_trace_single(args, requests, arrival_speedup_ratio)
+        simulate_trace_single(
+            args,
+            requests,
+            arrival_speedup_ratio,
+            record_per_request,
+            max_sim_time_ms,
+        )
     } else {
         simulate_trace_multi(
             args,
@@ -137,10 +146,13 @@ pub(crate) fn simulate_trace(
             num_workers,
             arrival_speedup_ratio,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -149,9 +161,17 @@ pub(crate) fn simulate_concurrency(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_concurrency_single(args, requests, max_in_flight)
+        simulate_concurrency_single(
+            args,
+            requests,
+            max_in_flight,
+            record_per_request,
+            max_sim_time_ms,
+        )
     } else {
         simulate_concurrency_multi(
             args,
@@ -161,10 +181,13 @@ pub(crate) fn simulate_concurrency(
             max_in_flight,
             num_workers,
             router_mode,
+            record_per_request,
+            max_sim_time_ms,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -172,6 +195,8 @@ pub(crate) fn simulate_trace_workload(
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     simulate_trace_workload_with_delta_mode(
         args,
@@ -181,6 +206,8 @@ pub(crate) fn simulate_trace_workload(
         num_workers,
         router_mode,
         false,
+        record_per_request,
+        max_sim_time_ms,
     )
 }
 
@@ -206,6 +233,7 @@ pub(crate) fn simulate_agentic_trace_workload(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_accumulating_deltas(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -213,6 +241,8 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     simulate_trace_workload_with_delta_mode(
         args,
@@ -222,9 +252,12 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
         num_workers,
         router_mode,
         true,
+        record_per_request,
+        max_sim_time_ms,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn simulate_trace_workload_with_delta_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -233,9 +266,17 @@ fn simulate_trace_workload_with_delta_mode(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_trace_workload_single(args, trace, accumulate_session_deltas)
+        simulate_trace_workload_single(
+            args,
+            trace,
+            accumulate_session_deltas,
+            record_per_request,
+            max_sim_time_ms,
+        )
     } else {
         simulate_trace_workload_multi(
             args,
@@ -245,10 +286,13 @@ fn simulate_trace_workload_with_delta_mode(
             num_workers,
             router_mode,
             accumulate_session_deltas,
+            record_per_request,
+            max_sim_time_ms,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -257,6 +301,8 @@ pub(crate) fn simulate_concurrency_workload(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_workload_with_delta_mode(
         args,
@@ -267,9 +313,12 @@ pub(crate) fn simulate_concurrency_workload(
         num_workers,
         router_mode,
         false,
+        record_per_request,
+        max_sim_time_ms,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -278,6 +327,8 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_workload_with_delta_mode(
         args,
@@ -288,6 +339,8 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
         num_workers,
         router_mode,
         true,
+        record_per_request,
+        max_sim_time_ms,
     )
 }
 
@@ -301,9 +354,18 @@ fn simulate_concurrency_workload_with_delta_mode(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     if num_workers == 1 && args.engine_type == EngineType::Vllm {
-        simulate_concurrency_workload_single(args, trace, max_in_flight, accumulate_session_deltas)
+        simulate_concurrency_workload_single(
+            args,
+            trace,
+            max_in_flight,
+            accumulate_session_deltas,
+            record_per_request,
+            max_sim_time_ms,
+        )
     } else {
         simulate_concurrency_workload_multi(
             args,
@@ -314,10 +376,13 @@ fn simulate_concurrency_workload_with_delta_mode(
             num_workers,
             router_mode,
             accumulate_session_deltas,
+            record_per_request,
+            max_sim_time_ms,
         )
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
@@ -325,6 +390,8 @@ pub(crate) fn simulate_trace_disagg(
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
@@ -336,10 +403,13 @@ pub(crate) fn simulate_trace_disagg(
         DisaggReplayMode::Trace,
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
@@ -347,6 +417,8 @@ pub(crate) fn simulate_concurrency_disagg(
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let pending = VecDeque::from(requests);
@@ -358,6 +430,8 @@ pub(crate) fn simulate_concurrency_disagg(
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
@@ -368,6 +442,8 @@ pub(crate) fn simulate_trace_workload_disagg(
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let driver = WorkloadDriver::new_trace(trace, config.prefill_args.block_size)?;
@@ -379,10 +455,13 @@ pub(crate) fn simulate_trace_workload_disagg(
         DisaggReplayMode::Trace,
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_workload_disagg(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
@@ -390,6 +469,8 @@ pub(crate) fn simulate_concurrency_workload_disagg(
     trace: Trace,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let driver = WorkloadDriver::new_concurrency(trace, config.prefill_args.block_size)?;
@@ -401,6 +482,8 @@ pub(crate) fn simulate_concurrency_workload_disagg(
         DisaggReplayMode::Concurrency { max_in_flight },
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
@@ -409,11 +492,16 @@ pub(crate) fn simulate_trace_single(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace).run()?;
+    let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace)
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
@@ -421,6 +509,8 @@ pub(crate) fn simulate_concurrency_single(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -430,6 +520,8 @@ pub(crate) fn simulate_concurrency_single(
         pending,
         SingleReplayMode::Concurrency { max_in_flight },
     )
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
@@ -438,6 +530,8 @@ pub(crate) fn simulate_trace_workload_single(
     args: MockEngineArgs,
     trace: Trace,
     accumulate_session_deltas: bool,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -447,7 +541,10 @@ pub(crate) fn simulate_trace_workload_single(
     } else {
         trace.into_trace_driver_with_block_size(engine_block_size)?
     };
-    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace).run()?;
+    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)
+        .with_per_request_records(record_per_request)
+        .with_max_sim_time_ms(max_sim_time_ms)
+        .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
@@ -468,6 +565,8 @@ pub(crate) fn simulate_concurrency_workload_single(
     trace: Trace,
     max_in_flight: usize,
     accumulate_session_deltas: bool,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -482,10 +581,13 @@ pub(crate) fn simulate_concurrency_workload_single(
         driver,
         SingleReplayMode::Concurrency { max_in_flight },
     )
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_multi(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -494,6 +596,8 @@ pub(crate) fn simulate_trace_multi(
     num_workers: usize,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -507,10 +611,13 @@ pub(crate) fn simulate_trace_multi(
         AggReplayMode::Trace,
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_concurrency_multi(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -519,6 +626,8 @@ pub(crate) fn simulate_concurrency_multi(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -532,10 +641,13 @@ pub(crate) fn simulate_concurrency_multi(
         AggReplayMode::Concurrency { max_in_flight },
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_workload_multi(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -544,6 +656,8 @@ pub(crate) fn simulate_trace_workload_multi(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -561,6 +675,8 @@ pub(crate) fn simulate_trace_workload_multi(
         AggReplayMode::Trace,
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }
@@ -599,6 +715,8 @@ pub(crate) fn simulate_concurrency_workload_multi(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     accumulate_session_deltas: bool,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
 ) -> Result<TraceSimulationReport> {
     let started_at = Instant::now();
     let args = args.normalized()?;
@@ -616,6 +734,8 @@ pub(crate) fn simulate_concurrency_workload_multi(
         AggReplayMode::Concurrency { max_in_flight },
         router_mode,
     )?
+    .with_per_request_records(record_per_request)
+    .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
     Ok(finish_with_replay_wall_time(collector, started_at))
 }

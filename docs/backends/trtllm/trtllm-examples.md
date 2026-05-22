@@ -19,7 +19,7 @@ For quick start instructions, see the [TensorRT-LLM README](README.md). This doc
 For local/bare-metal development, start etcd and optionally NATS using Docker Compose:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 <Note>

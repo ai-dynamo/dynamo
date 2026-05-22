@@ -17,6 +17,14 @@ use crate::protocols::{
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_runtime::engine::DataStream;
 
+fn is_harmony_parser(parser: &str) -> bool {
+    parser == "harmony"
+}
+
+fn contains_harmony_protocol(text: &str) -> bool {
+    text.contains("<|channel|>")
+}
+
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
 /// [`NvCreateChatCompletionResponse`]. This struct accumulates incremental responses
 /// from a streaming OpenAI API call into a complete final response.
@@ -381,6 +389,8 @@ impl DeltaAggregator {
 
                 if !tool_calls.is_empty() {
                     choice.tool_calls = Some(tool_calls);
+                    choice.text = content.unwrap_or_default();
+                } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();
                 }
             }
@@ -1564,6 +1574,65 @@ mod tests {
             choice.message.tool_calls.as_ref().unwrap()[0].r#type,
             dynamo_protocols::types::FunctionType::Function
         );
+    }
+
+    #[tokio::test]
+    async fn test_harmony_aggregate_zero_call_drops_internal_analysis() {
+        let annotated_delta = create_test_delta(
+            0,
+            r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("harmony".to_string()), None),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+        assert_eq!(choice.message.content, None);
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_harmony_aggregate_plain_text_without_markers_stays_plain_text() {
+        let annotated_delta = create_test_delta(
+            0,
+            "plain response",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("harmony".to_string()), None),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(
+                "plain response".to_string()
+            ))
+        );
+        assert!(choice.message.tool_calls.is_none());
     }
 
     #[test]
