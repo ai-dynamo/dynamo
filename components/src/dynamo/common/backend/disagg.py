@@ -3,10 +3,8 @@
 
 """Tiny helpers shared across unified-backend engines for disagg dispatch.
 
-Each engine holds its own mode (sourced from its CLI / upstream runtime) and
-declares it via `EngineConfig.disaggregation_mode` in `start()`. Engines
-branch on `self.disaggregation_mode` (or its engine-local name) inside
-`generate()`. The functions below capture the two patterns that recur in
+Each engine's `generate()` consults `WorkerConfig.disaggregation_mode` and
+branches on it. The functions below capture the two patterns that recur in
 multiple engines so we don't reinvent them per backend:
 
 * :func:`enforce_prefill_max_tokens` — clamp `stop_conditions.max_tokens`

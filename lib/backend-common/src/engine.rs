@@ -114,11 +114,9 @@ impl Deref for GenerateContext {
 pub struct EngineConfig {
     /// Canonical model identifier (e.g. HF repo name).
     pub model: String,
-    /// Disaggregation role for this worker. The engine declares it in
-    /// `start()` — either intrinsically (e.g. by querying an upstream
-    /// runtime) or from its own CLI flag. This is the sole source of truth;
-    /// `Worker` reads it directly to drive registration and indexer decisions.
-    pub disaggregation_mode: DisaggregationMode,
+    /// Disaggregation mode discovered by the engine in `start()`. When
+    /// `Some`, takes precedence over `WorkerConfig.disaggregation_mode`.
+    pub engine_disaggregation_mode: Option<DisaggregationMode>,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
     /// Maximum context length the engine supports, in tokens.

@@ -116,13 +116,13 @@ async def test_vllm_engine_all(request, started_engine):
     await _check_generate_streams_chunks_with_coherent_final_usage(started_engine)
     await _check_abort_and_cleanup_are_safe_before_start(request)
     await _check_abort_unknown_request_on_running_engine(started_engine)
-    await _check_from_args_propagates_disaggregation_mode_to_engine(
+    await _check_from_args_propagates_disaggregation_mode_to_worker_config(
         request, "agg", "AGGREGATED"
     )
-    await _check_from_args_propagates_disaggregation_mode_to_engine(
+    await _check_from_args_propagates_disaggregation_mode_to_worker_config(
         request, "prefill", "PREFILL"
     )
-    await _check_from_args_propagates_disaggregation_mode_to_engine(
+    await _check_from_args_propagates_disaggregation_mode_to_worker_config(
         request, "decode", "DECODE"
     )
 
@@ -187,14 +187,13 @@ async def _check_abort_unknown_request_on_running_engine(started_engine):
     await engine.abort(cast(object, _FakeContext("never-submitted")))  # type: ignore[arg-type]
 
 
-async def _check_from_args_propagates_disaggregation_mode_to_engine(
+async def _check_from_args_propagates_disaggregation_mode_to_worker_config(
     request, mode_arg, expected
 ):
-    """``--disaggregation-mode`` must flow from CLI through to the engine
-    instance so ``generate()`` can branch on it, and ``start()`` must
-    declare the mode via ``EngineConfig`` so the Rust Worker registers
-    the right ``ModelType``. Without this hookup the prefill role would
-    silently degrade to aggregated."""
+    """``--disaggregation-mode`` must flow from CLI through to the
+    ``WorkerConfig`` the unified Worker sees, and onto the engine instance
+    so ``generate()`` can branch on it. Without this hookup the prefill
+    role would silently degrade to aggregated."""
     from dynamo.common.constants import DisaggregationMode
     from dynamo.vllm.llm_engine import VllmLLMEngine
 
@@ -207,7 +206,7 @@ async def _check_from_args_propagates_disaggregation_mode_to_engine(
             '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
         ]
 
-    engine, _worker_config = await VllmLLMEngine.from_args(
+    engine, worker_config = await VllmLLMEngine.from_args(
         [
             *_base_argv(_env_with_requested_kv_bytes(request)),
             "--disaggregation-mode",
@@ -218,5 +217,6 @@ async def _check_from_args_propagates_disaggregation_mode_to_engine(
     try:
         expected_mode = getattr(DisaggregationMode, expected)
         assert engine.disaggregation_mode is expected_mode
+        assert worker_config.disaggregation_mode is expected_mode
     finally:
         await engine.cleanup()

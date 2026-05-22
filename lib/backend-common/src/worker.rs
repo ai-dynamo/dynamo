@@ -125,9 +125,23 @@ pub struct WorkerConfig {
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
     pub metrics_labels: Vec<(String, String)>,
+    /// Disaggregation role for this worker.
+    ///
+    /// `Aggregated` (default) registers the model with the parsed
+    /// `endpoint_types`. `Prefill` registers with `ModelType::Prefill` so the
+    /// frontend's prefill router targets it. `Decode` keeps `endpoint_types`
+    /// but force-disables the local KV indexer because decode workers do not
+    /// host the indexer endpoint.
+    pub disaggregation_mode: DisaggregationMode,
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
+}
+
+/// Engine-reported mode (from `start()`) wins; else operator's
+/// `WorkerConfig.disaggregation_mode`.
+fn resolve_disagg_mode(worker: &WorkerConfig, engine: &EngineConfig) -> DisaggregationMode {
+    engine.engine_disaggregation_mode.unwrap_or(worker.disaggregation_mode)
 }
 
 impl Default for WorkerConfig {
@@ -147,6 +161,7 @@ impl Default for WorkerConfig {
             enable_local_indexer: true,
             enable_kv_routing: true,
             metrics_labels: Vec::new(),
+            disaggregation_mode: DisaggregationMode::Aggregated,
             runtime: RuntimeConfig::default(),
         }
     }
@@ -399,7 +414,7 @@ impl Worker {
             );
             return Ok(());
         }
-        let mode = engine_config.disaggregation_mode;
+        let mode = resolve_disagg_mode(&self.config, engine_config);
         let enable_local_indexer = self.config.enable_local_indexer && !mode.is_decode();
         tracing::debug!(
             kv_sources = kv_sources.len(),
@@ -496,7 +511,7 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
-        let mode = engine_config.disaggregation_mode;
+        let mode = resolve_disagg_mode(&self.config, engine_config);
         let model_type = resolve_model_type(mode, &self.config.endpoint_types)?;
 
         let mut local_model = build_local_model(&self.config, engine_config, mode).await?;

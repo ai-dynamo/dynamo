@@ -5,20 +5,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
-from dynamo.common.constants import DisaggregationMode
 
 from .publisher import KvEventSource, SnapshotSource
 
 if TYPE_CHECKING:
     from .worker import WorkerConfig
-
-
-def _aggregated_mode() -> DisaggregationMode:
-    return DisaggregationMode.AGGREGATED
 
 
 # ---------------------------------------------------------------------------
@@ -70,14 +65,6 @@ class GenerateChunk(TypedDict, total=False):
 @dataclass
 class EngineConfig:
     model: str
-    # Disaggregation role declared by the engine in `start()`. This is the
-    # sole source of truth — the Rust Worker reads it for registration
-    # (Prefill→ModelType::Prefill, Decode→disable local indexer). Engines
-    # source it from their own config (CLI, upstream runtime, etc.) and
-    # return it here.
-    disaggregation_mode: "DisaggregationMode" = field(
-        default_factory=lambda: _aggregated_mode()
-    )
     served_model_name: Optional[str] = None
     context_length: Optional[int] = None
     kv_cache_block_size: Optional[int] = None

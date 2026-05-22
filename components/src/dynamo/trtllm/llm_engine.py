@@ -249,6 +249,7 @@ class TrtllmLLMEngine(LLMEngine):
             model_name=config.model,
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
+            disaggregation_mode=_TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode],
         )
         return engine, worker_config
 
@@ -277,7 +278,6 @@ class TrtllmLLMEngine(LLMEngine):
 
         return EngineConfig(
             model=self.model_name,
-            disaggregation_mode=_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode],
             served_model_name=self.served_model_name,
             context_length=self.max_seq_len,
             kv_cache_block_size=self.kv_block_size,

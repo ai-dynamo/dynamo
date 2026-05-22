@@ -110,16 +110,12 @@ async def test_decode_mode_runs_to_completion_when_prefill_result_provided():
     assert "disaggregated_params" not in terminal
 
 
-async def test_from_args_propagates_mode_to_engine_and_engine_config():
-    """Under engine-only disagg, the CLI flag lands on the engine itself
-    (consumed in generate() for per-mode dispatch) and is declared via
-    EngineConfig in start(). WorkerConfig no longer carries the mode."""
-    engine, _worker_config = await SampleLLMEngine.from_args(
+async def test_from_args_propagates_mode_to_worker_config():
+    engine, worker_config = await SampleLLMEngine.from_args(
         ["--disaggregation-mode", "prefill"]
     )
     assert engine.disaggregation_mode is DisaggregationMode.PREFILL
-    cfg = await engine.start(worker_id=0)
-    assert cfg.disaggregation_mode is DisaggregationMode.PREFILL
+    assert worker_config.disaggregation_mode is DisaggregationMode.PREFILL
 
 
 async def test_source_descriptors_have_expected_shape():
