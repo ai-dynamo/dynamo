@@ -7,7 +7,6 @@ from typing import Awaitable, Callable
 
 import sglang as sgl
 
-
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
