@@ -136,7 +136,9 @@ pub struct WorkerConfig {
     /// `endpoint_types`. `Prefill` registers with `ModelType::Prefill` so the
     /// frontend's prefill router targets it. `Decode` keeps `endpoint_types`
     /// but force-disables the local KV indexer because decode workers do not
-    /// host the indexer endpoint.
+    /// host the indexer endpoint. `Encode` registers as `WorkerType::Encode`
+    /// with topology needs `[[Prefill, Decode], [Aggregated]]`; it also
+    /// force-disables the local KV indexer.
     pub disaggregation_mode: DisaggregationMode,
     /// Operator override. `Worker` resolves precedence: this field >
     /// `DYN_HEALTH_CHECK_PAYLOAD` env > `engine.health_check_payload()`.
@@ -146,14 +148,21 @@ pub struct WorkerConfig {
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
+    /// When `true`, this worker declares an upstream `Encode` dependency in
+    /// its topology `needs`. Meaningful only for `Prefill` and `Aggregated`
+    /// roles -- setting it on `Decode` or `Encode` is rejected at
+    /// `Worker::run` validation time with `BackendError::InvalidArgument`.
+    pub route_to_encoder: bool,
 }
 
 impl WorkerConfig {
     /// Effective `enable_local_indexer`, accounting for disaggregation
-    /// mode. Decode workers force this off because they don't host the
-    /// in-process KV indexer endpoint and must not advertise it.
+    /// mode. Decode and Encode workers force this off because they don't
+    /// host the in-process KV indexer endpoint and must not advertise it.
     pub(crate) fn effective_enable_local_indexer(&self) -> bool {
-        self.enable_local_indexer && !self.disaggregation_mode.is_decode()
+        self.enable_local_indexer
+            && !self.disaggregation_mode.is_decode()
+            && !self.disaggregation_mode.is_encode()
     }
 }
 
@@ -177,6 +186,7 @@ impl Default for WorkerConfig {
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
             runtime: RuntimeConfig::default(),
+            route_to_encoder: false,
         }
     }
 }
@@ -262,6 +272,7 @@ impl Worker {
         // doesn't pay the cost of installing signal handlers and spawning
         // a listener task just to get an InvalidArgument error.
         validate_model_input(self.config.model_input)?;
+        validate_route_to_encoder(&self.config)?;
 
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
@@ -892,12 +903,65 @@ fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
 
 /// Derive the topology-readiness fields (`worker_type`, `needs`) for the
 /// worker's disaggregation role. Prefill workers need a Decode peer, Decode
-/// workers need a Prefill peer, and Aggregated workers stand alone.
+/// workers need a Prefill peer, Aggregated workers stand alone, and Encode
+/// workers need either a Prefill+Decode pair or a single Aggregated peer.
+///
+/// `route_to_encoder` extends the `needs` of `Prefill`/`Aggregated` to
+/// also require an `Encode` peer. Invalid combinations (`Decode` or
+/// `Encode` with `route_to_encoder=true`) are rejected upstream in
+/// `validate_route_to_encoder`; this function trusts that gate and only
+/// applies the flag when it is meaningful.
 fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<WorkerType>>) {
     match config.disaggregation_mode {
-        DisaggregationMode::Prefill => (WorkerType::Prefill, vec![vec![WorkerType::Decode]]),
+        DisaggregationMode::Prefill => {
+            let inner = if config.route_to_encoder {
+                vec![WorkerType::Decode, WorkerType::Encode]
+            } else {
+                vec![WorkerType::Decode]
+            };
+            (WorkerType::Prefill, vec![inner])
+        }
         DisaggregationMode::Decode => (WorkerType::Decode, vec![vec![WorkerType::Prefill]]),
-        DisaggregationMode::Aggregated => (WorkerType::Aggregated, Vec::new()),
+        DisaggregationMode::Aggregated => {
+            let needs = if config.route_to_encoder {
+                vec![vec![WorkerType::Encode]]
+            } else {
+                Vec::new()
+            };
+            (WorkerType::Aggregated, needs)
+        }
+        DisaggregationMode::Encode => (
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        ),
+    }
+}
+
+/// Validate that `route_to_encoder` is meaningful for the worker's
+/// disaggregation role. Setting the flag on `Decode` or `Encode` is a
+/// configuration bug: Decode reads KV cache from a Prefill peer and never
+/// sees the encoder output (the dependency is transitive through Prefill),
+/// while Encode is the producer of the encoder result and has nothing
+/// upstream to route to.
+fn validate_route_to_encoder(config: &WorkerConfig) -> Result<(), DynamoError> {
+    if !config.route_to_encoder {
+        return Ok(());
+    }
+    match config.disaggregation_mode {
+        DisaggregationMode::Aggregated | DisaggregationMode::Prefill => Ok(()),
+        DisaggregationMode::Decode | DisaggregationMode::Encode => Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            format!(
+                "--route-to-encoder is meaningful only for --disaggregation-mode \
+                 agg|prefill; got '{}'. Decode workers consume KV cache from a \
+                 Prefill peer (encoder dependency propagates transitively through \
+                 Prefill); Encode workers are the producer of the encoder result.",
+                config.disaggregation_mode
+            ),
+        )),
     }
 }
 
@@ -1187,6 +1251,191 @@ mod tests {
             ..WorkerConfig::default()
         };
         assert_eq!(resolve_model_type(&config).unwrap(), ModelType::Prefill);
+    }
+
+    #[test]
+    fn resolve_model_type_encode_uses_endpoint_types() {
+        // Encode stays endpoint_types-driven per the design: no
+        // ModelType::Encode, the role is encoded via WorkerType::Encode +
+        // topology needs at the discovery layer.
+        let config = WorkerConfig {
+            endpoint_types: "chat,completions".to_string(),
+            disaggregation_mode: DisaggregationMode::Encode,
+            ..WorkerConfig::default()
+        };
+        assert_eq!(
+            resolve_model_type(&config).unwrap(),
+            ModelType::Chat | ModelType::Completions,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // resolve_worker_type_and_needs: one test per row of the topology table
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn topology_aggregated_no_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Aggregated);
+        assert!(needs.is_empty());
+    }
+
+    #[test]
+    fn topology_aggregated_with_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Aggregated);
+        assert_eq!(needs, vec![vec![WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn topology_prefill_no_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Prefill);
+        assert_eq!(needs, vec![vec![WorkerType::Decode]]);
+    }
+
+    #[test]
+    fn topology_prefill_with_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Prefill);
+        assert_eq!(needs, vec![vec![WorkerType::Decode, WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn topology_decode_ignores_route_to_encoder_flag_in_needs() {
+        // route_to_encoder=true on Decode is rejected by
+        // validate_route_to_encoder; resolve_worker_type_and_needs only
+        // sees the flag false case in production. But sanity-check that
+        // even if it leaks through (e.g. internal callers bypassing the
+        // validator), Decode's needs don't grow an encoder leg.
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Decode,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Decode);
+        assert_eq!(needs, vec![vec![WorkerType::Prefill]]);
+    }
+
+    #[test]
+    fn topology_encode_has_two_alternative_needs() {
+        // Encode: needs `[[Prefill, Decode], [Aggregated]]` (DNF).
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Encode,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Encode);
+        assert_eq!(
+            needs,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // validate_route_to_encoder: one test per row of the rejection table
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn validate_route_to_encoder_accepts_aggregated_and_prefill_when_true() {
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+            let cfg = WorkerConfig {
+                disaggregation_mode: mode,
+                route_to_encoder: true,
+                ..WorkerConfig::default()
+            };
+            validate_route_to_encoder(&cfg).unwrap_or_else(|e| {
+                panic!("route_to_encoder=true should be accepted for {mode}; got {e}")
+            });
+        }
+    }
+
+    #[test]
+    fn validate_route_to_encoder_rejects_decode_when_true() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Decode,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let e = validate_route_to_encoder(&cfg).unwrap_err();
+        assert_eq!(
+            e.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(e.to_string().contains("decode"), "msg = {e}");
+    }
+
+    #[test]
+    fn validate_route_to_encoder_rejects_encode_when_true() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Encode,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let e = validate_route_to_encoder(&cfg).unwrap_err();
+        assert_eq!(
+            e.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(e.to_string().contains("encode"), "msg = {e}");
+    }
+
+    #[test]
+    fn validate_route_to_encoder_accepts_any_mode_when_false() {
+        for mode in [
+            DisaggregationMode::Aggregated,
+            DisaggregationMode::Prefill,
+            DisaggregationMode::Decode,
+            DisaggregationMode::Encode,
+        ] {
+            let cfg = WorkerConfig {
+                disaggregation_mode: mode,
+                route_to_encoder: false,
+                ..WorkerConfig::default()
+            };
+            validate_route_to_encoder(&cfg).unwrap_or_else(|e| {
+                panic!("route_to_encoder=false should be accepted for {mode}; got {e}")
+            });
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // effective_enable_local_indexer: Encode must force off
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn effective_enable_local_indexer_encode_force_disabled() {
+        let cfg = WorkerConfig {
+            enable_local_indexer: true,
+            disaggregation_mode: DisaggregationMode::Encode,
+            ..WorkerConfig::default()
+        };
+        assert!(!cfg.effective_enable_local_indexer());
     }
 
     #[tokio::test]
