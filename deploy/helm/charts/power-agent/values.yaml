@@ -51,12 +51,27 @@ tolerations:
     effect: NoSchedule
 
 resources:
+  # Steady-state RSS of the agent (pynvml + kubernetes client + prometheus
+  # exporter) is ~80 MiB on an idle 8-GPU node. The previous 128Mi limit
+  # left only ~48 MiB of headroom — enough to break under any of the
+  # workloads we expect operators to run alongside the agent:
+  #   - kubectl exec --container=power-agent -- python -c "..." for
+  #     ad-hoc inspection (re-importing the kubernetes client in the
+  #     same cgroup pushes RSS over 128 MiB; OOM-kills observed twice
+  #     during 2026-05-21 live testing on AKS dpp-dev-env)
+  #   - the agent's transient allocations during multi-pod conflict
+  #     resolution on a node with O(50) pods (UID→annotation dict +
+  #     PID→UUID map both held in memory)
+  # 256Mi gives ~3× the steady-state RSS with safe room for both
+  # patterns; on a fleet of 1000 nodes the extra 128MiB per node is
+  # 125GiB — negligible compared to the cost of a silently OOM-killed
+  # power-cap controller.
   requests:
     cpu: "50m"
-    memory: "64Mi"
+    memory: "96Mi"
   limits:
     cpu: "200m"
-    memory: "128Mi"
+    memory: "256Mi"
 
 # Persisted UUID-gated cold-start state (managed_gpus.json).
 state:
