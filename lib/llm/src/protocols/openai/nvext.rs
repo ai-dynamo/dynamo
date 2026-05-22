@@ -384,7 +384,14 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<SessionControl>,
+
+    /// Parameters forwarded to global router .
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterParams>,
 }
+
+pub use crate::protocols::common::preprocessor::RouterParams;
 
 /// Hints from the agent/caller about request characteristics.
 #[derive(ToSchema, Serialize, Deserialize, Builder, Debug, Clone, Default, PartialEq)]

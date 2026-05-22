@@ -464,6 +464,12 @@ impl OpenAIPreprocessor {
             .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
+        if let Some(nvext) = request.nvext()
+            && let Some(router_params) = &nvext.router
+        {
+            builder.router(Some(router_params.clone()));
+        }
+
         Ok((builder.build()?, annotations, prompt_injected_reasoning))
     }
 
