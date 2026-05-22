@@ -11,6 +11,7 @@ from dynamo._internal.aic import (
     DEFAULT_MEM_FRACTION_STATIC,
     estimate_num_gpu_blocks,
 )
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import MockEngineArgs, ModelRuntimeConfig, ReasoningConfig, SglangArgs
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
@@ -333,5 +334,7 @@ def build_runtime_config(
         rc.set_disaggregated_endpoint(
             bootstrap_host=host, bootstrap_port=bootstrap_port
         )
+
+    apply_topology_config(rc)
 
     return engine_args.block_size, rc
