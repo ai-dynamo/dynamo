@@ -523,23 +523,20 @@ is just for cross-referencing.
     NOT the `{"body":[{"Power Limit (W)":{"Current":"375"}}, ...]}`
     shape the rewrite assumed (the field is `"Power Limit"`, not
     `"Power Limit (W)"`, and `body` is a dict of fields, not a list of
-    GPU entries). Both defects must be addressed for `test_dcgm_*` to
-    pass on the next live run. Suggested fixes (any of these unblocks):
-    (a) pin `kubernetes-client<35.0.0` in the test environment;
-    (b) refactor `_exec_in_pod` to call
-        `connect_get_namespaced_pod_exec(..., _preload_content=False)`
-        and accumulate raw stdout from `WSClient.read_stdout()`;
-    (c) replace `json.loads(raw)` with `ast.literal_eval(raw)` at the
-        4 affected sites AND update the per-group parser to walk
-        `body.<field>.children.{Current,Target}.value` for the DCGM-4.5
-        shape (with `"Power Limit"` keying, no `(W)` suffix).
-    Files:
-    `components/src/dynamo/planner/tests/integration/test_multi_dgd_live.py:283-298`
-    (`_exec_in_pod` definition, `_preload_content=True`);
-    `:713-724, 745, 827-836, 854` (the 4 `json.loads` sites that hit
-    the mangling);
-    `:748-759, 858-873` (the strict per-field readers that also need
-    the shape update).
+    GPU entries).
+
+    **Status: fixed in `test_multi_dgd_live.py` (commit landing with
+    PR #9683 alongside this README).** The fix combines (b) — `_exec_in_pod`
+    now passes `_preload_content=False` and accumulates raw stdout via
+    `WSClient.read_stdout()` — with a new `_extract_power_limit_from_dcgmi_body`
+    helper that walks BOTH the DCGM 4.0–4.4 (list-of-fields, `"Power Limit (W)"`,
+    flat `Current/Target`) shape AND the DCGM 4.5+ (dict-of-fields,
+    `"Power Limit"`, nested `children.{Current,Target}.value`) shape
+    uniformly. Verification: feeding the helper synthetic payloads for
+    both shapes returns the expected `(current, target)` watts; the next
+    live re-run on `aks-a100b-22138447-vmss000000` is expected to flip
+    `test_dcgm_per_gpu_cap_matches_topology` and
+    `test_dcgm_target_config_registered` from SKIPPED to PASSED.
 
 ### Live-run patches kept in tree
 

@@ -278,7 +278,19 @@ def worker_pods_by_dgd(
 def _exec_in_pod(
     core_api: "k8s_client.CoreV1Api", pod_name: str, command: List[str]
 ) -> str:
-    """Run a command inside a pod and return stdout. Stderr is appended."""
+    """Run a command inside a pod and return stdout. Stderr is appended.
+
+    Uses ``_preload_content=False`` deliberately. With the default
+    ``True``, ``kubernetes-client>=35.0.0`` sniffs JSON-shaped stdout,
+    parses it client-side, and returns ``str(dict)`` — so ``printf '%s'
+    '{"a":1}'`` comes back as the literal 8-char string ``{'a': 1}``
+    (single quotes), which then fails ``json.loads`` everywhere it's
+    consumed (the four DCGM read-back sites below were the first
+    casualties on 2026-05-21). Streaming raw stdout/stderr off the
+    WSClient and joining at the end gives us the bytes the pod
+    actually wrote, regardless of which ``kubernetes-client`` version
+    is installed.
+    """
     resp = k8s_stream(
         core_api.connect_get_namespaced_pod_exec,
         pod_name,
@@ -288,9 +300,87 @@ def _exec_in_pod(
         stdin=False,
         stdout=True,
         tty=False,
-        _preload_content=True,
+        _preload_content=False,
     )
-    return resp
+    chunks: List[str] = []
+    try:
+        while resp.is_open():
+            resp.update(timeout=1)
+            if resp.peek_stdout():
+                chunks.append(resp.read_stdout())
+            if resp.peek_stderr():
+                chunks.append(resp.read_stderr())
+        # Drain any final buffered output post-close.
+        if resp.peek_stdout():
+            chunks.append(resp.read_stdout())
+        if resp.peek_stderr():
+            chunks.append(resp.read_stderr())
+    finally:
+        resp.close()
+    return "".join(chunks)
+
+
+# Helper: extract (Current, Target) watts from a `dcgmi config --get
+# -g <id> -j` body payload. DCGM's JSON shape changed twice across the
+# versions we care about:
+#
+#   DCGM 4.0–4.4:  body = [ { "Power Limit (W)": {"Current": "350",
+#                                                 "Target":  "350"} }, ... ]
+#   DCGM 4.5+:     body = { "Power Limit":      {"children": {
+#                              "Current": {"value": "375"},
+#                              "Target":  {"value": "375"} } }, ... }
+#
+# Notice three breaking changes:
+#   - `body` flipped from list-of-fields-per-GPU to dict-of-fields-for-one-GPU
+#   - the key dropped the `(W)` suffix
+#   - leaf values moved under a `children` wrapper with `value` strings
+#
+# This helper hides all three, returning two `Optional[int]` or
+# `(None, None)` if neither shape matches.
+def _extract_power_limit_from_dcgmi_body(body) -> tuple:
+    """Walk DCGM 4.0/4.4 list-shape OR DCGM 4.5+ dict-shape uniformly.
+
+    Returns (current_w, target_w) as ints, or (None, None) if no
+    Power-Limit field is present in either shape.
+    """
+
+    def _read_one(field):
+        if not isinstance(field, dict):
+            return None, None
+        # 4.5+ shape: {"children": {"Current": {"value": "375"}, ...}}
+        if "children" in field and isinstance(field["children"], dict):
+            children = field["children"]
+            cur_node = children.get("Current", {})
+            tgt_node = children.get("Target", {})
+            cur = cur_node.get("value") if isinstance(cur_node, dict) else None
+            tgt = tgt_node.get("value") if isinstance(tgt_node, dict) else None
+        else:
+            # 4.0–4.4 shape: {"Current": "350", "Target": "350"}
+            cur = field.get("Current")
+            tgt = field.get("Target")
+        try:
+            return (
+                int(cur) if cur is not None else None,
+                int(tgt) if tgt is not None else None,
+            )
+        except (ValueError, TypeError):
+            return None, None
+
+    # DCGM 4.5+ shape — body is a dict of field-name → field-object.
+    if isinstance(body, dict):
+        field = body.get("Power Limit") or body.get("Power Limit (W)")
+        return _read_one(field)
+
+    # DCGM 4.0–4.4 shape — body is a list of {field-name: field-object}.
+    if isinstance(body, list):
+        for entry in body:
+            if not isinstance(entry, dict):
+                continue
+            field = entry.get("Power Limit (W)") or entry.get("Power Limit")
+            cur, tgt = _read_one(field)
+            if cur is not None or tgt is not None:
+                return cur, tgt
+    return None, None
 
 
 def _scrape_power_agent_metrics(
@@ -727,6 +817,8 @@ class TestCapApplicationProof:
         # Extract the per-GPU groups the Power Agent created. Format
         # is `{"body": [{"Group ID": "2", "Group Name":
         # "dynamo-power-agent-gpu-0", "Entities": ["GPU 0"]}, ...]}`.
+        # `dcgmi group --list -j` body shape has been stable across
+        # 4.0–4.5 (unlike `dcgmi config --get`).
         observed: Dict[int, int] = {}
         for entry in groups.get("body", []):
             name = entry.get("Group Name", "")
@@ -746,16 +838,9 @@ class TestCapApplicationProof:
                 cfg = json.loads(cfg_raw)
             except json.JSONDecodeError:
                 continue
-            # 4.x shape: {"body": [{"Power Limit (W)": {"Current": "350",
-            # "Target": "350"}, ...}]}. Strict reader.
-            for body_entry in cfg.get("body", []):
-                pl = body_entry.get("Power Limit (W)") or body_entry.get("Power Limit")
-                if not isinstance(pl, dict):
-                    continue
-                try:
-                    observed[gpu_idx] = int(pl["Current"])
-                except (KeyError, ValueError, TypeError):
-                    continue
+            cur_w, _tgt_w = _extract_power_limit_from_dcgmi_body(cfg.get("body"))
+            if cur_w is not None:
+                observed[gpu_idx] = cur_w
 
         if len(observed) < 1:
             pytest.skip(
@@ -854,14 +939,9 @@ class TestCapApplicationProof:
                 cfg = json.loads(cfg_raw)
             except json.JSONDecodeError:
                 continue
-            for body_entry in cfg.get("body", []):
-                pl = body_entry.get("Power Limit (W)") or body_entry.get("Power Limit")
-                if not isinstance(pl, dict):
-                    continue
-                try:
-                    target_watts[gpu_idx] = int(pl["Target"])
-                except (KeyError, ValueError, TypeError):
-                    continue
+            _cur_w, tgt_w = _extract_power_limit_from_dcgmi_body(cfg.get("body"))
+            if tgt_w is not None:
+                target_watts[gpu_idx] = tgt_w
 
         if len(target_watts) < 1:
             pytest.skip(
