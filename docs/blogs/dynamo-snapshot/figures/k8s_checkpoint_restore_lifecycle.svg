@@ -57,16 +57,16 @@
 <line x1="880.0" y1="440" x2="880.0" y2="418" stroke="#74b711" stroke-width="1.5"/>
 <polygon points="875.0,418 885.0,418 880.0,410" fill="#74b711"/>
 <text class="arrow-meta" x="892.0" y="429.0">Enter and restore inside NS</text>
-<rect x="540.0" y="430.0" width="200" height="110" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<rect x="570.0" y="430.0" width="140" height="110" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <text class="card-title" x="640.0" y="481.0" text-anchor="middle">PVC</text>
 <text class="card-meta" x="640.0" y="505.0" text-anchor="middle">shared storage</text>
-<line x1="470.0" y1="485.0" x2="530.0" y2="485.0" stroke="#7a7a7a" stroke-width="2"/>
-<polygon points="530.0,478.0 540.0,485.0 530.0,492.0" fill="#7a7a7a"/>
-<text class="arrow-meta" x="505.0" y="475.0" text-anchor="middle">dump artifact</text>
-<text class="arrow-meta" x="505.0" y="507.0" text-anchor="middle" fill="#5a5a5a">+ overlay diff</text>
-<line x1="740.0" y1="485.0" x2="800.0" y2="485.0" stroke="#74b711" stroke-width="2"/>
+<line x1="470.0" y1="485.0" x2="560.0" y2="485.0" stroke="#7a7a7a" stroke-width="2"/>
+<polygon points="560.0,478.0 570.0,485.0 560.0,492.0" fill="#7a7a7a"/>
+<text class="arrow-meta" x="515.0" y="475.0" text-anchor="middle">dump artifact</text>
+<text class="arrow-meta" x="515.0" y="500.0" text-anchor="middle" fill="#5a5a5a">+ overlay diff</text>
+<line x1="710.0" y1="485.0" x2="800.0" y2="485.0" stroke="#74b711" stroke-width="2"/>
 <polygon points="800.0,478.0 810.0,485.0 800.0,492.0" fill="#74b711"/>
-<text class="arrow-meta" x="775.0" y="475.0" text-anchor="middle">restore artifact</text>
+<text class="arrow-meta" x="755.0" y="475.0" text-anchor="middle">restore artifact</text>
 <circle cx="553.5" cy="676" r="6" fill="#5a5a5a"/>
 <text class="legend" x="567.5" y="680">checkpoint</text>
 <circle cx="671.5" cy="676" r="6" fill="#74b711"/>

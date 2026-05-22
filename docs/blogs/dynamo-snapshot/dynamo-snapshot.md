@@ -112,7 +112,7 @@ This functionality is already given to us by vLLM's `sleep()` and `wake_up()` me
 
 ![Unmapping and releasing the KV cache shrinks device memory at checkpoint time to just weights and the CUDA graph buffers.](./figures/kv_cache_unmap_release.svg)
 
-Unmap and release of the KV cache reduces the checkpoint size of Qwen3 0.6B for a B200 from ~192 GiB to ~6 GiB. The wins are most pronounced for large KV cache sizes (i.e. smaller model weights relative to GPU size).
+Unmap and release of the KV cache shrinks the resident device memory of Qwen3 0.6B on a B200 from ~182 GiB (with `gpu_memory_utilization=0.95`) to ~2.6 GiB &mdash; just the ~1.1 GiB BF16 weights, the captured CUDA graphs, and a small working buffer. After cuda-checkpoint and CRIU serialize the rest of the process to disk, the on-disk checkpoint artifact is ~6 GiB. The wins are most pronounced for large KV cache sizes (i.e. smaller model weights relative to GPU size).
 
 ## Optimization #2: Making CRIU Fast
 So, what do the restore times look like? Surprisingly, really bad. For larger models, the restore time actually exceeds that of a cold start, defeating the entire purpose of checkpoint/restore.
