@@ -55,9 +55,28 @@ use crate::{
 use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
-/// Constructs the WorkerSet storage key. Prefill and decode workers in the same
-/// namespace get different keys so they don't block each other's registration.
-fn worker_set_key(namespace: &str, model_type: ModelType) -> String {
+/// Constructs the WorkerSet storage key. Workers with distinct roles in the
+/// same namespace get different keys so they don't block each other's
+/// registration (MDC checksums differ across roles via the `worker_type`
+/// byte at `model_card.rs`, so a key collision would surface as a checksum
+/// mismatch on the second registration).
+///
+/// Buckets:
+/// - `WorkerType::Encode` -> `"{ns}:encode"`. Independent of `model_type`
+///   because encode workers stay `endpoint_types`-driven (no
+///   `ModelType::Encode`); without this discriminator a default
+///   `chat,completions` encode worker would collide with Aggregated/Decode
+///   in the same namespace.
+/// - Otherwise, fall back to `model_type` (prefill workers -> `"{ns}:prefill"`,
+///   everything else -> `"{ns}"`).
+fn worker_set_key(
+    namespace: &str,
+    model_type: ModelType,
+    worker_type: Option<crate::worker_type::WorkerType>,
+) -> String {
+    if matches!(worker_type, Some(crate::worker_type::WorkerType::Encode)) {
+        return format!("{}:encode", namespace);
+    }
     if model_type.supports_prefill() {
         format!("{}:prefill", namespace)
     } else {
@@ -267,7 +286,7 @@ impl ModelWatcher {
                     // If a WorkerSet already exists for this (model, namespace, type),
                     // validate that the new worker's checksum matches. Different
                     // WorkerSets (different namespaces) are allowed to have different checksums to support rolling updates.
-                    let ws_key = worker_set_key(&mcid.namespace, card.model_type);
+                    let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
                     if let Some(model) = self.manager.get_model(card.name())
                         && !model.is_checksum_compatible(&ws_key, card.mdcsum())
                     {
@@ -410,7 +429,7 @@ impl ModelWatcher {
         let model_name = card.name().to_string();
         let worker_namespace = &mcid.namespace;
         let worker_component = &mcid.component;
-        let ws_key = worker_set_key(&mcid.namespace, card.model_type);
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
 
         // Query discovery for all remaining instances of this model
         let active_instances = self
@@ -418,12 +437,22 @@ impl ModelWatcher {
             .await
             .with_context(|| model_name.clone())?;
 
-        // Check if instances of the SAME component remain in this namespace.
-        // In disaggregated deployments, prefill and decode are different components
-        // in the same namespace, so we must check at the component level to avoid
-        // removing one type's WorkerSet while the other still has workers.
-        let component_has_instances = active_instances.iter().any(|(eid, _)| {
-            eid.namespace == *worker_namespace && eid.component == *worker_component
+        // Check if instances of the SAME role and component remain in
+        // this namespace. In disaggregated deployments, prefill and
+        // decode are different components in the same namespace -- so
+        // checking only (ns, component) is necessary but not sufficient.
+        // Encode workers can share a (ns, component) with Aggregated, so
+        // we ALSO require the remaining instance to map to the same
+        // computed `ws_key` (which folds in worker_type for Encode). If
+        // we used only (ns, component), removing the last Encode
+        // instance from a namespace that still has an Aggregated worker
+        // in the same component would see "instances exist" and skip
+        // remove_worker_set, leaking the Encode WorkerSet forever.
+        let component_has_instances = active_instances.iter().any(|(eid, other_card)| {
+            eid.namespace == *worker_namespace
+                && eid.component == *worker_component
+                && worker_set_key(&eid.namespace, other_card.model_type, other_card.worker_type)
+                    == ws_key
         });
 
         if !component_has_instances {
@@ -511,7 +540,7 @@ impl ModelWatcher {
         // If so, this is just another worker joining an existing set — no pipeline build needed.
         let model_name = card.name().to_string();
         let namespace = mcid.namespace.clone();
-        let ws_key = worker_set_key(&namespace, card.model_type);
+        let ws_key = worker_set_key(&namespace, card.model_type, card.worker_type);
 
         if let Some(model) = self.manager.get_model(&model_name)
             && model.has_worker_set(&ws_key)
@@ -715,7 +744,7 @@ impl ModelWatcher {
 
         let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
-        let ws_key = worker_set_key(&namespace, card.model_type);
+        let ws_key = worker_set_key(&namespace, card.model_type, card.worker_type);
 
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
@@ -1295,5 +1324,92 @@ mod tests {
         // Remove the last model — now empty
         mm.remove_model("model-b");
         assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
+    }
+
+    // ---------------------------------------------------------------------
+    // worker_set_key role disambiguation
+    //
+    // Encode workers stay endpoint_types-driven (no ModelType::Encode), so
+    // worker_set_key must look at worker_type to keep them in their own
+    // bucket. Without the discriminator, a default Encode worker
+    // (endpoint_types=chat,completions) would collide with Aggregated and
+    // trigger an MDC checksum mismatch on the second registration.
+    // ---------------------------------------------------------------------
+
+    use crate::worker_type::WorkerType;
+
+    #[test]
+    fn worker_set_key_encode_gets_dedicated_bucket() {
+        // Encode with default chat/completions endpoint_types lands in
+        // {ns}:encode, not the {ns} bucket Aggregated/Decode share.
+        let key = worker_set_key(
+            "dynamo",
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Encode),
+        );
+        assert_eq!(key, "dynamo:encode");
+    }
+
+    #[test]
+    fn worker_set_key_encode_bucket_independent_of_endpoint_types() {
+        // Even if an operator overrides endpoint_types (e.g. to "prefill"
+        // or "embeddings"), Encode still lands in {ns}:encode -- the role
+        // discriminator takes priority over model_type, so the bucket is
+        // stable regardless of what the operator advertises.
+        for model_type in [
+            ModelType::Chat,
+            ModelType::Prefill,
+            ModelType::Embedding,
+            ModelType::TensorBased,
+        ] {
+            let key = worker_set_key("dynamo", model_type, Some(WorkerType::Encode));
+            assert_eq!(key, "dynamo:encode", "Encode bucket leaked for {:?}", model_type);
+        }
+    }
+
+    #[test]
+    fn worker_set_key_aggregated_keeps_namespace_bucket() {
+        // Non-Encode roles keep their existing buckets so nothing else
+        // changes for Aggregated/Decode/Prefill.
+        for worker_type in [Some(WorkerType::Aggregated), Some(WorkerType::Decode), None] {
+            let key = worker_set_key(
+                "dynamo",
+                ModelType::Chat | ModelType::Completions,
+                worker_type,
+            );
+            assert_eq!(key, "dynamo", "{:?} should land in {{ns}}", worker_type);
+        }
+    }
+
+    #[test]
+    fn worker_set_key_prefill_role_uses_prefill_bucket() {
+        // Prefill workers register with ModelType::Prefill regardless of
+        // worker_type (the existing Prefill rule); their bucket is still
+        // {ns}:prefill.
+        let key = worker_set_key("dynamo", ModelType::Prefill, Some(WorkerType::Prefill));
+        assert_eq!(key, "dynamo:prefill");
+        // And worker_type=None falls back to model_type-only behavior.
+        let key = worker_set_key("dynamo", ModelType::Prefill, None);
+        assert_eq!(key, "dynamo:prefill");
+    }
+
+    #[test]
+    fn worker_set_key_encode_and_aggregated_coexist_in_same_namespace() {
+        // Regression for the DIS-2110 collision: Encode and Aggregated
+        // workers in the same namespace MUST map to different keys, so
+        // both can register without an MDC checksum mismatch.
+        let agg_key = worker_set_key(
+            "dynamo",
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Aggregated),
+        );
+        let enc_key = worker_set_key(
+            "dynamo",
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Encode),
+        );
+        assert_ne!(agg_key, enc_key);
+        assert_eq!(agg_key, "dynamo");
+        assert_eq!(enc_key, "dynamo:encode");
     }
 }
