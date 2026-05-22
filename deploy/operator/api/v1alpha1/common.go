@@ -192,8 +192,10 @@ type GPUMemoryServiceSpec struct {
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 
 	// ExtraClientContainers lists additional user-declared containers that should
-	// be wired as GMS clients in intrapod pods/jobs. In each rendered pod, only
-	// matching container names are wired; absent names are ignored.
+	// be wired as GMS clients in pods rendered from the enclosing spec.
+	// DGD/DCD services apply this to service pods; DynamoCheckpoint applies this
+	// to checkpoint Job pods. In each rendered pod, only matching container
+	// names are wired; absent names are ignored.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
@@ -317,6 +319,15 @@ type ServiceCheckpointConfig struct {
 
 // ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
 type ServiceCheckpointJobConfig struct {
+	// GMSClientContainers lists checkpoint Job containers that should receive
+	// GMS client wiring. Requires gpuMemoryService on the service.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
+
 	// PodTemplate customizes the checkpoint Job pod. The operator starts from the
 	// selected workload container and merges this template so users can add helper
 	// containers such as gms-saver.

@@ -611,7 +611,7 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
 							Mode:                  v1beta1.GMSModeIntraPod,
 							DeviceClassName:       "gpu.nvidia.com",
-							ExtraClientContainers: []string{"gms-loader", "gms-saver"},
+							ExtraClientContainers: []string{"gms-loader"},
 							ExtraClientPods: []v1beta1.GMSClientPodSpec{{
 								Name:        "loader",
 								PodTemplate: *clientPodTemplate.DeepCopy(),
@@ -626,6 +626,7 @@ func TestDGD_RoundTrip_Experimental(t *testing.T) {
 							CheckpointRef:       &ref,
 							TargetContainerName: "worker",
 							Job: &v1beta1.ComponentCheckpointJobConfig{
+								GMSClientContainers: []string{"gms-saver"},
 								PodTemplate: &corev1.PodTemplateSpec{
 									Spec: corev1.PodSpec{
 										Containers: []corev1.Container{{
@@ -657,7 +658,17 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 						Enabled:               true,
 						Mode:                  GMSModeIntraPod,
 						DeviceClassName:       "gpu.nvidia.com/h100",
-						ExtraClientContainers: []string{"gms-loader", "gms-saver"},
+						ExtraClientContainers: []string{"gms-loader"},
+					},
+					Checkpoint: &ServiceCheckpointConfig{
+						Enabled: true,
+						Identity: &DynamoCheckpointIdentity{
+							Model:            "model",
+							BackendFramework: "vllm",
+						},
+						Job: &ServiceCheckpointJobConfig{
+							GMSClientContainers: []string{"gms-saver"},
+						},
 					},
 				},
 			},
@@ -672,8 +683,11 @@ func TestDGD_FromV1alpha1_GMSExtraClientsRoundTripsThroughHub(t *testing.T) {
 	if gms == nil {
 		t.Fatalf("expected hub GMS config")
 	}
-	if diff := cmp.Diff([]string{"gms-loader", "gms-saver"}, gms.ExtraClientContainers); diff != "" {
+	if diff := cmp.Diff([]string{"gms-loader"}, gms.ExtraClientContainers); diff != "" {
 		t.Fatalf("hub extra clients mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"gms-saver"}, hub.Spec.Components[0].Experimental.Checkpoint.Job.GMSClientContainers); diff != "" {
+		t.Fatalf("hub checkpoint job GMS clients mismatch (-want +got):\n%s", diff)
 	}
 
 	got := roundTripFromV1alpha1(t, src)

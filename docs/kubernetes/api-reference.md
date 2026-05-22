@@ -901,7 +901,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled activates GMS wiring. GPU resources on client containers are<br />replaced with a DRA ResourceClaim for shared GPU access. |  |  |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the GMS deployment topology. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
 | `deviceClassName` _string_ | DeviceClassName is the DRA DeviceClass to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
-| `extraClientContainers` _string array_ | ExtraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in intrapod pods/jobs. In each rendered pod, only<br />matching container names are wired; absent names are ignored. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `extraClientContainers` _string array_ | ExtraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in pods rendered from the enclosing spec.<br />DGD/DCD services apply this to service pods; DynamoCheckpoint applies this<br />to checkpoint Job pods. In each rendered pod, only matching container<br />names are wired; absent names are ignored. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `extraClientPods` _[GMSClientPodSpec](#gmsclientpodspec) array_ | ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is<br />reserved for future use and is rejected until inter-pod client orchestration is wired. |  | Optional: \{\} <br /> |
 
 
@@ -1266,6 +1266,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `gmsClientContainers` _string array_ | GMSClientContainers lists checkpoint Job containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the service. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate customizes the checkpoint Job pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
 
 
@@ -1508,6 +1509,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `gmsClientContainers` _string array_ | gmsClientContainers lists checkpoint Job containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the component. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate customizes the checkpoint Job pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
 
 
@@ -2147,7 +2149,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | mode selects the GMS deployment topology. | IntraPod | Enum: [IntraPod InterPod] <br />Optional: \{\} <br /> |
 | `deviceClassName` _string_ | deviceClassName is the DRA `DeviceClass` to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
-| `extraClientContainers` _string array_ | extraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in intrapod pods/jobs. In each rendered pod, only<br />matching container names are wired; absent names are ignored. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `extraClientContainers` _string array_ | extraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in service pods. Checkpoint Job clients are declared<br />under checkpoint.job.gmsClientContainers. In each rendered pod, only<br />matching container names are wired; absent names are ignored. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `extraClientPods` _[GMSClientPodSpec](#gmsclientpodspec) array_ | extraClientPods declares additional GMS client pods for inter-pod GMS. This field is<br />reserved for future use and is rejected until inter-pod client orchestration is wired. |  | Optional: \{\} <br /> |
 
 

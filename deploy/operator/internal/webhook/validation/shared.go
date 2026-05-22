@@ -208,6 +208,27 @@ func (v *SharedSpecValidator) validateCheckpointConfig() error {
 			)
 		}
 	}
+	if v.spec.Checkpoint.Job != nil {
+		if len(v.spec.Checkpoint.Job.GMSClientContainers) > 0 {
+			if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+				return fmt.Errorf("%s.checkpoint.job.gmsClientContainers requires gpuMemoryService to be enabled", v.fieldPath)
+			}
+			if v.spec.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+				return fmt.Errorf("%s.checkpoint.job.gmsClientContainers is only supported with gpuMemoryService.mode=IntraPod", v.fieldPath)
+			}
+		}
+		for i, name := range v.spec.Checkpoint.Job.GMSClientContainers {
+			if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+				return fmt.Errorf(
+					"%s.checkpoint.job.gmsClientContainers[%d] %q is not a valid Kubernetes container name: %s",
+					v.fieldPath,
+					i,
+					name,
+					strings.Join(errs, "; "),
+				)
+			}
+		}
+	}
 	return nil
 }
 

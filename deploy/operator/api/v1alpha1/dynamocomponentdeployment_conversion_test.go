@@ -585,7 +585,7 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
 						Mode:                  v1beta1.GMSModeIntraPod,
 						DeviceClassName:       "gpu.nvidia.com",
-						ExtraClientContainers: []string{"gms-loader", "gms-saver"},
+						ExtraClientContainers: []string{"gms-loader"},
 						ExtraClientPods: []v1beta1.GMSClientPodSpec{{
 							Name:        "loader",
 							PodTemplate: *clientPodTemplate.DeepCopy(),
@@ -599,6 +599,7 @@ func TestDCD_RoundTrip_Experimental(t *testing.T) {
 							BackendFramework: "vllm",
 						},
 						Job: &v1beta1.ComponentCheckpointJobConfig{
+							GMSClientContainers: []string{"gms-saver"},
 							PodTemplate: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									Containers: []corev1.Container{{

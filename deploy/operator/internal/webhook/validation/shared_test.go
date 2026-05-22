@@ -373,6 +373,50 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			errMsg:              "spec.services[worker].checkpoint.job can only be set in Auto mode",
 		},
 		{
+			name: "checkpoint job GMS clients require gpuMemoryService",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
+						GMSClientContainers: []string{"gms-saver"},
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[worker].checkpoint.job.gmsClientContainers requires gpuMemoryService to be enabled",
+		},
+		{
+			name: "checkpoint job GMS client names must be Kubernetes container names",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled: true,
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "vllm",
+					},
+					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
+						GMSClientContainers: []string{"Bad_Name"},
+					},
+				},
+			},
+			fieldPath:           "spec.services[worker]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errContains:         "checkpoint.job.gmsClientContainers[0]",
+		},
+		{
 			name: "frontendSidecar with no extraPodSpec containers is valid",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				FrontendSidecar: &nvidiacomv1alpha1.FrontendSidecarSpec{

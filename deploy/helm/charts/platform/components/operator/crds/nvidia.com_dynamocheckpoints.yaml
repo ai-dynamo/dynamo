@@ -85,8 +85,10 @@ spec:
                     extraClientContainers:
                       description: |-
                         ExtraClientContainers lists additional user-declared containers that should
-                        be wired as GMS clients in intrapod pods/jobs. In each rendered pod, only
-                        matching container names are wired; absent names are ignored.
+                        be wired as GMS clients in pods rendered from the enclosing spec.
+                        DGD/DCD services apply this to service pods; DynamoCheckpoint applies this
+                        to checkpoint Job pods. In each rendered pod, only matching container
+                        names are wired; absent names are ignored.
                       items:
                         maxLength: 63
                         minLength: 1

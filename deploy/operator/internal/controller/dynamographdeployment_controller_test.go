@@ -776,9 +776,8 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClie
 			Limits: &v1alpha1.ResourceItem{GPU: "1"},
 		},
 		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
-			Enabled:               true,
-			Mode:                  v1alpha1.GMSModeIntraPod,
-			ExtraClientContainers: []string{"gms-saver"},
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeIntraPod,
 		},
 		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 			Enabled: true,
@@ -799,6 +798,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClie
 		},
 	}
 	component.Checkpoint.Job = &v1alpha1.ServiceCheckpointJobConfig{
+		GMSClientContainers: []string{"gms-saver"},
 		PodTemplate: &corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{
@@ -920,11 +920,15 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t
 			},
 		},
 		Experimental: &v1beta1.ExperimentalSpec{
+			GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
+				Mode: v1beta1.GMSModeIntraPod,
+			},
 			Checkpoint: &v1beta1.ComponentCheckpointConfig{
 				Mode:                v1beta1.CheckpointModeAuto,
 				TargetContainerName: "snapshot-me",
 				Identity:            &checkpointIdentity,
 				Job: &v1beta1.ComponentCheckpointJobConfig{
+					GMSClientContainers: []string{"gms-saver"},
 					PodTemplate: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{
@@ -943,6 +947,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t
 	assert.Equal(t, "snapshot-me", ckpt.Spec.Job.TargetContainerName)
 	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "snapshot-me"))
 	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "gms-saver"))
+	assert.Equal(t, []string{"gms-saver"}, ckpt.Spec.GPUMemoryService.ExtraClientContainers)
 	assert.Nil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName))
 	assert.Nil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "serve-sidecar"))
 }

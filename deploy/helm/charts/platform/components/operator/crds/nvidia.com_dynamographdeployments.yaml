@@ -966,6 +966,17 @@ spec:
                           job:
                             description: Job customizes the checkpoint Job that is created in Auto mode.
                             properties:
+                              gmsClientContainers:
+                                description: |-
+                                  GMSClientContainers lists checkpoint Job containers that should receive
+                                  GMS client wiring. Requires gpuMemoryService on the service.
+                                items:
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: set
                               podTemplate:
                                 description: |-
                                   PodTemplate customizes the checkpoint Job pod. The operator starts from the
@@ -11043,8 +11054,10 @@ spec:
                           extraClientContainers:
                             description: |-
                               ExtraClientContainers lists additional user-declared containers that should
-                              be wired as GMS clients in intrapod pods/jobs. In each rendered pod, only
-                              matching container names are wired; absent names are ignored.
+                              be wired as GMS clients in pods rendered from the enclosing spec.
+                              DGD/DCD services apply this to service pods; DynamoCheckpoint applies this
+                              to checkpoint Job pods. In each rendered pod, only matching container
+                              names are wired; absent names are ignored.
                             items:
                               maxLength: 63
                               minLength: 1
@@ -12212,6 +12225,17 @@ spec:
                               job:
                                 description: job customizes the checkpoint Job that is created in Auto mode.
                                 properties:
+                                  gmsClientContainers:
+                                    description: |-
+                                      gmsClientContainers lists checkpoint Job containers that should receive
+                                      GMS client wiring. Requires gpuMemoryService on the component.
+                                    items:
+                                      maxLength: 63
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: set
                                   podTemplate:
                                     description: |-
                                       podTemplate customizes the checkpoint Job pod. The operator starts from the
@@ -12285,7 +12309,8 @@ spec:
                               extraClientContainers:
                                 description: |-
                                   extraClientContainers lists additional user-declared containers that should
-                                  be wired as GMS clients in intrapod pods/jobs. In each rendered pod, only
+                                  be wired as GMS clients in service pods. Checkpoint Job clients are declared
+                                  under checkpoint.job.gmsClientContainers. In each rendered pod, only
                                   matching container names are wired; absent names are ignored.
                                 items:
                                   maxLength: 63

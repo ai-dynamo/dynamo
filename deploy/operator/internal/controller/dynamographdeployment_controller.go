@@ -1722,6 +1722,10 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	var gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	if converted := gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)); converted != nil {
 		gmsSpec = converted.DeepCopy()
+		gmsSpec.ExtraClientContainers = nil
+		if checkpointConfig.Job != nil {
+			gmsSpec.ExtraClientContainers = append([]string(nil), checkpointConfig.Job.GMSClientContainers...)
+		}
 	}
 	return checkpoint.CreateOrGetAutoCheckpoint(
 		ctx,
