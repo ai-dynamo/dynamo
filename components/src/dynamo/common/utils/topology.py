@@ -92,7 +92,7 @@ def _read_kv_transfer_policy() -> tuple[str, str | None, float | None]:
     kv_transfer_domain = (
         kv_transfer_domain.strip() if kv_transfer_domain is not None else None
     )
-    kv_transfer_enforcement = os.environ.get(_KV_TRANSFER_ENFORCEMENT_VAR, None)
+    kv_transfer_enforcement = os.environ.get(_KV_TRANSFER_ENFORCEMENT_VAR, "required")
     raw_preferred_weight = os.environ.get(_KV_TRANSFER_PREFERRED_WEIGHT_VAR, None)
 
     if not kv_transfer_domain:

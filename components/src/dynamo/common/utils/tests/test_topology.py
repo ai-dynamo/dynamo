@@ -50,13 +50,16 @@ def _enable_topology(
     monkeypatch,
     topology_dir: Path,
     transfer_domain: str = "zone",
-    enforcement: str = "required",
+    enforcement: str | None = "required",
     preferred_weight: float | None = None,
 ):
     monkeypatch.setenv("DYN_TOPOLOGY_ENABLED", "true")
     monkeypatch.setenv("DYN_TOPOLOGY_MOUNT_PATH", str(topology_dir))
     monkeypatch.setenv("DYN_KV_TRANSFER_DOMAIN", transfer_domain)
-    monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", enforcement)
+    if enforcement is not None:
+        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", enforcement)
+    else:
+        monkeypatch.delenv("DYN_KV_TRANSFER_ENFORCEMENT", raising=False)
     if preferred_weight is not None:
         monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", str(preferred_weight))
     else:
@@ -150,6 +153,17 @@ class TestReadTopologyConfig:
             "ZONE": "us-east-1a",
         }
         assert config.kv_transfer_domain == "ZONE"
+
+    def test_defaults_transfer_enforcement_to_required(self, monkeypatch, tmp_path):
+        """Defaults enforcement to required when only transfer domain is set."""
+        topology_dir = tmp_path / "topology"
+        topology_dir.mkdir()
+        (topology_dir / "zone").write_text("us-east-1a")
+
+        _enable_topology(monkeypatch, topology_dir, enforcement=None)
+
+        config = read_topology_config()
+        assert config.kv_transfer_enforcement == "required"
 
     def test_hard_exit_when_transfer_domain_env_not_set(self, monkeypatch, tmp_path):
         """Exits when enabled but DYN_KV_TRANSFER_DOMAIN is not set."""
