@@ -324,6 +324,7 @@ BATCH_SUB_CASE_GROUPS = [
             "7.c",
             "7.d",
             "7.e",
+            "7.f",
         ),
     ),
     ("Text interleaving", ("8.a", "8.b", "8.c", "8.d")),

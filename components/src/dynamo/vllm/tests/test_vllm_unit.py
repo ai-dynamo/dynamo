@@ -729,6 +729,46 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
+@pytest.mark.asyncio
+async def test_health_check_decode_opts_out_with_warning():
+    # mock.patch the module logger directly: dynamo's logging setup
+    # turns off propagation on per-module loggers, so pytest's caplog
+    # (which attaches at root) doesn't see these warnings.
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.DECODE,
+        served_model_name="test",
+        component="backend",
+    )
+    with patch("dynamo.vllm.llm_engine.logger") as mock_logger:
+        payload = await engine.health_check_payload()
+
+    assert payload is None
+    assert mock_logger.warning.call_count == 1
+    msg = mock_logger.warning.call_args.args[0]
+    assert "DECODE worker: health-check canary disabled" in msg
+
+
+@pytest.mark.asyncio
+async def test_health_check_aggregated_returns_canary():
+    from dynamo.common.backend.health_check import HEALTH_CHECK_KEY
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        served_model_name="test",
+        component="backend",
+    )
+    payload = await engine.health_check_payload()
+
+    assert payload is not None
+    assert payload[HEALTH_CHECK_KEY] is True
+    assert payload["token_ids"]
+
+
 def test_build_sampling_params_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params
 

@@ -20,6 +20,7 @@ from tests.router.e2e_harness import (
 )
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DefaultPort
+from tests.utils.gpu_args import build_trtllm_override_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
@@ -191,6 +192,8 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             if enable_attention_dp:
                 command.append("--enable-attention-dp")
 
+            command.extend(build_trtllm_override_args())
+
             # Each TRT-LLM worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
             # Ports are dynamically allocated for xdist-safe parallel execution.
             system_port = self._system_ports[worker_idx]
@@ -234,6 +237,8 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
 @pytest.mark.gpu_1
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(300)
 def test_trtllm_kv_router_basic(
@@ -295,6 +300,8 @@ def test_router_decisions_trtllm_attention_dp(
 
 @pytest.mark.gpu_1
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
@@ -355,6 +362,8 @@ def test_router_decisions_trtllm_disagg(
 
 @pytest.mark.gpu_1
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",

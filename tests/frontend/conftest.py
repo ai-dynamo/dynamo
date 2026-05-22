@@ -36,10 +36,15 @@ def pytest_ignore_collect(collection_path, config):
 
     # In-proc OTLP test needs grpc + opentelemetry-proto. Skip when
     # missing (e.g. pre-commit env that only installs lint deps).
+    # find_spec on a dotted name imports the parent and raises ModuleNotFoundError
+    # if it doesn't exist, so guard the opentelemetry.proto lookup.
     if filename == "test_unified_worker_otlp_export.py":
         if importlib.util.find_spec("grpc") is None:
             return True
-        if importlib.util.find_spec("opentelemetry.proto") is None:
+        try:
+            if importlib.util.find_spec("opentelemetry.proto") is None:
+                return True
+        except ModuleNotFoundError:
             return True
 
     return None
