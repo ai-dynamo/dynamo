@@ -164,3 +164,6 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+  PARSER.batch.7.f:
+    description: Numeric precision edge test 7.f — not yet authored for this family
+    reason: Numeric precision edge test 7.f not yet authored for mistral; Qwen3-Coder coverage is provided by qwen3_coder 7.f.

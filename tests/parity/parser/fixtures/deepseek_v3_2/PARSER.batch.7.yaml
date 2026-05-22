@@ -73,3 +73,6 @@ cases:
   PARSER.batch.7.e:
     description: Large / deep JSON-edge payload test 7.e — not yet authored for this family
     reason: Large/deep JSON-edge payload test 7.e not yet authored for deepseek_v3_2; existing batch.7 coverage remains in 7.a-d.
+  PARSER.batch.7.f:
+    description: Numeric precision edge test 7.f — not yet authored for this family
+    reason: Numeric precision edge test 7.f not yet authored for deepseek_v3_2; Qwen3-Coder coverage is provided by qwen3_coder 7.f.

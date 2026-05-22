@@ -21,7 +21,7 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
@@ -284,6 +284,11 @@ class WorkerFactory:
                     config,
                     engine_client,
                     vllm_config,
+                    # Embedding workers have no prefill/decode split — they
+                    # always serve a single pooling pass, so they advertise
+                    # as Aggregated with no peer dependencies.
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
                 ),
             )
         except Exception as e:
@@ -494,6 +499,16 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
+        # What the worker is advertising itself as, and what other worker it needs to serve traffic.
+        if config.disaggregation_mode == DisaggregationMode.DECODE:
+            worker_type = WorkerType.Decode
+            needs_set: list[WorkerType] = [WorkerType.Prefill]
+        else:
+            # AGGREGATED
+            worker_type = WorkerType.Aggregated
+            needs_set = []
+        needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
         await self.register_vllm_model(
             model_input,
             model_type,
@@ -501,6 +516,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=worker_type,
+            needs=needs,
         )
 
         health_check_payload = VllmHealthCheckPayload(
@@ -706,6 +723,8 @@ class WorkerFactory:
             config,
             engine_client,
             vllm_config,
+            worker_type=WorkerType.Prefill,
+            needs=[[WorkerType.Decode]],
         )
 
         health_check_payload = VllmPrefillHealthCheckPayload(

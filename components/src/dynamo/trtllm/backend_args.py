@@ -151,10 +151,19 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--publish-events-and-metrics",
-            env_var="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS",
+            flag_name="--publish-kv-events",
+            env_var="DYN_TRTLLM_PUBLISH_KV_EVENTS",
             default=False,
-            help="If set, publish events and metrics to Dynamo components.",
+            help=(
+                "If set, publish KV cache events to the KV router. The "
+                "`dynamo_component_*` gauges and `trtllm_*` vendor metrics "
+                "emit unconditionally regardless of this flag."
+            ),
+            dest="publish_events_and_metrics",
+            # `obsolete_flag` accepts the old `--publish-events-and-metrics`
+            # / `--no-publish-events-and-metrics` aliases automatically.
+            # DeprecationWarning fires in args.py:parse_args.
+            obsolete_flag="--publish-events-and-metrics",
         )
         add_argument(
             g,

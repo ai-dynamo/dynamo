@@ -17,6 +17,7 @@ use super::{KvWorkerMonitor, ModelManagerError};
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
+    RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
     openai::{
         audios::OpenAIAudiosStreamingEngine,
@@ -157,6 +158,13 @@ impl Model {
             .any(|entry| entry.value().has_audios_engine())
     }
 
+    /// Check if any WorkerSet has a realtime engine.
+    pub fn has_realtime_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_realtime_engine())
+    }
+
     // -- Topology readiness --
     //
     // A *topology* is the set of WorkerSets in this Model that share the same
@@ -275,6 +283,7 @@ impl Model {
                 || ws.has_tensor_engine()
                 || ws.has_videos_engine()
                 || ws.has_audios_engine()
+                || ws.has_realtime_engine()
         };
 
         let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
@@ -332,6 +341,11 @@ impl Model {
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
+    }
+
+    pub fn get_realtime_engine(&self) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.realtime_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -627,6 +641,32 @@ mod tests {
         assert!(model.get_embeddings_engine().is_err());
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
+        assert!(model.get_realtime_engine().is_err());
+    }
+
+    fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            "abc".to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.realtime_engine = Some(Arc::new(crate::engines::EchoBidirectionalEngine));
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn test_realtime_engine_round_trip() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.has_realtime_engine());
+        assert!(model.get_realtime_engine().is_ok());
+    }
+
+    #[test]
+    fn test_realtime_only_model_is_displayable() {
+        let model = Model::new("realtime-mock".to_string());
+        model.add_worker_set("ns1".to_string(), make_realtime_worker_set("ns1"));
+        assert!(model.is_displayable());
     }
 
     #[test]

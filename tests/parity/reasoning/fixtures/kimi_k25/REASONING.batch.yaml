@@ -1,0 +1,148 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k25
+model_label: Kimi K2.5
+mode: batch
+cases:
+  REASONING.batch.1.b:
+    description: Plain text stays in force-reasoning mode
+    ref: dynamo
+    model_text: plain answer
+    expected:
+      dynamo:
+        reasoning_text: plain answer
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.2.a:
+    description: Force-reasoning parser with explicit think tags
+    ref: dynamo
+    model_text: <think>thinking</think>answer
+    expected:
+      dynamo: &d_1
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.3.b:
+    description: Tool-call section marker force-exits an open reasoning block
+    ref: dynamo
+    model_text: thinking <|tool_calls_section_begin|>tool text
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: <|tool_calls_section_begin|>tool text
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.2.c:
+    description: Force-reasoning parser treats plain output as reasoning
+    ref: dynamo
+    model_text: thinking without explicit tags
+    expected:
+      dynamo:
+        reasoning_text: thinking without explicit tags
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.4:
+    description: Dangling end marker exits force-reasoning mode
+    ref: dynamo
+    model_text: normal</think>answer
+    expected:
+      dynamo:
+        reasoning_text: normal
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.5:
+    description: Missing end marker keeps the remaining text as reasoning
+    ref: dynamo
+    model_text: partial reasoning
+    expected:
+      dynamo:
+        reasoning_text: partial reasoning
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.2.e:
+    description: Empty reasoning block
+    ref: dynamo
+    model_text: <think></think>answer
+    expected:
+      dynamo:
+        reasoning_text: ''
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.2.f:
+    description: Complex reasoning content with Unicode and newlines
+    ref: dynamo
+    model_text: |-
+      <think>Line 1
+      Unicode: café
+      JSON-ish: {"x": [1, true]}</think>Done.
+    expected:
+      dynamo:
+        reasoning_text: |-
+          Line 1
+          Unicode: café
+          JSON-ish: {"x": [1, true]}
+        normal_text: Done.
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.1.a:
+    description: Empty input
+    ref: dynamo
+    model_text: ''
+    expected:
+      dynamo:
+        reasoning_text: ''
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.6.a:
+    description: Multiple reasoning spans are concatenated
+    ref: dynamo
+    model_text: <think>first</think> middle <think>second</think> done
+    expected:
+      dynamo:
+        reasoning_text: firstsecond
+        normal_text: middle  done
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.batch.2.d:
+    description: Normal text around reasoning is not applicable in force-reasoning mode
+    reason: Force-reasoning parser families start inside reasoning; marker-free prefix text is not a normal-text prefix.
+  REASONING.batch.3.a:
+    description: Closed reasoning span followed by Kimi tool-call section marker
+    ref: dynamo
+    model_text: <think>choose tool</think><|tool_calls_section_begin|>tool text
+    expected:
+      dynamo:
+        reasoning_text: choose tool
+        normal_text: <|tool_calls_section_begin|>tool text
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'

@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k25
+model_label: Kimi K2.5
+mode: stream
+cases:
+  REASONING.stream.1.a:
+    description: Empty stream chunk
+    ref: dynamo
+    chunks:
+    - ''
+    expected:
+      dynamo: &d_s0
+        reasoning_text: ''
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.2.a:
+    description: Force-reasoning stream exits on closing think tag
+    ref: dynamo
+    chunks:
+    - thinking
+    - </think>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.2.b:
+    description: Multiple reasoning spans across chunks
+    ref: dynamo
+    chunks:
+    - <think>first</think>
+    - ' middle '
+    - <think>second</think> done
+    expected:
+      dynamo:
+        reasoning_text: firstsecond
+        normal_text: ' middle  done'
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.3.a:
+    description: Opening think marker split across chunks
+    ref: dynamo
+    chunks:
+    - <thi
+    - nk>thinking</think>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.3.b:
+    description: End marker split across chunks
+    ref: dynamo
+    chunks:
+    - <think>thinking</th
+    - ink>answer
+    expected:
+      dynamo:
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.3.c:
+    description: Partial start-marker prefix later resolves as force-reasoning text
+    ref: dynamo
+    chunks:
+    - plain <th
+    - esis answer
+    expected:
+      dynamo:
+        reasoning_text: plain <thesis answer
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'
+  REASONING.stream.1.b:
+    description: Plain text stays in force-reasoning mode until an end marker
+    ref: dynamo
+    chunks:
+    - plain
+    - ' answer'
+    expected:
+      dynamo:
+        reasoning_text: plain answer
+        normal_text: ''
+      vllm:
+        unavailable: vLLM peer not wired for Dynamo parser family 'kimi_k25'
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'kimi_k25'

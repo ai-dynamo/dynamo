@@ -109,31 +109,6 @@ ARG MODELEXPRESS_REF={{ context.vllm.modelexpress_ref }}
 {% endif %}
 {%- endif -%}
 
-{% if framework == "trtllm" %}
-# TensorRT-LLM specific configuration
-ARG HAS_TRTLLM_CONTEXT={{ context.trtllm.has_trtllm_context }}
-ARG TENSORRTLLM_PIP_WHEEL={{ context.trtllm.pip_wheel }}
-ARG TENSORRTLLM_INDEX_URL={{ context.trtllm.index_url }}
-ARG GITHUB_TRTLLM_COMMIT={{ context.trtllm.github_trtllm_commit }}
-ARG TRTLLM_WHEEL_IMAGE={{ context.trtllm.trtllm_wheel_image }}
-
-# Copy pytorch installation from NGC PyTorch
-ARG FLASHINFER_PYTHON_VER={{ context.trtllm.flashinfer_python_ver }}
-ARG PYTORCH_TRITON_VER={{ context.trtllm.pytorch_triton_ver }}
-ARG TORCHAO_VER={{ context.trtllm.torchao_ver }}
-ARG TORCHDATA_VER={{ context.trtllm.torchdata_ver }}
-ARG TORCHTITAN_VER={{ context.trtllm.torchtitan_ver }}
-ARG TORCH_VER={{ context.trtllm.torch_version }}
-ARG TORCH_TENSORRT_VER={{ context.trtllm.torch_tensorrt_version }}
-ARG TORCHVISION_VER={{ context.trtllm.torchvision_version }}
-ARG JINJA2_VER={{ context.trtllm.jinja2_version }}
-ARG SYMPY_VER={{ context.trtllm.sympy_version }}
-ARG FLASH_ATTN_VER={{ context.trtllm.flash_attn_version }}
-
-# Python configuration
-ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
-{%- endif -%}
-
 {% if make_efa == true %}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
