@@ -47,6 +47,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+const testTopologyLabelKey = "topology.kubernetes.io/zone"
+
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	type args struct {
 		parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment
@@ -894,7 +896,7 @@ func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnno
 }
 
 func TestGenerateDynamoComponentsDeployments_AddsTopologyLabelAnnotationToWorkers(t *testing.T) {
-	labelKey := "topology.kubernetes.io/zone"
+	labelKey := testTopologyLabelKey
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -931,7 +933,7 @@ func TestGenerateDynamoComponentsDeployments_AddsTopologyLabelAnnotationToWorker
 }
 
 func TestTopologyLabelMetadataFromConvertedAlphaDGD(t *testing.T) {
-	labelKey := "topology.kubernetes.io/zone"
+	labelKey := testTopologyLabelKey
 	alpha := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -1051,7 +1053,7 @@ func TestGenerateDynamoComponentsDeployments_SkipsTopologyLabelAnnotationWithout
 }
 
 func TestGenerateGrovePodCliqueSet_AddsTopologyLabelAnnotationToWorkerCliques(t *testing.T) {
-	labelKey := "topology.kubernetes.io/zone"
+	labelKey := testTopologyLabelKey
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -9224,7 +9226,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 				},
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &v1beta1.KvTransferPolicy{
-						LabelKey:    "topology.kubernetes.io/zone",
+						LabelKey:    testTopologyLabelKey,
 						Domain:      "zone",
 						Enforcement: v1beta1.KvTransferEnforcementRequired,
 					},
@@ -9311,7 +9313,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 				},
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &v1beta1.KvTransferPolicy{
-						LabelKey:    "topology.kubernetes.io/zone",
+						LabelKey:    testTopologyLabelKey,
 						Domain:      "zone",
 						Enforcement: v1beta1.KvTransferEnforcementRequired,
 					},
@@ -9345,7 +9347,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 				},
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &v1beta1.KvTransferPolicy{
-						LabelKey:    "topology.kubernetes.io/zone",
+						LabelKey:    testTopologyLabelKey,
 						Domain:      "zone",
 						Enforcement: v1beta1.KvTransferEnforcementRequired,
 					},
@@ -9431,7 +9433,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 				},
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &v1beta1.KvTransferPolicy{
-						LabelKey: "topology.kubernetes.io/zone",
+						LabelKey: testTopologyLabelKey,
 						Domain:   "zone",
 						// Enforcement omitted (zero value)
 					},
@@ -9505,7 +9507,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 				},
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &v1beta1.KvTransferPolicy{
-						LabelKey:    "topology.kubernetes.io/zone",
+						LabelKey:    testTopologyLabelKey,
 						Domain:      "zone",
 						Enforcement: v1beta1.KvTransferEnforcementRequired,
 					},
@@ -9533,7 +9535,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 				require.NotNil(t, v.DownwardAPI)
 				require.Len(t, v.DownwardAPI.Items, 1)
 				assert.Equal(t, "zone", v.DownwardAPI.Items[0].Path)
-				assert.Equal(t, "metadata.labels['topology.kubernetes.io/zone']", v.DownwardAPI.Items[0].FieldRef.FieldPath)
+				assert.Equal(t, "metadata.labels['"+testTopologyLabelKey+"']", v.DownwardAPI.Items[0].FieldRef.FieldPath)
 			}
 		}
 		assert.Equal(t, 1, topologyVolumes, "topology-labels volume should be operator-owned")
@@ -9562,7 +9564,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 				},
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &v1beta1.KvTransferPolicy{
-						LabelKey:    "topology.kubernetes.io/zone",
+						LabelKey:    testTopologyLabelKey,
 						Domain:      "zone",
 						Enforcement: v1beta1.KvTransferEnforcementRequired,
 					},
