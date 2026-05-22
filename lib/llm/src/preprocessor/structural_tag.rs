@@ -5,11 +5,17 @@
 
 use crate::local_model::runtime_config::{StructuralTagMode, StructuralTagScope};
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
-use crate::protocols::common::GuidedDecodingOptions;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 
 use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption};
 use dynamo_runtime::error::{DynamoError, ErrorType};
+
+fn invalid_argument(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message)
+        .build()
+}
 
 pub(super) enum StructuralTagApplyResult {
     None,
@@ -48,28 +54,42 @@ impl OpenAIPreprocessor {
             .tool_choice
             .as_ref()
             .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-
         let tools = request.inner.tools.as_deref().unwrap_or(&[]);
 
-        Self::validate_structural_tag_tool_request(tool_choice, tools)?;
+        // Whether the request already carries an explicit guided-decoding constraint
+        let has_user_constraint = common_request
+            .sampling_options
+            .guided_decoding
+            .as_ref()
+            .is_some_and(|gd| gd.has_user_constraint());
 
-        // `tool_choice=none` uses a ban tag instead of a tool-call format tag.
-        if *tool_choice == ChatCompletionToolChoiceOption::None {
-            let applied_ban = if tools.is_empty() {
-                false
-            } else {
-                Self::apply_tool_call_ban_structural_tag(builder, common_request)?
-            };
+        match tool_choice {
+            ChatCompletionToolChoiceOption::None => {
+                // response_format already prevents tool-call generation, ban not needed.
+                if has_user_constraint || tools.is_empty() {
+                    return Ok(StructuralTagApplyResult::None);
+                }
 
-            return Ok(if applied_ban {
-                StructuralTagApplyResult::ToolCallBan
-            } else {
-                StructuralTagApplyResult::None
-            });
+                let applied = Self::apply_tool_call_ban(builder, common_request)?;
+                return Ok(if applied {
+                    StructuralTagApplyResult::ToolCallBan
+                } else {
+                    StructuralTagApplyResult::None
+                });
+            }
+            ChatCompletionToolChoiceOption::Auto => {
+                // User-provided response_format takes precedence over optional
+                // tool-call guidance; tool calls are not forced so no conflict.
+                if has_user_constraint {
+                    return Ok(StructuralTagApplyResult::None);
+                }
+            }
+            ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_) => {
+                Self::validate_tool_choice(tool_choice, tools, has_user_constraint)?;
+            }
         }
 
-        // `auto` only activates under the configured scope policy.
-        if !Self::should_activate_structural_tag(
+        if !Self::should_apply_tool_call_format(
             self.runtime_config.structural_tag_scope,
             tool_choice,
             tools,
@@ -86,8 +106,7 @@ impl OpenAIPreprocessor {
             starts_in_reasoning: prompt_injected_reasoning,
         };
 
-        if Self::apply_tool_call_format_structural_tag(parser_name, builder, &ctx, common_request)?
-        {
+        if Self::apply_tool_call_format(parser_name, builder, &ctx, common_request)? {
             Ok(StructuralTagApplyResult::ToolCallFormat)
         } else {
             Ok(StructuralTagApplyResult::None)
@@ -115,7 +134,7 @@ impl OpenAIPreprocessor {
     }
 
     /// Apply the `tool_choice=none` ban tag, if configured.
-    fn apply_tool_call_ban_structural_tag(
+    fn apply_tool_call_ban(
         builder: &dynamo_parsers::tool_calling::StructuralTagBuilder,
         common_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
@@ -129,7 +148,7 @@ impl OpenAIPreprocessor {
                 .sampling_options
                 .guided_decoding
                 .get_or_insert_default();
-            Self::set_structural_tag_guidance(gd, ban_tag);
+            gd.structural_tag = Some(ban_tag);
             Ok(true)
         } else {
             Ok(false)
@@ -137,7 +156,7 @@ impl OpenAIPreprocessor {
     }
 
     /// Build and inject the tool-call format tag, if one is needed.
-    fn apply_tool_call_format_structural_tag(
+    fn apply_tool_call_format(
         parser_name: &str,
         builder: &dynamo_parsers::tool_calling::StructuralTagBuilder,
         ctx: &dynamo_parsers::tool_calling::ToolCallFormatBuildContext<'_>,
@@ -167,53 +186,46 @@ impl OpenAIPreprocessor {
             .sampling_options
             .guided_decoding
             .get_or_insert_default();
-        Self::set_structural_tag_guidance(gd, structural_tag);
+        gd.structural_tag = Some(structural_tag);
         Ok(true)
     }
 
-    fn set_structural_tag_guidance(
-        gd: &mut GuidedDecodingOptions,
-        structural_tag: serde_json::Value,
-    ) {
-        gd.json = None;
-        gd.regex = None;
-        gd.choice = None;
-        gd.grammar = None;
-        gd.whitespace_pattern = None;
-        gd.structural_tag = Some(structural_tag);
-    }
-
-    /// Validate only structural-tag requests; other parser paths keep existing behavior.
-    fn validate_structural_tag_tool_request(
+    /// Validate forced tool-choice requests.
+    fn validate_tool_choice(
         tool_choice: &ChatCompletionToolChoiceOption,
         tools: &[ChatCompletionTool],
+        has_user_constraint: bool,
     ) -> Result<(), DynamoError> {
+        const RESPONSE_FORMAT_CONFLICT: &str = concat!(
+            "response_format cannot be used in the same request as ",
+            "tool_choice=\"required\" or a named tool_choice.",
+        );
+
         match tool_choice {
-            ChatCompletionToolChoiceOption::Required if tools.is_empty() => {
-                Err(DynamoError::builder()
-                    .error_type(ErrorType::InvalidArgument)
-                    .message("tool_choice is \"required\" but tools is empty")
-                    .build())
+            ChatCompletionToolChoiceOption::Required if tools.is_empty() => Err(invalid_argument(
+                "tool_choice is \"required\" but tools is empty",
+            )),
+            ChatCompletionToolChoiceOption::Required if has_user_constraint => {
+                Err(invalid_argument(RESPONSE_FORMAT_CONFLICT))
             }
             ChatCompletionToolChoiceOption::Named(named) => {
-                if tools.iter().any(|t| t.function.name == named.function.name) {
-                    Ok(())
-                } else {
-                    Err(DynamoError::builder()
-                        .error_type(ErrorType::InvalidArgument)
-                        .message(format!(
-                            "tool named \"{}\" in tool_choice is not present in tools",
-                            named.function.name
-                        ))
-                        .build())
+                if !tools.iter().any(|t| t.function.name == named.function.name) {
+                    return Err(invalid_argument(format!(
+                        "tool named \"{}\" in tool_choice is not present in tools",
+                        named.function.name
+                    )));
                 }
+                if has_user_constraint {
+                    return Err(invalid_argument(RESPONSE_FORMAT_CONFLICT));
+                }
+                Ok(())
             }
             _ => Ok(()),
         }
     }
 
     /// Decide whether this request should use a tool-call format tag.
-    fn should_activate_structural_tag(
+    fn should_apply_tool_call_format(
         scope: StructuralTagScope,
         tool_choice: &ChatCompletionToolChoiceOption,
         tools: &[ChatCompletionTool],

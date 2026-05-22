@@ -595,3 +595,33 @@ fn deepseek_v4_config_builds_tool_calls_block() {
     assert_eq!(invoke_tags[0]["end"], "</｜DSML｜invoke>\n");
     assert_eq!(invoke_tags[0]["content"]["style"], "deepseek_xml");
 }
+
+/// Round-trip every supported parser through the real parser map.
+#[test]
+fn parser_map_structural_tag_smoke() {
+    let map = crate::tool_calling::parsers::get_tool_parser_map();
+    let tools = sample_tools();
+    let names = ["hermes", "qwen3_coder", "deepseek_v3_2", "deepseek_v4"];
+
+    for name in names {
+        let builder = map
+            .get(name)
+            .unwrap_or_else(|| panic!("'{name}' not in parser map"))
+            .structural_tag_builder
+            .as_ref()
+            .unwrap_or_else(|| panic!("'{name}' has no structural_tag_builder"));
+
+        let c = ctx(
+            &ChatCompletionToolChoiceOption::Required,
+            &tools,
+            None,
+            StructuralTagSchemaMode::Auto,
+        );
+        let tag = builder
+            .build_tool_call_format(&c)
+            .unwrap_or_else(|e| panic!("'{name}' failed: {e}"))
+            .unwrap_or_else(|| panic!("'{name}' returned None for Required"));
+
+        assert_eq!(tag["type"], "structural_tag", "'{name}'");
+    }
+}
