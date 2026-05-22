@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: gemma4
+model_label: Gemma 4
+mode: stream
+cases:
+  REASONING.stream.1.a:
+    description: Empty stream chunk
+    ref: dynamo
+    chunks:
+    - ''
+    expected:
+      dynamo: &d_s0
+        reasoning_text: ''
+        normal_text: ''
+      vllm: *d_s0
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
+  REASONING.stream.2.a:
+    description: Gemma thought channel across chunks
+    ref: dynamo
+    chunks:
+    - |
+      <|channel>thought
+      step one
+    - |-
+      step two<channel|>
+    - The answer is 42.
+    expected:
+      dynamo: &d_s1
+        reasoning_text: |-
+          step one
+          step two
+        normal_text: The answer is 42.
+      vllm:
+        reasoning_text: |-
+          <|channel>thought
+          step one
+          step two
+        normal_text: The answer is 42.
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
+  REASONING.stream.2.b:
+    description: Multiple Gemma thought channels across chunks
+    ref: dynamo
+    chunks:
+    - |-
+      <|channel>thought
+      first<channel|>
+    - ' middle '
+    - |-
+      <|channel>thought
+      second<channel|> done
+    expected:
+      dynamo: &d_s5
+        reasoning_text: firstsecond
+        normal_text: ' middle  done'
+      vllm:
+        reasoning_text: first
+        normal_text: " middle <|channel>thought\nsecond<channel|> done"
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
+  REASONING.stream.3.a:
+    description: Start marker split across chunks
+    ref: dynamo
+    chunks:
+    - <|chan
+    - |-
+      nel>thought
+      thinking<channel|>answer
+    expected:
+      dynamo: &d_s2
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: ''
+        normal_text: |-
+          <|channel>thought
+          thinking<channel|>answer
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
+  REASONING.stream.3.b:
+    description: End marker split across chunks
+    ref: dynamo
+    chunks:
+    - |-
+      <|channel>thought
+      thinking<chan
+    - nel|>answer
+    expected:
+      dynamo: &d_s3
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        reasoning_text: |-
+          <|channel>thought
+          thinking<channel|>answer
+        normal_text: ''
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
+  REASONING.stream.3.c:
+    description: Partial channel marker prefix later becomes normal text
+    ref: dynamo
+    chunks:
+    - plain <|chan
+    - ce answer
+    expected:
+      dynamo: &d_s6
+        reasoning_text: ''
+        normal_text: plain <|chance answer
+      vllm: *d_s6
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'
+  REASONING.stream.1.b:
+    description: Plain text never enters reasoning mode
+    ref: dynamo
+    chunks:
+    - plain
+    - ' answer'
+    expected:
+      dynamo: &d_s4
+        reasoning_text: ''
+        normal_text: plain answer
+      vllm: *d_s4
+      sglang:
+        unavailable: SGLang peer not wired for Dynamo parser family 'gemma4'

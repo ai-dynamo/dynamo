@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: gpt_oss
+model_label: gpt-oss
+mode: batch
+cases:
+  REASONING.batch.1.b:
+    description: Plain text without Harmony channel markers
+    ref: dynamo
+    model_text: plain answer
+    expected:
+      dynamo:
+        reasoning_text: ''
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.2.a:
+    description: Harmony analysis channel followed by final channel
+    ref: dynamo
+    model_text: <|channel|>analysis<|message|>thinking<|end|><|start|>assistant<|channel|>final<|message|>answer
+    expected:
+      dynamo: &d_1
+        reasoning_text: thinking
+        normal_text: answer
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.3.a:
+    description: Harmony analysis followed by commentary tool-call channel
+    ref: dynamo
+    model_text: <|channel|>analysis<|message|>choose tool<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"SF"}<|call|>
+    expected:
+      dynamo: &d_2
+        reasoning_text: choose tool
+        normal_text: '{"city":"SF"}'
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.2.c:
+    description: Harmony analysis followed by normal final answer text
+    ref: dynamo
+    model_text: <|channel|>analysis<|message|>compute<|end|><|start|>assistant<|channel|>final<|message|>answer
+    expected:
+      dynamo: &d_3
+        reasoning_text: compute
+        normal_text: answer
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.4:
+    description: Final channel without prior analysis channel
+    dynamo_leak: true
+    ref: dynamo
+    model_text: <|channel|>final<|message|>answer
+    expected:
+      dynamo: &d_4
+        reasoning_text: answer
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.5:
+    description: Analysis channel without a final or commentary channel
+    ref: dynamo
+    model_text: <|channel|>analysis<|message|>partial reasoning<|end|>
+    expected:
+      dynamo: &d_5
+        reasoning_text: partial reasoning
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.2.e:
+    description: Empty analysis channel followed by final text
+    ref: dynamo
+    model_text: <|channel|>analysis<|message|><|end|><|start|>assistant<|channel|>final<|message|>answer
+    expected:
+      dynamo: &d_6
+        reasoning_text: ''
+        normal_text: answer
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.2.f:
+    description: Complex Harmony analysis content with Unicode and newlines
+    ref: dynamo
+    model_text: |-
+      <|channel|>analysis<|message|>Line 1
+      Unicode: café
+      JSON-ish: {"x": [1, true]}<|end|><|start|>assistant<|channel|>final<|message|>Done.
+    expected:
+      dynamo: &d_7
+        reasoning_text: |-
+          Line 1
+          Unicode: café
+          JSON-ish: {"x": [1, true]}
+        normal_text: Done.
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.1.a:
+    description: Empty input
+    ref: dynamo
+    model_text: ''
+    expected:
+      dynamo: &d_8
+        reasoning_text: ''
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.6.a:
+    description: Multiple Harmony analysis spans
+    dynamo_leak: true
+    ref: dynamo
+    model_text: <|channel|>analysis<|message|>first<|end|><|start|>assistant<|channel|>analysis<|message|>second<|end|><|start|>assistant<|channel|>final<|message|>done
+    expected:
+      dynamo: &d_9
+        reasoning_text: first
+        normal_text: second
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
+  REASONING.batch.2.d:
+    description: Normal text before a Harmony analysis channel is not a portable parser-level fixture
+    reason: Harmony reasoning content is channel-framed; prefix text before the first channel is outside this parser-level fixture contract.
+  REASONING.batch.3.b:
+    description: Tool-call boundary inside an open Harmony analysis channel
+    dynamo_leak: true
+    ref: dynamo
+    model_text: <|channel|>analysis<|message|>choose tool<tool_call>{}
+    expected:
+      dynamo:
+        reasoning_text: choose tool<tool_call>{}
+        normal_text: ''
+      vllm:
+        unavailable: vLLM gpt-oss batch reasoning uses token-level OpenAI parser wiring that this text harness does not call.
+      sglang:
+        unavailable: SGLang expectation not captured for Dynamo parser family 'gpt_oss'
