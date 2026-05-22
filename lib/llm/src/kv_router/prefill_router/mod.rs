@@ -194,8 +194,7 @@ impl
                 dp_rank: resolved_dp_rank,
             } => {
                 // Bootstrap unavailable after resolve_prefill_worker selected a worker.
-                // Commit the same selection in the synchronous path so prefill execution
-                // and topology-aware decode constraints use the same worker.
+                // Commit the same selection in the synchronous path
                 tracing::debug!(
                     worker_id = resolved_wid,
                     "Using original prefill path (no bootstrap endpoint), routing to resolved worker"
@@ -228,7 +227,11 @@ impl
             PrefillResolveDecision::Unavailable | PrefillResolveDecision::NotActivated => {
                 // No worker resolved; fall back to router-selected prefill.
                 tracing::debug!("Using original prefill path (no resolved worker)");
+
+                // Drop the phase barrier because we wait for prefill completion in this task,
+                // so there is no race with set_phase(Decode) below.
                 drop(prefill_phase_barrier);
+
                 // NVBugs 5969206: Do NOT link prefill as child (same rationale as bootstrap path).
                 let prefill_context = Context::with_id_and_metadata(
                     prefill_req,
