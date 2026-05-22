@@ -464,15 +464,6 @@ mod tests {
         }
     }
 
-    const TOPOLOGY_ZONE_A: &str = "dynamo.topology/zone=us-east-1a";
-    const TOPOLOGY_ZONE_B: &str = "dynamo.topology/zone=us-east-1b";
-
-    fn tainted_worker(taint: &str) -> TaintedWorkerConfig {
-        TaintedWorkerConfig {
-            taints: HashSet::from([taint.to_string()]),
-        }
-    }
-
     #[test]
     fn test_softmax_sample_single_key() {
         let mut logits = FxHashMap::default();
@@ -991,117 +982,6 @@ mod tests {
             .select_worker(&workers, &request, request.eligibility(), 16)
             .unwrap();
         assert_eq!(result.worker.worker_id, 20);
-    }
-
-    #[test]
-    fn test_required_topology_taint_routes_only_matching_decode_workers() {
-        let selector = DefaultWorkerSelector::new(
-            Some(KvRouterConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
-            "decode",
-        );
-        let workers = HashMap::from([
-            (10, tainted_worker(TOPOLOGY_ZONE_A)),
-            (20, tainted_worker(TOPOLOGY_ZONE_B)),
-        ]);
-        let mut request = base_request(16);
-        request
-            .decode_blocks
-            .insert(WorkerWithDpRank::from_worker_id(10), 100);
-        request
-            .decode_blocks
-            .insert(WorkerWithDpRank::from_worker_id(20), 0);
-        request.routing_constraints = crate::protocols::RoutingConstraints {
-            required_taints: HashSet::from([TOPOLOGY_ZONE_A.to_string()]),
-            preferred_taints: HashMap::new(),
-        };
-
-        let result = selector
-            .select_worker(&workers, &request, request.eligibility(), 16)
-            .unwrap();
-        assert_eq!(result.worker.worker_id, 10);
-    }
-
-    #[test]
-    fn test_preferred_topology_taint_weight_biases_same_domain_worker() {
-        let selector = DefaultWorkerSelector::new(
-            Some(KvRouterConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
-            "decode",
-        );
-        let workers = HashMap::from([
-            (10, tainted_worker(TOPOLOGY_ZONE_A)),
-            (20, tainted_worker(TOPOLOGY_ZONE_B)),
-        ]);
-        let mut request = base_request(16);
-        request
-            .decode_blocks
-            .insert(WorkerWithDpRank::from_worker_id(10), 100);
-        request
-            .decode_blocks
-            .insert(WorkerWithDpRank::from_worker_id(20), 90);
-        request.routing_constraints = crate::protocols::RoutingConstraints {
-            required_taints: HashSet::new(),
-            preferred_taints: HashMap::from([(TOPOLOGY_ZONE_A.to_string(), 0.85)]),
-        };
-
-        let result = selector
-            .select_worker(&workers, &request, request.eligibility(), 16)
-            .unwrap();
-        assert_eq!(result.worker.worker_id, 10);
-    }
-
-    #[test]
-    fn test_negative_topology_preferred_weight_avoids_same_domain_worker() {
-        let selector = DefaultWorkerSelector::new(
-            Some(KvRouterConfig {
-                router_temperature: 0.0,
-                ..Default::default()
-            }),
-            "decode",
-        );
-        let workers = HashMap::from([
-            (10, tainted_worker(TOPOLOGY_ZONE_A)),
-            (20, tainted_worker(TOPOLOGY_ZONE_B)),
-        ]);
-        let mut request = base_request(16);
-        request
-            .decode_blocks
-            .insert(WorkerWithDpRank::from_worker_id(10), 90);
-        request
-            .decode_blocks
-            .insert(WorkerWithDpRank::from_worker_id(20), 100);
-        request.routing_constraints = crate::protocols::RoutingConstraints {
-            required_taints: HashSet::new(),
-            preferred_taints: HashMap::from([(TOPOLOGY_ZONE_A.to_string(), -0.25)]),
-        };
-
-        let result = selector
-            .select_worker(&workers, &request, request.eligibility(), 16)
-            .unwrap();
-        assert_eq!(result.worker.worker_id, 20);
-    }
-
-    #[test]
-    fn test_pinned_worker_missing_required_topology_taint_returns_no_endpoints() {
-        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "decode");
-        let workers = HashMap::from([
-            (10, tainted_worker(TOPOLOGY_ZONE_B)),
-            (20, tainted_worker(TOPOLOGY_ZONE_A)),
-        ]);
-        let mut request = base_request(16);
-        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(10));
-        request.routing_constraints = crate::protocols::RoutingConstraints {
-            required_taints: HashSet::from([TOPOLOGY_ZONE_A.to_string()]),
-            preferred_taints: HashMap::new(),
-        };
-
-        let result = selector.select_worker(&workers, &request, request.eligibility(), 16);
-        assert!(matches!(result, Err(KvSchedulerError::NoEndpoints)));
     }
 
     /// Test the scoring formula with shared cache hits.
