@@ -138,6 +138,14 @@ impl WorkerSet {
     /// them, model-displayability logic would gate /v1/models on a
     /// PrefillRouter that doesn't exist for Encode. Keep the two
     /// mutually exclusive.
+    ///
+    /// **Role-based, not engine-field-based.** Unlike `has_chat_engine()`
+    /// / `has_completions_engine()` / etc. (which inspect typed engine
+    /// slots on the WorkerSet), `is_encode_set` reads `card.worker_type`
+    /// directly. The Encode role intentionally has no `encode_engine`
+    /// field -- Encode workers don't expose a public OpenAI-shaped
+    /// endpoint, so there is nothing to slot. The role itself is the
+    /// contract.
     pub fn is_encode_set(&self) -> bool {
         matches!(
             self.card.worker_type,
@@ -437,7 +445,11 @@ mod tests {
             card.worker_type = Some(role);
             let ws = WorkerSet::new("ns1".to_string(), "abc".to_string(), card);
             assert!(!ws.is_encode_set(), "{:?} should not be Encode", role);
-            assert!(ws.is_prefill_set(), "{:?} should remain prefill-classified", role);
+            assert!(
+                ws.is_prefill_set(),
+                "{:?} should remain prefill-classified",
+                role
+            );
         }
     }
 }

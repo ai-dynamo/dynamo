@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown() {
-        let e = "wibble".parse::<DisaggregationMode>().unwrap_err();
+        let e = "not-a-mode".parse::<DisaggregationMode>().unwrap_err();
         assert_eq!(
             e.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)

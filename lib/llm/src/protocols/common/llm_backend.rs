@@ -315,9 +315,7 @@ impl LLMEngineOutput {
     /// `index: Some(0)` matches the Python helper `encoder_terminal_chunk`
     /// so Rust and Python producers emit byte-identical terminals for the
     /// same `encoder_result`.
-    pub fn encode_terminal(
-        encoder_result: serde_json::Map<String, serde_json::Value>,
-    ) -> Self {
+    pub fn encode_terminal(encoder_result: serde_json::Map<String, serde_json::Value>) -> Self {
         LLMEngineOutput {
             token_ids: vec![],
             tokens: None,

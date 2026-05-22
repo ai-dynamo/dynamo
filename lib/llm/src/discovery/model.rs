@@ -876,20 +876,17 @@ mod tests {
     // deployments from /v1/models and continues to surface mixed
     // Aggregated+Encode deployments via the Aggregated set only.
 
-    /// Helper: build an Encode-role WorkerSet wrapped in Arc.
+    /// Helper: build an Encode-role WorkerSet wrapped in Arc. worker_count=1
+    /// via a live watcher so is_displayable doesn't filter it at the
+    /// worker_count == 0 guard. Dropping the sender is fine: tokio's
+    /// `watch::Receiver::borrow()` returns the current value even after the
+    /// sender closes, which is all `is_displayable` reads.
     fn make_encode_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
         let mut card = ModelDeploymentCard::default();
         card.worker_type = Some(crate::worker_type::WorkerType::Encode);
-        // worker_count=1 via a live watcher so is_displayable doesn't filter
-        // it out at the worker_count == 0 guard.
         let (_tx, rx) = watch::channel(vec![1_u64]);
         let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
         ws.set_instance_watcher(rx);
-        // Leak the sender by stashing it in a Box (so the receiver stays live
-        // for the test's duration). The model holds the WorkerSet via Arc; the
-        // sender's drop would close the channel, but the receiver only
-        // observes the *current* value -- closing is fine for is_displayable.
-        std::mem::forget(_tx);
         Arc::new(ws)
     }
 
@@ -901,7 +898,10 @@ mod tests {
         // hidden from /v1/models. The frontend's chat/completions surface
         // is not where users hit Encode workers; the EncoderRouter is.
         let model = Model::new("llava".to_string());
-        model.add_worker_set("dynamo:encode".to_string(), make_encode_worker_set("dynamo", "mdc-e"));
+        model.add_worker_set(
+            "dynamo:encode".to_string(),
+            make_encode_worker_set("dynamo", "mdc-e"),
+        );
 
         assert!(
             !model.is_displayable(),
@@ -920,7 +920,10 @@ mod tests {
         // by is_encode_set excluding it from is_prefill_set.
         let model = Model::new("llava".to_string());
         model.add_worker_set("dynamo".to_string(), make_worker_set("dynamo", "mdc-a"));
-        model.add_worker_set("dynamo:encode".to_string(), make_encode_worker_set("dynamo", "mdc-e"));
+        model.add_worker_set(
+            "dynamo:encode".to_string(),
+            make_encode_worker_set("dynamo", "mdc-e"),
+        );
 
         assert!(
             model.is_displayable(),

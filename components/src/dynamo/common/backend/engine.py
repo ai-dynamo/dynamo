@@ -64,7 +64,11 @@ class GenerateChunk(TypedDict, total=False):
 
     Every chunk must include ``token_ids`` and ``index``.
     Use ``index=0`` for single-choice responses. The final chunk must
-    additionally include ``finish_reason`` and ``completion_usage``.
+    additionally include ``finish_reason``; ``completion_usage`` is
+    optional (the OpenAI frontend aggregates it when present, and
+    matches the Rust ``Option<CompletionUsage>`` /
+    ``skip_serializing_if = "Option::is_none"`` semantics).
+
     Prefill terminals carry ``disaggregated_params`` for the
     PrefillRouter to forward to the decode peer.
 

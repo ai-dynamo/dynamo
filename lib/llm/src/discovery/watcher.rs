@@ -61,26 +61,32 @@ use crate::namespace::NamespaceFilter;
 /// byte at `model_card.rs`, so a key collision would surface as a checksum
 /// mismatch on the second registration).
 ///
+/// Role-first to make the discriminator obvious: `worker_type` is the
+/// primary signal because Encode is not a `ModelType` and Prefill should
+/// land in the same bucket regardless of whether the operator declared
+/// the role via `WorkerType::Prefill` or the legacy `ModelType::Prefill`.
+///
 /// Buckets:
 /// - `WorkerType::Encode` -> `"{ns}:encode"`. Independent of `model_type`
 ///   because encode workers stay `endpoint_types`-driven (no
 ///   `ModelType::Encode`); without this discriminator a default
 ///   `chat,completions` encode worker would collide with Aggregated/Decode
 ///   in the same namespace.
-/// - Otherwise, fall back to `model_type` (prefill workers -> `"{ns}:prefill"`,
-///   everything else -> `"{ns}"`).
+/// - `WorkerType::Prefill` (or, for backward compatibility, any worker
+///   whose `model_type.supports_prefill()`) -> `"{ns}:prefill"`.
+/// - Everything else (Aggregated, Decode, unspecified worker_type with no
+///   prefill model_type) -> `"{ns}"`.
 fn worker_set_key(
     namespace: &str,
     model_type: ModelType,
     worker_type: Option<crate::worker_type::WorkerType>,
 ) -> String {
-    if matches!(worker_type, Some(crate::worker_type::WorkerType::Encode)) {
-        return format!("{}:encode", namespace);
-    }
-    if model_type.supports_prefill() {
-        format!("{}:prefill", namespace)
-    } else {
-        namespace.to_string()
+    use crate::worker_type::WorkerType;
+    match worker_type {
+        Some(WorkerType::Encode) => format!("{namespace}:encode"),
+        Some(WorkerType::Prefill) => format!("{namespace}:prefill"),
+        _ if model_type.supports_prefill() => format!("{namespace}:prefill"),
+        _ => namespace.to_string(),
     }
 }
 
@@ -451,8 +457,11 @@ impl ModelWatcher {
         let component_has_instances = active_instances.iter().any(|(eid, other_card)| {
             eid.namespace == *worker_namespace
                 && eid.component == *worker_component
-                && worker_set_key(&eid.namespace, other_card.model_type, other_card.worker_type)
-                    == ws_key
+                && worker_set_key(
+                    &eid.namespace,
+                    other_card.model_type,
+                    other_card.worker_type,
+                ) == ws_key
         });
 
         if !component_has_instances {
@@ -756,19 +765,8 @@ impl ModelWatcher {
         );
 
         if is_encode {
-            // Encode workers are intermediate -- they ride the EncoderRouter,
-            // not /v1/chat/completions or any other public endpoint. Skip
-            // all engine/router/tokenizer construction; the WorkerSet still
-            // registers below at the add_worker_set tail so the readiness
-            // layer can see it (needs = [[Prefill, Decode], [Aggregated]]).
-            //
-            // The gate is `if is_encode { /* no-op */ }` before the existing
-            // case chain so it short-circuits regardless of card.model_type
-            // (Encode stays endpoint_types-driven; an operator may have left
-            // endpoint_types at the default chat,completions or set anything
-            // else). Falling through to the registration tail is mandatory:
-            // an early `return Ok(())` here would skip add_worker_set and
-            // the Encode worker would never become discoverable.
+            // Encode registers for readiness only; do not build public
+            // pipelines; fall through to add_worker_set below.
             tracing::info!(
                 model_name = card.name(),
                 namespace = %namespace,
@@ -1387,7 +1385,11 @@ mod tests {
             ModelType::TensorBased,
         ] {
             let key = worker_set_key("dynamo", model_type, Some(WorkerType::Encode));
-            assert_eq!(key, "dynamo:encode", "Encode bucket leaked for {:?}", model_type);
+            assert_eq!(
+                key, "dynamo:encode",
+                "Encode bucket leaked for {:?}",
+                model_type
+            );
         }
     }
 
