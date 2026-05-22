@@ -40,6 +40,30 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
+# Native NIXL SDK + UCX from dynamo's wheel_builder. The dynamo Rust wheel is
+# built in runtime_wheel_builder without NIXL headers, so nixl-sys falls back
+# to stubs that dlopen("libnixl_capi.so") by bare name at runtime (see
+# ai-dynamo/nixl src/bindings/rust/stubs.cpp). The upstream lmsysorg/sglang
+# image ships libnixl_capi.so only under .nixl_cu*.mesonpy.libs/, a path not
+# on the dynamic linker's search list — the dlopen happens to succeed on
+# cu12.9 and fails on cu13.0. Mirror vllm_runtime / trtllm_runtime: drop our
+# own NIXL SDK onto a system path and ldconfig so dlopen resolves the same
+# way across all CUDA variants and any future upstream image change.
+COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH:-}
+
+RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
+    echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
+    echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
+    echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
+    ldconfig
+
 # Runtime target installs only the prebuilt Dynamo wheels. SGLang and its NIXL
 # packages come from the upstream lmsysorg/sglang runtime image; --no-deps keeps
 # pip from replacing that stack. Dev/local-dev build from source later in the
