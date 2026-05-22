@@ -750,7 +750,31 @@ impl ModelWatcher {
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
         worker_set.set_instance_watcher(instance_watcher);
 
-        if card.model_input == ModelInput::Tokens
+        let is_encode = matches!(
+            card.worker_type,
+            Some(crate::worker_type::WorkerType::Encode),
+        );
+
+        if is_encode {
+            // Encode workers are intermediate -- they ride the EncoderRouter,
+            // not /v1/chat/completions or any other public endpoint. Skip
+            // all engine/router/tokenizer construction; the WorkerSet still
+            // registers below at the add_worker_set tail so the readiness
+            // layer can see it (needs = [[Prefill, Decode], [Aggregated]]).
+            //
+            // The gate is `if is_encode { /* no-op */ }` before the existing
+            // case chain so it short-circuits regardless of card.model_type
+            // (Encode stays endpoint_types-driven; an operator may have left
+            // endpoint_types at the default chat,completions or set anything
+            // else). Falling through to the registration tail is mandatory:
+            // an early `return Ok(())` here would skip add_worker_set and
+            // the Encode worker would never become discoverable.
+            tracing::info!(
+                model_name = card.name(),
+                namespace = %namespace,
+                "Encode worker detected; registering for readiness only (no public serving pipeline)"
+            );
+        } else if card.model_input == ModelInput::Tokens
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
         {
             // Case 1: Tokens + (Chat OR Completions OR Both)

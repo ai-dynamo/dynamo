@@ -869,6 +869,75 @@ mod tests {
         );
     }
 
+    // -- Encode-set visibility (DIS-2110) --
+    //
+    // Encode workers ride the EncoderRouter, not the public chat/completions
+    // surface. Tests below verify is_displayable correctly hides Encode-only
+    // deployments from /v1/models and continues to surface mixed
+    // Aggregated+Encode deployments via the Aggregated set only.
+
+    /// Helper: build an Encode-role WorkerSet wrapped in Arc.
+    fn make_encode_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Encode);
+        // worker_count=1 via a live watcher so is_displayable doesn't filter
+        // it out at the worker_count == 0 guard.
+        let (_tx, rx) = watch::channel(vec![1_u64]);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        // Leak the sender by stashing it in a Box (so the receiver stays live
+        // for the test's duration). The model holds the WorkerSet via Arc; the
+        // sender's drop would close the channel, but the receiver only
+        // observes the *current* value -- closing is fine for is_displayable.
+        std::mem::forget(_tx);
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn encode_only_model_is_not_displayable() {
+        // An Encode worker has no serving engines (the watcher's role gate
+        // skips pipeline construction) and is_prefill_set excludes Encode,
+        // so an Encode-only model has no displayable WorkerSet and stays
+        // hidden from /v1/models. The frontend's chat/completions surface
+        // is not where users hit Encode workers; the EncoderRouter is.
+        let model = Model::new("llava".to_string());
+        model.add_worker_set("dynamo:encode".to_string(), make_encode_worker_set("dynamo", "mdc-e"));
+
+        assert!(
+            !model.is_displayable(),
+            "Encode-only model must be hidden from /v1/models -- Encode workers \
+             aren't a public serving surface"
+        );
+    }
+
+    #[test]
+    fn aggregated_plus_encode_model_is_displayable_via_aggregated() {
+        // E/Agg topology: an Aggregated worker plus an Encode peer. The
+        // Aggregated set is engineless in this stub but is_prefill_set
+        // remains true for it (legacy classification), so the model is
+        // displayable via the Aggregated WorkerSet's fallback. The Encode
+        // WorkerSet does NOT contribute to displayability -- it's filtered
+        // by is_encode_set excluding it from is_prefill_set.
+        let model = Model::new("llava".to_string());
+        model.add_worker_set("dynamo".to_string(), make_worker_set("dynamo", "mdc-a"));
+        model.add_worker_set("dynamo:encode".to_string(), make_encode_worker_set("dynamo", "mdc-e"));
+
+        assert!(
+            model.is_displayable(),
+            "Aggregated+Encode model must be displayable via the Aggregated set"
+        );
+
+        // Removing the Aggregated set leaves only the Encode set -- model
+        // must flip to hidden (the bug we're guarding against would have
+        // kept it displayable via the Encode set being misclassified as
+        // prefill).
+        model.remove_worker_set("dynamo");
+        assert!(
+            !model.is_displayable(),
+            "after Aggregated leaves, Encode-only model must be hidden"
+        );
+    }
+
     // -- Topology readiness --
     //
     // These tests exercise the live-compute readiness methods on `Model`.
