@@ -40,7 +40,7 @@ impl PrefillRouter {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             enforce_disagg,
-            conditional_prefill_policy: make_conditional_prefill_policy(None),
+            conditional_prefill_policy: make_conditional_prefill_policy(None, None),
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -66,7 +66,10 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let conditional_prefill_policy = make_conditional_prefill_policy(kv_router_config.as_ref());
+        // Phase 4 wires a real NATS-backed evaluator here when policy=Regression;
+        // until then pass None (factory installs UnavailableCostEvaluator).
+        let conditional_prefill_policy =
+            make_conditional_prefill_policy(kv_router_config.as_ref(), None);
 
         let router = Arc::new(Self {
             prefill_router,

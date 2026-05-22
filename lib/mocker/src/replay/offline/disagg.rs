@@ -139,7 +139,13 @@ impl DisaggRuntime {
         router_mode: ReplayRouterMode,
     ) -> Result<Self> {
         let progress = ReplayProgress::new(admission.total_requests(), "offline disagg replay");
-        let conditional_prefill_policy = make_conditional_prefill_policy(router_config.as_ref());
+        // Mocker doesn't wire an evaluator yet; the Regression policy isn't
+        // exercised offline until Phase 5 (mocker integration). Pass `None`
+        // and the factory installs an `UnavailableCostEvaluator` if the
+        // config happens to select Regression — slow-path then falls back to
+        // conservative DISAGG every time.
+        let conditional_prefill_policy =
+            make_conditional_prefill_policy(router_config.as_ref(), None);
         let (prefill_router, decode_router) = match router_mode {
             ReplayRouterMode::RoundRobin => (None, None),
             ReplayRouterMode::KvRouter => {
@@ -552,12 +558,24 @@ impl DisaggRuntime {
             prefill_chosen_load_blocks,
             decode_pool_min_load_blocks,
             decode_min_overlap_blocks,
+            // Capacity/queue signals are populated by the Regression policy's
+            // probe (Phase 5 — mocker integration). TokenCap doesn't consume
+            // them; default None for now.
+            decode_chosen_max_blocks: None,
+            prefill_chosen_max_blocks: None,
+            decode_chosen_queued_blocks: None,
+            prefill_chosen_queued_blocks: None,
         };
 
-        if self
-            .conditional_prefill_policy
-            .should_bypass_remote_prefill(input)
-        {
+        // The trait method is async to support policies that consult an
+        // external service (e.g. Regression's NATS round-trip in the live
+        // router). The mocker has no tokio reactor and current policies
+        // available here (TokenCap, future Regression mocker-side via PyO3)
+        // produce a ready future, so the wrapping cost is negligible.
+        if futures::executor::block_on(
+            self.conditional_prefill_policy
+                .should_bypass_remote_prefill(input),
+        ) {
             Ok(Some(lhs.worker_idx))
         } else {
             Ok(None)

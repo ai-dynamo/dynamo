@@ -163,6 +163,12 @@ impl PrefillRouter {
             prefill_chosen_load_blocks,
             decode_pool_min_load_blocks,
             decode_min_overlap_blocks,
+            // Capacity/queue signals are populated by the Regression policy's
+            // probe (Phase 1.5+). TokenCap doesn't consume them; default None.
+            decode_chosen_max_blocks: None,
+            prefill_chosen_max_blocks: None,
+            decode_chosen_queued_blocks: None,
+            prefill_chosen_queued_blocks: None,
         };
         let net_new_tokens = input.net_new_tokens();
         let overlap_tokens = (overlap_blocks as usize) * block_size;
@@ -170,6 +176,7 @@ impl PrefillRouter {
         if self
             .conditional_prefill_policy
             .should_bypass_remote_prefill(input)
+            .await
         {
             return Ok(Some(ConditionalPrefillDecodeDecision {
                 worker,

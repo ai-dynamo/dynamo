@@ -315,6 +315,10 @@ struct KvRouterConfigSerde {
     conditional_prefill_enabled: bool,
     conditional_prefill_max_new_tokens: usize,
     conditional_prefill_policy: ConditionalPrefillPolicyKind,
+    conditional_prefill_regression_large_prompt_threshold_tokens: usize,
+    conditional_prefill_regression_roomy_available_ratio: f64,
+    conditional_prefill_regression_roomy_queued_blocks: u32,
+    cost_eval_subject: Option<String>,
     router_predicted_ttl_secs: Option<f64>,
 }
 
@@ -350,6 +354,13 @@ impl Default for KvRouterConfigSerde {
             conditional_prefill_enabled: config.conditional_prefill_enabled,
             conditional_prefill_max_new_tokens: config.conditional_prefill_max_new_tokens,
             conditional_prefill_policy: config.conditional_prefill_policy,
+            conditional_prefill_regression_large_prompt_threshold_tokens: config
+                .conditional_prefill_regression_large_prompt_threshold_tokens,
+            conditional_prefill_regression_roomy_available_ratio: config
+                .conditional_prefill_regression_roomy_available_ratio,
+            conditional_prefill_regression_roomy_queued_blocks: config
+                .conditional_prefill_regression_roomy_queued_blocks,
+            cost_eval_subject: config.cost_eval_subject.clone(),
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
         }
     }
@@ -477,6 +488,30 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub conditional_prefill_policy: ConditionalPrefillPolicyKind,
 
+    /// Regression policy: effective ISL (post device-cache, in tokens) above
+    /// which the fast path forces DISAGG regardless of decode-worker headroom.
+    /// Default 16384.
+    #[serde(default = "default_regression_large_prompt_threshold_tokens")]
+    pub conditional_prefill_regression_large_prompt_threshold_tokens: usize,
+
+    /// Regression policy: minimum `(max_blocks - load_blocks) / max_blocks`
+    /// for a worker to count as roomy. In `[0, 1]`. Default 0.5.
+    #[serde(default = "default_regression_roomy_available_ratio")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub conditional_prefill_regression_roomy_available_ratio: f64,
+
+    /// Regression policy: maximum `queued_blocks` for a worker to count as
+    /// roomy. Default 0 = no queued work allowed.
+    #[serde(default)]
+    pub conditional_prefill_regression_roomy_queued_blocks: u32,
+
+    /// NATS subject for the Regression policy's slow-path RPC. `None` disables
+    /// the slow path — the policy falls back to conservative DISAGG on every
+    /// non-fast-path decision. Default `Some("cost_eval.evaluate_v1")` so a
+    /// stood-up decision service is reached without extra config.
+    #[serde(default = "default_cost_eval_subject")]
+    pub cost_eval_subject: Option<String>,
+
     /// TTL in seconds applied to entries in the local predict-on-route side
     /// indexer. `None` disables predict-on-route. A value requires
     /// `use_kv_events=true` and enables a secondary approximate indexer
@@ -488,6 +523,18 @@ pub struct KvRouterConfig {
     pub router_predicted_ttl_secs: Option<f64>,
 }
 
+fn default_regression_large_prompt_threshold_tokens() -> usize {
+    crate::conditional_prefill::DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS
+}
+
+fn default_regression_roomy_available_ratio() -> f64 {
+    crate::conditional_prefill::DEFAULT_REGRESSION_ROOMY_AVAILABLE_RATIO
+}
+
+fn default_cost_eval_subject() -> Option<String> {
+    Some("cost_eval.evaluate_v1".to_string())
+}
+
 /// Identifies which `ConditionalPrefillPolicy` to instantiate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConditionalPrefillPolicyKind {
@@ -495,12 +542,19 @@ pub enum ConditionalPrefillPolicyKind {
     #[default]
     #[serde(rename = "token_cap")]
     TokenCap,
+    /// Two-phase fast-path + regression-backed slow-path policy. Consults a
+    /// `CostEvaluator` (typically NATS RPC to a Python decision service that
+    /// hosts the Planner regression models) when the fast path is ambiguous.
+    /// See `lib/kv-router/src/conditional_prefill.rs::RegressionConditionalPrefillPolicy`.
+    #[serde(rename = "regression")]
+    Regression,
 }
 
 impl ConditionalPrefillPolicyKind {
     pub fn as_str(self) -> &'static str {
         match self {
             ConditionalPrefillPolicyKind::TokenCap => "token_cap",
+            ConditionalPrefillPolicyKind::Regression => "regression",
         }
     }
 
@@ -508,6 +562,7 @@ impl ConditionalPrefillPolicyKind {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "token_cap" => Some(ConditionalPrefillPolicyKind::TokenCap),
+            "regression" => Some(ConditionalPrefillPolicyKind::Regression),
             _ => None,
         }
     }
@@ -543,6 +598,13 @@ impl Default for KvRouterConfig {
             conditional_prefill_enabled: false,
             conditional_prefill_max_new_tokens: DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS,
             conditional_prefill_policy: ConditionalPrefillPolicyKind::default(),
+            conditional_prefill_regression_large_prompt_threshold_tokens:
+                default_regression_large_prompt_threshold_tokens(),
+            conditional_prefill_regression_roomy_available_ratio:
+                default_regression_roomy_available_ratio(),
+            conditional_prefill_regression_roomy_queued_blocks:
+                crate::conditional_prefill::DEFAULT_REGRESSION_ROOMY_QUEUED_BLOCKS,
+            cost_eval_subject: default_cost_eval_subject(),
             router_predicted_ttl_secs: None,
         }
     }
@@ -591,6 +653,13 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             conditional_prefill_enabled: compat.conditional_prefill_enabled,
             conditional_prefill_max_new_tokens: compat.conditional_prefill_max_new_tokens,
             conditional_prefill_policy: compat.conditional_prefill_policy,
+            conditional_prefill_regression_large_prompt_threshold_tokens: compat
+                .conditional_prefill_regression_large_prompt_threshold_tokens,
+            conditional_prefill_regression_roomy_available_ratio: compat
+                .conditional_prefill_regression_roomy_available_ratio,
+            conditional_prefill_regression_roomy_queued_blocks: compat
+                .conditional_prefill_regression_roomy_queued_blocks,
+            cost_eval_subject: compat.cost_eval_subject,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
         })
     }
