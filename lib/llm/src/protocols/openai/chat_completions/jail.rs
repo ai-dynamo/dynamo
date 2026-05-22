@@ -849,6 +849,21 @@ impl JailedStream {
         sequence_match || tool_call_match
     }
 
+    fn prefix_before_first_tool_call_marker<'a>(&self, content: &'a str) -> Option<&'a str> {
+        let mut first_marker: Option<usize> = None;
+
+        for marker in &self.jail_start_sequences {
+            if marker.is_empty() {
+                continue;
+            }
+            if let Some(pos) = content.find(marker) {
+                first_marker = Some(first_marker.map_or(pos, |current| current.min(pos)));
+            }
+        }
+
+        first_marker.map(|pos| &content[..pos])
+    }
+
     /// Check if accumulated content should end jail
     async fn should_end_jail(&self, accumulated_content: &str) -> (bool, usize) {
         match &self.jail_mode {
@@ -1044,6 +1059,14 @@ impl JailedStream {
                         // than accumulated_content, which still contains raw protocol markers.
                         let content = if normal_text.as_deref() == Some("") {
                             ""
+                        } else if is_finalize
+                            && self.tool_call_parser.as_deref() == Some("minimax_m2")
+                        {
+                            // MiniMax's reference parser is strict: missing paired fences means
+                            // zero recovered calls. The raw `<minimax:tool_call>` envelope is
+                            // still protocol markup, so keep only pre-call prose at stream end.
+                            self.prefix_before_first_tool_call_marker(accumulated_content)
+                                .unwrap_or("")
                         } else if is_harmony_parser(self.tool_call_parser.as_deref())
                             && contains_harmony_protocol(accumulated_content)
                         {

@@ -3541,6 +3541,65 @@ fahrenheit
         }
     }
 
+    /// MiniMax uses a strict reference parser: incomplete paired XML fences do
+    /// not recover a call. At stream end, the jail must still avoid surfacing
+    /// the raw `<minimax:tool_call>` protocol block as assistant content.
+    #[tokio::test]
+    async fn test_minimax_m2_stream_finalize_zero_call_truncation_drops_markup() {
+        let cases = [
+            (
+                "complete body without outer close",
+                "<minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NYC</parameter>\n\
+                 </invoke>",
+            ),
+            (
+                "mid-call body truncation",
+                "<minimax:tool_call>\n\
+                 <invoke name=\"get_weather\">\n\
+                 <parameter name=\"location\">NY",
+            ),
+        ];
+
+        for (label, partial_tool_call) in cases {
+            let input_chunks = vec![
+                test_utils::create_mock_response_chunk(partial_tool_call.to_string(), 0),
+                test_utils::create_final_response_chunk(0),
+            ];
+
+            let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+                Some("minimax_m2".to_string()),
+                None,
+                None,
+                stream::iter(input_chunks),
+            )
+            .collect()
+            .await;
+
+            let tool_call_count: usize = results
+                .iter()
+                .map(|r| {
+                    r.data.as_ref().map_or(0, |d| {
+                        d.inner
+                            .choices
+                            .iter()
+                            .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
+                            .sum::<usize>()
+                    })
+                })
+                .sum();
+            assert_eq!(tool_call_count, 0, "{label}: strict MiniMax must not recover a call");
+
+            let content = test_utils::reconstruct_content(&results);
+            assert!(
+                !content.contains("<minimax:tool_call>") && !content.contains("<invoke"),
+                "{label}: MiniMax protocol markup leaked into content: {content:?}"
+            );
+            assert_eq!(content, "", "{label}: no pre-call prose should remain");
+        }
+    }
+
     /// tool_choice=required with the alternate `arguments` key (SGLang's
     /// JsonArrayParser and some vLLM paths emit this variant).  The
     /// base_json_parser accepts either `parameters` or `arguments`.
