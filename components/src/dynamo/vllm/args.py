@@ -276,6 +276,16 @@ def update_engine_config_with_dynamo(
                 f"be injected. To use forward pass metrics, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
+    else:
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None and _uses_nixl_connector(engine_config):
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.scheduler_patches.PatchedAsyncScheduler"
+            logger.info(
+                "NixlConnector detected: scheduler_cls set to PatchedAsyncScheduler "
+                "for disaggregated sleep support"
+            )
 
     if dynamo_config.benchmark_mode is not None:
         if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:

@@ -861,6 +861,24 @@ class TestRunnerPreservation:
         assert not hasattr(engine_cfg, "runner")
 
 
+def test_nixl_connector_uses_patched_scheduler_by_default():
+    dynamo_cfg = _make_dynamo_config()
+    engine_cfg = _make_engine_config_with_runner(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="NixlConnector",
+            kv_connector_extra_config=None,
+        ),
+        scheduler_cls=None,
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert (
+        engine_cfg.scheduler_cls
+        == "dynamo.vllm.scheduler_patches.PatchedAsyncScheduler"
+    )
+
+
 class TestEmbeddingWorkerFlag:
     """Parsing + validation for --embedding-worker."""
 

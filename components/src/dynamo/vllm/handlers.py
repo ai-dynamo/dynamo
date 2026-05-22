@@ -251,6 +251,7 @@ class VllmEngineQuiesceController:
         else:
             await self._engine_client.wake_up(tags)
         await self._engine_client.resume_generation()
+        self._is_quiesced = False
         return True
 
     def mark_resumed(self) -> None:
@@ -600,6 +601,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     # __new__ still have a sane value; __init__ overrides this from
     # hf_config.use_unified_vision_chunk on real instances.
     _use_unified_vision_chunk: bool = False
+    _endpoint_needs_registration: bool = False
+    _scheduler_needs_resume: bool = False
 
     def __init__(
         self,
@@ -652,6 +655,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
+        # Track partial sleep/wake transitions so failure paths can reconcile
+        # scheduler/discovery state on retry.
+        self._endpoint_needs_registration = False
+        self._scheduler_needs_resume = False
 
         # Some models (Kimi-K2.5) declare their image modality as
         # "vision_chunk" rather than "image". vLLM's openai entrypoint
@@ -761,19 +768,30 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             try:
                 # Step 1: Unregister endpoint instance before memory transitions.
-                if self.generate_endpoint is not None:
+                if (
+                    self.generate_endpoint is not None
+                    and not self._endpoint_needs_registration
+                ):
                     await self.generate_endpoint.unregister_endpoint_instance()
+                    self._endpoint_needs_registration = True
                     logger.info(
                         "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
                     )
 
                 # Step 2: Abort in-flight requests and wait for them to drain so the
                 # GPU is fully quiesced before unmapping memory.
-                if not await self._quiesce_controller.quiesce(level):
+                try:
+                    transitioned = await self._quiesce_controller.quiesce(level)
+                except Exception:
+                    self._scheduler_needs_resume = True
+                    raise
+
+                if not transitioned:
                     return {
                         "status": "ok",
                         "message": "Engine already sleeping",
                     }
+                self._scheduler_needs_resume = False
 
                 return {
                     "status": "ok",
@@ -781,6 +799,32 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 }
             except Exception as e:
                 logger.error(f"Failed to sleep engine: {e}")
+                # If the engine did not fully enter sleep mode, undo any
+                # partial scheduler/discovery transition.  Keep the repair
+                # flags set if rollback fails so a later wake_up call can
+                # retry the reconciliation.
+                if not self._quiesce_controller.is_quiesced:
+                    try:
+                        if self._scheduler_needs_resume:
+                            await self.engine_client.resume_generation()
+                            self._scheduler_needs_resume = False
+                            logger.info(
+                                "[Sleep] Resumed scheduler after failed sleep"
+                            )
+                        if (
+                            self.generate_endpoint is not None
+                            and self._endpoint_needs_registration
+                        ):
+                            await self.generate_endpoint.register_endpoint_instance()
+                            self._endpoint_needs_registration = False
+                            logger.info(
+                                "[Sleep] Re-registered endpoint after failed sleep - worker restored to routing pool"
+                            )
+                    except Exception as rollback_error:
+                        logger.error(
+                            "Failed to restore scheduler/discovery after sleep failure: %s",
+                            rollback_error,
+                        )
                 return {"status": "error", "message": str(e)}
 
     async def scale_elastic_ep(self, body: dict) -> dict:
@@ -896,18 +940,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         body = body or {}
         tags = body.get("tags")
         async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
+            if (
+                not self._quiesce_controller.is_quiesced
+                and not self._endpoint_needs_registration
+                and not self._scheduler_needs_resume
+            ):
                 return {"status": "ok", "message": "Engine already awake"}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._quiesce_controller.resume(tags)
-                if self.generate_endpoint is not None:
+                if self._quiesce_controller.is_quiesced:
+                    await self._quiesce_controller.resume(tags)
+                    self._scheduler_needs_resume = False
+                elif self._scheduler_needs_resume:
+                    await self.engine_client.resume_generation()
+                    self._scheduler_needs_resume = False
+                    logger.info("[Wake] Resumed scheduler after failed sleep attempt")
+                if (
+                    self.generate_endpoint is not None
+                    and self._endpoint_needs_registration
+                ):
                     await self.generate_endpoint.register_endpoint_instance()
+                    self._endpoint_needs_registration = False
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
-                self._quiesce_controller.mark_resumed()
 
                 return {
                     "status": "ok",
