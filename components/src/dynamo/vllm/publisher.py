@@ -85,6 +85,27 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         pass
 
 
+class _NoopStatLogger(StatLoggerBase):
+    """Stat logger that drops every record. Installed on embedding workers,
+    where vLLM still calls the factory during engine init but the
+    chat-shaped publish path (KV cache usage, scheduler gauges) has no
+    meaning on a pooling engine."""
+
+    def record(
+        self,
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
+        mm_cache_stats: object = None,
+        engine_idx: int = 0,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        return
+
+    def log_engine_initialized(self) -> None:
+        pass
+
+
 class StatLoggerFactory:
     """Factory for creating stat logger publishers. Required by vLLM."""
 
@@ -92,12 +113,19 @@ class StatLoggerFactory:
         self,
         endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
+        embedding_worker: bool = False,
     ) -> None:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
+        self.embedding_worker = embedding_worker
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
+        # Embedding workers have no KV cache and no scheduler stats worth
+        # publishing -- short-circuit before constructing the chat-shaped
+        # WorkerMetricsPublisher and skipping the component_gauges check.
+        if self.embedding_worker:
+            return _NoopStatLogger()
         # component_gauges must be set by setup_vllm_engine() before vLLM
         # calls create_stat_logger() during engine initialization.
         assert (

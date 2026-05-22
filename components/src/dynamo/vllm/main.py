@@ -412,7 +412,7 @@ def setup_vllm_engine(
     config: Config,
     stat_logger: Optional[StatLoggerFactory] = None,
     fpm_worker_id: Optional[str] = None,
-) -> tuple[AsyncLLM, VllmConfig, Any, Any, LLMBackendMetrics]:
+) -> tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]:
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
@@ -437,16 +437,24 @@ def setup_vllm_engine(
 
     # Construct Prometheus gauges AFTER setup_multiprocess_prometheus() so Gauge objects
     # see the correct ValueClass (multiprocess vs in-memory).
-    component_gauges = LLMBackendMetrics(
-        registry=DYNAMO_COMPONENT_REGISTRY,
-        model_name=config.served_model_name or "",
-        component_name=config.component or "",
-    )
+    #
+    # Embedding workers (pooling engines) have no KV cache, no scheduler
+    # gauges, and no model_load_time hook -- registering the chat-shaped
+    # LLMBackendMetrics on them publishes zeros forever. Skip the
+    # construction entirely on that path so /metrics stays clean.
+    embedding_worker = stat_logger is not None and stat_logger.embedding_worker
+    component_gauges: Optional[LLMBackendMetrics] = None
+    if not embedding_worker:
+        component_gauges = LLMBackendMetrics(
+            registry=DYNAMO_COMPONENT_REGISTRY,
+            model_name=config.served_model_name or "",
+            component_name=config.component or "",
+        )
 
-    # If a StatLoggerFactory was provided, give it the gauges so the loggers
-    # it creates can publish Prometheus metrics.
-    if stat_logger is not None:
-        stat_logger.component_gauges = component_gauges
+        # If a StatLoggerFactory was provided, give it the gauges so the loggers
+        # it creates can publish Prometheus metrics.
+        if stat_logger is not None:
+            stat_logger.component_gauges = component_gauges
 
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
