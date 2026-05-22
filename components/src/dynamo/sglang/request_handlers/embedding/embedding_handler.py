@@ -12,6 +12,10 @@ from dynamo._core import Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.embedding.metrics import (
+    observe_embedding_batch_size,
+    observe_embedding_input_tokens,
+)
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
@@ -127,6 +131,12 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
                 }
             )
             prompt_tokens += ret_item.get("meta_info", {}).get("prompt_tokens", 0)
+
+        try:
+            observe_embedding_batch_size(model_name, len(embedding_objects))
+            observe_embedding_input_tokens(model_name, prompt_tokens)
+        except Exception:
+            logging.warning("Failed to record embedding metrics", exc_info=True)
 
         return {
             "object": "list",

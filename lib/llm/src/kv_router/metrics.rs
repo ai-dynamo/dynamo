@@ -267,6 +267,7 @@ pub fn register_worker_load_metrics(
 pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
     pub pending_isl_tokens: IntGaugeVec,
+    pub backpressure_total: IntCounterVec,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
@@ -291,6 +292,14 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
             &[labels::WORKER_TYPE],
         )
         .expect("Failed to create router_queue_pending_isl_tokens gauge"),
+        backpressure_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_router_queue_backpressure_total", name_prefix::FRONTEND),
+                "Total number of router scheduler queue backpressure rejections",
+            ),
+            &[labels::WORKER_TYPE, "reason"],
+        )
+        .expect("Failed to create router_queue_backpressure_total counter"),
     });
 
 impl RouterQueueMetrics {
@@ -305,6 +314,12 @@ impl RouterQueueMetrics {
             .with_label_values(&[worker_type])
             .set(tokens as i64);
     }
+
+    pub fn inc_backpressure(&self, worker_type: &str, reason: &str) {
+        self.backpressure_total
+            .with_label_values(&[worker_type, reason])
+            .inc();
+    }
 }
 
 /// Register the router queue gauge with the given Prometheus registry.
@@ -315,6 +330,7 @@ pub fn register_router_queue_metrics(
     let m = &*ROUTER_QUEUE_METRICS;
     registry.register(Box::new(m.pending_requests.clone()))?;
     registry.register(Box::new(m.pending_isl_tokens.clone()))?;
+    registry.register(Box::new(m.backpressure_total.clone()))?;
     Ok(())
 }
 
@@ -760,6 +776,14 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[labels::WORKER_TYPE],
             )
             .unwrap(),
+            backpressure_total: IntCounterVec::new(
+                Opts::new(
+                    format!("{}_router_queue_backpressure_total", name_prefix::FRONTEND),
+                    "Total number of router scheduler queue backpressure rejections",
+                ),
+                &[labels::WORKER_TYPE, "reason"],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.pending_requests.clone()))
@@ -767,12 +791,19 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         registry
             .register(Box::new(metrics.pending_isl_tokens.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.backpressure_total.clone()))
+            .unwrap();
 
         metrics.set_pending("decode", 5);
         metrics.set_pending_isl_tokens("decode", 1024);
+        metrics.inc_backpressure("decode", "max_queued_isl_tokens_exceeded");
 
         let output = gather_pef(&registry);
         let expected = "\
+# HELP dynamo_frontend_router_queue_backpressure_total Total number of router scheduler queue backpressure rejections
+# TYPE dynamo_frontend_router_queue_backpressure_total counter
+dynamo_frontend_router_queue_backpressure_total{reason=\"max_queued_isl_tokens_exceeded\",worker_type=\"decode\"} 1
 # HELP dynamo_frontend_router_queue_pending_isl_tokens Sum of isl_tokens for requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_isl_tokens gauge
 dynamo_frontend_router_queue_pending_isl_tokens{worker_type=\"decode\"} 1024

@@ -50,6 +50,7 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     register_model,
 )
 from dynamo.runtime import DistributedRuntime
@@ -616,9 +617,21 @@ async def init_llm_worker(
             media_fetcher.allow_direct_port(allow_internal)
 
         # Register the model with runtime config
-        # Encode workers do NOT register - they're internal workers only
-        # Prefill and decode workers register - frontend detects their role via ModelType
+        # Encode workers do NOT register - they're internal workers only.
+        # Prefill and decode workers register
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            if config.disaggregation_mode == DisaggregationMode.PREFILL:
+                worker_type = WorkerType.Prefill
+                needs_set: list[WorkerType] = [WorkerType.Decode]
+            elif config.disaggregation_mode == DisaggregationMode.DECODE:
+                worker_type = WorkerType.Decode
+                needs_set = [WorkerType.Prefill]
+            else:
+                # AGGREGATED ("prefill_and_decode")
+                worker_type = WorkerType.Aggregated
+                needs_set = []
+            needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
             await register_model(
                 model_input,
                 model_type,
@@ -631,6 +644,8 @@ async def init_llm_worker(
                 custom_template_path=config.custom_jinja_template,
                 media_decoder=media_decoder,
                 media_fetcher=media_fetcher,
+                worker_type=worker_type,
+                needs=needs,
             )
 
         health_check_payload = TrtllmHealthCheckPayload(

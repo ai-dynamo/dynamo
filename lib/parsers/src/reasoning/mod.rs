@@ -312,7 +312,7 @@ mod tests {
         }
     }
 
-    #[test] // REASONING.batch.1
+    #[test] // REASONING.batch.2.c
     fn test_deepseek_v4_detect_and_parse() {
         for parser_name in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
             let mut parser = ReasoningParserType::get_reasoning_parser_from_name(parser_name);
@@ -322,7 +322,7 @@ mod tests {
         }
     }
 
-    #[test] // REASONING.batch.3, REASONING.batch.1
+    #[test] // REASONING.batch.1.b
     fn test_deepseek_v4_no_forced_reasoning_without_tags() {
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
         let result = parser.detect_and_parse_reasoning("answer only", &[]);
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(result.normal_text, "answer only");
     }
 
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c
     fn test_deepseek_v4_streaming() {
         let mut parser = ReasoningParserType::get_reasoning_parser_from_name("deepseek_v4");
 
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(normal, "answer");
     }
 
-    #[test] // REASONING.batch.1
+    #[test] // REASONING.batch.2.a, REASONING.batch.2.c, REASONING.batch.2.e
     fn test_kimi_k25_detect_and_parse() {
         // (description, input, expected_reasoning, expected_normal)
         let cases = [
@@ -389,7 +389,7 @@ mod tests {
         }
     }
 
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.3.a, REASONING.stream.3.b, REASONING.batch.2.c
     fn test_kimi_k25_streaming_force_reasoning() {
         // Streaming: force_reasoning means tokens before <think> are treated as reasoning
         let mut parser = ReasoningParserType::KimiK25.get_reasoning_parser();
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(r3.normal_text, "Hello!");
     }
 
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c, REASONING.batch.2.e
     fn test_kimi_k25_streaming() {
         // (description, tokens, expected_reasoning, expected_content)
         let cases: Vec<(&str, &[&str], &str, &str)> = vec![
@@ -483,7 +483,7 @@ mod tests {
     // Simulates the OpenAI path where the preprocessor detects prompt-injected
     // reasoning and calls set_in_reasoning(true). The parser should correctly
     // transition from reasoning to content when </think> arrives.
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c — force-mode
     fn test_nemotron_streaming_with_set_in_reasoning() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true); // OpenAI path calls this
@@ -506,7 +506,7 @@ mod tests {
     // set_in_reasoning is never called. The parser still starts in reasoning
     // mode (force_reasoning=true) but stripped_think_start=false. The </think>
     // boundary must still be detected correctly.
-    #[test] // REASONING.stream.3, REASONING.batch.1
+    #[test] // REASONING.stream.2.a, REASONING.batch.2.c — force-mode
     fn test_nemotron_streaming_force_reasoning_without_set_in_reasoning() {
         // DeepseekR1 has force_reasoning=true but we do NOT call set_in_reasoning
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
@@ -529,7 +529,7 @@ mod tests {
     // is false, the parser's prefix-check could buffer '<' and interfere with
     // </think> detection. This test verifies the boundary is detected even when
     // </think> arrives as individual characters.
-    #[test] // REASONING.stream.3, helper
+    #[test] // REASONING.stream.3.b, helper
     fn test_nemotron_streaming_split_end_think_tokens() {
         let mut parser = ReasoningParserType::DeepseekR1.get_reasoning_parser();
         parser.set_in_reasoning(true);

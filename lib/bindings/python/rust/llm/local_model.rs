@@ -7,6 +7,11 @@ use super::*;
 use dynamo_kv_router::protocols::RoutingConstraints as RsRoutingConstraints;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use pyo3::exceptions::PyValueError;
+
+fn validate_model_runtime_config(config: &RsModelRuntimeConfig) -> PyResult<()> {
+    config.validate_config().map_err(PyValueError::new_err)
+}
 
 #[pyclass]
 #[derive(Clone, Debug, Default)]
@@ -56,13 +61,21 @@ pub struct ModelRuntimeConfig {
     pub(crate) inner: RsModelRuntimeConfig,
 }
 
+impl ModelRuntimeConfig {
+    pub(crate) fn validate_config(&self) -> PyResult<()> {
+        validate_model_runtime_config(&self.inner)
+    }
+}
+
 #[pymethods]
 impl ModelRuntimeConfig {
     #[new]
-    fn new() -> Self {
-        Self {
+    fn new() -> PyResult<Self> {
+        let config = Self {
             inner: RsModelRuntimeConfig::new(),
-        }
+        };
+        config.validate_config()?;
+        Ok(config)
     }
 
     #[setter]
