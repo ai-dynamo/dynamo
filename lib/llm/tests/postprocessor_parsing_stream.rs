@@ -1318,8 +1318,14 @@ async fn tool_choice_matrix_force_reasoning_required_bare_json() {
     let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
 
     for (case, prompt_injected) in [
-        ("1a: force-reasoning + required + prompt_injected=false", false),
-        ("1b: force-reasoning + required + prompt_injected=true", true),
+        (
+            "1a: force-reasoning + required + prompt_injected=false",
+            false,
+        ),
+        (
+            "1b: force-reasoning + required + prompt_injected=true",
+            true,
+        ),
     ] {
         let preprocessor = build_preprocessor(Some("nemotron_nano"), Some("nemotron_nano"));
         let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
