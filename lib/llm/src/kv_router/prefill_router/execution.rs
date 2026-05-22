@@ -161,7 +161,9 @@ impl PrefillRouter {
         // Clone tracker before request is consumed by generate_to_worker.
         // Used to record prefill_complete_time for KV transfer latency metric.
         let tracker = request.tracker.clone();
-        let direct_target_info = match &router {
+        // Only SimpleRouter honors target_worker directly. KvRouter reads the
+        // pin from request routing and records the actual worker in RequestTracker.
+        let simple_direct_worker_info = match &router {
             InnerPrefillRouter::SimpleRouter(_) => target_worker.map(|worker_id| (worker_id, None)),
             InnerPrefillRouter::KvRouter(_) => None,
         };
@@ -233,7 +235,7 @@ impl PrefillRouter {
         let worker_info = prefill_worker_info(
             tracker.as_deref(),
             &disaggregated_params,
-            direct_target_info,
+            simple_direct_worker_info,
         );
         Ok(PrefillCompletion {
             result: PrefillResult {
@@ -378,10 +380,12 @@ impl PrefillRouter {
 fn prefill_worker_info(
     tracker: Option<&RequestTracker>,
     disaggregated_params: &serde_json::Value,
-    direct_target_info: Option<(u64, Option<u32>)>,
+    simple_direct_worker_info: Option<(u64, Option<u32>)>,
 ) -> Option<(u64, Option<u32>)> {
+    // Prefer router-owned attribution over backend payloads: KvRouter records
+    // in the tracker, SimpleRouter direct routing uses the explicit target.
     tracker_prefill_worker_info(tracker)
-        .or(direct_target_info)
+        .or(simple_direct_worker_info)
         .or_else(|| payload_prefill_worker_info(disaggregated_params))
 }
 
