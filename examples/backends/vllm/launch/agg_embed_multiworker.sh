@@ -94,10 +94,12 @@ common_worker_args=(
 # model 'Z' is already registered there". The frontend's model-keyed
 # dispatch (``get_embeddings_engine(model)``) still routes correctly by the
 # ``model`` field regardless of which component path hosts each model.
+#
+# Endpoint format is ``namespace.component.endpoint`` (dots, not slashes).
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model "$MODEL1" \
-    --endpoint dynamo/embed-worker-1/generate \
+    --endpoint dynamo.embed-worker-1.generate \
     "${common_worker_args[@]}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
@@ -105,7 +107,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model "$MODEL2" \
-    --endpoint dynamo/embed-worker-2/generate \
+    --endpoint dynamo.embed-worker-2.generate \
     "${common_worker_args[@]}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
