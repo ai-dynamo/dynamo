@@ -63,6 +63,7 @@ const (
 	LabelNVIDIARDMAPresent          = "nvidia.com/rdma.present"
 	LabelNFDRDMAAvailable           = "feature.node.kubernetes.io/rdma.available"
 	LabelNFDNetworkSRIOVCapable     = "feature.node.kubernetes.io/network-sriov.capable"
+	labelValueTrue                  = "true"
 )
 
 // --- Normalization helpers ---
@@ -1152,13 +1153,13 @@ func detectRDMAFromNode(ctx context.Context, k8sClient client.Reader, nodeName s
 		return false, strNone
 	}
 	labels := node.Labels
-	if labels[LabelNVIDIARDMAPresent] == "true" {
+	if labels[LabelNVIDIARDMAPresent] == labelValueTrue {
 		return true, "rdma"
 	}
-	if labels[LabelNFDRDMAAvailable] == "true" {
+	if labels[LabelNFDRDMAAvailable] == labelValueTrue {
 		return true, "rdma"
 	}
-	if labels[LabelNFDNetworkSRIOVCapable] == "true" {
+	if labels[LabelNFDNetworkSRIOVCapable] == labelValueTrue {
 		return true, "sriov"
 	}
 	return false, strNone

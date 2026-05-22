@@ -1684,51 +1684,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 
 	logger := log.FromContext(ctx)
 
-	var gpuInfo *gpu.GPUInfo
-	logger.Info("Attempting GPU discovery for profiling job")
-	var discoveredInfo *gpu.GPUInfo
-	var err error
-	if r.GPUDiscovery != nil {
-		discoveredInfo, err = r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
-		if err != nil {
-			reason := GetGPUDiscoveryFailureReason(err)
-			logger.Info("DCGM discovery failed, falling back to node-label discovery",
-				"reason", reason, "error", err.Error())
-			if !ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
-				if discoveryRequired {
-					return changed, fmt.Errorf("auto-discovery failed: %w", err)
-				}
-				logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
-				return changed, nil
-			}
-		}
+	gpuInfo, err := r.discoverHardwareForEnrichment(ctx, hw, discoveryRequired)
+	if err != nil {
+		return changed, err
 	}
-	if discoveredInfo == nil {
-		discoveredInfo, err = gpu.DiscoverGPUsFiltered(ctx, r.APIReader, hw.GPUSKU)
-		if err != nil {
-			logger.Info("Node-label discovery also failed", "error", err.Error())
-			if discoveryRequired {
-				return changed, fmt.Errorf("auto-discovery failed: %w", err)
-			}
-			logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged")
-			return changed, nil
-		}
+	if gpuInfo == nil {
+		return changed, nil
 	}
-	gpuInfo = discoveredInfo
-	if gpuInfo != nil {
-		logger.Info("GPU discovery completed successfully",
-			"gpusPerNode", gpuInfo.GPUsPerNode,
-			"nodesWithGPUs", gpuInfo.NodesWithGPUs,
-			"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
-			"model", gpuInfo.Model,
-			"vramMiB", gpuInfo.VRAMPerGPU,
-			"system", gpuInfo.System,
-			"cloudprovider", gpuInfo.CloudProvider,
-			"interconnect", gpuInfo.Interconnect,
-			"interconnectTier", gpuInfo.InterconnectTier,
-			"rdma", gpuInfo.RDMAEnabled,
-			"rdmaType", gpuInfo.RDMAType)
-	}
+	logger.Info("GPU discovery completed successfully",
+		"gpusPerNode", gpuInfo.GPUsPerNode,
+		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+		"model", gpuInfo.Model,
+		"vramMiB", gpuInfo.VRAMPerGPU,
+		"system", gpuInfo.System,
+		"cloudprovider", gpuInfo.CloudProvider,
+		"interconnect", gpuInfo.Interconnect,
+		"interconnectTier", gpuInfo.InterconnectTier,
+		"rdma", gpuInfo.RDMAEnabled,
+		"rdmaType", gpuInfo.RDMAType)
 
 	if hw.GPUSKU == "" {
 		inferred := gpu.InferHardwareSystem(gpuInfo.Model)
@@ -1780,6 +1754,41 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		changed = true
 	}
 	return changed, nil
+}
+
+func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(ctx context.Context, hw *nvidiacomv1beta1.HardwareSpec, discoveryRequired bool) (*gpu.GPUInfo, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Attempting GPU discovery for profiling job")
+
+	if r.GPUDiscovery != nil {
+		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
+		if err == nil {
+			return discoveredInfo, nil
+		}
+
+		reason := GetGPUDiscoveryFailureReason(err)
+		logger.Info("DCGM discovery failed, falling back to node-label discovery",
+			"reason", reason, "error", err.Error())
+		if !ptr.Deref(r.Config.GPU.DiscoveryEnabled, true) {
+			if discoveryRequired {
+				return nil, fmt.Errorf("auto-discovery failed: %w", err)
+			}
+			logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
+			return nil, nil
+		}
+	}
+
+	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, r.APIReader, hw.GPUSKU)
+	if err == nil {
+		return discoveredInfo, nil
+	}
+
+	logger.Info("Node-label discovery also failed", "error", err.Error())
+	if discoveryRequired {
+		return nil, fmt.Errorf("auto-discovery failed: %w", err)
+	}
+	logger.Info("Optional hardware metadata discovery unavailable; leaving unset fields unchanged")
+	return nil, nil
 }
 
 // extractModelCachePVCConfig reads model cache PVC settings from the typed v1beta1 spec.
