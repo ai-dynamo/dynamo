@@ -12,6 +12,13 @@ You'll run: **hub** (indexer + p2p) + **two aggregated vLLM instances A and B**.
 computes + indexes its blocks. Hit B cold with the same prompt → B finds A, pulls A's blocks,
 decodes. Same output, no recompute.
 
+### Flow at a glance
+
+![KVBM remote-search flow: one cold request on B — discover (hub indexer) → open_session/pull from A → onboard → prefill+decode, with kvbm_audit markers and file:line refs](docs/assets/img/remote-search-flow.svg)
+
+The request lifecycle on B with every `kvbm_audit` marker and `file:line` annotated (source:
+`docs/assets/img/remote-search-flow.svg`). The §"How it works" table below is the same content in prose.
+
 ---
 
 ## Prereqs
