@@ -1069,6 +1069,17 @@ impl ModelManager {
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
 
+    /// Whether any worker on this endpoint advertises a KV-transfer topology policy.
+    pub fn has_kv_transfer_routing_policy(&self, endpoint_id: &EndpointId) -> bool {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            return false;
+        };
+        let configs = rx.borrow();
+        configs
+            .values()
+            .any(|config| config.kv_transfer_domain.is_some())
+    }
+
     /// Build topology routing constraints from a selected prefill worker's metadata.
     pub fn get_kv_transfer_routing_constraints(
         &self,
@@ -1240,6 +1251,31 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn kv_transfer_policy_presence_detects_configured_domain() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+
+        assert!(!mm.has_kv_transfer_routing_policy(&endpoint_id));
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
+        );
+        assert!(!mm.has_kv_transfer_routing_policy(&endpoint_id));
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Required, None),
+            )]),
+        );
+        assert!(mm.has_kv_transfer_routing_policy(&endpoint_id));
     }
 
     #[test]

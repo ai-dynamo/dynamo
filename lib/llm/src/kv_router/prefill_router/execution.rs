@@ -17,14 +17,13 @@ use super::{
 use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
     preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
+    timing::RequestTracker,
 };
 
 pub(super) struct PrefillCompletion {
     pub result: PrefillResult,
-    /// (worker_id, dp_rank) parsed out of the engine's `disaggregated_params`.
-    /// Computed but unused today; kept here so adding a caller is a struct
-    /// field read rather than a return-type widening.
-    #[allow(dead_code)]
+    /// `(worker_id, dp_rank)` for the worker that performed prefill, when the
+    /// routing layer can identify it.
     pub worker_info: Option<(u64, Option<u32>)>,
     pub worker_link: Option<TraceLink>,
 }
@@ -109,13 +108,13 @@ impl PrefillRouter {
             .model_manager
             .get_disaggregated_endpoint(endpoint_id, worker_id)
         else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id };
+            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
         };
         let Some(host) = endpoint.bootstrap_host else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id };
+            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
         };
         let Some(port) = endpoint.bootstrap_port else {
-            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id };
+            return PrefillResolveDecision::NoBootstrapEndpoint { worker_id, dp_rank };
         };
 
         let dp_size: Option<u32> = self
@@ -162,6 +161,10 @@ impl PrefillRouter {
         // Clone tracker before request is consumed by generate_to_worker.
         // Used to record prefill_complete_time for KV transfer latency metric.
         let tracker = request.tracker.clone();
+        let direct_target_info = match &router {
+            InnerPrefillRouter::SimpleRouter(_) => target_worker.map(|worker_id| (worker_id, None)),
+            InnerPrefillRouter::KvRouter(_) => None,
+        };
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
@@ -227,19 +230,11 @@ impl PrefillRouter {
 
         let worker_link = output.worker_trace_link.clone();
 
-        // Extract prefill worker ID and dp_rank from disaggregated_params
-        let worker_info = disaggregated_params
-            .get("worker_id")
-            .and_then(|worker_id_json| {
-                let worker_id = worker_id_json
-                    .get("prefill_worker_id")
-                    .and_then(|v| v.as_u64())?;
-                let dp_rank = worker_id_json
-                    .get("prefill_dp_rank")
-                    .and_then(|v| v.as_u64())
-                    .map(|r| r as u32);
-                Some((worker_id, dp_rank))
-            });
+        let worker_info = prefill_worker_info(
+            tracker.as_deref(),
+            &disaggregated_params,
+            direct_target_info,
+        );
         Ok(PrefillCompletion {
             result: PrefillResult {
                 disaggregated_params,
@@ -380,6 +375,42 @@ impl PrefillRouter {
     }
 }
 
+fn prefill_worker_info(
+    tracker: Option<&RequestTracker>,
+    disaggregated_params: &serde_json::Value,
+    direct_target_info: Option<(u64, Option<u32>)>,
+) -> Option<(u64, Option<u32>)> {
+    tracker_prefill_worker_info(tracker)
+        .or(direct_target_info)
+        .or_else(|| payload_prefill_worker_info(disaggregated_params))
+}
+
+fn tracker_prefill_worker_info(tracker: Option<&RequestTracker>) -> Option<(u64, Option<u32>)> {
+    tracker
+        .and_then(|tracker| tracker.get_worker_info())
+        .and_then(|info| {
+            info.prefill_worker_id
+                .map(|worker_id| (worker_id, info.prefill_dp_rank))
+        })
+}
+
+fn payload_prefill_worker_info(
+    disaggregated_params: &serde_json::Value,
+) -> Option<(u64, Option<u32>)> {
+    disaggregated_params
+        .get("worker_id")
+        .and_then(|worker_id_json| {
+            let worker_id = worker_id_json
+                .get("prefill_worker_id")
+                .and_then(|v| v.as_u64())?;
+            let dp_rank = worker_id_json
+                .get("prefill_dp_rank")
+                .and_then(|v| v.as_u64())
+                .map(|r| r as u32);
+            Some((worker_id, dp_rank))
+        })
+}
+
 /// Derive a `bootstrap_room` from a pre-sampled `r` such that
 /// `room % dp_size == dp_rank` and `room <= i64::MAX`. The 63-bit cap is the
 /// existing room contract on the SGLang side. Falls back to `r` when
@@ -403,8 +434,70 @@ fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, r: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+    use serde_json::json;
 
     const MAX_ROOM: u64 = i64::MAX as u64;
+
+    #[test]
+    fn prefill_worker_info_prefers_tracker_over_payload_and_direct_target() {
+        let tracker = RequestTracker::new();
+        tracker.record_worker(10, Some(2), WORKER_TYPE_PREFILL);
+        let disaggregated_params = json!({
+            "worker_id": {
+                "prefill_worker_id": 20,
+                "prefill_dp_rank": 3
+            }
+        });
+
+        assert_eq!(
+            prefill_worker_info(Some(&tracker), &disaggregated_params, Some((30, None))),
+            Some((10, Some(2)))
+        );
+    }
+
+    #[test]
+    fn prefill_worker_info_prefers_direct_target_over_payload() {
+        let disaggregated_params = json!({
+            "worker_id": {
+                "prefill_worker_id": 20,
+                "prefill_dp_rank": 3
+            }
+        });
+
+        assert_eq!(
+            prefill_worker_info(None, &disaggregated_params, Some((30, None))),
+            Some((30, None))
+        );
+    }
+
+    #[test]
+    fn prefill_worker_info_falls_back_to_payload_worker_id() {
+        let disaggregated_params = json!({
+            "worker_id": {
+                "prefill_worker_id": 20,
+                "prefill_dp_rank": 3
+            }
+        });
+
+        assert_eq!(
+            prefill_worker_info(None, &disaggregated_params, None),
+            Some((20, Some(3)))
+        );
+    }
+
+    #[test]
+    fn prefill_worker_info_falls_back_to_direct_target() {
+        assert_eq!(
+            prefill_worker_info(None, &json!({}), Some((30, None))),
+            Some((30, None))
+        );
+    }
+
+    #[test]
+    fn prefill_worker_info_returns_none_without_authoritative_source() {
+        assert_eq!(prefill_worker_info(None, &json!({}), None), None);
+    }
 
     #[test]
     fn bootstrap_room_falls_back_when_dp_unavailable() {

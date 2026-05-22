@@ -201,6 +201,7 @@ impl
             }
             PrefillResolveDecision::NoBootstrapEndpoint {
                 worker_id: resolved_wid,
+                dp_rank: resolved_dp_rank,
             } => {
                 // Bootstrap unavailable but worker was selected; use synchronous prefill
                 // and carry the known worker_id for topology-aware decode routing.
@@ -208,6 +209,16 @@ impl
                     worker_id = resolved_wid,
                     "Using original prefill path (no bootstrap endpoint), routing to resolved worker"
                 );
+                if !self.router_mode.is_kv_routing()
+                    && let Some(router) = self.prefill_router.get()
+                {
+                    router.select_next_worker();
+                }
+
+                let routing = prefill_req.routing_mut();
+                routing.prefill_worker_id = Some(resolved_wid);
+                routing.dp_rank = resolved_dp_rank;
+
                 drop(prefill_phase_barrier);
                 let prefill_context = Context::with_id_and_metadata(
                     prefill_req,
@@ -313,13 +324,20 @@ impl
                 // Resolve prefill worker topology from the prefill endpoint's worker configs,
                 // then express it through the standard decode routing constraints.
                 let endpoint_id = self.endpoint_id.get();
-                let topology_constraints =
-                    if let Some((wid, eid)) = selected_prefill_worker_id.zip(endpoint_id) {
-                        self.model_manager
-                            .get_kv_transfer_routing_constraints(eid, wid)?
-                    } else {
-                        None
-                    };
+                let topology_constraints = if let Some((wid, eid)) =
+                    selected_prefill_worker_id.zip(endpoint_id)
+                {
+                    self.model_manager
+                        .get_kv_transfer_routing_constraints(eid, wid)?
+                } else if let Some(eid) = endpoint_id
+                    && self.model_manager.has_kv_transfer_routing_policy(eid)
+                {
+                    return Err(anyhow::anyhow!(
+                        "prefill worker id unavailable after prefill; cannot derive KV transfer topology constraints for endpoint {eid}"
+                    ));
+                } else {
+                    None
+                };
 
                 if let Some(topology_constraints) = topology_constraints {
                     merge_decode_topology_constraints(&mut decode_req, topology_constraints);
