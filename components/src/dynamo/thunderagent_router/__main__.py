@@ -155,6 +155,7 @@ class ThunderAgentRouterHandler:
 
         prompt_tokens_seen = 0
         completion_tokens_seen = 0
+        usage_completion_seen = False
         first_chunk = True
         try:
             async for chunk in await self._kv_router.generate_from_request(
@@ -173,14 +174,17 @@ class ThunderAgentRouterHandler:
                     prompt_tokens_seen = int(
                         usage.get("prompt_tokens", prompt_tokens_seen)
                     )
-                    completion_tokens_seen = int(
-                        usage.get("completion_tokens", completion_tokens_seen)
-                    )
+                    if isinstance(usage.get("completion_tokens"), int):
+                        completion_tokens_seen = int(usage["completion_tokens"])
+                        usage_completion_seen = True
                 token_ids_out = (
                     chunk.get("token_ids", []) if isinstance(chunk, dict) else []
                 )
                 if isinstance(token_ids_out, list) and token_ids_out:
-                    completion_tokens_seen += len(token_ids_out)
+                    # Engine usage is authoritative if present; only the
+                    # token-id fallback path increments completion_tokens_seen.
+                    if not usage_completion_seen:
+                        completion_tokens_seen += len(token_ids_out)
                     self._scheduler.record_output_tokens(program_id, len(token_ids_out))
 
                 yield chunk

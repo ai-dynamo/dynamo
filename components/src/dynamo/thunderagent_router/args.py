@@ -53,10 +53,16 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
         super().validate()
         if not 0.0 <= self.pause_threshold <= 1.0:
             raise ValueError("--pause-threshold must be in [0, 1]")
+        if not 0.0 <= self.pause_target <= self.pause_threshold:
+            raise ValueError("--pause-target must be in [0, --pause-threshold]")
         if not 0.0 <= self.soft_demote_threshold <= self.pause_threshold:
             raise ValueError(
                 "--soft-demote-threshold must be in [0, --pause-threshold]"
             )
+        if not 0.0 <= self.resume_hysteresis <= self.pause_threshold:
+            raise ValueError("--resume-hysteresis must be in [0, --pause-threshold]")
+        if self.acting_token_weight <= 0:
+            raise ValueError("--acting-token-weight must be > 0")
         if self.scheduler_interval_seconds <= 0:
             raise ValueError("--scheduler-interval-seconds must be > 0")
         if self.resume_timeout_seconds <= 0:

@@ -146,7 +146,7 @@ LLM-turn ↔ tool-gap timeline per agent.
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │ dynamo.frontend  (HTTP + auth + tracing sink)               │
 └────────────────────┬────────────────────────────────────────┘
@@ -231,7 +231,7 @@ non-agentic traffic sharing the same workers.
 
 ## Testing
 
-```
+```bash
 pytest components/src/dynamo/thunderagent_router/tests/test_router.py
 ```
 
