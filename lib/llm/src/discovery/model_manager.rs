@@ -117,19 +117,6 @@ impl ModelManager {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn insert_runtime_configs_for_test(
-        &self,
-        endpoint_id: EndpointId,
-        configs: std::collections::HashMap<
-            WorkerId,
-            crate::local_model::runtime_config::ModelRuntimeConfig,
-        >,
-    ) {
-        let (_tx, rx) = tokio::sync::watch::channel(configs);
-        self.runtime_configs.insert(endpoint_id, rx);
-    }
-
     // -- Model access --
 
     /// Get or create a Model for the given name.
