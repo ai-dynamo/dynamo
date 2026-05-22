@@ -41,8 +41,8 @@ pub struct BucketedRateCounter {
     num_buckets: usize,
 }
 
-// SAFETY: Composed entirely of atomics and an immutable Instant.
-unsafe impl Sync for BucketedRateCounter {}
+// All fields (Vec<AtomicU64>, Instant, Duration, usize) are Sync, so Sync is
+// auto-derived; no explicit unsafe impl needed.
 
 impl std::fmt::Debug for BucketedRateCounter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -97,7 +97,12 @@ impl BucketedRateCounter {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    self.buckets[index].store(n, Ordering::Release);
+                    // Discard the stale previous epoch's value and add our
+                    // contribution. Using swap(0) + fetch_add instead of
+                    // store(n) avoids a lost-update race: a concurrent fast-path
+                    // fetch_add between these two ops would still be preserved.
+                    self.buckets[index].swap(0, Ordering::AcqRel);
+                    self.buckets[index].fetch_add(n, Ordering::Relaxed);
                 }
                 Err(actual) => {
                     if actual == global_bucket {
@@ -115,9 +120,9 @@ impl BucketedRateCounter {
         let global_bucket = (elapsed.as_nanos() / self.bucket_duration.as_nanos()) as u64;
 
         let mut total = 0u64;
+        let min_valid_epoch = global_bucket.saturating_sub(self.num_buckets as u64 - 1);
         for i in 0..self.num_buckets {
             let epoch = self.epochs[i].load(Ordering::Acquire);
-            let min_valid_epoch = global_bucket.saturating_sub(self.num_buckets as u64 - 1);
             if epoch >= min_valid_epoch && epoch <= global_bucket {
                 total += self.buckets[i].load(Ordering::Relaxed);
             }
@@ -241,6 +246,12 @@ impl LoadEstimator {
                     rate_counter: new_counter,
                 };
             }
+            // Window geometry changed; EMA estimates built over the old window
+            // are meaningless — clear them so smoothing restarts from scratch.
+            self.predictors
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
         }
 
         tracing::info!(
@@ -255,6 +266,12 @@ impl LoadEstimator {
         if let Some(entry) = self.data.get(lora_name) {
             entry.value().rate_counter.clear();
         }
+        // Remove the predictor entry so the next get_current_load() call starts
+        // fresh rather than carrying the pre-clear EMA estimate forward.
+        self.predictors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(lora_name);
     }
 
     pub fn start_polling(
@@ -375,9 +392,19 @@ impl LoadEstimator {
     }
 
     /// Decrement in-flight count for a LORA.
+    ///
+    /// Uses `saturating_sub` to guard against underflow: a duplicate, delayed,
+    /// or out-of-order `Free` event when `active_count == 0` is silently
+    /// ignored rather than wrapping to `usize::MAX`.
     pub fn decrement_load(&self, lora_name: &str) {
         if let Some(entry) = self.data.get(lora_name) {
-            entry.value().active_count.fetch_sub(1, Ordering::Relaxed);
+            entry
+                .value()
+                .active_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                })
+                .ok();
         }
     }
 
@@ -392,11 +419,19 @@ impl LoadEstimator {
             self.data
                 .entry(lora_name.clone())
                 .and_modify(|data| {
+                    let prev = data.active_count.load(Ordering::Relaxed);
                     data.active_count.store(*count, Ordering::Relaxed);
-                    data.rate_counter.record_count(*count as u64, now);
+                    // Record only the delta (new arrivals since the last poll) to
+                    // avoid double-counting sustained requests.  A request active
+                    // for N ticks should contribute 1 arrival, not N.
+                    let arrivals = count.saturating_sub(prev) as u64;
+                    if arrivals > 0 {
+                        data.rate_counter.record_count(arrivals, now);
+                    }
                 })
                 .or_insert_with(|| {
                     let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
+                    // First observation: the entire count represents new arrivals.
                     counter.record_count(*count as u64, now);
                     LoraLoadData {
                         active_count: AtomicUsize::new(*count),
@@ -436,7 +471,8 @@ impl LoadEstimator {
         }
 
         let mut predictors = self.predictors.lock().unwrap_or_else(|e| e.into_inner());
-        self.data
+        let result = self
+            .data
             .iter()
             .filter_map(|entry| {
                 let lora_name = entry.key();
@@ -456,7 +492,11 @@ impl LoadEstimator {
                     None
                 }
             })
-            .collect()
+            .collect();
+        // Prune predictors for LoRAs that are no longer in self.data to prevent
+        // unbounded growth and stale EMA reuse when names are recycled.
+        predictors.retain(|name, _| self.data.contains_key(name));
+        result
     }
 
     fn create_predictor(predictor_type: PredictorType, ema_alpha: f64) -> Box<dyn LoadPredictor> {

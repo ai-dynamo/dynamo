@@ -93,8 +93,15 @@ impl LoraAllocationConfig {
     pub fn from_env() -> Self {
         let defaults = Self::default();
 
+        // Map recognised values; unknown strings fall through to None so the
+        // default is preserved instead of silently disabling allocation.
         let enabled = std::env::var(llm::DYN_LORA_ALLOCATION_ENABLED)
-            .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+            .ok()
+            .and_then(|v| match v.to_lowercase().as_str() {
+                "true" | "1" | "yes" => Some(true),
+                "false" | "0" | "no" => Some(false),
+                _ => None,
+            })
             .unwrap_or(defaults.enabled);
 
         let algorithm = std::env::var(llm::DYN_LORA_ALLOCATION_ALGORITHM)
@@ -105,6 +112,7 @@ impl LoraAllocationConfig {
         let timestep_secs = std::env::var(llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS)
             .ok()
             .and_then(|v| v.parse().ok())
+            .map(|v: u64| v.max(1)) // zero timestep is pathological
             .unwrap_or(defaults.timestep_secs);
 
         let scale_down_cooldown_ticks =
@@ -121,6 +129,8 @@ impl LoraAllocationConfig {
         let buckets_per_second = std::env::var(llm::DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND)
             .ok()
             .and_then(|v| v.parse().ok())
+            // Clamp: 0 causes divide-by-zero; > 1_000_000_000 makes bucket_duration < 1 ns.
+            .map(|v: u64| v.clamp(1, 1_000_000_000))
             .unwrap_or(defaults.buckets_per_second);
 
         let predictor_type = std::env::var(llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE)
