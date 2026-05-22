@@ -28,7 +28,9 @@ fi
 mkdir -p "${DISCOVERY_DIR}" "${LOG_DIR}"
 
 export DYN_DISCOVERY_BACKEND=file
+export DYN_EVENT_PLANE=zmq
 export DYN_FILE_KV="${DYN_FILE_KV:-${DISCOVERY_DIR}}"
+unset NATS_SERVER
 
 cd "${EXAMPLE_DIR}"
 
@@ -39,7 +41,13 @@ if [[ -n "${WORKER_EXTRA_ARGS}" ]]; then
   worker_cmd+=("${worker_extra[@]}")
 fi
 
-frontend_cmd=("${PYTHON_BIN}" -m dynamo.frontend --http-port "${DYN_HTTP_PORT}" --discovery-backend file)
+frontend_cmd=(
+  "${PYTHON_BIN}" -m dynamo.frontend
+  --http-port "${DYN_HTTP_PORT}"
+  --discovery-backend file
+  --request-plane tcp
+  --event-plane zmq
+)
 if [[ -n "${FRONTEND_EXTRA_ARGS}" ]]; then
   # shellcheck disable=SC2206
   frontend_extra=( ${FRONTEND_EXTRA_ARGS} )
