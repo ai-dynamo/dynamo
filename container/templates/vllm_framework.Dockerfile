@@ -99,11 +99,7 @@ ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 ## -  Build settings chosen to cross-compile with AVX512 support on amd64 only.
 
 ENV VLLM_TARGET_DEVICE=cpu
-ARG VLLM_CPU_DISABLE_AVX512=false  # If false, decide based on build-machine support or below flags (latter overrides former). If true, disable AVX512 support.
-ARG VLLM_CPU_AVX512=true           # Support for building with AVX512 ISA (Explicitly enable to cross-compile)
-ARG VLLM_CPU_AVX512BF16=true       # Support for building with AVX512BF16 ISA
-ARG VLLM_CPU_AVX512VNNI=false      # Support for building with VLLM_CPU_AVX512VNNI ISA
-ARG VLLM_CPU_AMXBF16=true          # Support for building with AMXBF16 ISA
+ARG VLLM_CPU_X86=true              # Enable x86 ISA path in cmake (AVX2 + AVX512 + AMX)
 {% endif %}
 
 # Install VLLM and related dependencies
@@ -113,11 +109,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
     if [ "$DEVICE" = "cpu" ] && [ "$TARGETARCH" = "amd64" ]; then \
-        export VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512} \
-               VLLM_CPU_AVX512=${VLLM_CPU_AVX512} \
-               VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16} \
-               VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI} \
-               VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}; \
+        export VLLM_CPU_X86=${VLLM_CPU_X86}; \
     fi && \
     /tmp/install_vllm.sh \
         --device $DEVICE \
