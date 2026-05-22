@@ -130,6 +130,30 @@ func TestEnrichHardwareFromDiscovery_RequiredFieldsMissingWithoutAPIReaderFails(
 	assert.False(t, changed)
 }
 
+func TestEnrichHardwareFromDiscovery_SkipsOptionalMetadataWhenNodeDiscoveryDisabled(t *testing.T) {
+	node := gpuNode("gpu-node-rdma", "H100-SXM5-80GB", 8, 81920)
+	node.Labels[gpupkg.LabelNFDRDMAAvailable] = "true"
+	r := newFakeReconciler(node)
+	r.GPUDiscovery = nil
+	r.Config.GPU.DiscoveryEnabled = ptr.To(false)
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(16)),
+			},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Nil(t, dgdr.Spec.Hardware.RDMA)
+}
+
 func TestEnrichHardwareFromDiscovery(t *testing.T) {
 	tests := []struct {
 		name string
@@ -394,6 +418,52 @@ func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
 	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{
 		Name:      getProfilingJobName(&stored),
 		Namespace: stored.Namespace,
+	}, job))
+}
+
+func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "manual-hardware",
+			Namespace: "default",
+		},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "test-model",
+			Backend: nvidiacomv1beta1.BackendTypeVllm,
+			Image:   "test-profiler:latest",
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(16)),
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgdr).Build()
+	r := &DynamoGraphDeploymentRequestReconciler{
+		Client:      fakeClient,
+		Recorder:    &record.FakeRecorder{},
+		Config:      &configv1alpha1.OperatorConfiguration{},
+		RBACManager: &MockRBACManager{},
+	}
+
+	var fetched nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, &fetched))
+
+	requeue, err := r.createProfilingJob(ctx, &fetched)
+	require.NoError(t, err)
+	require.False(t, requeue)
+
+	job := &batchv1.Job{}
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{
+		Name:      getProfilingJobName(&fetched),
+		Namespace: fetched.Namespace,
 	}, job))
 }
 

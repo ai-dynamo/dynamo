@@ -1792,22 +1792,28 @@ func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(c
 		return nil, nil
 	}
 
+	var dcgmErr error
 	if r.GPUDiscovery != nil {
 		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, reader, r.GPUDiscoveryCache, hw.GPUSKU)
 		if err == nil {
 			return discoveredInfo, nil
 		}
+		dcgmErr = err
 
 		reason := GetGPUDiscoveryFailureReason(err)
 		logger.Info("DCGM discovery failed, falling back to node-label discovery",
 			"reason", reason, "error", err.Error())
-		if !r.gpuDiscoveryEnabled() {
-			if discoveryRequired {
-				return nil, fmt.Errorf("auto-discovery failed: %w", err)
+	}
+
+	if !r.gpuDiscoveryEnabled() {
+		if discoveryRequired {
+			if dcgmErr != nil {
+				return nil, fmt.Errorf("auto-discovery failed: %w", dcgmErr)
 			}
-			logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
-			return nil, nil
+			return nil, fmt.Errorf("auto-discovery failed: node-label discovery is disabled")
 		}
+		logger.Info("Optional hardware metadata discovery skipped because node-label discovery is disabled")
+		return nil, nil
 	}
 
 	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, reader, hw.GPUSKU)
