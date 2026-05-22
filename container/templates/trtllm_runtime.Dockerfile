@@ -13,6 +13,16 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 
+# Not in upstream nvcr.io/nvidia/tensorrt-llm/release.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        openssh-server \
+        librdmacm1 \
+        rdma-core && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace
 
 # DYNAMO_HOME points at /workspace so bundled TRT-LLM scripts that reference
