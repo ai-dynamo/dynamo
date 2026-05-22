@@ -31,7 +31,7 @@ cargo test
 
 The simplest way to deploy the pre-requisite services is using
 [docker-compose](https://docs.docker.com/compose/install/linux/),
-defined in [deploy/docker-compose.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml).
+defined in [deploy/docker-compose.yml](https://github.com/ai-dynamo/dynamo/tree/release/1.2.0/deploy/docker-compose.yml).
 
 ```
 # At the root of the repository:
