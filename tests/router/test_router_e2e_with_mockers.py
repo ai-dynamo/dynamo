@@ -1017,20 +1017,29 @@ async def _wait_for_frontend_models(frontend_url: str, timeout_s: int = 120) -> 
 async def _send_topology_mismatched_request_expect_failure(
     chat_url: str,
     test_payload: Dict[str, Any],
+    timeout_s: int = 120,
 ) -> tuple[int, str]:
     payload = {
         **test_payload,
         "stream": False,
     }
+    deadline = asyncio.get_running_loop().time() + timeout_s
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(chat_url, json=payload) as response:
-            response_body = await response.text()
-            assert response.status != 200, (
-                "Expected required KV-transfer topology mismatch to fail, "
-                f"got status=200 body={response_body}"
-            )
-            return response.status, response_body
+        while asyncio.get_running_loop().time() < deadline:
+            async with session.post(chat_url, json=payload) as response:
+                response_body = await response.text()
+                if response.status == 404:
+                    await asyncio.sleep(1)
+                    continue
+
+                assert response.status != 200, (
+                    "Expected required KV-transfer topology mismatch to fail, "
+                    f"got status=200 body={response_body}"
+                )
+                return response.status, response_body
+
+    raise TimeoutError("Timed out waiting for chat completions route to become ready")
 
 
 @pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
