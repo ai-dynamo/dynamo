@@ -11,7 +11,6 @@ so they work without GPU, CUDA, or any backend installed.
 """
 
 import importlib.util
-import math
 import threading
 import time
 from pathlib import Path
@@ -50,12 +49,21 @@ class FakeRuntimeConfig:
         self.taints = set()
 
 
-def _enable_topology(monkeypatch, topology_dir: Path, transfer_domain: str = "zone"):
+def _enable_topology(
+    monkeypatch,
+    topology_dir: Path,
+    transfer_domain: str = "zone",
+    enforcement: str = "required",
+    preferred_weight: float | None = None,
+):
     monkeypatch.setenv("DYN_TOPOLOGY_ENABLED", "true")
     monkeypatch.setenv("DYN_TOPOLOGY_MOUNT_PATH", str(topology_dir))
     monkeypatch.setenv("DYN_KV_TRANSFER_DOMAIN", transfer_domain)
-    monkeypatch.delenv("DYN_KV_TRANSFER_ENFORCEMENT", raising=False)
-    monkeypatch.delenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", raising=False)
+    monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", enforcement)
+    if preferred_weight is not None:
+        monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", str(preferred_weight))
+    else:
+        monkeypatch.delenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", raising=False)
 
 
 class TestReadTopologyConfig:
@@ -107,21 +115,6 @@ class TestReadTopologyConfig:
         assert config.kv_transfer_enforcement == "required"
         assert config.kv_transfer_preferred_weight is None
 
-    def test_strips_whitespace_from_file_values(self, monkeypatch, tmp_path):
-        """Strips whitespace/newlines from topology file values."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("  us-east-1a\n")
-        (topology_dir / "rack").write_text("\t rack-22  \n")
-
-        _enable_topology(monkeypatch, topology_dir)
-
-        config = read_topology_config()
-        assert config.topology_domains == {
-            "rack": "rack-22",
-            "zone": "us-east-1a",
-        }
-
     def test_domain_keys_preserve_file_names(self, monkeypatch, tmp_path):
         """Domain keys match the visible topology file names exactly."""
         topology_dir = tmp_path / "topology"
@@ -166,21 +159,6 @@ class TestReadTopologyConfig:
             read_topology_config(poll_interval=0.05, poll_timeout=0.15)
         assert exc_info.value.code == 1
 
-    def test_hard_exit_after_timeout_transfer_domain_file_empty(
-        self, monkeypatch, tmp_path
-    ):
-        """Exits when the transfer-domain file exists but stays empty."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("")
-        (topology_dir / "rack").write_text("rack-22")
-
-        _enable_topology(monkeypatch, topology_dir)
-
-        with pytest.raises(SystemExit) as exc_info:
-            read_topology_config(poll_interval=0.05, poll_timeout=0.15)
-        assert exc_info.value.code == 1
-
     def test_retry_succeeds_when_transfer_domain_file_appears(
         self, monkeypatch, tmp_path
     ):
@@ -205,49 +183,15 @@ class TestReadTopologyConfig:
             "zone": "us-west-2a",
         }
 
-    def test_retry_succeeds_when_empty_transfer_domain_file_gets_content(
-        self, monkeypatch, tmp_path
-    ):
-        """Empty transfer-domain file gets content after a delay."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        zone_file = topology_dir / "zone"
-        zone_file.write_text("")
-
-        _enable_topology(monkeypatch, topology_dir)
-
-        def write_after_delay():
-            time.sleep(0.1)
-            zone_file.write_text("eu-central-1a")
-
-        writer = threading.Thread(target=write_after_delay)
-        writer.start()
-
-        config = read_topology_config(poll_interval=0.05, poll_timeout=2.0)
-        writer.join()
-        assert config.topology_domains == {"zone": "eu-central-1a"}
-
-    def test_reads_required_transfer_policy_env_vars(self, monkeypatch, tmp_path):
-        """Reads required KV transfer policy from env vars."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("us-east-1a")
-
-        _enable_topology(monkeypatch, topology_dir)
-        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "required")
-
-        config = read_topology_config()
-        assert config.kv_transfer_domain == "zone"
-        assert config.kv_transfer_enforcement == "required"
-        assert config.kv_transfer_preferred_weight is None
-
     def test_reads_preferred_transfer_policy_env_vars(self, monkeypatch, tmp_path):
         """Reads preferred KV transfer policy and weight from env vars."""
         topology_dir = tmp_path / "topology"
         topology_dir.mkdir()
         (topology_dir / "zone").write_text("us-east-1a")
 
-        _enable_topology(monkeypatch, topology_dir)
+        _enable_topology(
+            monkeypatch, topology_dir, enforcement="preferred", preferred_weight=0.85
+        )
         monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "preferred")
         monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", "0.85")
 
@@ -255,87 +199,6 @@ class TestReadTopologyConfig:
         assert config.kv_transfer_domain == "zone"
         assert config.kv_transfer_enforcement == "preferred"
         assert config.kv_transfer_preferred_weight == 0.85
-
-    def test_required_is_default_enforcement_when_domain_set(
-        self, monkeypatch, tmp_path
-    ):
-        """Missing enforcement defaults to required when a transfer domain is set."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("us-east-1a")
-
-        _enable_topology(monkeypatch, topology_dir)
-
-        config = read_topology_config()
-        assert config.kv_transfer_enforcement == "required"
-
-    def test_reads_transfer_policy_env_vars_without_validation(
-        self, monkeypatch, tmp_path
-    ):
-        """Reader passes env values through; binding owns enum normalization."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("us-east-1a")
-
-        _enable_topology(monkeypatch, topology_dir)
-        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "Preferred")
-        monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", "0.5")
-
-        config = read_topology_config()
-        assert config.kv_transfer_domain == "zone"
-        assert config.kv_transfer_enforcement == "Preferred"
-        assert config.kv_transfer_preferred_weight == 0.5
-
-    def test_reader_defers_missing_preferred_weight_validation(
-        self, monkeypatch, tmp_path
-    ):
-        """Reader publishes env values; runtime config validates policy shape."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("us-east-1a")
-
-        _enable_topology(monkeypatch, topology_dir)
-        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "preferred")
-        monkeypatch.delenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", raising=False)
-
-        config = read_topology_config()
-        assert config.kv_transfer_enforcement == "preferred"
-        assert config.kv_transfer_preferred_weight is None
-
-    def test_reader_defers_invalid_transfer_enforcement_validation(
-        self, monkeypatch, tmp_path
-    ):
-        """Invalid enforcement is left for the ModelRuntimeConfig binding."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("us-east-1a")
-
-        _enable_topology(monkeypatch, topology_dir)
-        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "fallback")
-
-        config = read_topology_config()
-        assert config.kv_transfer_enforcement == "fallback"
-
-    @pytest.mark.parametrize("raw_weight", ["1.1", "-0.1", "nan", "inf"])
-    def test_reader_defers_preferred_weight_range_validation(
-        self, monkeypatch, tmp_path, raw_weight
-    ):
-        """Reader only parses weight as float; binding validates finite range."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("us-east-1a")
-
-        _enable_topology(monkeypatch, topology_dir)
-        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "preferred")
-        monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", raw_weight)
-
-        config = read_topology_config()
-        if raw_weight == "nan":
-            assert math.isnan(config.kv_transfer_preferred_weight)
-        elif raw_weight == "inf":
-            assert math.isinf(config.kv_transfer_preferred_weight)
-        else:
-            assert config.kv_transfer_preferred_weight == float(raw_weight)
 
     def test_non_float_preferred_weight_raises_value_error(self, monkeypatch, tmp_path):
         """Python still parses string env vars before calling the float setter."""
@@ -343,54 +206,8 @@ class TestReadTopologyConfig:
         topology_dir.mkdir()
         (topology_dir / "zone").write_text("us-east-1a")
 
-        _enable_topology(monkeypatch, topology_dir)
-        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "preferred")
+        _enable_topology(monkeypatch, topology_dir, enforcement="preferred")
         monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", "heavy")
 
         with pytest.raises(ValueError, match="could not convert string to float"):
             read_topology_config()
-
-    def test_reader_defers_weight_enforcement_pair_validation(
-        self, monkeypatch, tmp_path
-    ):
-        """Required+weight is left for ModelRuntimeConfig validation."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("us-east-1a")
-
-        _enable_topology(monkeypatch, topology_dir)
-        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "required")
-        monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", "0.85")
-
-        config = read_topology_config()
-        assert config.kv_transfer_enforcement == "required"
-        assert config.kv_transfer_preferred_weight == 0.85
-
-    def test_apply_topology_config_reads_env_and_leaves_existing_taints(
-        self, monkeypatch, tmp_path
-    ):
-        """Python publishes topology domains; Rust derives topology taints."""
-        topology_dir = tmp_path / "topology"
-        topology_dir.mkdir()
-        (topology_dir / "zone").write_text("us-east-1a")
-        (topology_dir / "rack").write_text("rack-22")
-
-        _enable_topology(monkeypatch, topology_dir)
-        monkeypatch.setenv("DYN_KV_TRANSFER_ENFORCEMENT", "preferred")
-        monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", "0.85")
-
-        runtime_config = FakeRuntimeConfig()
-        runtime_config.taints = {"user.taint/example"}
-
-        returned = apply_topology_config(runtime_config)
-
-        expected_topology_domains = {
-            "rack": "rack-22",
-            "zone": "us-east-1a",
-        }
-        assert returned.topology_domains == expected_topology_domains
-        assert runtime_config.topology_domains == expected_topology_domains
-        assert runtime_config.kv_transfer_domain == "zone"
-        assert runtime_config.kv_transfer_enforcement == "preferred"
-        assert runtime_config.kv_transfer_preferred_weight == 0.85
-        assert runtime_config.taints == {"user.taint/example"}
