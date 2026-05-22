@@ -35,6 +35,7 @@ _KV_TRANSFER_DOMAIN_VAR = "DYN_KV_TRANSFER_DOMAIN"
 _KV_TRANSFER_ENFORCEMENT_VAR = "DYN_KV_TRANSFER_ENFORCEMENT"
 _KV_TRANSFER_PREFERRED_WEIGHT_VAR = "DYN_KV_TRANSFER_PREFERRED_WEIGHT"
 _DEFAULT_MOUNT_PATH = "/etc/dynamo/topology"
+_DEFAULT_KV_TRANSFER_ENFORCEMENT = "required"
 _POLL_INTERVAL_SECS = 1.0
 _POLL_TIMEOUT_SECS = 30.0
 
@@ -92,7 +93,9 @@ def _read_kv_transfer_policy() -> tuple[str, str | None, float | None]:
     kv_transfer_domain = (
         kv_transfer_domain.strip() if kv_transfer_domain is not None else None
     )
-    kv_transfer_enforcement = os.environ.get(_KV_TRANSFER_ENFORCEMENT_VAR, "required")
+    kv_transfer_enforcement = os.environ.get(
+        _KV_TRANSFER_ENFORCEMENT_VAR, _DEFAULT_KV_TRANSFER_ENFORCEMENT
+    )
     raw_preferred_weight = os.environ.get(_KV_TRANSFER_PREFERRED_WEIGHT_VAR, None)
 
     if not kv_transfer_domain:
