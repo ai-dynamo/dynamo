@@ -1780,9 +1780,9 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	)
 }
 
-// buildCheckpointJobPodTemplate builds a pod template for the checkpoint job from the component spec.
-// It reuses GenerateBasePodSpec to ensure checkpoint jobs have the same configuration as regular pods,
-// including auto-discovered image pull secrets, envFromSecret, resources, security context, etc.
+// buildCheckpointJobPodTemplate builds a checkpoint job template from the same
+// component defaults used for regular DGD pods, then keeps only the target
+// container plus any checkpoint-job sidecars supplied by the user.
 //
 //nolint:gocyclo
 func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
@@ -1820,19 +1820,13 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	}
 	componentForJob.FrontendSidecar = nil
 
-	// Generate base PodSpec using the same logic as regular worker pods
-	// This includes: image pull secrets (auto-discovered + explicit), envFromSecret,
-	// resources, security context, tolerations, node selectors, etc.
-	//
-	// Note: For checkpoint jobs, we use Grove deployment type even though it's single-node.
-	// This is because GenerateBasePodSpec requires a valid MultinodeDeployer, and for
-	// single-node cases, the backends simply return early without modifications.
-	podSpec, err := dynamo.GenerateBasePodSpec(
+	// Use the normal DGD path so graph-level defaults such as spec.env,
+	// annotations, labels, and pod-template metadata are applied consistently.
+	podSpec, err := dynamo.GeneratePodSpecForComponent(
 		componentForJob,
 		backendFramework,
 		r.DockerSecretRetriever,
-		dynamoDeployment.Name,
-		dynamoDeployment.Namespace,
+		dynamoDeployment,
 		dynamo.RoleCheckpoint, // Use checkpoint role
 		1,                     // Single node for checkpoint job
 		r.Config,
