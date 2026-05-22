@@ -4,6 +4,8 @@
 //! Parse the subset of SGLang's `GetServerInfo` / `GetModelInfo` JSON fields
 //! the bridge needs to populate Dynamo's MDC.
 
+use dynamo_backend_common::DisaggregationMode;
+
 #[derive(Debug, Default)]
 pub struct SglangServerInfo {
     pub model_path: Option<String>,
@@ -15,6 +17,8 @@ pub struct SglangServerInfo {
     pub max_total_num_tokens: Option<u64>,
     pub bootstrap_port: Option<u16>,
     pub bootstrap_host: Option<String>,
+    /// SGLang's own `--disaggregation-mode`. `"null"` and missing both → None.
+    pub disaggregation_mode: Option<DisaggregationMode>,
 }
 
 /// ServerArgs is nested under `server_args` on newer SGLang and at the top
@@ -48,6 +52,12 @@ pub fn parse_server_info(json_info: &str) -> SglangServerInfo {
             addr.rsplit_once(':')
                 .map(|(h, _)| h.to_string())
                 .unwrap_or(addr)
+        }),
+        disaggregation_mode: args.get("disaggregation_mode").and_then(|v| match v.as_str()? {
+            "prefill" => Some(DisaggregationMode::Prefill),
+            "decode" => Some(DisaggregationMode::Decode),
+            "null" | "" => Some(DisaggregationMode::Aggregated),
+            _ => None,
         }),
     }
 }

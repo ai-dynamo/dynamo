@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio::sync::watch;
 
+use crate::disagg::DisaggregationMode;
 use crate::error::DynamoError;
 
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -115,6 +116,12 @@ pub struct EngineConfig {
     /// `WorkerConfig.model_name` is empty, `Worker` resolves this as the
     /// tokenizer source (local path or HF fetch).
     pub model: String,
+    /// Disaggregation mode reported by the engine (typically read from an
+    /// external runtime in `start()`). When `Some`, overrides
+    /// `WorkerConfig.disaggregation_mode`. `None` means "use the operator's
+    /// CLI value." Lets engines that connect to upstream runtimes (e.g.
+    /// `sglang_bridge`) discover the mode instead of trusting a CLI flag.
+    pub disaggregation_mode_override: Option<DisaggregationMode>,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
     /// Maximum context length the engine supports, in tokens.

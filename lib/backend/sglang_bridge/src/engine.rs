@@ -34,7 +34,9 @@ const SCHEDULER_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct SglangBridge {
     grpc_endpoint: String,
-    disaggregation_mode: DisaggregationMode,
+    /// Discovered from SGLang's `GetServerInfo` in `start()`; read by
+    /// `generate()` to dispatch prefill vs decode.
+    disaggregation_mode: OnceCell<DisaggregationMode>,
     bootstrap: OnceCell<(String, u16)>,
     client: OnceCell<SglangServiceClient<Channel>>,
     health_check_task: OnceCell<JoinHandle<()>>,
@@ -50,21 +52,26 @@ impl SglangBridge {
 
         let engine = SglangBridge {
             grpc_endpoint: args.sglang_grpc_endpoint,
-            disaggregation_mode: args.common.disaggregation_mode,
+            disaggregation_mode: OnceCell::new(),
             bootstrap: OnceCell::new(),
             client: OnceCell::new(),
             health_check_task: OnceCell::new(),
         };
+        // disaggregation_mode is discovered by `start()` from SGLang and
+        // returned on EngineConfig; Worker reads the engine's override.
         let config = WorkerConfig {
             namespace: args.common.namespace,
             component: args.common.component,
             endpoint: args.common.endpoint,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
-            disaggregation_mode: args.common.disaggregation_mode,
             ..Default::default()
         };
         Ok((engine, config))
+    }
+
+    fn mode(&self) -> DisaggregationMode {
+        self.disaggregation_mode.get().copied().unwrap_or_default()
     }
 }
 
@@ -108,6 +115,8 @@ impl LLMEngine for SglangBridge {
             .map_err(|e| backend_error(format!("GetServerInfo: {e}")))?
             .into_inner();
         let info = parse_server_info(&server_info.json_info);
+        let mode = info.disaggregation_mode.unwrap_or_default();
+        let _ = self.disaggregation_mode.set(mode);
 
         let model_path = if !model_info.model_path.is_empty() {
             model_info.model_path
@@ -119,7 +128,7 @@ impl LLMEngine for SglangBridge {
         }
         let served_model_name = info.served_model_name.unwrap_or_else(|| model_path.clone());
 
-        if self.disaggregation_mode.is_prefill() {
+        if mode.is_prefill() {
             let port = info.bootstrap_port.ok_or_else(|| {
                 backend_error("GetServerInfo.disaggregation_bootstrap_port missing")
             })?;
@@ -142,7 +151,7 @@ impl LLMEngine for SglangBridge {
         tracing::info!(
             endpoint = %self.grpc_endpoint,
             model = %model_path,
-            disagg_mode = %self.disaggregation_mode,
+            disagg_mode = %mode,
             "sglang_bridge connected"
         );
 
@@ -160,6 +169,7 @@ impl LLMEngine for SglangBridge {
         Ok(EngineConfig {
             model: model_path,
             served_model_name: Some(served_model_name),
+            disaggregation_mode_override: Some(mode),
             context_length,
             kv_cache_block_size: info.page_size,
             total_kv_blocks,
@@ -178,7 +188,7 @@ impl LLMEngine for SglangBridge {
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let ctx = ctx.inner_arc();
-        if self.disaggregation_mode.is_prefill() {
+        if self.mode().is_prefill() {
             self.generate_prefill(request, ctx).await
         } else {
             self.generate_decode(request, ctx).await

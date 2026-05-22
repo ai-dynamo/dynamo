@@ -155,6 +155,7 @@ impl EngineConfig {
                 bootstrap_host,
                 bootstrap_port,
                 runtime_data,
+                ..Default::default()
             },
         })
     }
@@ -561,6 +562,7 @@ impl LLMEngine for PyLLMEngine {
                     Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
                     _ => HashMap::new(),
                 },
+                ..Default::default()
             })
         })
         .map_err(py_err_to_dynamo)
