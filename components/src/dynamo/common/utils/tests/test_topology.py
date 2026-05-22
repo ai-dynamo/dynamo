@@ -12,8 +12,6 @@ so they work without GPU, CUDA, or any backend installed.
 """
 
 import importlib.util
-import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -65,6 +63,26 @@ def _enable_topology(
         monkeypatch.setenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", str(preferred_weight))
     else:
         monkeypatch.delenv("DYN_KV_TRANSFER_PREFERRED_WEIGHT", raising=False)
+
+
+def _mock_topology_clock(monkeypatch, on_sleep=None):
+    """Replace topology's clock so polling tests do not use wall time."""
+    now = 0.0
+    sleep_calls = []
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        sleep_calls.append(seconds)
+        if on_sleep is not None:
+            on_sleep(len(sleep_calls))
+        now += seconds
+
+    monkeypatch.setattr(topology.time, "monotonic", monotonic)
+    monkeypatch.setattr(topology.time, "sleep", sleep)
+    return sleep_calls
 
 
 class TestReadTopologyConfig:
@@ -146,6 +164,7 @@ class TestReadTopologyConfig:
             read_topology_config()
         assert exc_info.value.code == 1
 
+    @pytest.mark.timeout(5)
     def test_hard_exit_after_timeout_transfer_domain_file_missing(
         self, monkeypatch, tmp_path
     ):
@@ -155,11 +174,14 @@ class TestReadTopologyConfig:
         (topology_dir / "rack").write_text("rack-22")
 
         _enable_topology(monkeypatch, topology_dir)
+        sleep_calls = _mock_topology_clock(monkeypatch)
 
         with pytest.raises(SystemExit) as exc_info:
             read_topology_config(poll_interval=0.05, poll_timeout=0.15)
         assert exc_info.value.code == 1
+        assert sleep_calls == pytest.approx([0.05, 0.05, 0.05])
 
+    @pytest.mark.timeout(5)
     def test_retry_succeeds_when_transfer_domain_file_appears(
         self, monkeypatch, tmp_path
     ):
@@ -170,19 +192,18 @@ class TestReadTopologyConfig:
 
         _enable_topology(monkeypatch, topology_dir)
 
-        def write_after_delay():
-            time.sleep(0.1)
+        def publish_transfer_domain_on_retry(_sleep_count):
             (topology_dir / "zone").write_text("us-west-2a")
 
-        writer = threading.Thread(target=write_after_delay)
-        writer.start()
-
+        sleep_calls = _mock_topology_clock(
+            monkeypatch, on_sleep=publish_transfer_domain_on_retry
+        )
         config = read_topology_config(poll_interval=0.05, poll_timeout=2.0)
-        writer.join()
         assert config.topology_domains == {
             "rack": "rack-22",
             "zone": "us-west-2a",
         }
+        assert sleep_calls == [0.05]
 
     def test_reads_preferred_transfer_policy_env_vars(self, monkeypatch, tmp_path):
         """Reads preferred KV transfer policy and weight from env vars."""
