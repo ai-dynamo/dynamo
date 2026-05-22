@@ -1,50 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="600" viewBox="0 0 1280 600">
-<rect width="1280" height="600" fill="#000000"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="460" viewBox="0 0 1280 460">
+<rect width="1280" height="460" fill="#000000"/>
 <style>
   .title { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 36px; font-weight: 300; fill: #ffffff; }
   .subtitle { font-family: "Helvetica Neue", Helvetica, Geist, Arial, sans-serif; font-size: 17px; font-weight: 300; fill: #cdcdcd; }
-  .frame-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; fill: #8c8c8c; letter-spacing: 0.04em; text-transform: uppercase; }
-  .frame-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #8c8c8c; }
-  .block-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #ffffff; }
-  .block-label-small { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; fill: #ffffff; }
-  .block-label-green { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 500; fill: #74b711; }
-  .block-label-ghost { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 400; fill: #5a5a5a; font-style: italic; }
-  .block-meta-mono { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #cdcdcd; }
-  .block-meta-mono-dim { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #8c8c8c; }
-  .block-meta-mono-green { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #74b711; }
-  .block-meta-mono-ghost { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #5a5a5a; }
-  .arrow-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; fill: #ffffff; letter-spacing: 0.04em; }
-  .arrow-meta { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #74b711; }
+  .row-label { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 600; fill: #ffffff; letter-spacing: 0.08em; text-transform: uppercase; }
+  .row-total { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 13px; font-weight: 500; fill: #cdcdcd; }
+  .seg-big { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 500; fill: #ffffff; }
+  .seg-ghost { font-family: Geist, "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 400; fill: #6a6a6a; font-style: italic; }
+  .callout { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 400; fill: #cdcdcd; }
+  .callout-green { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 11px; font-weight: 500; fill: #74b711; }
+  .footer { font-family: "Geist Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-weight: 400; fill: #8c8c8c; }
 </style>
-<text class="title" x="40" y="58">Releasing the KV cache before freeze</text>
-<text class="subtitle" x="40" y="86">Unmapping cache buffers before the snapshot keeps the artifact small &#8212; on B200 it recovers ~180 GiB of KV cache and shrinks the checkpoint to ~6 GiB for Qwen3 0.6B</text>
-<rect x="70.0" y="140" width="480" height="400" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<text class="frame-label" x="94.0" y="170">Before freeze</text>
-<text class="frame-meta" x="526.0" y="170" text-anchor="end">Device memory &#183; ~182 GiB at gpu_memory_utilization=0.95</text>
-<rect x="94.0" y="196" width="432" height="35.95854922279793" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
-<text class="block-label-small" x="108.0" y="217.97927461139898">Weights</text>
-<text class="block-meta-mono" x="512.0" y="217.97927461139898" text-anchor="end">~1.1 GiB &#183; Qwen3 0.6B BF16</text>
-<rect x="94.0" y="239.95854922279793" width="432" height="246.71502590673575" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
-<text class="block-label" x="310.0" y="359.3160621761658" text-anchor="middle">KV cache</text>
-<text class="block-meta-mono" x="310.0" y="381.3160621761658" text-anchor="middle">~180 GiB &#183; sized to fill the budget</text>
-<rect x="94.0" y="494.6735751295337" width="432" height="29.326424870466322" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
-<text class="block-label-small" x="108.0" y="513.3367875647668">CUDA graph + buffers</text>
-<text class="block-meta-mono" x="512.0" y="513.3367875647668" text-anchor="end">~1.5 GiB &#183; compiled kernels + workspace</text>
-<rect x="730.0" y="140" width="480" height="400" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<text class="frame-label" x="754.0" y="170">After unmap + release</text>
-<text class="frame-meta" x="1186.0" y="170" text-anchor="end">Device memory &#183; ~2.6 GiB resident</text>
-<rect x="754.0" y="196" width="432" height="35.95854922279793" fill="#000000" stroke="#74b711" stroke-width="1.5"/>
-<text class="block-label-small" x="768.0" y="217.97927461139898">Weights</text>
-<text class="block-meta-mono-green" x="1172.0" y="217.97927461139898" text-anchor="end">~1.1 GiB &#183; survives freeze</text>
-<rect x="754.0" y="239.95854922279793" width="432" height="246.71502590673575" fill="none" stroke="#5a5a5a" stroke-width="1" stroke-dasharray="6 6"/>
-<text class="block-label-ghost" x="970.0" y="359.3160621761658" text-anchor="middle">KV cache</text>
-<text class="block-meta-mono-ghost" x="970.0" y="381.3160621761658" text-anchor="middle">released &#183; ~180 GiB recovered</text>
-<rect x="754.0" y="494.6735751295337" width="432" height="29.326424870466322" fill="#000000" stroke="#74b711" stroke-width="1.5"/>
-<text class="block-label-small" x="768.0" y="513.3367875647668">CUDA graph + buffers</text>
-<text class="block-meta-mono-green" x="1172.0" y="513.3367875647668" text-anchor="end">~1.5 GiB &#183; survives freeze</text>
-<line x1="564.0" y1="340.0" x2="704.0" y2="340.0" stroke="#74b711" stroke-width="2"/>
-<polygon points="704.0,332.0 716.0,340.0 704.0,348.0" fill="#74b711"/>
-<text class="arrow-label" x="640.0" y="312.0" text-anchor="middle">UNMAP + RELEASE</text>
-<text class="arrow-meta" x="640.0" y="366.0" text-anchor="middle">device: ~182 GiB &#8594; ~2.6 GiB</text>
-<text class="arrow-meta" x="640.0" y="384.0" text-anchor="middle" fill="#8c8c8c">CRIU + cuda-checkpoint artifact: ~6 GiB</text>
+
+<text class="title" x="40" y="58">Unmapping the KV cache before snapshot</text>
+<text class="subtitle" x="40" y="86">cuMemUnmap + cuMemRelease before CRIU runs &#8212; otherwise the snapshot has to capture ~180 GiB of unused buffer.</text>
+
+<!-- BEFORE UNMAP -->
+<text class="row-label" x="60" y="146">Before unmap</text>
+<text class="row-total" x="1220" y="146" text-anchor="end">~182 GiB resident</text>
+<rect x="60" y="166" width="7" height="60" fill="#5a5a5a"/>
+<rect x="67" y="166" width="1143" height="60" fill="#4a4a4a"/>
+<rect x="1210" y="166" width="10" height="60" fill="#5a5a5a"/>
+<text class="seg-big" x="638" y="203" text-anchor="middle">KV cache &#183; 180 GiB</text>
+
+<line x1="63.5" y1="228" x2="63.5" y2="244" stroke="#5a5a5a" stroke-width="1"/>
+<text class="callout" x="74" y="258">Weights &#183; 1.1 GiB</text>
+<line x1="1215" y1="228" x2="1215" y2="244" stroke="#5a5a5a" stroke-width="1"/>
+<text class="callout" x="1207" y="258" text-anchor="end">CUDA graph + buffers &#183; 1.5 GiB</text>
+
+<!-- AFTER UNMAP -->
+<text class="row-label" x="60" y="310">After unmap</text>
+<text class="row-total" x="1220" y="310" text-anchor="end">~2.6 GiB resident</text>
+<rect x="60" y="330" width="7" height="60" fill="#74b711"/>
+<rect x="67" y="330" width="1143" height="60" fill="none" stroke="#3a3a3a" stroke-width="1" stroke-dasharray="6 6"/>
+<rect x="1210" y="330" width="10" height="60" fill="#74b711"/>
+<text class="seg-ghost" x="638" y="367" text-anchor="middle">KV cache &#183; virtual addresses kept, physical pages released</text>
+
+<line x1="63.5" y1="392" x2="63.5" y2="408" stroke="#74b711" stroke-width="1"/>
+<text class="callout-green" x="74" y="422">Weights &#183; 1.1 GiB &#183; survives</text>
+<line x1="1215" y1="392" x2="1215" y2="408" stroke="#74b711" stroke-width="1"/>
+<text class="callout-green" x="1207" y="422" text-anchor="end">CUDA graph + buffers &#183; 1.5 GiB &#183; survives</text>
+
+<!-- Footer (setup details at bottom) -->
+<text class="footer" x="40" y="450">Qwen3 0.6B BF16 &#183; NVIDIA B200, 192 GiB HBM &#183; vLLM gpu_memory_utilization=0.95 &#183; on-disk checkpoint artifact after unmap: ~6 GiB</text>
 </svg>
