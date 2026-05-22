@@ -16,7 +16,7 @@ These skills are mirrored daily to the public [NVIDIA/skills](https://github.com
 | Skill | Lifecycle stage | Owns | NV-ACES |
 |---|---|---|---|
 | [`dynamo-plan`](dynamo-plan/SKILL.md) | Plan | AIConfigurator workflow, DGDR `searchStrategy` choice (`rapid` vs `thorough`), SLA target framing, recipe selection | 92 |
-| [`dynamo-optimize`](dynamo-optimize/SKILL.md) | Optimize | **Placeholder.** Will own recipe selection, patching, validation, and pre-deploy smoke-testing once the recipe-runner workflow from a parallel in-flight PR is brought through the rigor floor documented in `dynamo-skill-author`. | TBD |
+| [`dynamo-optimize`](dynamo-optimize/SKILL.md) | Optimize | Recipe selection from `ai-dynamo/dynamo` `recipes/<model>/<framework>/<mode>/`, soft-chain to AIConfigurator output, workload-class interview, recipe-envelope refusal, minimal patches, optional `agg-*` workstation pre-validation, server-side dry-run, AIPerf 0.8.0 `--goodput` SLO validation with per-dimension PASS/FAIL and optional baseline delta. | TBD |
 | [`dynamo-serve`](dynamo-serve/SKILL.md) | Local run | Single-node workstation workflow via `python3 -m dynamo.<backend>`; per-backend launch-flag matrix | 92 |
 | [`dynamo-deploy`](dynamo-deploy/SKILL.md) | Deploy | `dynamo-platform` Helm install, DGD + DGDR authoring, recipe-based deployment, conversion-webhook semantics, day-2 ops | 90 |
 | [`dynamo-frontend`](dynamo-frontend/SKILL.md) | Request path | Frontend service (OpenAI endpoints `/v1/chat`, `/v1/completions`, `/v1/embeddings`, `/v1/realtime`), `DynamoModel` CR, multi-model serving, GAIE / kgateway / Istio integration | 92 |
@@ -24,7 +24,7 @@ These skills are mirrored daily to the public [NVIDIA/skills](https://github.com
 | [`dynamo-benchmark`](dynamo-benchmark/SKILL.md) | Benchmark | AIPerf workflow, in-tree `benchmarks/` suites, recipe-attached benchmark companions | 92 |
 | [`dynamo-skill-author`](dynamo-skill-author/SKILL.md) | Meta / authoring | Step-by-step guidance for adding a new skill to this directory or refreshing one for a new release. Includes `scaffold-skill.sh`, `validate-skill.sh`, and a strict `check-frontmatter.py`. Eats its own dogfood — self-validates clean. | TBD |
 
-NV-ACES Tier 1 (Astra Continuous Evaluation for Skills) deterministic-scoring results from 2026-05-21 across the six lifecycle skills that currently ship content. Average **91.7 / 100**; lowest **90**. All grades A- or A. The placeholder `dynamo-optimize` skill and the meta-skill `dynamo-skill-author` are scored on a subsequent NV-ACES run as their content lands.
+NV-ACES Tier 1 (Astra Continuous Evaluation for Skills) deterministic-scoring results from 2026-05-21 across the six lifecycle skills that currently shipped content at that snapshot. Average **91.7 / 100**; lowest **90**. All grades A- or A. The newly-landed `dynamo-optimize` skill and the meta-skill `dynamo-skill-author` are scored on a subsequent NV-ACES run.
 
 Two further lifecycle skills are considered and deferred to a follow-up MR: `dynamo-install` (one-time cluster install of `dynamo-platform`) and `dynamo-upgrade` (release-to-release migration). Both have real workflows but require capturing the end-to-end command sequences before they're skill-ready. The new `dynamo-skill-author` skill above is the recommended entry point when authoring either of those.
 
