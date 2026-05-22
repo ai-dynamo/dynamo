@@ -210,6 +210,7 @@ class VllmLLMEngine(LLMEngine):
 
         return EngineConfig(
             model=self.engine_args.model,
+            disaggregation_mode=self.disaggregation_mode,
             served_model_name=self.engine_args.served_model_name,
             context_length=self._model_max_len,
             kv_cache_block_size=block_size,

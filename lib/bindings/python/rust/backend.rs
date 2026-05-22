@@ -108,6 +108,7 @@ impl EngineConfig {
     #[new]
     #[pyo3(signature = (
         model,
+        disaggregation_mode = DisaggregationMode::Aggregated,
         served_model_name = None,
         context_length = None,
         kv_cache_block_size = None,
@@ -123,6 +124,7 @@ impl EngineConfig {
     #[allow(clippy::too_many_arguments)]
     fn new(
         model: String,
+        disaggregation_mode: DisaggregationMode,
         served_model_name: Option<String>,
         context_length: Option<u32>,
         kv_cache_block_size: Option<u32>,
@@ -144,6 +146,7 @@ impl EngineConfig {
         Ok(Self {
             inner: RsEngineConfig {
                 model,
+                disaggregation_mode: disaggregation_mode.into(),
                 served_model_name,
                 context_length,
                 kv_cache_block_size,
@@ -163,6 +166,14 @@ impl EngineConfig {
     #[getter]
     fn model(&self) -> &str {
         &self.inner.model
+    }
+    #[getter]
+    fn disaggregation_mode(&self) -> DisaggregationMode {
+        match self.inner.disaggregation_mode {
+            RsDisaggregationMode::Aggregated => DisaggregationMode::Aggregated,
+            RsDisaggregationMode::Prefill => DisaggregationMode::Prefill,
+            RsDisaggregationMode::Decode => DisaggregationMode::Decode,
+        }
     }
     #[getter]
     fn served_model_name(&self) -> Option<&str> {
@@ -270,7 +281,6 @@ impl WorkerConfig {
         enable_kv_routing = true,
         metrics_labels = Vec::new(),
         runtime = None,
-        disaggregation_mode = DisaggregationMode::Aggregated,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -289,7 +299,6 @@ impl WorkerConfig {
         enable_kv_routing: bool,
         metrics_labels: Vec<(String, String)>,
         runtime: Option<RuntimeConfig>,
-        disaggregation_mode: DisaggregationMode,
     ) -> Self {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -313,7 +322,6 @@ impl WorkerConfig {
                 enable_local_indexer,
                 enable_kv_routing,
                 metrics_labels,
-                disaggregation_mode: disaggregation_mode.into(),
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
             },
         }
@@ -546,8 +554,17 @@ impl LLMEngine for PyLLMEngine {
             if let Ok(cfg) = bound.extract::<EngineConfig>() {
                 return Ok(cfg.inner);
             }
+            // Duck-typed: `disaggregation_mode` reads either a
+            // `dynamo._core.backend.DisaggregationMode` (3-mode Rust enum)
+            // or the user-facing 4-mode `dynamo.common.constants.DisaggregationMode`
+            // (ENCODE rejects at coercion). Default = Aggregated when absent.
+            let disaggregation_mode = match bound.getattr("disaggregation_mode") {
+                Ok(value) if !value.is_none() => coerce_disagg_mode(&value)?,
+                _ => RsDisaggregationMode::Aggregated,
+            };
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
+                disaggregation_mode,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
                 context_length: opt_attr::<u32>(bound, "context_length")?,
                 kv_cache_block_size: opt_attr::<u32>(bound, "kv_cache_block_size")?,
@@ -884,6 +901,40 @@ fn depythonize_metrics_source(item: &Bound<'_, PyAny>) -> PyResult<RsMetricsSour
 ///   * `Err(PyErr)` when present and non-`None` but the conversion fails
 ///     — surfaces engine-author bugs (e.g. `context_length="not-a-int"`)
 ///     rather than silently dropping them.
+/// Convert a Python `DisaggregationMode` (either our Rust pyclass or the
+/// 4-mode user-facing enum from `dynamo.common.constants`) into the Rust
+/// 3-mode enum. ENCODE is rejected with a clear message — multimodal encode
+/// workers stay on the legacy backend path.
+fn coerce_disagg_mode(value: &Bound<'_, PyAny>) -> PyResult<RsDisaggregationMode> {
+    // Path 1: already the Rust pyclass.
+    if let Ok(mode) = value.extract::<DisaggregationMode>() {
+        return Ok(mode.into());
+    }
+    // Path 2: foreign enum — match by `.name` attribute.
+    let name: String = value
+        .getattr("name")
+        .and_then(|n| n.extract())
+        .map_err(|e| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "EngineConfig.disaggregation_mode is {}; expected a DisaggregationMode \
+                 (no `.name` attribute): {e}",
+                value.get_type().name().map(|s| s.to_string()).unwrap_or_default()
+            ))
+        })?;
+    match name.to_ascii_uppercase().as_str() {
+        "AGGREGATED" => Ok(RsDisaggregationMode::Aggregated),
+        "PREFILL" => Ok(RsDisaggregationMode::Prefill),
+        "DECODE" => Ok(RsDisaggregationMode::Decode),
+        "ENCODE" => Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "DisaggregationMode.ENCODE is not supported by the unified backend; \
+             use the legacy backend entry point for multimodal encode workers",
+        )),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown DisaggregationMode `{other}` on EngineConfig.disaggregation_mode"
+        ))),
+    }
+}
+
 fn opt_attr<T>(bound: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<T>>
 where
     T: for<'py> FromPyObject<'py>,

@@ -91,6 +91,18 @@ struct Args {
     /// `num_gpu_blocks * block_size`.
     #[arg(long, default_value_t = 8192)]
     context_length: u32,
+
+    /// Disaggregation role: `agg` (default), `prefill`, or `decode`.
+    /// Mocker has no upstream to query for this, so it accepts the value
+    /// from the CLI and declares it via `EngineConfig.disaggregation_mode`
+    /// in `start()`.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = DisaggregationMode::Aggregated,
+        env = "DYN_DISAGGREGATION_MODE",
+    )]
+    disaggregation_mode: DisaggregationMode,
 }
 
 fn build_engine_args(args: &Args) -> Result<MockEngineArgs, DynamoError> {
@@ -189,12 +201,11 @@ impl MockerBackend {
         .map_err(|e| invalid_arg(e.to_string()))?;
 
         let engine_args = build_engine_args(&args)?;
-        let disaggregation_mode = args.common.disaggregation_mode;
         let engine = Self::new(
             args.model_name.clone(),
             args.context_length,
             engine_args,
-            disaggregation_mode,
+            args.disaggregation_mode,
         );
         let config = WorkerConfig {
             namespace: args.common.namespace,
@@ -202,7 +213,6 @@ impl MockerBackend {
             endpoint: args.common.endpoint,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
-            disaggregation_mode,
             model_name: args.model_path,
             served_model_name: Some(args.model_name),
             ..Default::default()
@@ -278,6 +288,7 @@ impl LLMEngine for MockerBackend {
         Ok(EngineConfig {
             model: self.model_name.clone(),
             served_model_name: Some(self.model_name.clone()),
+            disaggregation_mode: self.disaggregation_mode,
             context_length: Some(self.context_length),
             kv_cache_block_size: Some(self.engine_args.block_size as u32),
             total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
@@ -291,7 +302,6 @@ impl LLMEngine for MockerBackend {
             bootstrap_host: None,
             bootstrap_port: None,
             runtime_data: Default::default(),
-            engine_disaggregation_mode: None,
         })
     }
 
@@ -890,19 +900,25 @@ mod tests {
     }
 
     #[test]
-    fn from_args_propagates_disaggregation_mode_to_worker_config_and_engine() {
-        // The mode flows two places: onto WorkerConfig (consumed by the
-        // Rust Worker for registration) and onto the engine itself
-        // (consumed in generate() for per-mode dispatch). Both must
-        // agree — a mismatch would mean the engine ran prefill logic
-        // while the runtime registered as decode (or vice versa).
-        let (engine, config) = MockerBackend::from_args(Some(vec![
+    fn from_args_propagates_disaggregation_mode_to_engine() {
+        // Under engine-only disagg, the CLI flag flows into the engine
+        // (consumed in generate() for per-mode dispatch) and from there
+        // gets declared via EngineConfig in start(). There is no longer
+        // a WorkerConfig copy, so the "do both agree" question is gone.
+        let (engine, _config) = MockerBackend::from_args(Some(vec![
             "bin".to_string(),
             "--disaggregation-mode".to_string(),
             "prefill".to_string(),
         ]))
         .unwrap();
-        assert_eq!(config.disaggregation_mode, DisaggregationMode::Prefill);
         assert_eq!(engine.disaggregation_mode, DisaggregationMode::Prefill);
+    }
+
+    #[tokio::test]
+    async fn start_returns_engine_declared_disaggregation_mode() {
+        let engine = test_engine_with_mode(DisaggregationMode::Decode);
+        let cfg = engine.start(0).await.unwrap();
+        assert_eq!(cfg.disaggregation_mode, DisaggregationMode::Decode);
+        engine.cleanup().await.unwrap();
     }
 }

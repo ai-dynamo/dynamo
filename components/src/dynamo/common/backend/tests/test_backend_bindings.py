@@ -63,6 +63,7 @@ def test_engine_config_required_model_only():
 def test_engine_config_full_kwargs_round_trip_through_getters():
     cfg = backend.EngineConfig(
         model="m2",
+        disaggregation_mode=backend.DisaggregationMode.Prefill,
         served_model_name="m2-serving",
         context_length=2048,
         kv_cache_block_size=16,
@@ -72,6 +73,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
         runtime_data={"sglang_worker_group_id": "group-a"},
     )
     assert cfg.model == "m2"
+    assert cfg.disaggregation_mode == backend.DisaggregationMode.Prefill
     assert cfg.served_model_name == "m2-serving"
     assert cfg.context_length == 2048
     assert cfg.kv_cache_block_size == 16
@@ -79,6 +81,17 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert cfg.max_num_seqs == 64
     assert cfg.max_num_batched_tokens == 2048
     assert cfg.runtime_data == {"sglang_worker_group_id": "group-a"}
+
+
+def test_engine_config_disaggregation_mode_each_variant():
+    """Each DisaggregationMode variant must construct via EngineConfig."""
+    for mode in (
+        backend.DisaggregationMode.Aggregated,
+        backend.DisaggregationMode.Prefill,
+        backend.DisaggregationMode.Decode,
+    ):
+        cfg = backend.EngineConfig(model="m", disaggregation_mode=mode)
+        assert cfg.disaggregation_mode == mode
 
 
 def test_worker_config_minimum_args():
@@ -110,17 +123,6 @@ def test_worker_config_accepts_parser_runtime_settings():
     )
 
 
-def test_worker_config_accepts_disaggregation_mode():
-    """The Rust binding must accept a DisaggregationMode kwarg so the
-    Python shim can plumb the field through. Each variant must construct."""
-    for mode in (
-        backend.DisaggregationMode.Aggregated,
-        backend.DisaggregationMode.Prefill,
-        backend.DisaggregationMode.Decode,
-    ):
-        backend.WorkerConfig(namespace="dynamo", disaggregation_mode=mode)
-
-
 @pytest.mark.unified
 def test_python_worker_config_from_runtime_config_copies_parser_settings():
     from dynamo.common.backend.worker import WorkerConfig
@@ -139,10 +141,6 @@ def test_python_worker_config_from_runtime_config_copies_parser_settings():
     runtime_cfg.dyn_reasoning_parser = "kimi_k25"
     runtime_cfg.exclude_tools_when_tool_choice_none = False
     runtime_cfg.enable_local_indexer = False
-    # MagicMock auto-attrs would be rejected as a foreign type by the
-    # strict coercer; pin them to None.
-    runtime_cfg.disaggregation_mode = None
-    runtime_cfg.serving_mode = None
 
     config = WorkerConfig.from_runtime_config(runtime_cfg, "nvidia/Kimi-K2.5-NVFP4")
 
@@ -190,118 +188,28 @@ def test_python_worker_config_from_runtime_config_overrides_win():
 
 
 @pytest.mark.unified
-def test_python_worker_config_picks_up_disaggregation_mode_from_runtime_config():
-    from dynamo.common.backend.worker import WorkerConfig
+def test_engine_config_dataclass_default_is_aggregated():
+    """Python `EngineConfig` dataclass defaults `disaggregation_mode` to
+    AGGREGATED so engines that don't run disagg need no extra wiring."""
+    from dynamo.common.backend.engine import EngineConfig
     from dynamo.common.constants import DisaggregationMode
 
-    class _Prefill:
-        namespace = "ns"
-        discovery_backend = "etcd"
-        request_plane = "tcp"
-        event_plane = "nats"
-        # vLLM/TRT-LLM use this name; the helper's primary lookup path.
-        disaggregation_mode = DisaggregationMode.PREFILL
-
-    cfg = WorkerConfig.from_runtime_config(_Prefill(), model_name="m")
-    assert cfg.disaggregation_mode is DisaggregationMode.PREFILL
-
-
-@pytest.mark.unified
-def test_python_worker_config_falls_back_to_serving_mode_for_sglang():
-    from dynamo.common.backend.worker import WorkerConfig
-    from dynamo.common.constants import DisaggregationMode
-
-    class _Sglang:
-        # SGLang stores the resolved mode under `serving_mode` rather than
-        # `disaggregation_mode`. The from_runtime_config helper must probe
-        # both names so both backends round-trip without per-backend wiring.
-        namespace = "ns"
-        discovery_backend = "etcd"
-        request_plane = "tcp"
-        event_plane = "nats"
-        serving_mode = DisaggregationMode.DECODE
-
-    cfg = WorkerConfig.from_runtime_config(_Sglang(), model_name="m")
-    assert cfg.disaggregation_mode is DisaggregationMode.DECODE
-
-
-@pytest.mark.unified
-def test_python_worker_config_defaults_to_aggregated_when_runtime_lacks_mode():
-    from dynamo.common.backend.worker import WorkerConfig
-    from dynamo.common.constants import DisaggregationMode
-
-    class _NoMode:
-        namespace = "ns"
-        discovery_backend = "etcd"
-        request_plane = "tcp"
-        event_plane = "nats"
-
-    cfg = WorkerConfig.from_runtime_config(_NoMode(), model_name="m")
+    cfg = EngineConfig(model="m")
     assert cfg.disaggregation_mode is DisaggregationMode.AGGREGATED
 
 
 @pytest.mark.unified
-def test_python_worker_config_coerces_foreign_disaggregation_mode_enum_by_name():
-    """Foreign enum on `runtime_cfg` (e.g. TRT-LLM's local
-    `DisaggregationMode`) is coerced by `.name` when a member with the
-    same name exists on `dynamo.common.constants.DisaggregationMode`.
-    An explicit `disaggregation_mode=` override still wins."""
-    import enum
-
-    from dynamo.common.backend.worker import WorkerConfig
+def test_engine_config_dataclass_accepts_all_four_modes_pre_extraction():
+    """The Python dataclass accepts the full 4-mode enum (incl. ENCODE).
+    Rejection of ENCODE happens at the Rust boundary when the engine returns
+    its EngineConfig from start() — exercised in Worker integration tests,
+    not here."""
+    from dynamo.common.backend.engine import EngineConfig
     from dynamo.common.constants import DisaggregationMode
 
-    class _ForeignMode(enum.Enum):
-        AGGREGATED = "prefill_and_decode"
-        PREFILL = "prefill"
-
-    class _RuntimeWithForeignMode:
-        namespace = "ns"
-        discovery_backend = "etcd"
-        request_plane = "tcp"
-        event_plane = "nats"
-        disaggregation_mode = _ForeignMode.PREFILL
-
-    cfg = WorkerConfig.from_runtime_config(_RuntimeWithForeignMode(), model_name="m")
-    assert cfg.disaggregation_mode is DisaggregationMode.PREFILL
-
-    # Explicit override still wins over the runtime_cfg field.
-    cfg = WorkerConfig.from_runtime_config(
-        _RuntimeWithForeignMode(),
-        model_name="m",
-        disaggregation_mode=DisaggregationMode.AGGREGATED,
-    )
-    assert cfg.disaggregation_mode is DisaggregationMode.AGGREGATED
-
-
-@pytest.mark.unified
-def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
-    """A non-enum or unrecognized name on `runtime_cfg.disaggregation_mode`
-    raises TypeError so a typo-string can't silently degrade to AGG."""
-    from dynamo.common.backend.worker import WorkerConfig
-
-    class _RuntimeWithStringMode:
-        namespace = "ns"
-        discovery_backend = "etcd"
-        request_plane = "tcp"
-        event_plane = "nats"
-        disaggregation_mode = "prefill"  # str, not enum
-
-    with pytest.raises(TypeError, match="DisaggregationMode"):
-        WorkerConfig.from_runtime_config(_RuntimeWithStringMode(), model_name="m")
-
-
-@pytest.mark.unified
-def test_python_worker_config_rejects_unsupported_mode_when_running():
-    """ENCODE has no unified-path implementation yet; the shim must raise
-    NotImplementedError when it tries to translate the mode for the Rust
-    binding instead of silently treating ENCODE as aggregated."""
-    from dynamo.common.backend.worker import WorkerConfig, _to_rust_disaggregation_mode
-    from dynamo.common.constants import DisaggregationMode
-
-    cfg = WorkerConfig(namespace="ns", disaggregation_mode=DisaggregationMode.ENCODE)
-    with pytest.raises(NotImplementedError):
-        _to_rust_disaggregation_mode(cfg.disaggregation_mode)
+    for mode in DisaggregationMode:
+        cfg = EngineConfig(model="m", disaggregation_mode=mode)
+        assert cfg.disaggregation_mode is mode
 
 
 def test_worker_constructor_requires_engine_config_loop():

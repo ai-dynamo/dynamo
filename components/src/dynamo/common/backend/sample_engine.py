@@ -106,7 +106,6 @@ class SampleLLMEngine(LLMEngine):
             discovery_backend=args.discovery_backend,
             request_plane=args.request_plane,
             event_plane=args.event_plane,
-            disaggregation_mode=mode,
         )
         return engine, worker_config
 
@@ -114,6 +113,7 @@ class SampleLLMEngine(LLMEngine):
         del worker_id
         return EngineConfig(
             model=self.model_name,
+            disaggregation_mode=self.disaggregation_mode,
             served_model_name=self.model_name,
             context_length=2048,
             kv_cache_block_size=_SAMPLE_BLOCK_SIZE,

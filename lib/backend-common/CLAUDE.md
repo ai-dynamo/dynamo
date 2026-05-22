@@ -165,13 +165,16 @@ aggregates it when present. `usage(prompt, completion)` computes
 
 ## Disaggregated Serving
 
-`DisaggregationMode` (`disagg.rs`) is metadata carried on `WorkerConfig`.
-`Aggregated` is the default and keeps existing callers unchanged.
-`CommonArgs` exposes the `--disaggregation-mode` flag (env
-`DYN_DISAGGREGATION_MODE`) so engines that flatten `CommonArgs` get the
-flag automatically.
+`DisaggregationMode` (`disagg.rs`) lives on `EngineConfig` and is the
+sole source of truth for a worker's role. The engine declares it in
+`start()` — either intrinsically (e.g. `sglang_bridge` reads it from
+SGLang's `GetServerInfo`) or from its own CLI flag (mocker takes
+`--disaggregation-mode` on its own `Args`, not on `CommonArgs`).
+`CommonArgs` no longer carries the flag; engines that need operator
+declaration add their own.
 
-What the **`Worker`** does with the mode at registration time:
+What the **`Worker`** does with the engine-declared mode at
+registration time (read straight from `engine_config.disaggregation_mode`):
 
 - `Prefill` → register with `ModelType::Prefill` regardless of
   `endpoint_types`, so the frontend's `PrefillRouter` targets it.

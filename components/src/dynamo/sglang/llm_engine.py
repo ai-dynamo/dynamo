@@ -135,7 +135,6 @@ class SglangLLMEngine(LLMEngine):
             model_name=server_args.model_path,
             served_model_name=server_args.served_model_name,
             model_input=model_input,
-            disaggregation_mode=config.serving_mode,
         )
         return engine, worker_config
 
@@ -187,6 +186,7 @@ class SglangLLMEngine(LLMEngine):
         self._dp_size = dp_end - dp_start
         return EngineConfig(
             model=self.server_args.model_path,
+            disaggregation_mode=self.serving_mode,
             served_model_name=self.server_args.served_model_name,
             context_length=self.server_args.context_length,
             kv_cache_block_size=page_size,

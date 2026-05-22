@@ -63,8 +63,8 @@ impl SglangBridge {
             client: OnceCell::new(),
             health_check_task: OnceCell::new(),
         };
-        // disaggregation_mode is discovered by `start()` from SGLang and
-        // returned on EngineConfig; Worker reads the engine's override.
+        // disaggregation_mode is discovered by `start()` from SGLang's
+        // GetServerInfo and returned via EngineConfig.disaggregation_mode.
         let config = WorkerConfig {
             namespace: args.common.namespace,
             component: args.common.component,
@@ -179,7 +179,7 @@ impl LLMEngine for SglangBridge {
         Ok(EngineConfig {
             model: model_path,
             served_model_name: Some(served_model_name),
-            engine_disaggregation_mode: Some(mode),
+            disaggregation_mode: mode,
             context_length,
             kv_cache_block_size: info.page_size,
             total_kv_blocks,

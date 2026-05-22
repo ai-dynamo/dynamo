@@ -94,9 +94,11 @@ Build the `completion_usage` dict inline. Finish reason normalization
 
 ## Disaggregated Serving
 
-`WorkerConfig.disaggregation_mode` is the single source of truth for the
-worker's role. Default `DisaggregationMode.AGGREGATED` keeps existing
-callers unchanged.
+`EngineConfig.disaggregation_mode` is the single source of truth for the
+worker's role. The engine declares it in `start()` — sourced from its
+own runtime config (vLLM/TRT-LLM `config.disaggregation_mode`, SGLang
+`config.serving_mode`, etc.). `WorkerConfig` does not carry the mode.
+Default `DisaggregationMode.AGGREGATED` keeps existing callers unchanged.
 
 What the **runtime** does with the mode (Rust `Worker` in `lib/backend-common`):
 
