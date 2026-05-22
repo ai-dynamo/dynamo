@@ -223,6 +223,11 @@ pub mod frontend_service {
     /// Inter-token latency in seconds
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
 
+    /// End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    /// Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    /// pooling-model latencies (sub-second) without sacrificing resolution.
+    pub const EMBEDDING_LATENCY_SECONDS: &str = "embedding_latency_seconds";
+
     /// Model configuration metrics
     ///
     /// Runtime config metrics (from ModelRuntimeConfig):
