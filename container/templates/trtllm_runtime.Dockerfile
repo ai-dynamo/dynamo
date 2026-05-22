@@ -7,26 +7,20 @@
 ########## Runtime Image #########
 ##################################
 
-# Workspace transport stage: gather all workspace contents so the runtime
-# pulls them in one COPY layer instead of nine. Reduces overlayfs depth on
-# top of the 226-layer upstream TRT-LLM base.
+# Transport stage — runtime pulls /workspace_src/ in one cross-stage COPY.
 FROM scratch AS workspace_files
-COPY --chmod=775 tests /tests
-COPY --chmod=775 examples /examples
-COPY --chmod=775 deploy /deploy
-COPY --chmod=775 dev /dev
-COPY --chmod=775 components/src/dynamo/common /components/src/dynamo/common
-COPY --chmod=775 components/src/dynamo/frontend /components/src/dynamo/frontend
-COPY --chmod=775 components/src/dynamo/trtllm /components/src/dynamo/trtllm
-COPY --chmod=775 components/src/dynamo/mocker /components/src/dynamo/mocker
-COPY --chmod=775 lib /lib
+COPY --chmod=775 tests /workspace_src/tests
+COPY --chmod=775 examples /workspace_src/examples
+COPY --chmod=775 deploy /workspace_src/deploy
+COPY --chmod=775 dev /workspace_src/dev
+COPY --chmod=775 components/src/dynamo/common /workspace_src/components/src/dynamo/common
+COPY --chmod=775 components/src/dynamo/frontend /workspace_src/components/src/dynamo/frontend
+COPY --chmod=775 components/src/dynamo/trtllm /workspace_src/components/src/dynamo/trtllm
+COPY --chmod=775 components/src/dynamo/mocker /workspace_src/components/src/dynamo/mocker
+COPY --chmod=775 lib /workspace_src/lib
 
-# Transport stage for dynamo_base artifacts — same one-layer trick as
-# workspace_files. Each file is placed at its final runtime path so the
-# runtime stage pulls all four with a single cross-stage COPY.
-# Note: place uv/uvx at /usr/bin (not /bin) — upstream tensorrt-llm/release is
-# usrmerged (/bin -> /usr/bin), and a cross-stage COPY of / / chokes on the
-# symlink target. The runtime's PATH includes /usr/bin so this is equivalent.
+# Transport stage for dynamo_base artifacts. uv/uvx go to /usr/bin (not /bin)
+# because upstream is usrmerged and cross-stage COPY chokes on the symlink.
 FROM scratch AS dynamo_base_export
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
@@ -38,7 +32,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
-ARG DYNAMO_COMMIT_SHA
 
 # DYNAMO_HOME points at /workspace so bundled TRT-LLM scripts that reference
 # $DYNAMO_HOME/examples/... resolve. LD_PRELOAD/NIXL_PLUGIN_DIR are a workaround
@@ -52,18 +45,17 @@ ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     PATH=/usr/local/bin/etcd:${PATH} \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
-    DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
 
 # Not in upstream nvcr.io/nvidia/tensorrt-llm/release.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssh-server \
         librdmacm1 \
         rdma-core && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get clean
 
 WORKDIR /workspace
 
@@ -90,13 +82,10 @@ RUN test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libni
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
 
-# Create dynamo user with group 0 for OpenShift compatibility, clear upstream's
-# /workspace baggage (README.md, tutorials/, docker-examples/, license.txt —
-# pytest collection picks up broken tutorial test files otherwise), and (for
-# non-dev targets) create the dynamo venv. Upstream tensorrt-llm/release marks
-# system Python as PEP 668 externally-managed, so we install Dynamo wheels into
-# a venv with --system-site-packages so upstream's solve stays importable while
-# our wheels live in their own namespace.
+# dynamo user (group 0 for OpenShift), clear upstream /workspace baggage
+# (otherwise pytest collects broken tutorial test files), and create the
+# Dynamo venv on non-dev. --system-site-packages keeps upstream's solve
+# importable since system Python is PEP 668 externally-managed.
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
     && [ `id -u dynamo` -eq 1000 ] \
@@ -146,13 +135,17 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 
 # Still root from above; collapse workspace COPY + launch-screen prep into one
 # pair of layers and only switch to dynamo at the very end.
-COPY --chmod=775 --chown=dynamo:0 --from=workspace_files / /workspace/
+COPY --chmod=775 --chown=dynamo:0 --from=workspace_files /workspace_src/ /workspace/
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
+
+# Kept at the bottom — SHA changes per build; layers above stay cached.
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 # Reset upstream TRT-LLM image's entrypoint so derived runtimes behave like
 # other Dynamo images and can execute arbitrary commands directly.
