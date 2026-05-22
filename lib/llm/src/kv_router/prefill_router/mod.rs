@@ -320,7 +320,9 @@ impl
                     self.model_manager
                         .get_kv_transfer_routing_constraints(eid, wid)?
                 } else if let Some(eid) = endpoint_id
-                    && self.model_manager.has_kv_transfer_routing_policy(eid)
+                    && self
+                        .model_manager
+                        .has_kv_transfer_required_routing_policy(eid)
                 {
                     return Err(anyhow::anyhow!(
                         "prefill worker id unavailable after prefill; cannot derive KV transfer topology constraints for endpoint {eid}"
