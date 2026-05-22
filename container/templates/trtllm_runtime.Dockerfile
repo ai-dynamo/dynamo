@@ -147,3 +147,4 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 # Reset upstream TRT-LLM image's entrypoint so derived runtimes behave like
 # other Dynamo images and can execute arbitrary commands directly.
 ENTRYPOINT []
+CMD ["/bin/bash"]
