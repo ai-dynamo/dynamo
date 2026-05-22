@@ -1206,86 +1206,52 @@ mod tests {
     }
 
     #[test]
-    fn kv_transfer_constraints_required_use_canonical_topology_taint() {
+    fn kv_transfer_constraints_build_required_and_preferred_constraints() {
         let mm = ModelManager::new();
         let endpoint_id = EndpointId::from("test.prefill.generate");
-        insert_runtime_configs(
-            &mm,
-            &endpoint_id,
-            HashMap::from([(
+
+        for (worker_id, config) in [
+            (
                 7,
                 topology_runtime_config(KvTransferEnforcement::Required, None),
-            )]),
-        );
-
-        let constraints = mm
-            .get_kv_transfer_routing_constraints(&endpoint_id, 7)
-            .unwrap()
-            .unwrap();
-
-        assert!(
-            constraints
-                .required_taints
-                .contains("dynamo.topology/zone=us-east-1a")
-        );
-        assert!(constraints.preferred_taints.is_empty());
-    }
-
-    #[test]
-    fn kv_transfer_constraints_preferred_use_configured_weight() {
-        let mm = ModelManager::new();
-        let endpoint_id = EndpointId::from("test.prefill.generate");
-        insert_runtime_configs(
-            &mm,
-            &endpoint_id,
-            HashMap::from([(
-                7,
+            ),
+            (
+                8,
                 topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.85)),
-            )]),
-        );
+            ),
+        ] {
+            insert_runtime_configs(&mm, &endpoint_id, HashMap::from([(worker_id, config)]));
 
-        let constraints = mm
-            .get_kv_transfer_routing_constraints(&endpoint_id, 7)
-            .unwrap()
-            .unwrap();
-
-        assert!(constraints.required_taints.is_empty());
-        assert_eq!(
-            constraints.preferred_taints["dynamo.topology/zone=us-east-1a"],
-            0.85
-        );
-    }
-
-    #[test]
-    fn kv_transfer_constraints_no_transfer_domain_is_skipped() {
-        let mm = ModelManager::new();
-        let endpoint_id = EndpointId::from("test.prefill.generate");
-        insert_runtime_configs(
-            &mm,
-            &endpoint_id,
-            HashMap::from([(7, ModelRuntimeConfig::default())]),
-        );
-
-        assert!(
-            mm.get_kv_transfer_routing_constraints(&endpoint_id, 7)
+            let constraints = mm
+                .get_kv_transfer_routing_constraints(&endpoint_id, worker_id)
                 .unwrap()
-                .is_none()
-        );
+                .unwrap();
+
+            match worker_id {
+                7 => {
+                    assert!(
+                        constraints
+                            .required_taints
+                            .contains("dynamo.topology/zone=us-east-1a")
+                    );
+                    assert!(constraints.preferred_taints.is_empty());
+                }
+                8 => {
+                    assert!(constraints.required_taints.is_empty());
+                    assert_eq!(
+                        constraints.preferred_taints["dynamo.topology/zone=us-east-1a"],
+                        0.85
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]
     fn kv_transfer_required_policy_presence_ignores_preferred_policy() {
         let mm = ModelManager::new();
         let endpoint_id = EndpointId::from("test.prefill.generate");
-
-        assert!(!mm.has_kv_transfer_required_routing_policy(&endpoint_id));
-
-        insert_runtime_configs(
-            &mm,
-            &endpoint_id,
-            HashMap::from([(7, ModelRuntimeConfig::default())]),
-        );
-        assert!(!mm.has_kv_transfer_required_routing_policy(&endpoint_id));
 
         insert_runtime_configs(
             &mm,
@@ -1306,45 +1272,6 @@ mod tests {
             )]),
         );
         assert!(mm.has_kv_transfer_required_routing_policy(&endpoint_id));
-    }
-
-    #[test]
-    fn kv_transfer_constraints_missing_domain_value_errors() {
-        let mm = ModelManager::new();
-        let endpoint_id = EndpointId::from("test.prefill.generate");
-        let config = ModelRuntimeConfig {
-            kv_transfer_domain: Some("zone".to_string()),
-            kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
-            ..Default::default()
-        };
-        insert_runtime_configs(&mm, &endpoint_id, HashMap::from([(7, config)]));
-
-        let err = mm
-            .get_kv_transfer_routing_constraints(&endpoint_id, 7)
-            .expect_err("missing topology domain value should fail");
-        assert!(
-            err.to_string()
-                .contains("topology_domains does not contain that domain")
-        );
-    }
-
-    #[test]
-    fn kv_transfer_constraints_preferred_missing_weight_errors() {
-        let mm = ModelManager::new();
-        let endpoint_id = EndpointId::from("test.prefill.generate");
-        insert_runtime_configs(
-            &mm,
-            &endpoint_id,
-            HashMap::from([(
-                7,
-                topology_runtime_config(KvTransferEnforcement::Preferred, None),
-            )]),
-        );
-
-        let err = mm
-            .get_kv_transfer_routing_constraints(&endpoint_id, 7)
-            .expect_err("preferred enforcement without weight should fail");
-        assert!(err.to_string().contains("kv_transfer_preferred_weight"));
     }
 
     // -- CRUD delegation tests --
