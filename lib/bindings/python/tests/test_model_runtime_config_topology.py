@@ -5,14 +5,11 @@ import pytest
 
 from dynamo.llm import ModelRuntimeConfig
 
-pytestmark = [
-    pytest.mark.unit,
-    pytest.mark.none,
-    pytest.mark.gpu_0,
-    pytest.mark.pre_merge,
-]
 
-
+@pytest.mark.unit
+@pytest.mark.none
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
 def test_model_runtime_config_topology_fields_round_trip():
     runtime_config = ModelRuntimeConfig()
 
@@ -35,6 +32,10 @@ def test_model_runtime_config_topology_fields_round_trip():
     assert runtime_config.kv_transfer_preferred_weight is None
 
 
+@pytest.mark.unit
+@pytest.mark.none
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
 def test_model_runtime_config_rejects_invalid_topology_policy_values():
     runtime_config = ModelRuntimeConfig()
 

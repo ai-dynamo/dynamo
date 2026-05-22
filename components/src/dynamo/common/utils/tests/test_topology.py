@@ -16,8 +16,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
-
 # ---------------------------------------------------------------------------
 # Module loading: import topology without triggering the full dynamo package
 # (which requires dynamo.llm, CUDA, etc.)
@@ -85,6 +83,9 @@ def _mock_topology_clock(monkeypatch, on_sleep=None):
     return sleep_calls
 
 
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
 class TestReadTopologyConfig:
     """Tests for read_topology_config()."""
 
