@@ -251,7 +251,14 @@ if [ "$DEVICE" = "cuda" ]; then
         exit 1
     fi
     rm -rf ${INSTALLATION_DIR}/lmcache
-    echo "✓ LMCache ${LMCACHE_REF} installed from source"
+    # PR #7534 enabled the lmcache CUDA-13 path which transitively pulls
+    # nixl-cu13 1.1.0. On a CUDA-12 image (this one) we already have the
+    # source-built nixl-cu12 0.10.1; the cu13 backend is ABI-incompatible
+    # (NIXL_ERR_NOT_FOUND at backend creation; surfaces as
+    # "Failed to load telemetry plugin: prometheus" at first NIXL agent
+    # construction). Drop it.
+    uv pip uninstall nixl-cu13 2>/dev/null || true
+    echo "✓ LMCache ${LMCACHE_REF} installed from source (nixl-cu13 removed; cu12 0.10.1 retained)"
 elif [ "$DEVICE" = "xpu" ] && [ "$ARCH" = "amd64" ]; then
     uv pip install lmcache==${LMCACHE_REF}
     echo "✓ LMCache ${LMCACHE_REF} installed from PyPI (XPU)"
