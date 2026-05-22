@@ -225,9 +225,8 @@ CURL_EOF
 # resolve_local_model_dir <hf_id_or_dir>
 #
 # If the argument is a local directory, echo it unchanged. Otherwise treat
-# it as an HF id and resolve a snapshot directory (downloading
-# config + tokenizer only) so callers that need a path-on-disk (e.g.
-# dynamo.frontend with --dyn-engine sglang-grpc) get one.
+# it as an HF id and resolve a snapshot directory (downloading config +
+# tokenizer only) so callers that need a path-on-disk get one.
 resolve_local_model_dir() {
     local _model="$1"
     if [ -d "$_model" ]; then

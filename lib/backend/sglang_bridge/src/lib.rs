@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Dynamo bridge to SGLang's native gRPC server (`sglang.runtime.v1`).
-//! Runs as the `dynamo-sglang-bridge` sidecar binary, or in-process under
-//! the `dynamo.sglang_grpc` Python supervisor via PyO3.
 
-pub mod engine;
-pub mod proto;
+mod args;
+mod engine;
+mod health;
+mod proto;
+mod sampling;
+mod server_info;
 
-pub use engine::{Args, SglangBridge};
+pub use engine::SglangBridge;

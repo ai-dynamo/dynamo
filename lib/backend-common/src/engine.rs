@@ -111,7 +111,9 @@ impl Deref for GenerateContext {
 /// can leave `kv_cache_block_size` and `total_kv_blocks` unset.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
-    /// Canonical model identifier (e.g. HF repo name).
+    /// Canonical model identifier (e.g. HF repo name). When non-empty and
+    /// `WorkerConfig.model_name` is empty, `Worker` resolves this as the
+    /// tokenizer source (local path or HF fetch).
     pub model: String,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
