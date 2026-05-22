@@ -19,32 +19,32 @@
 </style>
 <text class="title" x="40" y="58">Unmapping the KV cache before snapshot</text>
 <text class="subtitle" x="40" y="86">Releasing the KV cache before CRIU runs shrinks the snapshot artifact from ~182 GiB to ~6 GiB.</text>
-<rect x="70.0" y="140" width="480" height="400" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<text class="frame-label" x="94.0" y="170">Before unmap</text>
-<text class="frame-meta" x="526.0" y="170" text-anchor="end">Device memory &#183; ~182 GiB resident</text>
-<rect x="94.0" y="196" width="432" height="35.95854922279793" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
-<text class="block-label-small" x="108.0" y="217.97927461139898">Weights</text>
-<text class="block-meta-mono" x="512.0" y="217.97927461139898" text-anchor="end">~1.1 GiB</text>
-<rect x="94.0" y="239.95854922279793" width="432" height="246.71502590673575" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
-<text class="block-label" x="310.0" y="359.3160621761658" text-anchor="middle">KV cache</text>
-<text class="block-meta-mono" x="310.0" y="381.3160621761658" text-anchor="middle">~180 GiB</text>
-<rect x="94.0" y="494.6735751295337" width="432" height="29.326424870466322" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
-<text class="block-label-small" x="108.0" y="513.3367875647668">CUDA graph + buffers</text>
-<text class="block-meta-mono" x="512.0" y="513.3367875647668" text-anchor="end">~1.5 GiB</text>
-<rect x="730.0" y="140" width="480" height="400" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
-<text class="frame-label" x="754.0" y="170">After unmap</text>
-<text class="frame-meta" x="1186.0" y="170" text-anchor="end">Device memory &#183; ~2.6 GiB resident</text>
-<rect x="754.0" y="196" width="432" height="35.95854922279793" fill="#000000" stroke="#74b711" stroke-width="1.5"/>
-<text class="block-label-small" x="768.0" y="217.97927461139898">Weights</text>
-<text class="block-meta-mono-green" x="1172.0" y="217.97927461139898" text-anchor="end">~1.1 GiB &#183; survives</text>
-<rect x="754.0" y="239.95854922279793" width="432" height="246.71502590673575" fill="none" stroke="#5a5a5a" stroke-width="1" stroke-dasharray="6 6"/>
-<text class="block-label-ghost" x="970.0" y="359.3160621761658" text-anchor="middle">KV cache</text>
-<text class="block-meta-mono-ghost" x="970.0" y="381.3160621761658" text-anchor="middle">released &#183; virtual addresses kept</text>
-<rect x="754.0" y="494.6735751295337" width="432" height="29.326424870466322" fill="#000000" stroke="#74b711" stroke-width="1.5"/>
-<text class="block-label-small" x="768.0" y="513.3367875647668">CUDA graph + buffers</text>
-<text class="block-meta-mono-green" x="1172.0" y="513.3367875647668" text-anchor="end">~1.5 GiB &#183; survives</text>
-<line x1="564.0" y1="340.0" x2="704.0" y2="340.0" stroke="#74b711" stroke-width="2"/>
-<polygon points="704.0,332.0 716.0,340.0 704.0,348.0" fill="#74b711"/>
+<rect x="60.0" y="140" width="440" height="400" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="frame-label" x="84.0" y="170">Before unmap</text>
+<text class="frame-meta" x="476.0" y="170" text-anchor="end">Device memory &#183; ~182 GiB resident</text>
+<rect x="84.0" y="196" width="392" height="35.95854922279793" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label-small" x="98.0" y="217.97927461139898">Weights</text>
+<text class="block-meta-mono" x="462.0" y="217.97927461139898" text-anchor="end">~1.1 GiB</text>
+<rect x="84.0" y="239.95854922279793" width="392" height="246.71502590673575" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label" x="280.0" y="359.3160621761658" text-anchor="middle">KV cache</text>
+<text class="block-meta-mono" x="280.0" y="381.3160621761658" text-anchor="middle">~180 GiB</text>
+<rect x="84.0" y="494.6735751295337" width="392" height="29.326424870466322" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
+<text class="block-label-small" x="98.0" y="513.3367875647668">CUDA graph + buffers</text>
+<text class="block-meta-mono" x="462.0" y="513.3367875647668" text-anchor="end">~1.5 GiB</text>
+<rect x="780.0" y="140" width="440" height="400" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+<text class="frame-label" x="804.0" y="170">After unmap</text>
+<text class="frame-meta" x="1196.0" y="170" text-anchor="end">Device memory &#183; ~2.6 GiB resident</text>
+<rect x="804.0" y="196" width="392" height="35.95854922279793" fill="#000000" stroke="#74b711" stroke-width="1.5"/>
+<text class="block-label-small" x="818.0" y="217.97927461139898">Weights</text>
+<text class="block-meta-mono-green" x="1182.0" y="217.97927461139898" text-anchor="end">~1.1 GiB &#183; survives</text>
+<rect x="804.0" y="239.95854922279793" width="392" height="246.71502590673575" fill="none" stroke="#5a5a5a" stroke-width="1" stroke-dasharray="6 6"/>
+<text class="block-label-ghost" x="1000.0" y="359.3160621761658" text-anchor="middle">KV cache</text>
+<text class="block-meta-mono-ghost" x="1000.0" y="381.3160621761658" text-anchor="middle">released &#183; virtual addresses kept</text>
+<rect x="804.0" y="494.6735751295337" width="392" height="29.326424870466322" fill="#000000" stroke="#74b711" stroke-width="1.5"/>
+<text class="block-label-small" x="818.0" y="513.3367875647668">CUDA graph + buffers</text>
+<text class="block-meta-mono-green" x="1182.0" y="513.3367875647668" text-anchor="end">~1.5 GiB &#183; survives</text>
+<line x1="514.0" y1="340.0" x2="754.0" y2="340.0" stroke="#74b711" stroke-width="2"/>
+<polygon points="754.0,332.0 766.0,340.0 754.0,348.0" fill="#74b711"/>
 <text class="arrow-label" x="640.0" y="312.0" text-anchor="middle">cuMemUnmap + cuMemRelease</text>
 <text class="arrow-meta" x="640.0" y="366.0" text-anchor="middle">~182 GiB &#8594; ~2.6 GiB on device</text>
 <text class="arrow-meta" x="640.0" y="384.0" text-anchor="middle" fill="#8c8c8c">~6 GiB on-disk checkpoint artifact</text>
