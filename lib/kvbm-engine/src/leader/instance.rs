@@ -1972,7 +1972,13 @@ impl Leader for InstanceLeader {
                         Some(pw) => {
                             let holder = BlockHolder::new(g3);
                             match stage_g3_to_g2(&holder, &g2_manager, &**pw).await {
-                                Ok(staged) => g2.extend(staged.new_g2_blocks),
+                                // Staging registers the new G2 blocks before
+                                // returning, so re-match the full sequence: a
+                                // staged block can fill a hole between the G2
+                                // prefix and a later already-resident G2 run,
+                                // extending the contiguous match. Counting only
+                                // `prefix + staged` would under-report that tail.
+                                Ok(_staged) => g2 = g2_manager.match_blocks(&sequence_hashes),
                                 Err(e) => tracing::warn!(
                                     %session_id,
                                     error = %e,
@@ -2133,6 +2139,17 @@ mod tests {
         assert_eq!(delivered, 2, "expected only the G2 prefix to be delivered");
         Ok(())
     }
+
+    // TODO(test): hole-fill under-report reproducer for the local G3→G2 staging
+    // path. `match_blocks` is a first-hole prefix match, so when G2 holds
+    // [h0,h1,h3] (hole at h2) and G3 holds [h2], staging h2 into G2 must make the
+    // contiguous match grow to [h0,h1,h2,h3] (4) — not the [h0,h1] prefix + [h2]
+    // staged (3). The fix re-matches the full sequence after a successful stage;
+    // this test asserts matched_blocks == 4. It needs a parallel worker that can
+    // actually stage G3→G2 in-process: the current `TestInstanceLeaderWithWorkers`
+    // fixture registers only a G2 layout (no G3), so this requires adding a G3
+    // layout registration (or a lightweight `ParallelWorkers` stub returning a
+    // pre-completed transfer notification). Deferred to avoid that infra build-out.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn assemble_export_metadata_stamps_when_template_set() -> Result<()> {
