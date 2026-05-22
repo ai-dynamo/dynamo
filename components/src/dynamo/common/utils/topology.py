@@ -89,10 +89,13 @@ def _read_topology_domains(mount_path: Path) -> dict[str, str]:
 
 def _read_kv_transfer_policy() -> tuple[str, str | None, float | None]:
     kv_transfer_domain = os.environ.get(_KV_TRANSFER_DOMAIN_VAR, None)
+    kv_transfer_domain = (
+        kv_transfer_domain.strip() if kv_transfer_domain is not None else None
+    )
     kv_transfer_enforcement = os.environ.get(_KV_TRANSFER_ENFORCEMENT_VAR, None)
     raw_preferred_weight = os.environ.get(_KV_TRANSFER_PREFERRED_WEIGHT_VAR, None)
 
-    if kv_transfer_domain is None:
+    if not kv_transfer_domain:
         logger.error(
             "DYN_TOPOLOGY_ENABLED=true but %s is not set. The deployment "
             "environment must set the KV transfer domain when topology is "
