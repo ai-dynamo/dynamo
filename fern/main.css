@@ -109,6 +109,7 @@ html:not([data-theme]),html[data-theme=light] {
 
 /* Dark theme */
 html[data-theme=dark],
+html.dark,
 .dark {
     --pst-color-background: #111;
     --pst-color-on-background: #000;
