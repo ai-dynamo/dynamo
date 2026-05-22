@@ -17,8 +17,22 @@ use dynamo_backend_common::{
 use futures::stream::BoxStream;
 use rand::Rng;
 use tokio::sync::OnceCell;
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tonic::transport::{Channel, Endpoint};
+
+/// How often to send the canary generate request after the bridge has come up.
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// Per-probe timeout. A 1-token greedy decode should complete in <100ms; we
+/// give it 10s to absorb GC pauses without false-positives.
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Consecutive failed canaries before the bridge tears itself down.
+/// 3 × 30s = ~90s tolerated outage before the worker self-evicts.
+const HEALTH_CHECK_FAILURE_THRESHOLD: u32 = 3;
+/// Input token for the canary probe. Matches `dynamo.sglang`'s
+/// `SglangHealthCheckPayload` fallback when the model's BOS token can't be
+/// resolved -- SGLang accepts any valid token here for a 1-step generate.
+const HEALTH_CHECK_INPUT_TOKEN: i32 = 1;
 
 use crate::proto::v1::{
     AbortRequest, DisaggregatedParams, GenerateRequest, GetModelInfoRequest, GetServerInfoRequest,
@@ -69,6 +83,8 @@ pub struct SglangBridge {
     bootstrap_host: OnceCell<String>,
     bootstrap_port: OnceCell<u16>,
     client: OnceCell<SglangServiceClient<Channel>>,
+    /// Periodic SGLang HealthCheck task spawned in `start()`; aborted in `cleanup()`.
+    health_check_task: OnceCell<JoinHandle<()>>,
 }
 
 impl SglangBridge {
@@ -90,6 +106,7 @@ impl SglangBridge {
             bootstrap_host: OnceCell::new(),
             bootstrap_port: OnceCell::new(),
             client: OnceCell::new(),
+            health_check_task: OnceCell::new(),
         }
     }
 
@@ -217,6 +234,106 @@ fn parse_finish_reason(raw: &str) -> FinishReason {
         "length" => FinishReason::Length,
         "abort" => FinishReason::Cancelled,
         other => FinishReason::Error(format!("unknown sglang finish_reason: {other}")),
+    }
+}
+
+/// Build the canary `GenerateRequest`. Field-for-field equivalent of
+/// `SglangHealthCheckPayload` in `components/src/dynamo/sglang/health_check.py`:
+/// 1 input token, 1 output token, greedy, no EOS shortcut.
+fn build_canary_request() -> GenerateRequest {
+    let nonce: u64 = rand::random();
+    GenerateRequest {
+        input_ids: vec![HEALTH_CHECK_INPUT_TOKEN],
+        sampling_params: Some(SamplingParams {
+            temperature: Some(0.0),
+            top_p: Some(1.0),
+            top_k: Some(-1),
+            max_new_tokens: Some(1),
+            ignore_eos: Some(false),
+            ..Default::default()
+        }),
+        stream: Some(true),
+        rid: Some(format!("dyn-canary-{nonce:016x}")),
+        ..Default::default()
+    }
+}
+
+/// Run one canary probe end-to-end: open the stream, drain until the
+/// terminal chunk arrives, all inside one timeout window.
+async fn run_canary_probe(client: &mut SglangServiceClient<Channel>) -> Result<(), String> {
+    let req = build_canary_request();
+    let work = async {
+        let stream = client
+            .generate(req)
+            .await
+            .map_err(|e| format!("generate RPC: {e}"))?
+            .into_inner();
+        drain_until_terminal(stream).await
+    };
+    tokio::time::timeout(HEALTH_CHECK_TIMEOUT, work)
+        .await
+        .map_err(|_| format!("canary timed out after {:?}", HEALTH_CHECK_TIMEOUT))?
+}
+
+async fn drain_until_terminal(
+    mut stream: tonic::Streaming<crate::proto::v1::GenerateResponse>,
+) -> Result<(), String> {
+    loop {
+        match stream.next().await {
+            Some(Ok(resp)) if resp.finished => return Ok(()),
+            Some(Ok(_)) => continue,
+            Some(Err(e)) => return Err(format!("stream error: {e}")),
+            None => return Err("stream closed without terminal chunk".to_string()),
+        }
+    }
+}
+
+/// Periodically run a 1-token canary generate against SGLang. Mirrors the
+/// `dynamo.sglang` runtime canary -- the only differences are (a) we send
+/// the probe directly via our gRPC client rather than through Dynamo's
+/// `serve_endpoint(health_check_payload=...)` plumbing, and (b) on
+/// persistent failure we self-evict via SIGTERM instead of marking the
+/// endpoint unhealthy in discovery.
+///
+/// SGLang's `HealthCheck` RPC is liveness-only (reports `gracefully_exit` /
+/// `Starting`), so a real `Generate` is the only way to catch a hung
+/// scheduler or a worker that's accepting requests but never returning.
+async fn health_check_loop(mut client: SglangServiceClient<Channel>) {
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        tokio::time::sleep(HEALTH_CHECK_INTERVAL).await;
+        match run_canary_probe(&mut client).await {
+            Ok(()) => {
+                if consecutive_failures > 0 {
+                    tracing::info!(
+                        recovered_after = consecutive_failures,
+                        "sglang_bridge: canary recovered"
+                    );
+                }
+                consecutive_failures = 0;
+            }
+            Err(reason) => {
+                consecutive_failures += 1;
+                tracing::warn!(
+                    consecutive_failures,
+                    reason = %reason,
+                    "sglang_bridge: canary failed"
+                );
+                if consecutive_failures >= HEALTH_CHECK_FAILURE_THRESHOLD {
+                    tracing::error!(
+                        consecutive_failures,
+                        "sglang_bridge: canary failed past threshold; raising SIGTERM"
+                    );
+                    // raise(2) is async-signal-safe; only signals the
+                    // current process. The worker's tokio signal handler
+                    // observes it and runs graceful shutdown.
+                    unsafe {
+                        libc::raise(libc::SIGTERM);
+                    }
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -390,8 +507,17 @@ impl LLMEngine for SglangBridge {
         }
 
         self.client
-            .set(client)
+            .set(client.clone())
             .map_err(|_| backend_error("client already set"))?;
+
+        // Periodic SGLang liveness probe. Mirrors the canary `dynamo.sglang`
+        // wires up via `serve_endpoint(health_check_payload=...)` -- since
+        // backend-common's Worker doesn't surface a health_check_payload to
+        // the runtime, the bridge runs its own loop and self-terminates via
+        // SIGTERM on persistent failure so etcd evicts the instance and the
+        // operator's restart policy can recover the worker.
+        let task = tokio::spawn(health_check_loop(client.clone()));
+        let _ = self.health_check_task.set(task);
 
         // Mirror dynamo.sglang's MDC: if max_prefill_tokens is unset, fall
         // back to scheduler's max_total_num_tokens so the planner always has
@@ -453,6 +579,9 @@ impl LLMEngine for SglangBridge {
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
+        if let Some(task) = self.health_check_task.get() {
+            task.abort();
+        }
         Ok(())
     }
 }

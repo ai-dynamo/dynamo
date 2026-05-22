@@ -2381,6 +2381,7 @@ dependencies = [
  "clap",
  "dynamo-backend-common",
  "futures",
+ "libc",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rand 0.9.4",
