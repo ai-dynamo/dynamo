@@ -375,6 +375,7 @@ func TestBuildCheckpointJobAddsGMSCheckpointClient(t *testing.T) {
 		Name:    "gms-saver",
 		Image:   "saver:latest",
 		Command: []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"},
+		Args:    []string{"--checkpoint-dir", "/artifacts/gms"},
 	})
 	snapshotAgentDaemonSet := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -429,6 +430,7 @@ func TestBuildCheckpointJobAddsGMSCheckpointClient(t *testing.T) {
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
 	assert.Nil(t, weightsServer.StartupProbe, "no probe — clients drive readiness via connect-retry")
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"}, saver.Command)
+	assert.Equal(t, []string{"--checkpoint-dir", "/artifacts/gms"}, saver.Args)
 	assert.Nil(t, saver.RestartPolicy, "saver runs as a regular Job container so Job completion waits for it")
 	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
 }
