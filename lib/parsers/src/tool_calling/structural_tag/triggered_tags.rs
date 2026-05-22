@@ -57,6 +57,7 @@ pub(crate) fn build_triggered_tags(
     let tags: Vec<TagFormat> = tools_to_include
         .iter()
         .map(|tool| {
+            // function name validated by validate_tools() in the request handler
             let begin = config
                 .begin_template
                 .replace(TOOL_NAME_PLACEHOLDER, &tool.function.name);

@@ -60,6 +60,7 @@ pub(crate) fn build_dsml_tool_calls(
     let invoke_tags: Vec<TagFormat> = tools_to_include
         .iter()
         .map(|tool| {
+            // function name validated by validate_tools() in the request handler
             let begin = config
                 .invoke_begin_template
                 .replace(TOOL_NAME_PLACEHOLDER, &tool.function.name);
