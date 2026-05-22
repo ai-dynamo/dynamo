@@ -5,12 +5,12 @@ import pytest
 
 from dynamo.llm import ModelRuntimeConfig
 
-pytestmark = [
+pytestmark = (
     pytest.mark.unit,
     pytest.mark.none,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
-]
+)
 
 
 def test_model_runtime_config_topology_fields_round_trip():

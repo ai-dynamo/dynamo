@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+pytestmark = (pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge)
 
 # ---------------------------------------------------------------------------
 # Module loading: import topology without triggering the full dynamo package
