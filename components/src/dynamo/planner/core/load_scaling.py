@@ -195,6 +195,7 @@ class LoadScalingMixin:
         final_p = max(final_p, self._config.min_endpoint)
         final_d = max(final_d, self._config.min_endpoint)
         final_p, final_d = self._apply_global_budget(final_p, final_d)
+        final_p, final_d = self._apply_power_budget(final_p, final_d)  # Phase 2
 
         # Per-component reasons
         def _reason(final: int, original: int, post_floor: int, current: int) -> str:

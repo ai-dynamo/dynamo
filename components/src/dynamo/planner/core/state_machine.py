@@ -409,6 +409,14 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._config.max_gpu_budget,
             self._config.min_endpoint,
         )
+        # Open Question #2: prevent up-scaling decode beyond original demand
+        # when prefill is the binding constraint and budget slack remains.
+        # proportional_clamp_pair distributes the remaining budget
+        # proportionally and can over-allocate decode; the planner's
+        # migration-safety contract requires decode to never grow on a
+        # budget-driven path. min_endpoint stays the lower bound.
+        if new_d > num_d:
+            new_d = max(self._config.min_endpoint, num_d)
         if (new_p, new_d) != (num_p, num_d):
             old_total = num_p * p_gpu + num_d * d_gpu
             new_total = new_p * p_gpu + new_d * d_gpu
@@ -419,6 +427,72 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                 f"({new_p}P + {new_d}D = {new_total})"
             )
         return new_p, new_d
+
+    def _apply_power_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
+        """Apply power budget constraint to replica counts (Phase 2).
+
+        Mirrors _apply_global_budget so both budgets share the same scaling
+        semantics:
+          1. Projected power fits budget → return unchanged.
+          2. Even min_endpoint replicas of both components don't fit → (0,0).
+          3. Otherwise: reserve decode floor, proportionally scale prefill,
+             give remaining budget to decode (capped at original demand — never
+             up-scales decode beyond num_d).
+
+        Order matters: call _apply_global_budget first, then _apply_power_budget.
+        The two do not commute on cost-asymmetric inputs (p_gpu ≠ d_gpu).
+        """
+        if not self._config.enable_power_awareness:
+            return num_p, num_d
+
+        p_gpu = (
+            self._capabilities.prefill.num_gpu if self._capabilities.prefill else None
+        )
+        d_gpu = self._capabilities.decode.num_gpu if self._capabilities.decode else None
+        if p_gpu is None or d_gpu is None:
+            return num_p, num_d
+
+        budget = self._config.total_gpu_power_limit
+        if budget is None:
+            return num_p, num_d
+
+        p_watts = self._config.prefill_engine_gpu_power_limit * p_gpu  # per replica
+        d_watts = self._config.decode_engine_gpu_power_limit * d_gpu  # per replica
+
+        projected = num_p * p_watts + num_d * d_watts
+        if projected <= budget:
+            return num_p, num_d
+
+        min_p_watts = self._config.min_endpoint * p_watts
+        min_d_watts = self._config.min_endpoint * d_watts
+        if budget < min_p_watts + min_d_watts:
+            logger.warning(
+                "total_gpu_power_limit (%dW) < minimum required (%dW) for "
+                "min_endpoint replicas; enforcing zero replicas.",
+                budget,
+                min_p_watts + min_d_watts,
+            )
+            return 0, 0
+
+        scale = budget / projected
+        max_p = math.floor((budget - min_d_watts) / p_watts)
+        scaled_p = max(self._config.min_endpoint, min(max_p, math.floor(num_p * scale)))
+        remaining = budget - scaled_p * p_watts
+        scaled_d = max(
+            self._config.min_endpoint, min(num_d, math.floor(remaining / d_watts))
+        )
+
+        logger.warning(
+            "Power budget: projected %dW > limit %dW. "
+            "Scaled (%dP, %dD) → (%dP, %dD).",
+            projected,
+            budget,
+            num_p,
+            num_d,
+            scaled_p,
+            scaled_d,
+        )
+        return scaled_p, scaled_d
 
     def _budget_clamp(self, desired: int, engine_gpu: int) -> int:
         """Apply the GPU budget band to a single component's desired replica
