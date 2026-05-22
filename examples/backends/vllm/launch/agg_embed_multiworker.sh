@@ -88,9 +88,16 @@ common_worker_args=(
     --trust-remote-code
 )
 
+# Each worker registers at its OWN ``--endpoint`` path. Dynamo enforces one
+# model per endpoint, so without unique endpoints the second worker fails
+# to register with: "Cannot register model 'X' on endpoint Y: a different
+# model 'Z' is already registered there". The frontend's model-keyed
+# dispatch (``get_embeddings_engine(model)``) still routes correctly by the
+# ``model`` field regardless of which component path hosts each model.
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model "$MODEL1" \
+    --endpoint dynamo/embed-worker-1/generate \
     "${common_worker_args[@]}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
@@ -98,6 +105,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model "$MODEL2" \
+    --endpoint dynamo/embed-worker-2/generate \
     "${common_worker_args[@]}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
