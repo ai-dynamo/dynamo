@@ -105,6 +105,11 @@ def _generate_dgd_from_pick(
     finally:
         tc.total_gpus = original_total_gpus
 
+    service_cfg = cfg.get("ServiceConfig")
+    if isinstance(service_cfg, dict):
+        service_cfg["model_path"] = dgdr.model
+        service_cfg["served_model_path"] = dgdr.model
+
     artifacts = generate_backend_artifacts(
         params=cfg,
         backend=tc.backend_name,

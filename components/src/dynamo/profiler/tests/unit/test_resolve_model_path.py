@@ -17,7 +17,11 @@ pytestmark = [
 ]
 
 try:
-    from dynamo.profiler.rapid import _run_autoscale_sim, _run_default_sim
+    from dynamo.profiler.rapid import (
+        _generate_dgd_from_pick,
+        _run_autoscale_sim,
+        _run_default_sim,
+    )
     from dynamo.profiler.thorough import run_thorough
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
@@ -64,6 +68,14 @@ def _pvc_model_cache(mount_path: str, model_path: str) -> ModelCacheSpec:
     )
 
 
+def _make_model_dir(path) -> str:
+    """Create an AIC-loadable model directory (one containing config.json)
+    and return its path as a string."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.json").write_text("{}")
+    return str(path)
+
+
 # ---------------------------------------------------------------------------
 # resolve_model_path() helper
 # ---------------------------------------------------------------------------
@@ -72,10 +84,10 @@ def _pvc_model_cache(mount_path: str, model_path: str) -> ModelCacheSpec:
 class TestResolveModelPath:
     """Tests for the resolve_model_path() helper."""
 
-    def test_returns_local_path_when_pvc_dir_exists(self, tmp_path):
-        """Full PVC spec + an existing directory -> the local path."""
+    def test_returns_local_path_when_pvc_dir_has_config(self, tmp_path):
+        """Full PVC spec + a directory containing config.json -> the local path."""
         local_dir = tmp_path / "hub" / "models--Qwen--Qwen3-32B"
-        local_dir.mkdir(parents=True)
+        _make_model_dir(local_dir)
         dgdr = _make_dgdr(
             modelCache=_pvc_model_cache(str(tmp_path), "hub/models--Qwen--Qwen3-32B")
         )
@@ -122,13 +134,22 @@ class TestResolveModelPath:
     def test_normalizes_surrounding_slashes(self, tmp_path):
         """slash on the model path -> resolve to the correct local directory."""
         local_dir = tmp_path / "model"
-        local_dir.mkdir()
+        _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(f"{tmp_path}/", "/model"))
         assert resolve_model_path(dgdr) == str(local_dir)
 
     def test_returns_hf_id_when_local_path_is_a_file(self, tmp_path):
         """The resolved path exists but is a file, not a directory -> the HF id."""
         (tmp_path / "model").write_text("not a directory")
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
+        assert resolve_model_path(dgdr) == _HF_ID
+
+    def test_returns_hf_id_when_dir_has_no_config_json(self, tmp_path):
+        """The PVC dir exists but has no config.json -> the HF id. AIC treats
+        any directory as a local model and would otherwise hard-fail with no
+        HuggingFace fallback."""
+        local_dir = tmp_path / "model"
+        local_dir.mkdir()  # directory only, no config.json
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
         assert resolve_model_path(dgdr) == _HF_ID
 
@@ -151,7 +172,7 @@ class TestRapidResolvesModelPath:
     def test_default_sim_uses_local_path_when_pvc_mounted(self, tmp_path):
         """_run_default_sim -> build_default_task_configs gets the local PVC path."""
         local_dir = tmp_path / "model"
-        local_dir.mkdir()
+        _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
 
         with (
@@ -213,7 +234,7 @@ class TestRapidResolvesModelPath:
     def test_autoscale_sim_uses_local_path_when_pvc_mounted(self, tmp_path):
         """_run_autoscale_sim -> TaskConfig gets the local PVC path."""
         local_dir = tmp_path / "model"
-        local_dir.mkdir()
+        _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
 
         runner = MagicMock()
@@ -245,6 +266,79 @@ class TestRapidResolvesModelPath:
             )
 
         assert mock_task_config.call_args.kwargs["model_path"] == _HF_ID
+
+
+# ---------------------------------------------------------------------------
+# DGD generation must keep the served model name as the HF id
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateDgdKeepsServedModelName:
+    """_generate_dgd_from_pick() must not leak a resolved local PVC path into
+    the generated DGD's served model name.
+    """
+
+    @staticmethod
+    def _generator_cfg(model_path: str) -> dict:
+        return {
+            "ServiceConfig": {
+                "model_path": model_path,
+                "served_model_path": model_path,
+                "include_frontend": True,
+            },
+            "K8sConfig": {},
+        }
+
+    @staticmethod
+    def _task_config() -> MagicMock:
+        tc = MagicMock()
+        tc.total_gpus = 8
+        tc.backend_name = "trtllm"
+        tc.backend_version = None
+        return tc
+
+    def _capture_generate(self, dgdr, cfg) -> MagicMock:
+        """Run _generate_dgd_from_pick with the generator stubbed out and
+        return the generate_backend_artifacts mock for assertions."""
+        best_df = pd.DataFrame([{"tp": 1}])
+        task_configs = {"disagg": self._task_config()}
+        with (
+            patch(
+                "dynamo.profiler.rapid.task_config_to_generator_config",
+                return_value=cfg,
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={"k8s_deploy.yaml": ""},
+            ) as mock_generate,
+        ):
+            _generate_dgd_from_pick(dgdr, best_df, "disagg", task_configs)
+        return mock_generate
+
+    def test_local_pvc_path_does_not_leak_into_served_model_name(self, tmp_path):
+        """the ServiceConfig handed to the generator carries dgdr.model,
+        not the resolved local path."""
+        local_dir = tmp_path / "model"
+        local_dir.mkdir()
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
+
+        mock_generate = self._capture_generate(
+            dgdr, self._generator_cfg(str(local_dir))
+        )
+
+        service_cfg = mock_generate.call_args.kwargs["params"]["ServiceConfig"]
+        assert service_cfg["model_path"] == _HF_ID
+        assert service_cfg["served_model_path"] == _HF_ID
+
+    def test_no_pvc_keeps_hf_id(self):
+        """No PVC: ServiceConfig.model_path is already the HF id and stays so."""
+        dgdr = _make_dgdr()
+
+        mock_generate = self._capture_generate(dgdr, self._generator_cfg(_HF_ID))
+
+        service_cfg = mock_generate.call_args.kwargs["params"]["ServiceConfig"]
+        assert service_cfg["model_path"] == _HF_ID
+        assert service_cfg["served_model_path"] == _HF_ID
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +386,7 @@ class TestThoroughResolvesModelPath:
         """run_thorough -> enumerate_profiling_configs gets the local PVC path."""
         pvc_root = tmp_path / "pvc"
         local_dir = pvc_root / "model"
-        local_dir.mkdir(parents=True)
+        _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(pvc_root), "model"))
 
         mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
@@ -357,7 +451,7 @@ class TestThoroughResolvesModelPath:
         """run_thorough -> TaskConfig gets the local PVC path."""
         pvc_root = tmp_path / "pvc"
         local_dir = pvc_root / "model"
-        local_dir.mkdir(parents=True)
+        _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(pvc_root), "model"))
 
         mock_task_config = await self._capture_task_config(dgdr, tmp_path)
