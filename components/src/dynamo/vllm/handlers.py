@@ -2767,6 +2767,14 @@ class EmbeddingWorkerHandler:
         config: Config,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
+        """Initialize the standalone handler for embedding requests.
+
+        Args:
+            runtime: The dynamo runtime instance.
+            engine: The vLLM AsyncLLM engine client.
+            config: The backend configuration.
+            shutdown_event: Optional event to signal engine shutdown.
+        """
         self.runtime = runtime
         self.engine_client = engine
         self.config = config
@@ -2787,12 +2795,17 @@ class EmbeddingWorkerHandler:
         return None
 
     async def _monitor_abort(self, context: Context, request_id: str) -> None:
-        """Background task: abort the encode if context is cancelled or
-        shutdown_event fires. Raises EngineShutdown on shutdown so the
-        ``_abort_monitor`` context manager can propagate it.
+        """Background task: abort the encode if context is cancelled.
 
-        Mirrors ``BaseWorkerHandler._monitor_abort`` but trimmed for the
-        embedding path (no ``is_prefill``, no ``abort_guard``).
+        On cancellation or shutdown, it signals the engine to abort the
+        request. Mirrors ``BaseWorkerHandler._monitor_abort``.
+
+        Args:
+            context: The request context containing cancellation signals.
+            request_id: The unique ID of the request to abort.
+
+        Raises:
+            EngineShutdown: If the engine was shut down during processing.
         """
         shutdown_task: Optional[asyncio.Task] = None
         try:
@@ -2854,9 +2867,11 @@ class EmbeddingWorkerHandler:
 
     @asynccontextmanager
     async def _abort_monitor(self, context: Context, request_id: str):
-        """Create + tear down an abort monitor task around one encode call.
+        """Context manager to monitor request cancellation.
 
-        On exit, re-raises EngineShutdown if the monitor caught a shutdown.
+        Args:
+            context: The request context.
+            request_id: The unique ID of the request.
         """
         task = asyncio.create_task(self._monitor_abort(context, request_id))
         try:
