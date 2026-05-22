@@ -4,7 +4,8 @@
 """Unit tests for topology domain utilities.
 
 Tests the read_topology_config() function that reads topology files from a
-Downward API volume and KV transfer policy from env vars at worker startup.
+deployment-provided directory and KV transfer policy from env vars at worker
+startup.
 
 These tests import topology.py directly (bypassing the dynamo package hierarchy)
 so they work without GPU, CUDA, or any backend installed.

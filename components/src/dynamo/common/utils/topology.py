@@ -3,21 +3,22 @@
 
 """Topology domain utilities for topology-aware KV transfer routing.
 
-Workers read their topology placement (e.g. zone, rack) from a file
-projected by the Kubernetes Downward API volume, and read KV transfer
-policy from environment variables. The Rust runtime derives canonical
-topology taints from the published topology domains.
+Workers read their topology placement (e.g. zone, rack) from files provided
+by the deployment environment, and read KV transfer policy from environment
+variables. Each visible, non-empty file name is treated as a topology domain
+and its contents as this worker's value for that domain. The Rust runtime
+derives canonical topology taints from the published topology domains.
 
-Environment variables (set by the operator):
+Environment variables:
     DYN_TOPOLOGY_ENABLED: Set to "true" to enable topology reading.
-    DYN_TOPOLOGY_MOUNT_PATH: Directory where the Downward API volume is
-        mounted (default: /etc/dynamo/topology).
+    DYN_TOPOLOGY_MOUNT_PATH: Directory containing topology domain files
+        (default: /etc/dynamo/topology).
     DYN_KV_TRANSFER_DOMAIN: Which topology domain the router should enforce
         for KV transfer constraints (e.g. "zone"). The file at
         {mount_path}/{domain} must contain the transfer-domain topology value.
     DYN_KV_TRANSFER_ENFORCEMENT: KV transfer enforcement mode, either
         "required" or "preferred" (default: "required" when a domain is set).
-    DYN_KV_TRANSFER_PREFERRED_WEIGHT: Required preferred-taint weight when
+    DYN_KV_TRANSFER_PREFERRED_WEIGHT: Preferred-taint weight used when
         enforcement is "preferred".
 """
 
@@ -85,6 +86,7 @@ def _read_topology_domains(mount_path: Path) -> dict[str, str]:
 
     return topology_domains
 
+
 def _read_kv_transfer_policy() -> tuple[str, str | None, float | None]:
     kv_transfer_domain = os.environ.get(_KV_TRANSFER_DOMAIN_VAR, None)
     kv_transfer_enforcement = os.environ.get(_KV_TRANSFER_ENFORCEMENT_VAR, None)
@@ -92,8 +94,9 @@ def _read_kv_transfer_policy() -> tuple[str, str | None, float | None]:
 
     if kv_transfer_domain is None:
         logger.error(
-            "DYN_TOPOLOGY_ENABLED=true but %s is not set. The operator must "
-            "set the KV transfer domain when topology is enabled. Exiting.",
+            "DYN_TOPOLOGY_ENABLED=true but %s is not set. The deployment "
+            "environment must set the KV transfer domain when topology is "
+            "enabled. Exiting.",
             _KV_TRANSFER_DOMAIN_VAR,
         )
         sys.exit(1)
@@ -106,9 +109,10 @@ def read_topology_config(
     poll_interval: float = _POLL_INTERVAL_SECS,
     poll_timeout: float = _POLL_TIMEOUT_SECS,
 ) -> TopologyConfig:
-    """Read topology config from Downward API volume and env vars.
+    """Read topology config from a file-backed source and env vars.
 
-    The operator injects env vars for topology location and transfer policy:
+    The deployment environment injects env vars for topology location and
+    transfer policy:
       - DYN_TOPOLOGY_ENABLED=true
       - DYN_TOPOLOGY_MOUNT_PATH=/etc/dynamo/topology
       - DYN_KV_TRANSFER_DOMAIN=zone
@@ -116,7 +120,7 @@ def read_topology_config(
       - DYN_KV_TRANSFER_PREFERRED_WEIGHT=0.85
 
     Topology values are read by listing non-hidden files under the mount path.
-    Since the Downward API volume reflects live label updates, this function
+    The topology source may populate files asynchronously, so this function
     polls until the transfer-domain file has content, sleeping between retries.
 
     Args:
@@ -145,6 +149,7 @@ def read_topology_config(
     transfer_domain_file = topology_mount_path / kv_transfer_domain
 
     # Poll until the transfer-domain file has content or timeout expires.
+    # This supports topology sources that populate files asynchronously.
     deadline = time.monotonic() + poll_timeout
     topology_domains = _read_topology_domains(topology_mount_path)
     while kv_transfer_domain not in topology_domains and time.monotonic() < deadline:
@@ -161,8 +166,8 @@ def read_topology_config(
     if kv_transfer_domain not in topology_domains:
         logger.error(
             "DYN_TOPOLOGY_ENABLED=true but topology file %s was not populated "
-            "within %.0fs. This indicates the pod label was never projected "
-            "via the Downward API. Exiting.",
+            "within %.0fs. This indicates the configured topology source did "
+            "not publish the selected transfer domain. Exiting.",
             transfer_domain_file,
             poll_timeout,
         )
