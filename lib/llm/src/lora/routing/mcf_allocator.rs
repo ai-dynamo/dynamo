@@ -104,12 +104,35 @@ impl McfPlacementSolver {
         changed_loras: Option<&HashSet<String>>,
         changed_workers: Option<&HashSet<WorkerWithDpRank>>,
     ) -> Result<McfPlacementResult, String> {
-        if workers.is_empty() || loras.is_empty() {
+        // Trivial: no LoRAs to place.
+        if loras.is_empty() {
             return Ok(McfPlacementResult {
                 assignment: HashMap::new(),
                 loads: HashMap::new(),
                 unloads: HashMap::new(),
                 overflow_count: 0,
+            });
+        }
+
+        // LoRAs exist but there are no workers. Every required replica
+        // overflows: route through the overflow path if allowed, otherwise
+        // fail hard to match the behaviour of the main solver under
+        // allow_overflow = false.
+        if workers.is_empty() {
+            let total_demand: usize = loras.iter().map(|l| l.replicas).sum();
+            if !self.params.allow_overflow {
+                return Err(format!(
+                    "MCF solver failed: no workers available but {} replica(s) required across {} LoRA(s); \
+                     enable overflow or provision workers.",
+                    total_demand,
+                    loras.len(),
+                ));
+            }
+            return Ok(McfPlacementResult {
+                assignment: HashMap::new(),
+                loads: HashMap::new(),
+                unloads: HashMap::new(),
+                overflow_count: total_demand,
             });
         }
 
@@ -580,6 +603,37 @@ mod tests {
         let result = solver.solve(&[], &[], &HashMap::new(), None, None).unwrap();
         assert!(result.assignment.is_empty());
         assert_eq!(result.overflow_count, 0);
+    }
+
+    #[test]
+    fn test_no_workers_with_loras_overflows() {
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let loras = vec![make_lora("A", 2), make_lora("B", 3)];
+        let result = solver
+            .solve(&[], &loras, &HashMap::new(), None, None)
+            .expect("allow_overflow defaults to true");
+        assert!(
+            result.assignment.is_empty(),
+            "no workers means no assignments"
+        );
+        assert_eq!(
+            result.overflow_count, 5,
+            "all required replicas should overflow when no workers exist"
+        );
+    }
+
+    #[test]
+    fn test_no_workers_with_loras_overflow_disabled_fails() {
+        let solver = McfPlacementSolver::new(McfSolveParams {
+            allow_overflow: false,
+            ..Default::default()
+        });
+        let loras = vec![make_lora("A", 1)];
+        let result = solver.solve(&[], &loras, &HashMap::new(), None, None);
+        assert!(
+            result.is_err(),
+            "with allow_overflow=false, missing workers must surface as an error"
+        );
     }
 
     #[test]

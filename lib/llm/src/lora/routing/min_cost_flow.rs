@@ -6,8 +6,6 @@
 //! Implements the Successive Shortest Augmenting Paths (SSAP) algorithm with
 //! Johnson's potentials (Dijkstra on reduced costs). All capacities and costs
 //! are integers, guaranteeing integral optimal solutions.
-//!
-//! Reference: the Python SSAP implementation in the LoRA allocation design doc.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
