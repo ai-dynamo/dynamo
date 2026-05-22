@@ -88,18 +88,28 @@ common_worker_args=(
     --trust-remote-code
 )
 
-# Each worker registers at its OWN ``--endpoint`` path. Dynamo enforces one
-# model per endpoint, so without unique endpoints the second worker fails
-# to register with: "Cannot register model 'X' on endpoint Y: a different
-# model 'Z' is already registered there". The frontend's model-keyed
-# dispatch (``get_embeddings_engine(model)``) still routes correctly by the
-# ``model`` field regardless of which component path hosts each model.
+# Each worker registers under its OWN Dynamo NAMESPACE.
+#
+# Why namespaces and not just unique components or endpoints: the frontend
+# keys ``Model.worker_sets`` by ``(namespace, model_type)`` (see
+# ``worker_set_key`` in ``lib/llm/src/discovery/watcher.rs``), and
+# ``add_worker_set`` is an insert-overwrite on that key. Two workers
+# sharing a namespace -- regardless of how their endpoint paths differ --
+# both hash to the same ``ws_key``, and the second registration silently
+# replaces the first ``WorkerSet`` (along with its push_router). Only the
+# last-registered worker survives in the routing table; the other one
+# stays alive but is orphaned from the frontend's
+# ``select_worker_set_with`` selector. The original "one model per
+# endpoint" symptom was a sibling consequence of the same collision --
+# this resolves both by giving each worker its own namespace, so both
+# ``WorkerSet``s coexist and ``select_worker_set_with`` does its
+# weighted-random fan-out as designed.
 #
 # Endpoint format is ``namespace.component.endpoint`` (dots, not slashes).
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model "$MODEL1" \
-    --endpoint dynamo.embed-worker-1.generate \
+    --endpoint embed-worker-1.vllm.generate \
     "${common_worker_args[@]}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
@@ -107,7 +117,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model "$MODEL2" \
-    --endpoint dynamo.embed-worker-2.generate \
+    --endpoint embed-worker-2.vllm.generate \
     "${common_worker_args[@]}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
