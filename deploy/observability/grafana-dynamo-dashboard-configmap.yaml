@@ -3019,9 +3019,8 @@ data:
         "list": [
           {
             "current": {
-              "selected": false,
-              "text": "prometheus",
-              "value": "prometheus"
+              "text": "default",
+              "value": "default"
             },
             "hide": 0,
             "includeAll": false,
