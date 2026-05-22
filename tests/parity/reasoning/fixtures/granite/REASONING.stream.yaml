@@ -4,10 +4,12 @@
 family: granite
 model_label: Granite
 mode: stream
+refs:
+  upstream: &upstream_ref 'inspired by vLLM Granite reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_granite_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 cases:
   REASONING.stream.1.a:
     description: Empty stream chunk
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - ''
     expected:
@@ -19,7 +21,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'granite'
   REASONING.stream.2.a:
     description: Granite thought-process marker across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - "Here is my thought process: thin"
     - "king Here is my response:"
@@ -35,7 +37,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'granite'
   REASONING.stream.2.b:
     description: Multiple thought-process spans across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - 'Here is my thought process: first Here is my response:'
     - ' middle '
@@ -51,7 +53,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'granite'
   REASONING.stream.3.a:
     description: Start marker split across chunks
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - "Here is my"
     - " thought process: thinking Here is my response: answer"
@@ -68,7 +70,7 @@ cases:
   REASONING.stream.3.b:
     description: End marker split across chunks
     dynamo_leak: true
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - "Here is my thought process: thinking Here is my res"
     - "ponse: answer"
@@ -83,7 +85,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'granite'
   REASONING.stream.3.c:
     description: Partial phrase prefix later becomes normal text
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain Here is my thou
     - ghtful answer
@@ -96,7 +98,7 @@ cases:
         unavailable: SGLang peer not wired for Dynamo parser family 'granite'
   REASONING.stream.1.b:
     description: Plain text never enters reasoning mode
-    ref: dynamo
+    ref: *upstream_ref
     chunks:
     - plain
     - ' answer'
