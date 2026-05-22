@@ -297,11 +297,10 @@ impl AddressedPushRouter {
         // `recv_stream` (worker → upstream, carrying response chunks).
         let (pending_send_stream, pending_recv_stream) =
             self.register_streams(engine_ctx.clone(), true, true).await;
-        let pending_send_stream = pending_send_stream.unwrap();
-        let pending_recv_stream = pending_recv_stream.unwrap();
-
-        let (req_stream_conn_info, request_stream_provider) = pending_send_stream.into_parts();
-        let (resp_stream_conn_info, response_stream_provider) = pending_recv_stream.into_parts();
+        let (req_stream_conn_info, request_stream_provider) =
+            pending_send_stream.unwrap().into_parts();
+        let (resp_stream_conn_info, response_stream_provider) =
+            pending_recv_stream.unwrap().into_parts();
 
         let recv_subject: Option<String> =
             serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&resp_stream_conn_info.info)
@@ -318,7 +317,7 @@ impl AddressedPushRouter {
         if let Some(subject) = &recv_subject
             && !self
                 .resp_transport
-                .associate_instance(subject, &endpoint_instance_id)
+                .associate_instance(subject, send_subject.as_deref(), &endpoint_instance_id)
                 .await
         {
             self.cancel_both(&recv_subject, &send_subject).await;
@@ -560,14 +559,14 @@ where
         let (request, address, instance_info) = addressed_request.into_parts();
         let engine_ctx = context.context();
 
-        // Register only the recv half on the data plane for a single-in /
-        // many-out transport.
+        // Register only the recv half on the data plane for a single-in / many-out.
+        // Request will be passed as part of the control message to the worker.
         let (_, pending_response_stream) =
             self.register_streams(engine_ctx.clone(), false, true).await;
-        let pending_response_stream = pending_response_stream.unwrap();
 
         // separate out the connection info and the stream provider from the registered stream
-        let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
+        let (connection_info, response_stream_provider) =
+            pending_response_stream.unwrap().into_parts();
 
         // Snapshot subject before connection_info is moved; used for cleanup.
         let recv_subject: Option<String> =
