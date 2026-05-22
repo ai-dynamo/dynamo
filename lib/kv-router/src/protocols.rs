@@ -436,14 +436,6 @@ pub struct WorkerSelectionResult {
 
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
-
-    /// Projected active decode blocks on the chosen worker at admission time —
-    /// the `decode_block` term in the cost equation `overlap_weight *
-    /// potential_prefill_block + decode_block`. Optional because most callers
-    /// don't need it; populated by the default selector so policies (e.g.
-    /// conditional-prefill cost-equation) can reconstruct the chosen worker's
-    /// logit without an extra round-trip through the scheduler.
-    pub chosen_worker_decode_blocks: Option<usize>,
 }
 
 /// Active load metrics for a worker, used for overload detection.

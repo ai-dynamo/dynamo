@@ -357,6 +357,21 @@ where
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.slots.get_active_lora_counts()
     }
+
+    /// Snapshot per-worker projected active block load. Used by the
+    /// conditional-prefill probe to populate the Regression policy's
+    /// `roomy()` inputs without threading the value through the selector
+    /// return type.
+    pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.slots.active_blocks()
+    }
+
+    /// Snapshot per-worker decay-adjusted pending-prefill token count.
+    /// Same use case as `active_blocks` — surfaces the data the
+    /// conditional-prefill probe needs without a selector-level pass-through.
+    pub fn active_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.slots.active_tokens(Instant::now())
+    }
 }
 
 #[cfg(test)]

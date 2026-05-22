@@ -54,9 +54,6 @@ struct AdmitOutcome {
 pub(crate) struct PeekResult {
     pub worker_idx: usize,
     pub overlap_blocks: u32,
-    /// Projected active decode blocks on the chosen worker — the
-    /// `decode_block` term in the selector cost equation.
-    pub chosen_decode_blocks: Option<usize>,
 }
 
 #[cfg(test)]
@@ -573,7 +570,6 @@ impl OfflineReplayRouter {
         Ok(PeekResult {
             worker_idx,
             overlap_blocks,
-            chosen_decode_blocks: selection.chosen_worker_decode_blocks,
         })
     }
 

@@ -37,9 +37,6 @@ use crate::config::{
 ///   picked by the agg-equation peek on the decode pool).
 /// - `prefill_chosen_*` — value for the cost-equation-chosen prefill worker
 ///   (the DISAGG prefill target).
-/// - `decode_min_*` / `decode_pool_min_*` — value for the load-min decode
-///   worker picked by the post-handoff load-only peek (the DISAGG decode
-///   target after prefill completes).
 ///
 /// `Option<...>` fields are populated only when the relevant peek runs; the
 /// probe gates the extra peeks behind `ConditionalPrefillPolicy::needs_cost_terms`.
@@ -81,40 +78,33 @@ pub struct ConditionalPrefillDecisionInput {
     /// `None` if the prefill peek did not run.
     pub prefill_chosen_load_blocks: Option<usize>,
 
-    // === Decode min-load worker (DISAGG decode post-prefill re-pick) ===
-    /// `min_d decode_block(d)` — projected active blocks on the load-min
-    /// decode worker, from the post-handoff load-only peek
-    /// (`overlap_score_credit=0`). Models the standard-disagg decode re-pick.
-    /// Used only by CostEquation.
-    pub decode_pool_min_load_blocks: Option<usize>,
-
-    /// Device-prefix overlap (blocks) on the same load-min decode worker.
-    /// Used by CostEquation's delta-aware transfer term as
-    /// `transfer_cost_scale * (prompt_blocks − decode_min_overlap_blocks)`.
-    /// `None` if the load-only peek did not run.
-    pub decode_min_overlap_blocks: Option<u32>,
-
-    // === Capacity / queue signals for Regression policy fast path ===
-    /// Total KV block capacity (`num_gpu_blocks`) on the cache-hot decode
-    /// worker. Used alongside `decode_chosen_load_blocks` to compute
-    /// `available_ratio = (max − active) / max` for the `roomy(d)` predicate.
-    /// `None` if the probe didn't surface it.
+    // === Capacity / pending-prefill signals for Regression policy fast path ===
+    //
+    // Sourced router-side from KvRouter accessors (live router) or equivalent
+    // mocker-side state (Phase 5). See `worker_is_roomy` for the load/queued
+    // semantic gap warning — these aren't literal "free blocks" + "queue depth."
+    /// Static KV block capacity advertised by the cache-hot decode worker at
+    /// registration. Sourced via `KvRouter::total_kv_blocks_for`. Used with
+    /// `decode_chosen_load_blocks` to compute available-ratio headroom for
+    /// the `roomy(d)` check. `None` if the worker config didn't surface it.
     pub decode_chosen_max_blocks: Option<usize>,
 
-    /// Total KV block capacity on the cost-equation-chosen prefill worker.
-    /// Used for the `roomy(p)` predicate. `None` if the prefill peek didn't
-    /// run or didn't surface it.
+    /// Same as `decode_chosen_max_blocks` but for the cost-equation-chosen
+    /// prefill worker. Used for `roomy(p)`. `None` if the prefill peek didn't
+    /// run or the worker config didn't surface it.
     pub prefill_chosen_max_blocks: Option<usize>,
 
-    /// Queued (waiting) block count on the cache-hot decode worker — requests
-    /// admitted but not yet scheduled into a forward pass. Distinct from
-    /// `decode_chosen_load_blocks` (which counts *active* blocks). Feeds
-    /// `roomy(d)`. `None` if the probe didn't surface it.
+    /// Decay-adjusted pending-prefill load on the cache-hot decode worker,
+    /// in block-equivalent units (tokens / block_size). Sourced via
+    /// `KvRouter::pending_prefill_tokens_for` and rounded up. Includes the
+    /// currently-running prefill (decay-credited) plus queued-at-worker work
+    /// (full weight) — NOT literal queue depth. Used by `roomy(d)` as the
+    /// "pending work ahead" threshold check.
     pub decode_chosen_queued_blocks: Option<u32>,
 
-    /// Queued block count on the cost-equation-chosen prefill worker. Feeds
-    /// `roomy(p)`. `None` if the prefill peek didn't run or didn't surface
-    /// the value.
+    /// Same as `decode_chosen_queued_blocks` but for the cost-equation-chosen
+    /// prefill worker. Used for `roomy(p)`. `None` if the prefill peek didn't
+    /// run.
     pub prefill_chosen_queued_blocks: Option<u32>,
 }
 
@@ -132,11 +122,10 @@ impl ConditionalPrefillDecisionInput {
 pub trait ConditionalPrefillPolicy: Send + Sync {
     fn is_enabled(&self) -> bool;
 
-    /// Does this policy need the cost-equation RHS terms
+    /// Does this policy need the extra cost-equation RHS terms
     /// (`prefill_chosen_tier_overlap_credit_blocks`, `prefill_chosen_load_blocks`,
-    /// `decode_pool_min_load_blocks`, `decode_min_overlap_blocks`)? The probe
-    /// only does the extra prefill / load-only decode lookups when this returns
-    /// true.
+    /// `prefill_chosen_max_blocks`, `prefill_chosen_queued_blocks`)? The
+    /// probe only does the extra prefill-router peek when this returns true.
     fn needs_cost_terms(&self) -> bool {
         false
     }
@@ -391,9 +380,47 @@ pub const DEFAULT_REGRESSION_ROOMY_QUEUED_BLOCKS: u32 = 0;
 /// decode has headroom.
 pub const DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS: usize = 16_384;
 
-/// True when worker `w` has both capacity headroom and an empty/short queue,
-/// per the configured thresholds. Missing capacity/queue signals → not roomy
-/// (conservative). All four fields must be present to count.
+/// True when worker `w` has both KV-capacity headroom and a small pending-
+/// prefill backlog, per the configured thresholds. Missing capacity/queue
+/// signals → not roomy (conservative). All four arguments must be present.
+///
+/// **Semantic warning — the inputs are not literal "queue depth".** Both
+/// `load_blocks` and `queued_blocks` arrive from router-state snapshots,
+/// sourced by `prefill_router/execution.rs` via:
+///   - `load_blocks` ← `KvRouter::active_blocks_for(worker)` (delegates to
+///     `ActiveSequencesMultiWorker::active_blocks`) — total projected KV
+///     block load across all router-dispatched requests on the worker
+///     (admitted + queued-at-worker), not just "admitted-and-scheduled."
+///   - `queued_blocks` ← `KvRouter::pending_prefill_tokens_for(worker) /
+///     block_size` (delegates to `ActiveSequencesMultiWorker::active_tokens`)
+///     — decay-adjusted pending-prefill token load: includes the currently-
+///     running prefill (linearly decaying to 0 over its expected duration)
+///     plus all queued-at-worker prefill work (full weight). Divided by
+///     block_size to get block-equivalent units.
+///
+/// Both signals are snapshot values (pre-request) — they don't include the
+/// current request's projected contribution. For the `roomy()` decision this
+/// is what we want ("is the worker busy *now*?"), and the difference vs the
+/// projected view is small (one request's contribution is ~1-20 blocks
+/// against typical thresholds of 500+).
+///
+/// In practice the two signals together capture "worker is busy" reasonably:
+///   - `(max - load) / max ≥ ratio` → "enough free KV memory"
+///   - `queued ≤ threshold`         → "small pending prefill compute backlog"
+///
+/// TODO (Phase 6 review — see `docs/regressionpolicy_implementation.md`):
+/// once mocker/live data is in hand, revisit:
+///   - Threshold defaults (`available/max ≥ 0.5`, `queued ≤ 0`).
+///   - Whether `load_blocks` and `queued_blocks` give independent signal or
+///     are correlated enough that we could drop one (the currently-running
+///     prefill contributes to both — its KV holds blocks, its remaining work
+///     decays into `queued`).
+///   - Whether the snapshot semantic (this function's current shape) gives
+///     materially different decisions vs a request-projected view at the
+///     workloads of interest.
+///   - Per-side asymmetry: AGG cares more about decode-side memory pressure;
+///     DISAGG cares more about prefill-side queue depth. Today both sides
+///     use the same symmetric `roomy()` form.
 fn worker_is_roomy(
     load_blocks: Option<usize>,
     max_blocks: Option<usize>,
@@ -511,8 +538,6 @@ mod tests {
             decode_chosen_load_blocks: None,
             prefill_chosen_tier_overlap_credit_blocks: None,
             prefill_chosen_load_blocks: None,
-            decode_pool_min_load_blocks: None,
-            decode_min_overlap_blocks: None,
             decode_chosen_max_blocks: None,
             prefill_chosen_max_blocks: None,
             decode_chosen_queued_blocks: None,
@@ -615,8 +640,6 @@ mod tests {
             decode_chosen_load_blocks: Some(900),
             prefill_chosen_tier_overlap_credit_blocks: Some(0.0),
             prefill_chosen_load_blocks: Some(900),
-            decode_pool_min_load_blocks: None,
-            decode_min_overlap_blocks: None,
             decode_chosen_max_blocks: Some(1000),
             prefill_chosen_max_blocks: Some(1000),
             decode_chosen_queued_blocks: Some(10),

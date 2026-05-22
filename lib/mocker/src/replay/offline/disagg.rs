@@ -524,25 +524,12 @@ impl DisaggRuntime {
             )?;
 
         let needs_cost_terms = self.conditional_prefill_policy.needs_cost_terms();
-        let (
-            prefill_chosen_tier_overlap_credit_blocks,
-            prefill_chosen_load_blocks,
-            decode_pool_min_load_blocks,
-            decode_min_overlap_blocks,
-        ) = if needs_cost_terms {
-            let (tier_credit, load) =
-                self.peek_prefill_chosen_components(request, replay_hashes)?;
-            let (decode_pool_min_load, decode_pool_min_overlap) =
-                self.peek_decode_pool_min_load_blocks(request, replay_hashes)?;
-            (
-                tier_credit,
-                load,
-                decode_pool_min_load,
-                decode_pool_min_overlap,
-            )
-        } else {
-            (None, None, None, None)
-        };
+        let (prefill_chosen_tier_overlap_credit_blocks, prefill_chosen_load_blocks) =
+            if needs_cost_terms {
+                self.peek_prefill_chosen_components(request, replay_hashes)?
+            } else {
+                (None, None)
+            };
 
         // Offline router only models the device tier (no host-pinned / disk
         // overlap), so the tier-weighted credit collapses to device overlap.
@@ -553,14 +540,14 @@ impl DisaggRuntime {
             block_size,
             decode_chosen_overlap_blocks: lhs.overlap_blocks,
             decode_chosen_tier_overlap_credit_blocks: Some(lhs.overlap_blocks as f64),
-            decode_chosen_load_blocks: lhs.chosen_decode_blocks,
+            // Mocker doesn't yet plumb router-state snapshots into the input
+            // (Phase 5 — mocker integration). Slow path runs without load info;
+            // Regression fast-path roomy() returns false → falls through to
+            // slow-path conservative DISAGG.
+            decode_chosen_load_blocks: None,
             prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks,
-            decode_pool_min_load_blocks,
-            decode_min_overlap_blocks,
-            // Capacity/queue signals are populated by the Regression policy's
-            // probe (Phase 5 — mocker integration). TokenCap doesn't consume
-            // them; default None for now.
+            // Same as above — Phase 5 work.
             decode_chosen_max_blocks: None,
             prefill_chosen_max_blocks: None,
             decode_chosen_queued_blocks: None,
@@ -598,25 +585,11 @@ impl DisaggRuntime {
         };
         let peek =
             prefill_router.peek_request(request, replay_hashes.clone(), None, self.now_ms)?;
-        Ok((Some(peek.overlap_blocks as f64), peek.chosen_decode_blocks))
-    }
-
-    /// Peek the decode router with the load-only formulation (the same shape
-    /// the post-prefill decode hop uses) and return the chosen min-load
-    /// worker's `(decode_blocks, device_overlap_blocks)`. Offline decode
-    /// baseline is already `overlap_score_credit=0.0`, so no override is
-    /// needed. The device overlap is surfaced for the refined CostEquation's
-    /// delta-aware transfer term.
-    fn peek_decode_pool_min_load_blocks(
-        &mut self,
-        request: &DirectRequest,
-        replay_hashes: &Option<ReplayRequestHashes>,
-    ) -> Result<(Option<usize>, Option<u32>)> {
-        let Some(decode_router) = self.decode_router.as_mut() else {
-            return Ok((None, None));
-        };
-        let peek = decode_router.peek_request(request, replay_hashes.clone(), None, self.now_ms)?;
-        Ok((peek.chosen_decode_blocks, Some(peek.overlap_blocks)))
+        // Mocker doesn't yet plumb per-worker load snapshots into the input
+        // (Phase 5 — mocker integration). Return None for the load component
+        // so the policy's slow path proceeds with conservative-DISAGG fallback
+        // when load info is required.
+        Ok((Some(peek.overlap_blocks as f64), None))
     }
 
     /// Bypass remote prefill: pin the request to the probe-chosen decode

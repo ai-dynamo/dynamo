@@ -111,10 +111,6 @@ struct CacheHitEstimates {
 pub(crate) struct BestMatchDetails {
     pub worker: WorkerWithDpRank,
     pub cache_hit: WorkerCacheHitEstimate,
-    /// Projected active decode blocks on the chosen worker — the `decode_block`
-    /// term in the selector cost equation. `None` from selectors that don't
-    /// surface it; populated by `DefaultWorkerSelector`.
-    pub chosen_worker_decode_blocks: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -715,7 +711,6 @@ where
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
             },
-            chosen_worker_decode_blocks: response.chosen_worker_decode_blocks,
         })
     }
 
@@ -880,6 +875,29 @@ where
 
     pub fn block_size(&self) -> u32 {
         self.block_size
+    }
+
+    /// Projected active KV block load on `worker` (snapshot, does not include
+    /// any in-flight request's contribution beyond what's already booked).
+    /// Used by the conditional-prefill probe to populate the Regression
+    /// policy's `roomy()` inputs. Returns `None` if the worker isn't tracked.
+    pub fn active_blocks_for(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.scheduler.active_blocks().get(&worker).copied()
+    }
+
+    /// Decay-adjusted pending-prefill load on `worker` in tokens (snapshot).
+    /// See `LocalScheduler::active_tokens` for the decay semantics. Returned
+    /// to the conditional-prefill probe's `roomy()` inputs.
+    pub fn pending_prefill_tokens_for(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.scheduler.active_tokens().get(&worker).copied()
+    }
+
+    /// Static KV block capacity advertised by the worker at registration.
+    /// `None` if the worker config isn't surfaced. Used by the Regression
+    /// policy's `roomy()` headroom check.
+    pub fn total_kv_blocks_for(&self, worker_id: WorkerId) -> Option<u64> {
+        let configs = self.workers_with_configs.borrow();
+        configs.get(&worker_id).and_then(|cfg| cfg.total_kv_blocks)
     }
 
     /// Compute the overlap blocks for a given token sequence and worker.
@@ -1265,7 +1283,6 @@ mod tests {
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
-                chosen_worker_decode_blocks: None,
             })
         }
     }

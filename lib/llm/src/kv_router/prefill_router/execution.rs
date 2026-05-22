@@ -8,7 +8,6 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
-use dynamo_kv_router::config::RouterConfigOverride;
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
@@ -118,37 +117,44 @@ impl PrefillRouter {
         // shifted. We don't model that drift here. In steady state the
         // distribution is roughly stable, and both LHS and RHS share the same
         // snapshot bias, so the relative comparison stays meaningful.
+        // Convert decay-adjusted pending-prefill tokens (snapshot, router-
+        // tracked) into block-equivalent units for the Regression policy's
+        // `roomy()` predicate. See `worker_is_roomy` for the semantic gap —
+        // this is not literal queue depth, despite the field name.
+        let tokens_to_blocks = |tokens: Option<usize>| -> Option<u32> {
+            tokens.map(|t| t.div_ceil(block_size.max(1)) as u32)
+        };
+
+        // Decode-side load + capacity + pending-prefill signals for the
+        // cache-hot decode worker (AGG bypass target). All three are snapshot
+        // accessors on the router state — no projection re-computation, no
+        // pollution of the selector return type.
+        let decode_chosen_load_blocks = decode_router.active_blocks_for(worker);
+        let decode_chosen_max_blocks = decode_router
+            .total_kv_blocks_for(worker.worker_id)
+            .map(|b| b as usize);
+        let decode_chosen_queued_blocks =
+            tokens_to_blocks(decode_router.pending_prefill_tokens_for(worker));
+
+        // Prefill-side equivalents — gated on `needs_cost_terms()` because
+        // they require a prefill-router peek to know which prefill worker
+        // would be picked.
         let (
             prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks,
-            decode_pool_min_load_blocks,
-            decode_min_overlap_blocks,
+            prefill_chosen_max_blocks,
+            prefill_chosen_queued_blocks,
         ) = if self.conditional_prefill_policy.needs_cost_terms() {
-            let (credit, load) = self
-                .query_prefill_chosen_components(
-                    routing_token_ids,
-                    block_mm_infos,
-                    lora_name.clone(),
-                    priority_jump,
-                    expected_output_tokens,
-                    allowed_worker_ids.clone(),
-                    routing_constraints.clone(),
-                )
-                .await;
-            let (decode_pool_min_load, decode_pool_min_overlap) = self
-                .query_decode_pool_min_load_blocks(
-                    decode_router,
-                    routing_token_ids,
-                    block_mm_infos,
-                    req.router_config_override.as_ref(),
-                    lora_name.clone(),
-                    priority_jump,
-                    expected_output_tokens,
-                    allowed_worker_ids.clone(),
-                    routing_constraints.clone(),
-                )
-                .await;
-            (credit, load, decode_pool_min_load, decode_pool_min_overlap)
+            self.query_prefill_chosen_components(
+                routing_token_ids,
+                block_mm_infos,
+                lora_name.clone(),
+                priority_jump,
+                expected_output_tokens,
+                allowed_worker_ids.clone(),
+                routing_constraints.clone(),
+            )
+            .await
         } else {
             (None, None, None, None)
         };
@@ -158,17 +164,13 @@ impl PrefillRouter {
             block_size,
             decode_chosen_overlap_blocks: overlap_blocks,
             decode_chosen_tier_overlap_credit_blocks,
-            decode_chosen_load_blocks: details.chosen_worker_decode_blocks,
+            decode_chosen_load_blocks,
             prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks,
-            decode_pool_min_load_blocks,
-            decode_min_overlap_blocks,
-            // Capacity/queue signals are populated by the Regression policy's
-            // probe (Phase 1.5+). TokenCap doesn't consume them; default None.
-            decode_chosen_max_blocks: None,
-            prefill_chosen_max_blocks: None,
-            decode_chosen_queued_blocks: None,
-            prefill_chosen_queued_blocks: None,
+            decode_chosen_max_blocks,
+            prefill_chosen_max_blocks,
+            decode_chosen_queued_blocks,
+            prefill_chosen_queued_blocks,
         };
         let net_new_tokens = input.net_new_tokens();
         let overlap_tokens = (overlap_blocks as usize) * block_size;
@@ -191,23 +193,32 @@ impl PrefillRouter {
             dp_rank = worker.dp_rank,
             net_new_tokens,
             overlap_tokens,
-            decode_chosen_load_blocks = ?details.chosen_worker_decode_blocks,
+            decode_chosen_load_blocks = ?decode_chosen_load_blocks,
             decode_chosen_tier_overlap_credit_blocks = ?decode_chosen_tier_overlap_credit_blocks,
             prefill_chosen_tier_overlap_credit_blocks = ?prefill_chosen_tier_overlap_credit_blocks,
             prefill_chosen_load_blocks = ?prefill_chosen_load_blocks,
-            decode_pool_min_load_blocks = ?decode_pool_min_load_blocks,
-            decode_min_overlap_blocks = ?decode_min_overlap_blocks,
             "Conditional prefill policy declined to bypass"
         );
         Ok(None)
     }
 
     /// Peek-query the prefill router for the cost-equation-chosen prefill
-    /// worker `p` and return its `(tier_overlap_credit_blocks, decode_blocks)`
-    /// components. The tier credit is the selector's `effective_overlap_blocks`
-    /// (already tier-weighted: device + host*0.75 + disk*0.25 + ...). Returns
-    /// `(None, None)` if the prefill router isn't KV-mode, isn't activated,
-    /// or the call fails.
+    /// worker `p` and return its
+    /// `(tier_overlap_credit_blocks, load_blocks, max_blocks, queued_blocks)`
+    /// components for the Regression policy's `roomy()` and slow-path inputs.
+    ///
+    /// - `tier_credit` is the selector's `effective_overlap_blocks` (already
+    ///   tier-weighted: device + host*0.75 + disk*0.25 + ...).
+    /// - `load_blocks` is the router's snapshot of active decode-side blocks
+    ///   on the chosen worker (via `KvRouter::active_blocks_for`).
+    /// - `max_blocks` is the worker's static KV capacity (advertised via MDC).
+    /// - `queued_blocks` is the router's decay-adjusted pending-prefill token
+    ///   load, divided by `block_size` (via `KvRouter::pending_prefill_tokens_for`).
+    ///   See `worker_is_roomy` for the semantic warning — this is *not*
+    ///   literal queue depth.
+    ///
+    /// Returns all-`None` if the prefill router isn't KV-mode, isn't
+    /// activated, or the call fails.
     #[allow(clippy::too_many_arguments)]
     async fn query_prefill_chosen_components(
         &self,
@@ -218,13 +229,13 @@ impl PrefillRouter {
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> (Option<f64>, Option<usize>) {
+    ) -> (Option<f64>, Option<usize>, Option<usize>, Option<u32>) {
         let Some(inner) = self.prefill_router.get() else {
-            return (None, None);
+            return (None, None, None, None);
         };
         let kv = match inner {
             InnerPrefillRouter::KvRouter(r) => r,
-            InnerPrefillRouter::SimpleRouter(_) => return (None, None),
+            InnerPrefillRouter::SimpleRouter(_) => return (None, None, None, None),
         };
         let Ok(details) = kv
             .chooser
@@ -243,56 +254,20 @@ impl PrefillRouter {
             )
             .await
         else {
-            return (None, None);
+            return (None, None, None, None);
         };
+        let block_size = kv.chooser.block_size() as usize;
         let tier_credit = Some(details.cache_hit.effective_overlap_blocks);
-        let load = details.chosen_worker_decode_blocks;
-        (tier_credit, load)
-    }
-
-    /// Peek-query the decode router with `overlap_score_credit = 0` to find
-    /// the least-loaded decode worker — the worker the standard disagg path
-    /// would re-pick after remote prefill — and return its projected
-    /// `(decode_block, device_overlap_blocks)`. The device overlap is needed
-    /// by the refined CostEquation's delta-aware transfer term.
-    #[allow(clippy::too_many_arguments)]
-    async fn query_decode_pool_min_load_blocks(
-        &self,
-        decode_router: &super::super::KvRouter,
-        token_ids: &[u32],
-        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-        existing_override: Option<&RouterConfigOverride>,
-        lora_name: Option<String>,
-        priority_jump: f64,
-        expected_output_tokens: Option<u32>,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
-    ) -> (Option<usize>, Option<u32>) {
-        let load_only_override = RouterConfigOverride {
-            overlap_score_credit: Some(0.0),
-            ..existing_override.cloned().unwrap_or_default()
-        };
-        let Ok(details) = decode_router
-            .find_best_match_details(
-                None,
-                token_ids,
-                block_mm_infos,
-                Some(&load_only_override),
-                false,
-                lora_name,
-                priority_jump,
-                expected_output_tokens,
-                None,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await
-        else {
-            return (None, None);
-        };
-        let load = details.chosen_worker_decode_blocks;
-        let overlap = Some(details.cache_hit.rounded_overlap_blocks());
-        (load, overlap)
+        let load = kv.chooser.active_blocks_for(details.worker);
+        let max_blocks = kv
+            .chooser
+            .total_kv_blocks_for(details.worker.worker_id)
+            .map(|b| b as usize);
+        let queued = kv
+            .chooser
+            .pending_prefill_tokens_for(details.worker)
+            .map(|t| t.div_ceil(block_size.max(1)) as u32);
+        (tier_credit, load, max_blocks, queued)
     }
 
     /// Select a prefill worker and resolve its bootstrap connection info.

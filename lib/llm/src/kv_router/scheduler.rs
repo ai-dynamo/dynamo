@@ -232,4 +232,17 @@ where
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.inner.get_active_lora_counts()
     }
+
+    /// Per-worker snapshot of projected active KV block load. Exposed for the
+    /// conditional-prefill probe; see `LocalScheduler::active_blocks`.
+    pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.inner.active_blocks()
+    }
+
+    /// Per-worker snapshot of decay-adjusted pending-prefill token load.
+    /// Exposed for the conditional-prefill probe; see
+    /// `LocalScheduler::active_tokens`.
+    pub fn active_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.inner.active_tokens()
+    }
 }
