@@ -476,7 +476,7 @@ func main() {
 		"istio", runtimeConfig.IstioAvailable,
 	)
 
-	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
+	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
 	// refresh whenever a secret is created/deleted/updated
 	// Set up informer
 	var factory informers.SharedInformerFactory
@@ -541,12 +541,13 @@ func main() {
 		setupLog.Error(err, "unable to add event handler to secret informer")
 		os.Exit(1)
 	}
+	if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
+		setupLog.Error(err, "initial docker secrets index refresh failed")
+		os.Exit(1)
+	}
+	setupLog.Info("initial docker secrets index refreshed")
 	// launch a goroutine to refresh the docker secret indexer in any case every minute
 	go func() {
-		// Initial refresh
-		if err := dockerSecretRetriever.RefreshIndex(context.Background()); err != nil {
-			setupLog.Error(err, "initial docker secrets index refresh failed")
-		}
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for {

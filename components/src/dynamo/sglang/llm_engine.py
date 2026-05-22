@@ -15,13 +15,14 @@ import logging
 import os
 import random
 import sys
-from collections.abc import AsyncGenerator, Callable
-from typing import Any, Optional
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any, Optional
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
@@ -33,12 +34,12 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
-from dynamo.common.backend.publisher import (
-    KvEventSource,
-    Metrics,
-    SnapshotSource,
-    ZmqSource,
+from dynamo.common.backend.health_check import (
+    bos_token_id_or,
+    build_health_check_payload,
+    is_probe,
 )
+from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
@@ -52,6 +53,9 @@ from dynamo.sglang._disagg import (
 )
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.publisher import format_zmq_endpoint
+
+if TYPE_CHECKING:
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +112,10 @@ class SglangLLMEngine(LLMEngine):
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
-        # Populated by `_metrics_pull_loop`; read by `metrics_sources()`.
-        self._latest_metrics: dict[int, Metrics] = {}
+        # Set by attach_snapshot_publisher when component_metrics_dp_ranks
+        # is non-empty. `_metrics_pull_loop` pushes ComponentSnapshots into
+        # it on every ZMQ message — event-driven, no framework polling.
+        self._snapshot_publisher: Optional[Any] = None
         self._metrics_task: Optional[asyncio.Task[None]] = None
         self._metrics_zmq_ctx: Optional[zmq.asyncio.Context] = None
         self._metrics_zmq_sock = None
@@ -143,6 +149,7 @@ class SglangLLMEngine(LLMEngine):
 
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id  # SGLang bootstrap uses host/port/room triples
+
         self.engine = sgl.Engine(server_args=self.server_args)
 
         tokenizer = (
@@ -220,7 +227,8 @@ class SglangLLMEngine(LLMEngine):
 
     def _start_metrics_task(self) -> None:
         assert self.engine is not None, "Engine not initialized"
-        if not (self._kv_routing_enabled() and self._is_metrics_leader()):
+        # Match legacy: gate only on node_rank, not router state.
+        if not self._is_metrics_leader():
             return
         self._metrics_zmq_ctx = zmq.asyncio.Context()
         self._metrics_zmq_sock = get_zmq_socket(
@@ -250,9 +258,20 @@ class SglangLLMEngine(LLMEngine):
                 if kv_metrics.data_parallel_rank is not None
                 else 0
             )
-            self._latest_metrics[dp_rank] = Metrics(
-                kv_used_blocks=kv_metrics.kv_active_blocks,
-            )
+            # SGLang's KvMetrics carries `cache_hit_rate_perc` on recent
+            # versions; older releases (pre-N-1) may omit it.
+            hit_rate = getattr(kv_metrics, "cache_hit_rate_perc", None)
+            if self._snapshot_publisher is not None:
+                self._snapshot_publisher.publish(
+                    dp_rank,
+                    ComponentSnapshot(
+                        kv_used_blocks=kv_metrics.kv_active_blocks,
+                        kv_total_blocks=kv_metrics.kv_total_blocks,
+                        gpu_cache_usage=kv_metrics.gpu_cache_usage_perc,
+                        kv_cache_hit_rate=hit_rate,
+                        dp_rank=dp_rank,
+                    ),
+                )
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -297,6 +316,31 @@ class SglangLLMEngine(LLMEngine):
         # above) before we yield the bootstrap chunk — otherwise the
         # decode peer can connect to a room that doesn't exist yet.
         if self.serving_mode == DisaggregationMode.PREFILL:
+            # Canary probes: drain the engine stream and yield a single
+            # terminal so `HealthCheckManager` observes actual engine
+            # completion. Without this, the bootstrap chunk below makes
+            # the probe "succeed" before the engine has done any work.
+            if is_probe(request):
+                try:
+                    async for _ in stream:
+                        if context.is_stopped():
+                            break
+                except Exception as e:
+                    logger.warning(
+                        "prefill canary stream failed (rid=%s): %s",
+                        context.trace_id,
+                        e,
+                        exc_info=True,
+                    )
+                    self._abort_sglang_request(context.trace_id)
+                    yield {
+                        "token_ids": [],
+                        "index": 0,
+                        "finish_reason": f"error: {e}",
+                    }
+                    return
+                yield {"token_ids": [], "index": 0, "finish_reason": "stop"}
+                return
             yield {
                 "token_ids": [],
                 "index": 0,
@@ -535,14 +579,13 @@ class SglangLLMEngine(LLMEngine):
                 rid,
                 exc_info=True,
             )
-            if rid is not None:
-                self._abort_sglang_request(rid)
+            self._abort_sglang_request(rid)
 
-    def _abort_sglang_request(self, rid: str) -> None:
+    def _abort_sglang_request(self, rid: Optional[str]) -> None:
         """Best-effort abort. Failures here are swallowed — SGLang is
         already in a bad state and we want to surface the original
         failure, not a follow-up abort error."""
-        if self.engine is None:
+        if rid is None or self.engine is None:
             return
         tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
         if tokenizer_manager is None:
@@ -584,18 +627,61 @@ class SglangLLMEngine(LLMEngine):
             )
         return sources
 
-    async def metrics_sources(self) -> list[SnapshotSource]:
-        if not (self._kv_routing_enabled() and self._is_metrics_leader()):
+    def component_metrics_dp_ranks(self) -> list[int]:
+        # Leader-only to avoid multi-node double-counting; not gated on
+        # router state since gauges are observability data.
+        if not self._is_metrics_leader():
             return []
-
-        def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
-            return lambda: self._latest_metrics.get(r)
-
         start, end = _local_dp_rank_range(self.server_args)
-        return [
-            SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
-            for rank in range(start, end)
-        ]
+        return list(range(start, end))
+
+    def attach_snapshot_publisher(self, publisher) -> None:
+        self._snapshot_publisher = publisher
+
+    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        # SGLang multiprocess registry — only when --enable-metrics is
+        # set (otherwise SGLang doesn't call set_prometheus_multiproc_dir
+        # and MultiProcessCollector would have no .db files to read).
+        if self.server_args.enable_metrics:
+            from prometheus_client import CollectorRegistry, multiprocess
+
+            from dynamo.common.backend.metrics import register_engine_registry
+
+            sgl_registry = CollectorRegistry()
+            multiprocess.MultiProcessCollector(sgl_registry)
+            register_engine_registry(metrics, sgl_registry, prefix_filters=["sglang:"])
+
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        # `--use-sglang-tokenizer` consumes `messages`/`prompt`/`text` via
+        # `_input_param_manager.get_input_param(use_tokenizer=True)` and
+        # reads flat sampling fields. Neither shape survives the
+        # `PreprocessedRequest` typed deserialize on the canary path
+        # (no `prompt`/`messages` fields on the struct), so the canary
+        # is opted out in tokenizer mode. Activity-driven health remains.
+        if self._use_sglang_tokenizer:
+            logger.warning(
+                "SGLang tokenizer-mode worker: health-check canary disabled — "
+                "PreprocessedRequest has no prompt/messages field for the "
+                "JSON probe adapter. Endpoint readiness will rely on real "
+                "request traffic."
+            )
+            return None
+        extras: Optional[dict[str, Any]] = None
+        # FAKE_BOOTSTRAP_HOST tells SGLang to short-circuit real KV transfer;
+        # room=0 always routes to DP rank 0.
+        if self.serving_mode in (DisaggregationMode.PREFILL, DisaggregationMode.DECODE):
+            bootstrap_port = (
+                getattr(self.server_args, "disaggregation_bootstrap_port", None) or 0
+            )
+            extras = {
+                "bootstrap_info": {
+                    "bootstrap_host": FAKE_BOOTSTRAP_HOST,
+                    "bootstrap_port": bootstrap_port,
+                    "bootstrap_room": 0,
+                }
+            }
+        bos = bos_token_id_or(getattr(self.engine, "tokenizer_manager", None))
+        return build_health_check_payload(bos_token_id=bos, extras=extras)
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if not self._use_sglang_tokenizer:

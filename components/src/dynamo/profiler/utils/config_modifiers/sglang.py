@@ -46,6 +46,36 @@ DEFAULT_SGLANG_AGG_CONFIG_PATH = resolve_deploy_path(
 )
 
 
+def _arg_value(args: list[str], key: str) -> str | None:
+    for idx in range(len(args) - 1, -1, -1):
+        arg = args[idx]
+        if arg.startswith(f"{key}="):
+            return arg.split("=", 1)[1]
+        if arg == key:
+            return args[idx + 1] if idx + 1 < len(args) else None
+    return None
+
+
+def _has_arg(args: list[str], key: str) -> bool:
+    return any(arg == key or arg.startswith(f"{key}=") for arg in args)
+
+
+def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
+    args = list(args)
+    if _has_arg(args, "--cuda-graph-bs") or _has_arg(args, "--disable-cuda-graph"):
+        return args
+
+    max_running_requests = _arg_value(args, "--max-running-requests")
+    try:
+        max_running_requests_int = int(max_running_requests or "")
+    except ValueError:
+        return args
+
+    if max_running_requests_int == 1:
+        args = append_argument(args, ["--cuda-graph-bs", "1"])
+    return args
+
+
 class SGLangConfigModifier(BaseConfigModifier):
     BACKEND = "sglang"
 
@@ -63,6 +93,30 @@ class SGLangConfigModifier(BaseConfigModifier):
     def update_image(cls, config, image: str) -> dict:
         """Update container image for all DGD services (frontend, planner, workers)."""
         return update_image(config, image)
+
+    @classmethod
+    def _apply_disagg_workers(
+        cls,
+        cfg: Config,
+        prefill_cli_args: list[str],
+        prefill_replicas: int,
+        prefill_gpus: int,
+        decode_cli_args: list[str],
+        decode_replicas: int,
+        decode_gpus: int,
+        num_gpus_per_node: int | None = None,
+    ) -> None:
+        prefill_cli_args = _ensure_safe_prefill_cuda_graph_bs(prefill_cli_args)
+        super()._apply_disagg_workers(
+            cfg,
+            prefill_cli_args=prefill_cli_args,
+            prefill_replicas=prefill_replicas,
+            prefill_gpus=prefill_gpus,
+            decode_cli_args=decode_cli_args,
+            decode_replicas=decode_replicas,
+            decode_gpus=decode_gpus,
+            num_gpus_per_node=num_gpus_per_node,
+        )
 
     @classmethod
     def convert_config(
@@ -366,6 +420,7 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         # Set max concurrency to control effective batch size
         args = set_argument_value(args, "--max-running-requests", str(max_batch_size))
+        args = _ensure_safe_prefill_cuda_graph_bs(args)
 
         # Cap total tokens processed in a batch to avoid chunked prefill
         args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))
