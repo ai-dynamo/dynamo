@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Periodic 1-token canary against SGLang's Generate RPC. SGLang's own
-//! HealthCheck is liveness-only and won't catch a hung scheduler, so we
-//! send a real Generate and self-evict via SIGTERM on persistent failure.
+//! Periodic 1-token canary. SGLang's HealthCheck is liveness-only and won't
+//! catch a hung scheduler, so we send a real Generate and self-evict via
+//! SIGTERM on persistent failure.
 
 use std::time::Duration;
 

@@ -30,9 +30,8 @@ pub struct SglangServerInfo {
     pub bootstrap_host: Option<String>,
 }
 
-/// ServerArgs may be nested under `server_args` or live at the top level
-/// depending on SGLang version. Mirrors the field set
-/// `dynamo.sglang.register._get_runtime_config` reads.
+/// ServerArgs is nested under `server_args` on newer SGLang and at the top
+/// level on older versions; we accept both.
 pub fn parse_server_info(json_info: &str) -> SglangServerInfo {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json_info) else {
         tracing::warn!("GetServerInfo.json_info is not valid JSON");
