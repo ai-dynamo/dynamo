@@ -3546,6 +3546,9 @@ fahrenheit
     /// the raw `<minimax:tool_call>` protocol block as assistant content.
     #[tokio::test]
     async fn test_minimax_m2_stream_finalize_zero_call_truncation_drops_markup() {
+        // These are jail/finalize regression checks for existing parser parity cases:
+        // the first and prefix-preservation rows cover PARSER.stream.4.a, and
+        // the mid-call body truncation row covers PARSER.stream.4.b.
         let cases = [
             (
                 "complete body without outer close",
