@@ -23,7 +23,8 @@
 //! ## Worker Capacity Invariant
 //!
 //! `LoraInfo::max_gpu_lora_count` is a *worker-level* property (the engine's
-//! `--max-loras` setting, see DEP §9), but is duplicated into every `LoraInfo` a
+//! `--max-loras` setting; see `docs/dev/dep/000N-lora-placement/lora-allocation-v2.md`),
+//! but is duplicated into every `LoraInfo` a
 //! worker publishes for convenience. All `LoraInfo` values coming from the same
 //! worker MUST carry the same `max_gpu_lora_count`. If a mismatch is observed
 //! across updates, we log a warning and adopt the latest value — but this should
@@ -131,12 +132,17 @@ impl LoraStateTracker {
 
         self.lora_info.remove(&(lora_name.to_string(), worker));
 
-        if let Some(mut loras) = self.worker_to_loras.get_mut(&worker) {
+        let became_empty = if let Some(mut loras) = self.worker_to_loras.get_mut(&worker) {
             loras.remove(lora_name);
-            if loras.is_empty() {
-                drop(loras);
-                self.worker_to_loras.remove(&worker);
-            }
+            loras.is_empty()
+        } else {
+            false
+        };
+        if became_empty {
+            // remove_if re-checks the predicate under the shard lock, so a
+            // concurrent handle_mdc_addition that races between the drop above
+            // and this call cannot have its newly inserted entry deleted.
+            self.worker_to_loras.remove_if(&worker, |_, v| v.is_empty());
         }
 
         tracing::debug!(
