@@ -1755,18 +1755,19 @@ func applyDGDTemplateDefaults(
 		main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
 	}
 
-	// Bake KV transfer policy env vars into worker pod templates so they
-	// survive DGD → DCD materialization (the DCD controller lacks the parent DGD).
-	// Workers publish these in their MDC so the router reads policy per-worker.
-	if shouldApplyKvTransferPolicyEnvVarsToWorkerComponent(component, dynamoDeployment) {
-		applyKvTransferPolicyEnvVarsToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
+	// Bake KV transfer policy env vars and topology projection into worker pod
+	// templates so they survive DGD -> DCD materialization (the DCD controller
+	// lacks the parent DGD). Workers publish these in their MDC so the router
+	// reads policy per-worker.
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
+		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
 }
 
-func shouldApplyKvTransferPolicyEnvVarsToWorkerComponent(
+func shouldApplyKvTransferPolicyToWorkerComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 ) bool {
@@ -1777,7 +1778,7 @@ func shouldApplyKvTransferPolicyEnvVarsToWorkerComponent(
 		IsWorkerComponent(string(component.ComponentType))
 }
 
-func applyKvTransferPolicyEnvVarsToWorkerComponent(
+func applyKvTransferPolicyToWorkerComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	kvt *v1beta1.KvTransferPolicy,
 ) {
@@ -1786,6 +1787,12 @@ func applyKvTransferPolicyEnvVarsToWorkerComponent(
 	}
 	podTemplate := ensurePodTemplate(component)
 	main := ensureMainContainer(podTemplate)
+	main.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(main.Env), workerKvTransferPolicyEnvVars(kvt))
+	main.VolumeMounts = appendTopologyLabelVolumeMount(main.VolumeMounts, TopologyLabelVolumeMount())
+	podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt))
+}
+
+func workerKvTransferPolicyEnvVars(kvt *v1beta1.KvTransferPolicy) []corev1.EnvVar {
 	enforcement := string(kvt.Enforcement)
 	if enforcement == "" {
 		enforcement = string(v1beta1.KvTransferEnforcementRequired)
@@ -1793,6 +1800,8 @@ func applyKvTransferPolicyEnvVarsToWorkerComponent(
 	policyEnvs := []corev1.EnvVar{
 		{Name: commonconsts.EnvKvTransferDomain, Value: string(kvt.Domain)},
 		{Name: commonconsts.EnvKvTransferEnforcement, Value: enforcement},
+		{Name: commonconsts.EnvTopologyEnabled, Value: "true"},
+		{Name: commonconsts.EnvTopologyMountPath, Value: topologyMountPath},
 	}
 	if kvt.PreferredWeight != nil {
 		policyEnvs = append(policyEnvs, corev1.EnvVar{
@@ -1800,16 +1809,16 @@ func applyKvTransferPolicyEnvVarsToWorkerComponent(
 			Value: strconv.FormatFloat(float64(*kvt.PreferredWeight), 'f', -1, 32),
 		})
 	}
-	main.Env = MergeEnvs(removeKvTransferPolicyEnvVars(main.Env), policyEnvs)
+	return policyEnvs
 }
 
-func removeKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
+func removeWorkerKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	if len(envs) == 0 {
 		return envs
 	}
 	filtered := make([]corev1.EnvVar, 0, len(envs))
 	for _, env := range envs {
-		if isKvTransferPolicyEnvVar(env.Name) {
+		if isWorkerKvTransferPolicyEnvVar(env.Name) {
 			continue
 		}
 		filtered = append(filtered, env)
@@ -1817,15 +1826,39 @@ func removeKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	return filtered
 }
 
-func isKvTransferPolicyEnvVar(name string) bool {
+func isWorkerKvTransferPolicyEnvVar(name string) bool {
 	switch name {
 	case commonconsts.EnvKvTransferDomain,
 		commonconsts.EnvKvTransferEnforcement,
-		commonconsts.EnvKvTransferPreferredWeight:
+		commonconsts.EnvKvTransferPreferredWeight,
+		commonconsts.EnvTopologyEnabled,
+		commonconsts.EnvTopologyMountPath:
 		return true
 	default:
 		return false
 	}
+}
+
+func appendTopologyLabelVolumeMount(mounts []corev1.VolumeMount, mount corev1.VolumeMount) []corev1.VolumeMount {
+	filtered := make([]corev1.VolumeMount, 0, len(mounts)+1)
+	for _, existing := range mounts {
+		if existing.Name == mount.Name || existing.MountPath == mount.MountPath {
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	return append(filtered, mount)
+}
+
+func appendTopologyLabelVolume(volumes []corev1.Volume, vol corev1.Volume) []corev1.Volume {
+	filtered := make([]corev1.Volume, 0, len(volumes)+1)
+	for _, v := range volumes {
+		if v.Name == vol.Name {
+			continue
+		}
+		filtered = append(filtered, v)
+	}
+	return append(filtered, vol)
 }
 
 // dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated

@@ -375,6 +375,10 @@ fn register_model<'p>(
         .or(model_name)
         .or_else(|| Some(source_path.clone()));
 
+    if let Some(cfg) = &runtime_config {
+        cfg.validate_config()?;
+    }
+
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // For TensorBased, Images, and Videos models, skip HuggingFace downloads and register directly
         // These model types handle model loading internally, no tokenizer extraction needed
