@@ -60,6 +60,7 @@ use crate::protocols::openai::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
 use dynamo_runtime::logging::get_distributed_tracing_context;
@@ -1132,7 +1133,7 @@ fn make_dispatch_event(
 }
 
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
-/// `role` is excluded — backends set it on every delta.
+/// `role` is excluded; backends set it on every delta.
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
         return false;
@@ -1147,8 +1148,15 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 refusal,
                 reasoning_content,
             } = &c.delta;
+            // `Text("")` happens during multi-byte UTF-8 token assembly;
+            // `Parts(vec![])` is a structurally empty multimodal payload.
+            let content_empty = match content {
+                None => true,
+                Some(ChatCompletionMessageContent::Text(t)) => t.is_empty(),
+                Some(ChatCompletionMessageContent::Parts(p)) => p.is_empty(),
+            };
             c.finish_reason.is_none()
-                && content.is_none()
+                && content_empty
                 && function_call.is_none()
                 && tool_calls.is_none()
                 && refusal.is_none()
@@ -4601,6 +4609,59 @@ mod tests {
                 }),
             )),
             "function_call present → not empty",
+        );
+    }
+
+    #[test]
+    fn test_chat_predicate_filters_text_empty_string() {
+        use dynamo_protocols::types::{
+            ChatCompletionMessageContent, ChatCompletionResponseContentPart,
+            ChatCompletionResponseContentPartText,
+        };
+
+        // `Text("")` arises during multi-byte UTF-8 token assembly and must be
+        // filtered, matching `is_empty_completion_stream_response`'s `""` case.
+        let resp = make_delta(Some(""), None, None, None, None, None, None, None);
+        assert!(
+            is_empty_stream_response(&resp),
+            "Text(\"\") delta should be filtered as empty",
+        );
+
+        // Structurally empty multimodal `Parts(vec![])` is also empty.
+        let mut resp = make_delta(None, None, None, None, None, None, None, None);
+        resp.inner.choices[0].delta.content =
+            Some(ChatCompletionMessageContent::Parts(Vec::new()));
+        assert!(
+            is_empty_stream_response(&resp),
+            "Parts(vec![]) delta should be filtered as empty",
+        );
+
+        // Non-empty multimodal Parts must be preserved.
+        let mut resp = make_delta(None, None, None, None, None, None, None, None);
+        resp.inner.choices[0].delta.content = Some(ChatCompletionMessageContent::Parts(vec![
+            ChatCompletionResponseContentPart::Text(ChatCompletionResponseContentPartText {
+                text: "hi".to_string(),
+            }),
+        ]));
+        assert!(
+            !is_empty_stream_response(&resp),
+            "Parts with content must not be filtered",
+        );
+
+        // Empty content alongside a semantic field (finish_reason) must survive.
+        let resp = make_delta(
+            Some(""),
+            None,
+            None,
+            Some(FinishReason::Stop),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !is_empty_stream_response(&resp),
+            "Text(\"\") + finish_reason must not be filtered",
         );
     }
 
