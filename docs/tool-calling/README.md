@@ -24,7 +24,7 @@ parser lives in Dynamo's own registry or in an upstream engine frontend
 Start with the Dynamo path. Fall back to the engine path only when Dynamo's
 registry does not list a parser for your model.
 
-## Why Dynamo implements tool-call parsers
+## Why Dynamo implements tool-call and reasoning parsers
 
 In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call parsing and 
 reasoning parsing happens in the engine's frontend server, with subtle 
