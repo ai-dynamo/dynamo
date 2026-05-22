@@ -19,7 +19,7 @@ parser lives in Dynamo's own registry or in an upstream engine frontend
 | Path | When to use | Page |
 |------|-------------|------|
 | **Dynamo** | Dynamo ships a framework-agnostic Rust parser for the model's tool-call format. Default path. | [Tool Call Parsing (Dynamo)](dynamo.md) |
-| **Engine Fallback** | Use the framework's frontend implementation (vLLM or SGLang today; TRTLLM in progress) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Tool Call Parsing (Engine Fallback)](engine-fallback.md) |
+| **Engine Fallback** | Use the framework's parser implementation (vLLM or SGLang today; TRTLLM in progress) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Tool Call Parsing (Engine Fallback)](engine-fallback.md) |
 
 Start with the Dynamo path. Fall back to the engine path only when Dynamo's
 registry does not list a parser for your model.
