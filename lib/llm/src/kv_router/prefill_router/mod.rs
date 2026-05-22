@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(override_config.router_temperature, Some(0.7));
     }
 
-    fn make_request_with_constraints(
+    fn request_with_constraints(
         routing_constraints: Option<RoutingConstraints>,
     ) -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -447,71 +447,48 @@ mod tests {
     }
 
     #[test]
-    fn merge_decode_topology_constraints_preserves_existing_constraints() {
-        let mut request = make_request_with_constraints(Some(RoutingConstraints {
-            required_taints: HashSet::from(["user.required".to_string()]),
-            preferred_taints: HashMap::from([("user.preferred".to_string(), 0.25)]),
-        }));
+    fn merge_decode_topology_constraints_creates_and_preserves_constraints() {
+        for (mut request, expect_user_constraints) in [
+            (request_with_constraints(None), false),
+            (
+                request_with_constraints(Some(RoutingConstraints {
+                    required_taints: HashSet::from(["user.required".to_string()]),
+                    preferred_taints: HashMap::from([("user.preferred".to_string(), 0.25)]),
+                })),
+                true,
+            ),
+        ] {
+            merge_decode_topology_constraints(
+                &mut request,
+                RoutingConstraints {
+                    required_taints: HashSet::from(["dynamo.topology/zone=us-east-1a".to_string()]),
+                    preferred_taints: HashMap::from([(
+                        "dynamo.topology/rack=rack-7".to_string(),
+                        0.85,
+                    )]),
+                },
+            );
 
-        merge_decode_topology_constraints(
-            &mut request,
-            RoutingConstraints {
-                required_taints: HashSet::from(["dynamo.topology/zone=us-east-1a".to_string()]),
-                preferred_taints: HashMap::from([(
-                    "dynamo.topology/rack=rack-7".to_string(),
-                    0.85,
-                )]),
-            },
-        );
+            let constraints = request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.routing_constraints.as_ref())
+                .unwrap();
+            assert!(
+                constraints
+                    .required_taints
+                    .contains("dynamo.topology/zone=us-east-1a")
+            );
+            assert_eq!(
+                constraints.preferred_taints["dynamo.topology/rack=rack-7"],
+                0.85
+            );
 
-        let constraints = request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.routing_constraints.as_ref())
-            .unwrap();
-        assert!(constraints.required_taints.contains("user.required"));
-        assert!(
-            constraints
-                .required_taints
-                .contains("dynamo.topology/zone=us-east-1a")
-        );
-        assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
-        assert_eq!(
-            constraints.preferred_taints["dynamo.topology/rack=rack-7"],
-            0.85
-        );
-    }
-
-    #[test]
-    fn merge_decode_topology_constraints_creates_routing_hints_when_missing() {
-        let mut request = PreprocessedRequest::builder()
-            .model("test".to_string())
-            .token_ids(vec![1, 2, 3])
-            .stop_conditions(Default::default())
-            .sampling_options(Default::default())
-            .output_options(Default::default())
-            .build()
-            .unwrap();
-
-        merge_decode_topology_constraints(
-            &mut request,
-            RoutingConstraints {
-                required_taints: HashSet::from(["dynamo.topology/zone=us-east-1a".to_string()]),
-                preferred_taints: HashMap::new(),
-            },
-        );
-
-        let constraints = request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.routing_constraints.as_ref())
-            .unwrap();
-        assert!(
-            constraints
-                .required_taints
-                .contains("dynamo.topology/zone=us-east-1a")
-        );
-        assert!(constraints.preferred_taints.is_empty());
+            if expect_user_constraints {
+                assert!(constraints.required_taints.contains("user.required"));
+                assert_eq!(constraints.preferred_taints["user.preferred"], 0.25);
+            }
+        }
     }
 
     // -- Prefill death handling tests --
