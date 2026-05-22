@@ -3609,7 +3609,10 @@ fahrenheit
                 !content.contains("<minimax:tool_call>") && !content.contains("<invoke"),
                 "{label}: MiniMax protocol markup leaked into content: {content:?}"
             );
-            assert_eq!(content, expected_content, "{label}: unexpected residual content");
+            assert_eq!(
+                content, expected_content,
+                "{label}: unexpected residual content"
+            );
         }
     }
 
