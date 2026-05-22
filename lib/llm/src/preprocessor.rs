@@ -22,6 +22,7 @@ use anyhow::{Result, bail};
 
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
@@ -205,6 +206,27 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
             .build_http_client()
             .expect("dim-fetch http client construction failed")
     });
+
+fn extract_images_from_tool_parts(
+    tool_parts: &[ChatCompletionRequestToolMessageContentPart],
+) -> Vec<ChatCompletionRequestUserMessageContentPart> {
+    // Process Tool Call messages with image content.
+    // Due to structure of multimodal types the most laconic solution is to "convert" tool's images to the user's ones.
+    let mut user_parts: Vec<ChatCompletionRequestUserMessageContentPart> = Vec::new();
+
+    for part in tool_parts.iter() {
+        match part {
+            ChatCompletionRequestToolMessageContentPart::Text(_) => continue,
+            ChatCompletionRequestToolMessageContentPart::ImageUrl(image_content) => {
+                user_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                    image_content.clone(),
+                ));
+            }
+        }
+    }
+
+    user_parts
+}
 
 pub struct OpenAIPreprocessor {
     mdcsum: String,
@@ -630,8 +652,9 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
     ) -> Result<Vec<MmImageEntry>> {
+        let mut converted_tool_parts: Vec<ChatCompletionRequestUserMessageContentPart>;
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
+        let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
         // Per-image (mm_hash, width, height) for the lightseek MM-routing path.
         // Accumulated in message order so we don't walk messages twice.
@@ -669,6 +692,14 @@ impl OpenAIPreprocessor {
                     ChatCompletionRequestUserMessageContent::Array(parts) => parts,
                     _ => continue,
                 },
+                ChatCompletionRequestMessage::Tool(t) => match &t.content {
+                    ChatCompletionRequestToolMessageContent::Array(tool_parts) => {
+                        converted_tool_parts =
+                            extract_images_from_tool_parts(tool_parts.as_slice());
+                        &converted_tool_parts
+                    }
+                    _ => continue,
+                },
                 _ => continue,
             };
             for content_part in content_parts.iter() {
@@ -683,7 +714,7 @@ impl OpenAIPreprocessor {
                     if type_str == "image_url" {
                         total_image_count += 1;
                     }
-                    fetch_tasks.push((type_str.to_string(), content_part));
+                    fetch_tasks.push((type_str.to_string(), content_part.clone()));
                 } else {
                     let (type_str, url) = match content_part {
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
@@ -2721,6 +2752,70 @@ mod strip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_images_from_tool_parts() {
+        use dynamo_protocols::types::{
+            ChatCompletionRequestMessageContentPartImage,
+            ChatCompletionRequestMessageContentPartText,
+            ChatCompletionRequestToolMessageContentPart,
+            ChatCompletionRequestUserMessageContentPart, ImageUrl,
+        };
+
+        // Tool call result with text and image content
+        let tool_parts = vec![
+            ChatCompletionRequestToolMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText {
+                    text: "Some text...".to_string(),
+                },
+            ),
+            ChatCompletionRequestToolMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: ImageUrl::from("https://example.com/image1.jpg"),
+                },
+            ),
+            ChatCompletionRequestToolMessageContentPart::Text(
+                ChatCompletionRequestMessageContentPartText {
+                    text: "Some text...".to_string(),
+                },
+            ),
+            ChatCompletionRequestToolMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage {
+                    image_url: ImageUrl::from("data:image/png;base64,dGVzdA=="),
+                },
+            ),
+        ];
+
+        let result = extract_images_from_tool_parts(&tool_parts);
+
+        // Parse only multimodal data (images only)
+        assert_eq!(result.len(), 2);
+
+        match &result[0] {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                assert_eq!(
+                    img.image_url.url.to_string(),
+                    "https://example.com/image1.jpg"
+                );
+            }
+            _ => panic!("Expected ImageUrl content part"),
+        }
+
+        match &result[1] {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
+                assert_eq!(
+                    img.image_url.url.to_string(),
+                    "data:image/png;base64,dGVzdA=="
+                );
+            }
+            _ => panic!("Expected ImageUrl content part"),
+        }
+
+        // Checking empty content
+        let empty_parts: Vec<ChatCompletionRequestToolMessageContentPart> = vec![];
+        let empty_result = extract_images_from_tool_parts(&empty_parts);
+        assert_eq!(empty_result.len(), 0);
+    }
 
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]

@@ -45,10 +45,6 @@ pub use async_openai::types::chat::{
     ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestSystemMessageContent,
     ChatCompletionRequestSystemMessageContentPart,
-    ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageArgs,
-    ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestToolMessageContentPart,
     ChatCompletionResponseMessageAudio,
     ChatCompletionTokenLogprob,
     Choice,
@@ -334,6 +330,55 @@ pub struct ChatCompletionTool {
     #[builder(default = "ChatCompletionToolType::Function")]
     pub r#type: ChatCompletionToolType,
     pub function: FunctionObject,
+}
+
+// ---------------------------------------------------------------------------
+// Tool message content parts (local extension)
+// ---------------------------------------------------------------------------
+/// Tool message content part with image support.
+///
+/// Extends upstream tool message parts to allow `image_url` entries, which
+/// enables passing image URLs produced by tools into the multimodal pipeline.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCompletionRequestToolMessageContentPart {
+    Text(ChatCompletionRequestMessageContentPartText),
+    ImageUrl(ChatCompletionRequestMessageContentPartImage),
+}
+
+/// Tool message content.
+///
+/// Mirrors the upstream shape but uses our locally extended to support
+/// images as a tool call result.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum ChatCompletionRequestToolMessageContent {
+    /// The text contents of the tool message.
+    Text(String),
+    /// A list of structured content parts (now supports `image_url`).
+    Array(Vec<ChatCompletionRequestToolMessageContentPart>),
+}
+
+impl Default for ChatCompletionRequestToolMessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+/// Tool message.
+///
+/// Kept locally so tool messages can carry `image_url` parts in their `content`.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Builder, PartialEq)]
+#[builder(name = "ChatCompletionRequestToolMessageArgs")]
+#[builder(pattern = "mutable")]
+#[builder(setter(into, strip_option), default)]
+#[builder(derive(Debug))]
+#[builder(build_fn(error = "OpenAIError"))]
+pub struct ChatCompletionRequestToolMessage {
+    /// The contents of the tool message.
+    pub content: ChatCompletionRequestToolMessageContent,
+    pub tool_call_id: String,
 }
 
 // ---------------------------------------------------------------------------
