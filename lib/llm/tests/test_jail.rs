@@ -1919,6 +1919,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_jailed_stream_harmony_bare_commentary_marker_split() {
+        // PARSER.stream.3: gpt-oss may start a tool call directly at the
+        // commentary channel marker, and the marker can split across chunks.
+        let chunks = vec![
+            create_mock_response_chunk("<|".to_string(), 0),
+            create_mock_response_chunk("cha".to_string(), 0),
+            create_mock_response_chunk("nnel|".to_string(), 0),
+            create_mock_response_chunk(">commentary".to_string(), 0),
+            create_mock_response_chunk(" to=functions.get_w".to_string(), 0),
+            create_mock_response_chunk("ea".to_string(), 0),
+            create_mock_response_chunk("the".to_string(), 0),
+            create_mock_response_chunk("r <|c".to_string(), 0),
+            create_mock_response_chunk("onstrain|>j".to_string(), 0),
+            create_mock_response_chunk("son<|message|>{\"loc".to_string(), 0),
+            create_mock_response_chunk("at".to_string(), 0),
+            create_mock_response_chunk("ion".to_string(), 0),
+            create_mock_response_chunk("\":\"NY".to_string(), 0),
+            create_mock_response_chunk("C\"}<|call|>".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let jail = JailedStream::builder().tool_call_parser("harmony").build();
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        let content = test_utils::reconstruct_content(&results);
+        assert_eq!(content, "");
+        assert!(!content.contains("<|channel|>"));
+        let tool_call_idx = results
+            .iter()
+            .position(test_utils::has_tool_call)
+            .expect("Should have a tool call result");
+        test_utils::assert_tool_call(
+            &results[tool_call_idx],
+            "get_weather",
+            json!({"location": "NYC"}),
+        );
+    }
+
+    #[tokio::test]
     async fn test_jailed_stream_harmony_analysis_only_drops_content() {
         let chunks = vec![create_mock_response_chunk(
             "<|channel|>analysis<|message|>Need to inspect the request.<|end|>".to_string(),
