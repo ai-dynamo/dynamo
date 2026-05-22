@@ -9,6 +9,7 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -40,8 +41,10 @@ from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
     get_runtime,
+    wait_for_frontend_ready,
     wait_for_indexer_workers_active,
 )
+from tests.router.router_process import KVRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -643,6 +646,7 @@ class DisaggMockerProcess:
         store_backend: str = "etcd",
         request_plane: str = "nats",
         enable_bootstrap: bool = False,
+        env_overrides: Optional[Dict[str, str]] = None,
     ):
         if worker_type not in ("prefill", "decode"):
             raise ValueError(
@@ -684,6 +688,7 @@ class DisaggMockerProcess:
 
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request_plane
+        env.update(env_overrides or {})
 
         self._process = ManagedProcess(
             command=command,
@@ -904,6 +909,102 @@ def _launch_disagg_workers(
         ) as prefill_workers:
             logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
             yield prefill_workers, decode_workers
+
+
+def _topology_env(
+    tmp_path: Path,
+    name: str,
+    topology_domains: Dict[str, str],
+    *,
+    transfer_domain: str = "zone",
+    enforcement: str = "required",
+) -> Dict[str, str]:
+    topology_dir = tmp_path / name
+    topology_dir.mkdir()
+    for domain, value in topology_domains.items():
+        (topology_dir / domain).write_text(value)
+
+    return {
+        "DYN_TOPOLOGY_ENABLED": "true",
+        "DYN_TOPOLOGY_MOUNT_PATH": str(topology_dir),
+        "DYN_KV_TRANSFER_DOMAIN": transfer_domain,
+        "DYN_KV_TRANSFER_ENFORCEMENT": enforcement,
+    }
+
+
+async def _wait_for_disagg_worker_ids(
+    namespace: str,
+    component_name: str,
+    expected_num_workers: int,
+    *,
+    request_plane: str = "nats",
+    timeout_s: int = 60,
+) -> list[int]:
+    runtime = get_runtime(request_plane=request_plane)
+    endpoint = runtime.endpoint(f"{namespace}.{component_name}.generate")
+    client = await endpoint.client()
+
+    for _ in range(timeout_s * 2):
+        worker_ids = sorted(set(client.instance_ids()))
+        if len(worker_ids) >= expected_num_workers:
+            return worker_ids
+        await asyncio.sleep(0.5)
+
+    raise TimeoutError(
+        f"Timed out waiting for {expected_num_workers} worker(s) on "
+        f"{namespace}.{component_name}.generate"
+    )
+
+
+async def _send_topology_filtered_request(
+    chat_url: str,
+    test_payload: Dict[str, Any],
+) -> Dict[str, int]:
+    payload = {
+        **test_payload,
+        "nvext": {"extra_fields": ["worker_id"]},
+        "stream": True,
+    }
+    prefill_worker_id = None
+    decode_worker_id = None
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(chat_url, json=payload) as response:
+            response_body = ""
+            async for line in response.content:
+                line_str = line.decode("utf-8", errors="replace").strip()
+                response_body += line_str
+                if not line_str.startswith("data:"):
+                    continue
+
+                data_str = line_str[5:].strip()
+                if data_str == "[DONE]":
+                    break
+
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                worker_id_info = data.get("nvext", {}).get("worker_id", {})
+                if not isinstance(worker_id_info, dict):
+                    continue
+                if "prefill_worker_id" in worker_id_info:
+                    prefill_worker_id = worker_id_info["prefill_worker_id"]
+                if "decode_worker_id" in worker_id_info:
+                    decode_worker_id = worker_id_info["decode_worker_id"]
+
+            assert response.status == 200, (
+                f"Topology-filtered request failed with status {response.status}: "
+                f"{response_body}"
+            )
+
+    assert prefill_worker_id is not None, "Missing prefill_worker_id in nvext"
+    assert decode_worker_id is not None, "Missing decode_worker_id in nvext"
+    return {
+        "prefill_worker_id": prefill_worker_id,
+        "decode_worker_id": decode_worker_id,
+    }
 
 
 @pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
@@ -1555,6 +1656,122 @@ def test_router_decisions_disagg(
             request_plane="nats",
             enable_bootstrap=enable_disagg_bootstrap,
         )
+
+
+@pytest.mark.timeout(180)
+def test_disagg_topology_required_filters_decode_workers(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    tmp_path,
+):
+    """Validate required KV-transfer topology policy filters decode workers."""
+    logger.info("Starting disaggregated topology-aware decode filtering test")
+
+    namespace_suffix = generate_random_suffix()
+    shared_namespace = f"test-namespace-{namespace_suffix}"
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    prefill_env = _topology_env(tmp_path, "prefill-zone-a", {"zone": "zone-a"})
+    compatible_decode_env = _topology_env(tmp_path, "decode-zone-a", {"zone": "zone-a"})
+    incompatible_decode_env = _topology_env(
+        tmp_path, "decode-zone-b", {"zone": "zone-b"}
+    )
+
+    with DisaggMockerProcess(
+        request,
+        namespace=shared_namespace,
+        worker_type="prefill",
+        mocker_args=mocker_args,
+        num_mockers=1,
+        request_plane="nats",
+        env_overrides=prefill_env,
+    ):
+        prefill_ids = asyncio.run(
+            _wait_for_disagg_worker_ids(shared_namespace, "prefill", 1)
+        )
+        logger.info("Prefill topology worker ids: %s", prefill_ids)
+
+        with DisaggMockerProcess(
+            request,
+            namespace=shared_namespace,
+            worker_type="decode",
+            mocker_args=mocker_args,
+            num_mockers=1,
+            request_plane="nats",
+            env_overrides=incompatible_decode_env,
+        ):
+            incompatible_decode_ids = asyncio.run(
+                _wait_for_disagg_worker_ids(shared_namespace, "backend", 1)
+            )
+            logger.info(
+                "Incompatible decode topology worker ids: %s",
+                incompatible_decode_ids,
+            )
+
+            with DisaggMockerProcess(
+                request,
+                namespace=shared_namespace,
+                worker_type="decode",
+                mocker_args=mocker_args,
+                num_mockers=1,
+                request_plane="nats",
+                env_overrides=compatible_decode_env,
+            ):
+                all_decode_ids = asyncio.run(
+                    _wait_for_disagg_worker_ids(shared_namespace, "backend", 2)
+                )
+                compatible_decode_ids = sorted(
+                    set(all_decode_ids) - set(incompatible_decode_ids)
+                )
+                assert len(compatible_decode_ids) == 1, (
+                    "Expected exactly one newly registered compatible decode worker, "
+                    f"got all={all_decode_ids}, incompatible={incompatible_decode_ids}"
+                )
+                compatible_decode_id = compatible_decode_ids[0]
+
+                frontend_port = get_unique_ports(request, num_ports=1)[0]
+                with KVRouterProcess(
+                    request,
+                    BLOCK_SIZE,
+                    frontend_port,
+                    shared_namespace,
+                    enforce_disagg=True,
+                    request_plane="nats",
+                    min_initial_workers=2,
+                ):
+                    frontend_url = f"http://localhost:{frontend_port}"
+                    chat_url = f"{frontend_url}/v1/chat/completions"
+
+                    async def run_requests() -> list[Dict[str, int]]:
+                        await wait_for_frontend_ready(
+                            frontend_url=frontend_url,
+                            expected_num_workers=2,
+                            timeout=120,
+                        )
+                        return [
+                            await _send_topology_filtered_request(
+                                chat_url, TEST_PAYLOAD
+                            )
+                            for _ in range(4)
+                        ]
+
+                    worker_ids = asyncio.run(run_requests())
+
+                observed_prefill_ids = {ids["prefill_worker_id"] for ids in worker_ids}
+                observed_decode_ids = {ids["decode_worker_id"] for ids in worker_ids}
+
+                assert observed_prefill_ids <= set(
+                    prefill_ids
+                ), f"Expected prefill ids from {prefill_ids}, got {worker_ids}"
+                assert observed_decode_ids == {compatible_decode_id}, (
+                    "Required KV-transfer topology policy should restrict decode "
+                    f"routing to zone-a worker {compatible_decode_id}; got "
+                    f"{worker_ids} with incompatible={incompatible_decode_ids}"
+                )
 
 
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
