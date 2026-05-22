@@ -68,7 +68,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <th>Runtime</th>
 <th>Hardware</th>
 <th>Traffic</th>
-<th>Evidence</th>
 <th></th>
 </tr>
 </thead>
@@ -79,7 +78,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>1x GB200</td>
 <td>1,000 requests, 80% image reuse</td>
-<td><mark>deploy.yaml + perf.yaml + results</mark></td>
 <td><a href="#deploy-aggregated--embedding-cache-on">Deploy</a></td>
 </tr><tr>
 <td><strong>Aggregated cache OFF baseline</strong><span>Control run for measuring cache impact before changing image pool, cache size, or request rate.</span></td>
@@ -87,7 +85,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>1x GB200</td>
 <td>Same generated JSONL</td>
-<td><mark>same deploy/perf with cache env changes</mark></td>
 <td><a href="#deploy-aggregated-cache-off-baseline">Deploy</a></td>
 </tr>
 </tbody>

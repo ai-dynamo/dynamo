@@ -68,7 +68,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <th>Runtime</th>
 <th>Hardware</th>
 <th>Traffic</th>
-<th>Evidence</th>
 <th></th>
 </tr>
 </thead>
@@ -79,7 +78,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>8x B200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-vllm-agg-b200">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>vLLM agg GB200</strong><span>TP=8 cross-node MNNVL path when one GB200 tray is not enough HBM.</span></td>
@@ -87,7 +85,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>8x GB200 across 2 nodes</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-vllm-agg-gb200">Deploy</a></td>
 </tr><tr className="recommended">
 <td><strong>vLLM disagg GB200</strong><span>Only V4-Pro path with benchmark instructions checked in today.</span></td>
@@ -95,7 +92,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>16x GB200</td>
 <td>8K ISL / 1K OSL concurrency sweep</td>
-<td><mark>deploy.yaml + perf.yaml</mark></td>
 <td><a href="#deploy-vllm-disagg-gb200">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>SGLang agg B200</strong><span>TP=8 SGLang path with MXFP4 MoE via FlashInfer and EAGLE MTP.</span></td>
@@ -103,7 +99,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>SGLang</td>
 <td>8x B200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-sglang-agg-b200">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>SGLang agg GB200</strong><span>GB200 SGLang aggregate path present in manifests but not benchmarked.</span></td>
@@ -111,7 +106,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>SGLang</td>
 <td>8x GB200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-sglang-agg-gb200">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>SGLang disagg B200</strong><span>Cluster-specific SGLang disagg path; keep as deploy-only until benchmark YAML lands.</span></td>
@@ -119,7 +113,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>SGLang</td>
 <td>B200</td>
 <td>Deployment validation</td>
-<td><mark>README + deploy.yaml only</mark></td>
 <td><a href="#deploy-sglang-disagg-b200">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>SGLang disagg GB200</strong><span>GB200 SGLang disagg path with cluster-specific notes.</span></td>
@@ -127,7 +120,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>SGLang</td>
 <td>GB200</td>
 <td>Deployment validation</td>
-<td><mark>README + deploy.yaml only</mark></td>
 <td><a href="#deploy-sglang-disagg-gb200">Deploy</a></td>
 </tr>
 </tbody>

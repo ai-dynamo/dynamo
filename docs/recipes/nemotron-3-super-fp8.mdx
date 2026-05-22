@@ -68,7 +68,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <th>Runtime</th>
 <th>Hardware</th>
 <th>Traffic</th>
-<th>Evidence</th>
 <th></th>
 </tr>
 </thead>
@@ -79,7 +78,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>4x H100/H200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-vllm-aggregated">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>TensorRT-LLM disaggregated</strong><span>P/D split using UCX transfer because hybrid cache state is not NIXL/Mooncake-safe here.</span></td>
@@ -87,7 +85,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>TRT-LLM</td>
 <td>4x H100/H200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-tensorrt-llm-disaggregated">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>SGLang aggregated</strong><span>TP4 aggregate SGLang path; verify against current Dynamo image before claiming support.</span></td>
@@ -95,7 +92,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>SGLang</td>
 <td>4x H100/H200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-sglang-aggregated">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>SGLang disaggregated</strong><span>P/D split with nixl transfer in the README; no benchmark coverage today.</span></td>
@@ -103,7 +99,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>SGLang</td>
 <td>4x H100/H200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-sglang-disaggregated">Deploy</a></td>
 </tr>
 </tbody>

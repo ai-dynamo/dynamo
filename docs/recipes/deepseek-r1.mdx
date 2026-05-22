@@ -68,7 +68,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <th>Runtime</th>
 <th>Hardware</th>
 <th>Traffic</th>
-<th>Evidence</th>
 <th></th>
 </tr>
 </thead>
@@ -79,7 +78,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>SGLang</td>
 <td>16x H200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-sglang-disagg-8-gpu">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>SGLang disagg 16 GPU</strong><span>Multi-node SGLang WideEP path with TP=16 per worker.</span></td>
@@ -87,7 +85,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>SGLang</td>
 <td>32x H200</td>
 <td>Deployment validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-sglang-disagg-16-gpu">Deploy</a></td>
 </tr><tr className="recommended">
 <td><strong>TRT-LLM WideEP GB200</strong><span>Only DeepSeek-R1 row with checked-in benchmark instructions today.</span></td>
@@ -95,7 +92,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>TRT-LLM</td>
 <td>36x GB200</td>
 <td>1K ISL / 1K OSL static benchmark</td>
-<td><mark>deploy.yaml + perf.yaml</mark></td>
 <td><a href="#deploy-trt-llm-wideep-gb200">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>vLLM disagg</strong><span>vLLM DEP16 multi-node path; add perf.yaml before comparing with TRT-LLM.</span></td>
@@ -103,7 +99,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>32x H200</td>
 <td>Deployment validation</td>
-<td><mark>deploy_hopper_16gpu.yaml only</mark></td>
 <td><a href="#deploy-vllm-disagg">Deploy</a></td>
 </tr>
 </tbody>

@@ -68,7 +68,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <th>Runtime</th>
 <th>Hardware</th>
 <th>Traffic</th>
-<th>Evidence</th>
 <th></th>
 </tr>
 </thead>
@@ -79,7 +78,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>16x H200</td>
 <td>12K avg ISL conversation trace</td>
-<td><mark>deploy.yaml + perf.yaml</mark></td>
 <td><a href="#deploy-disagg--kv-router">Deploy</a></td>
 </tr><tr>
 <td><strong>Aggregated round-robin</strong><span>Control run that removes P/D split and KV-aware routing while holding model and traffic constant.</span></td>
@@ -87,7 +85,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>16x H200</td>
 <td>Same fixed-schedule trace</td>
-<td><mark>deploy.yaml + perf.yaml</mark></td>
 <td><a href="#deploy-aggregated-round-robin">Deploy</a></td>
 </tr><tr className="deploy-only">
 <td><strong>Aggregated + KVBM</strong><span>Use for KVBM deployment mechanics; do not include in the trace comparison until a perf.yaml exists.</span></td>
@@ -95,7 +92,6 @@ deployable variant, its role in the recipe set, and the benchmark evidence avail
 <td>vLLM</td>
 <td>1x H200 or B200</td>
 <td>Functional deploy validation</td>
-<td><mark>deploy.yaml only</mark></td>
 <td><a href="#deploy-aggregated--kvbm">Deploy</a></td>
 </tr>
 </tbody>
