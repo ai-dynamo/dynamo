@@ -357,7 +357,7 @@ impl ToolCallConfig {
                     triggers: vec!["<tool_call>".to_string()],
                     content_style: JsonSchemaStyle::Json,
                     tool_call_ban_tokens: vec!["<tool_call>".to_string()],
-                    reasoning_end: None,
+                    reasoning_end: Some("</think>".to_string()),
                 },
             )),
         }
