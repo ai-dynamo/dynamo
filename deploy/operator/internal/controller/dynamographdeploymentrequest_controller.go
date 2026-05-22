@@ -410,6 +410,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryEnabled() bool {
 	return *r.Config.GPU.DiscoveryEnabled
 }
 
+func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryReader() (client.Reader, bool) {
+	if r == nil || r.APIReader == nil {
+		return nil, false
+	}
+	return r.APIReader, true
+}
+
 // FinalizeResource implements commonController.Finalizer interface
 func (r *DynamoGraphDeploymentRequestReconciler) FinalizeResource(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
@@ -1270,9 +1277,18 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 		return nil
 	}
 
+	reader, ok := r.gpuDiscoveryReader()
+	if !ok {
+		logger.Info("GPU discovery unavailable; APIReader is not configured")
+		return fmt.Errorf(
+			"GPU hardware info required but auto-discovery failed. " +
+				"Verify DCGM exporter is reachable from the operator's namespace, " +
+				"or set spec.hardware.{gpuSku,vramMb,numGpusPerNode} explicitly.")
+	}
+
 	// DCGM exporter is a cluster-level Service — reachable from any namespace.
 	if r.GPUDiscovery != nil {
-		if _, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache); err == nil {
+		if _, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, reader, r.GPUDiscoveryCache); err == nil {
 			return nil
 		} else {
 			logger.Info("DCGM discovery unavailable", "error", err.Error())
@@ -1281,7 +1297,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateGPUHardwareInfo(ctx con
 
 	// Node-label fallback
 	if r.gpuDiscoveryEnabled() {
-		if _, err := gpu.DiscoverGPUs(ctx, r.APIReader); err == nil {
+		if _, err := gpu.DiscoverGPUs(ctx, reader); err == nil {
 			return nil
 		} else {
 			logger.Info("Node-label discovery unavailable", "error", err.Error())
@@ -1767,8 +1783,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(c
 	logger := log.FromContext(ctx)
 	logger.Info("Attempting GPU discovery for profiling job")
 
+	reader, ok := r.gpuDiscoveryReader()
+	if !ok {
+		if discoveryRequired {
+			return nil, fmt.Errorf("auto-discovery failed: APIReader is not configured")
+		}
+		logger.Info("Optional hardware metadata discovery skipped because APIReader is not configured")
+		return nil, nil
+	}
+
 	if r.GPUDiscovery != nil {
-		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
+		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, reader, r.GPUDiscoveryCache, hw.GPUSKU)
 		if err == nil {
 			return discoveredInfo, nil
 		}
@@ -1785,7 +1810,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(c
 		}
 	}
 
-	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, r.APIReader, hw.GPUSKU)
+	discoveredInfo, err := gpu.DiscoverGPUsFiltered(ctx, reader, hw.GPUSKU)
 	if err == nil {
 		return discoveredInfo, nil
 	}

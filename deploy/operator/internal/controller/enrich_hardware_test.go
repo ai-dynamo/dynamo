@@ -92,6 +92,44 @@ func TestGPUDiscoveryEnabledDefaults(t *testing.T) {
 	}).gpuDiscoveryEnabled())
 }
 
+func TestEnrichHardwareFromDiscovery_SkipsOptionalMetadataWithoutAPIReader(t *testing.T) {
+	r := &DynamoGraphDeploymentRequestReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+				VRAMMB:         ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To(int32(8)),
+				TotalGPUs:      ptr.To(int32(16)),
+			},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Empty(t, dgdr.Spec.Hardware.Interconnect)
+	assert.Nil(t, dgdr.Spec.Hardware.RDMA)
+}
+
+func TestEnrichHardwareFromDiscovery_RequiredFieldsMissingWithoutAPIReaderFails(t *testing.T) {
+	r := &DynamoGraphDeploymentRequestReconciler{
+		Config: &configv1alpha1.OperatorConfiguration{},
+	}
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APIReader is not configured")
+	assert.False(t, changed)
+}
+
 func TestEnrichHardwareFromDiscovery(t *testing.T) {
 	tests := []struct {
 		name string
