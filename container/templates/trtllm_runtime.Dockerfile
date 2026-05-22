@@ -7,7 +7,7 @@
 ########## Runtime Image #########
 ##################################
 
-# Transport stage — runtime pulls /workspace_src/ in one cross-stage COPY.
+# Transport stage — runtime pulls /workspace_src/ in one bind-mount cp.
 FROM scratch AS workspace_files
 COPY --chmod=775 tests /workspace_src/tests
 COPY --chmod=775 examples /workspace_src/examples
@@ -18,6 +18,7 @@ COPY --chmod=775 components/src/dynamo/frontend /workspace_src/components/src/dy
 COPY --chmod=775 components/src/dynamo/trtllm /workspace_src/components/src/dynamo/trtllm
 COPY --chmod=775 components/src/dynamo/mocker /workspace_src/components/src/dynamo/mocker
 COPY --chmod=775 lib /workspace_src/lib
+COPY --chmod=664 ATTRIBUTION* LICENSE /workspace_src/
 
 # Transport stage for dynamo_base artifacts. uv/uvx go to /usr/bin (not /bin)
 # because upstream is usrmerged and cross-stage COPY chokes on the symlink.
@@ -47,7 +48,14 @@ ENV DYNAMO_HOME=/workspace \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
 
-# Not in upstream nvcr.io/nvidia/tensorrt-llm/release.
+WORKDIR /workspace
+
+# Install packages missing from upstream, sanity-check libnixl, register
+# TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
+# for shells, not K8s python3 launches), swap upstream's single-binary etcd
+# for dynamo_base's directory, and symlink system libstdc++ to a stable
+# path for LD_PRELOAD — keeps PyInstaller-bundled tools (`jet`) from
+# shadowing it with an older copy.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
@@ -55,16 +63,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         openssh-server \
         librdmacm1 \
         rdma-core && \
-    apt-get clean
-
-WORKDIR /workspace
-
-# Sanity-check libnixl exists, register TRT-LLM lib paths with ldconfig
-# (upstream's /etc/shinit_v2 only sets them for shells, not K8s python3),
-# swap upstream's single-binary etcd for dynamo_base's directory, and
-# symlink system libstdc++ to a stable path for LD_PRELOAD — keeps
-# PyInstaller-bundled tools (`jet`) from shadowing it with an older copy.
-RUN test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
+    test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
     test -d "${NIXL_PLUGIN_DIR}" && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     printf '%s\n' \
@@ -103,12 +102,17 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:${PATH}
 {% endif %}
 
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-
 {% if target not in ("dev", "local-dev") %}
+# Persist wheels in /opt/dynamo/wheelhouse (tests/dependencies/test_kvbm_imports.py
+# greps for them) while installing them in the same RUN — saves the standalone
+# COPY layer for *.whl.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
+    --mount=type=bind,from=wheel_builder,source=/opt/dynamo/dist,target=/tmp/wheels \
+    mkdir -p /opt/dynamo/wheelhouse && \
+    cp /tmp/wheels/*.whl /opt/dynamo/wheelhouse/ && \
+    chown -R dynamo:0 /opt/dynamo/wheelhouse && \
+    chmod -R 775 /opt/dynamo/wheelhouse && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     \
     # Dynamo's own wheels — --no-deps preserves upstream's solve.
@@ -133,10 +137,13 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     fi
 {% endif %}
 
-# Still root from above; collapse workspace COPY + launch-screen prep into one
-# pair of layers and only switch to dynamo at the very end.
-COPY --chmod=775 --chown=dynamo:0 --from=workspace_files /workspace_src/ /workspace/
-RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
+# Pull /workspace_src (incl. ATTRIBUTION/LICENSE) from the transport stage and
+# wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
+RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
+    --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
+    cp -a /tmp/workspace_src/. /workspace/ && \
+    chown -R dynamo:0 /workspace && \
+    chmod -R g+w /workspace && \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
