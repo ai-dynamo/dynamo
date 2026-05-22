@@ -82,7 +82,7 @@ python3 -m dynamo.sglang_grpc --spawn-sglang \
     --model-path "$MODEL" \
     --tp 1 \
     --trust-remote-code \
-    --tokenizer-worker-num 1 \
+    --skip-tokenizer-init \
     --enable-metrics \
     "${EXTRA_ARGS[@]}" &
 
