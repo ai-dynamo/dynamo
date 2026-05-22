@@ -4,16 +4,21 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use tokio::sync::oneshot;
 
-use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
+use dynamo_kv_router::{
+    PrefillLoadEstimator,
+    config::{ConditionalPrefillPolicyKind, KvRouterConfig},
+};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     pipeline::{PushRouter, RouterMode},
     protocols::annotated::Annotated,
+    traits::DistributedRuntimeProvider,
 };
 
+use super::cost_eval_client::RequestPlaneCostEvaluator;
 use super::types::make_conditional_prefill_policy;
 use super::{InnerPrefillRouter, PrefillRouter};
 use crate::{
@@ -66,8 +71,11 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        // Phase 4 wires a real NATS-backed evaluator here when policy=Regression;
-        // until then pass None (factory installs UnavailableCostEvaluator).
+        // Construct the policy with no evaluator. For Regression policy,
+        // `activate()` late-binds the request-plane `CostEvaluator` via
+        // `try_set_cost_evaluator()` once the endpoint is available and we
+        // know which Component to address. Until then the policy's slow path
+        // falls back to conservative DISAGG.
         let conditional_prefill_policy =
             make_conditional_prefill_policy(kv_router_config.as_ref(), None);
 
@@ -146,7 +154,7 @@ impl PrefillRouter {
                 .kv_chooser_for(
                     &endpoint,
                     kv_cache_block_size,
-                    kv_router_config,
+                    kv_router_config.clone(),
                     prefill_load_estimator,
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
@@ -188,6 +196,40 @@ impl PrefillRouter {
 
         // Set the router (ignore error if already set)
         let _ = self.prefill_router.set(inner_router);
+
+        // If the Regression conditional-prefill policy is selected, build the
+        // request-plane cost-eval client *now* (we have an Endpoint, so we
+        // can resolve the cost-eval sidecar's Component) and late-bind it on
+        // the existing policy via `try_set_cost_evaluator()`. Must happen
+        // before `activated=true` so requests don't observe the policy
+        // before its evaluator is bound. If the construction fails, the
+        // policy's slow path falls back to conservative DISAGG on every
+        // request — no panic, no router disruption.
+        if let Some(cfg) = kv_router_config.as_ref()
+            && cfg.conditional_prefill_enabled
+            && cfg.conditional_prefill_policy == ConditionalPrefillPolicyKind::Regression
+            && let Some(subject) = cfg.cost_eval_subject.as_ref()
+        {
+            match self.build_cost_eval_evaluator(&endpoint, subject).await {
+                Ok(evaluator) => {
+                    self.conditional_prefill_policy
+                        .try_set_cost_evaluator(evaluator);
+                    tracing::info!(
+                        subject = %subject,
+                        "Regression policy bound to request-plane cost-eval evaluator"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        subject = %subject,
+                        "Failed to construct cost-eval client; Regression policy falls back \
+                         to conservative DISAGG on every request"
+                    );
+                }
+            }
+        }
+
         self.activated.store(true, Ordering::Release);
 
         tracing::info!(
@@ -196,6 +238,26 @@ impl PrefillRouter {
         );
 
         Ok(())
+    }
+
+    /// Resolve the cost-eval sidecar's request-plane endpoint and build a
+    /// `RequestPlaneCostEvaluator` against it. `subject` is the
+    /// `<component>.<endpoint>` suffix configured via
+    /// `KvRouterConfig.cost_eval_subject`; the namespace is inherited from
+    /// the prefill router's `self.namespace`.
+    async fn build_cost_eval_evaluator(
+        &self,
+        endpoint: &Endpoint,
+        subject: &str,
+    ) -> Result<Arc<RequestPlaneCostEvaluator>> {
+        let (component_name, endpoint_name) = subject.rsplit_once('.').ok_or_else(|| {
+            anyhow!("cost_eval_subject {subject:?} must be \"<component>.<endpoint>\"")
+        })?;
+        let drt = endpoint.component().drt();
+        let component = drt.namespace(&self.namespace)?.component(component_name)?;
+        let client = component.endpoint(endpoint_name).client().await?;
+        let evaluator = RequestPlaneCostEvaluator::from_client(client).await?;
+        Ok(Arc::new(evaluator))
     }
 
     fn register_prefill_client(&self, model_manager: &ModelManager, client: &Client) {

@@ -21,9 +21,10 @@
 //!   slow-path regression-backed cost compare (Cost 4A; see
 //!   `docs/model_costs_design.md`).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{
     ConditionalPrefillPolicyKind, DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS, KvRouterConfig,
@@ -144,6 +145,17 @@ pub trait ConditionalPrefillPolicy: Send + Sync {
     async fn evaluate_costs(&self, _input: ConditionalPrefillDecisionInput) -> Option<(f64, f64)> {
         None
     }
+
+    /// Late-bind a `CostEvaluator` after construction. Used by the live
+    /// router's `PrefillRouter::activate()`: the policy is constructed at
+    /// `PrefillRouter::new()` (sync, before the runtime is wired), and the
+    /// request-plane evaluator becomes constructable only later, at activation.
+    ///
+    /// Default impl is a no-op — policies without a slow path (TokenCap)
+    /// don't need to override. The Regression policy overrides to store the
+    /// evaluator in its internal `OnceLock`; subsequent calls silently
+    /// no-op (the lock is set-once).
+    fn try_set_cost_evaluator(&self, _evaluator: Arc<dyn CostEvaluator>) {}
 }
 
 /// Slow-path cost evaluator used by the `RegressionConditionalPrefillPolicy`.
@@ -166,7 +178,7 @@ pub trait CostEvaluator: Send + Sync {
 /// queue depth, `max_num_batched_tokens`, decode KV, and avg ISL are all
 /// tracked sidecar-side from FPM + engine config. So the request carries one
 /// hit rate per mode plus the prompt token count for sidecar observability.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CostEvalRequest {
     /// Caller-attached identifier for tracing; not consumed by the regression.
     pub request_id: String,
@@ -189,7 +201,7 @@ pub struct CostEvalRequest {
 /// the corresponding regression isn't warm. The `*_warm` flags expose warmth
 /// explicitly so the policy can apply conservative-DISAGG fallback semantics
 /// without having to inspect the ms values.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CostEvalResponse {
     pub agg_ttft_ms: Option<f64>,
     pub disagg_ttft_ms: Option<f64>,
@@ -220,10 +232,10 @@ pub type SharedCostEvaluator = Arc<dyn CostEvaluator>;
 /// other consumers.
 ///
 /// `evaluator` is consumed only by `ConditionalPrefillPolicyKind::Regression`;
-/// the other policy kinds ignore it. Callers that never expect to route through
-/// the Regression policy can pass `None` and we fall back to an evaluator that
-/// always reports "unavailable" — the policy then takes its conservative
-/// DISAGG fallback on every slow-path decision.
+/// the other policy kinds ignore it. When `None`, the Regression policy is
+/// constructed with no evaluator and its slow path falls back to conservative
+/// DISAGG until something (typically `PrefillRouter::activate()`) calls
+/// `try_set_cost_evaluator()` on the policy.
 pub fn make_conditional_prefill_policy(
     config: Option<&KvRouterConfig>,
     evaluator: Option<SharedCostEvaluator>,
@@ -235,13 +247,9 @@ pub fn make_conditional_prefill_policy(
         ConditionalPrefillPolicyKind::TokenCap => {
             Box::new(TokenCapConditionalPrefillPolicy::from_config(Some(config)))
         }
-        ConditionalPrefillPolicyKind::Regression => {
-            let evaluator = evaluator.unwrap_or_else(|| Arc::new(UnavailableCostEvaluator) as _);
-            Box::new(RegressionConditionalPrefillPolicy::from_config(
-                Some(config),
-                evaluator,
-            ))
-        }
+        ConditionalPrefillPolicyKind::Regression => Box::new(
+            RegressionConditionalPrefillPolicy::from_config(Some(config), evaluator),
+        ),
     }
 }
 
@@ -318,33 +326,48 @@ pub struct RegressionConditionalPrefillPolicy {
     /// `queued_blocks` must be at or below this for the worker to count as
     /// roomy. `0` = no queued work allowed.
     roomy_queued_blocks_threshold: u32,
-    evaluator: SharedCostEvaluator,
+    /// Slow-path evaluator. Late-bound via `try_set_cost_evaluator()` so the
+    /// router can construct the policy synchronously at startup and fill in
+    /// the request-plane evaluator only after `activate()` has resolved the
+    /// cost-eval sidecar's endpoint. When unset, slow-path decisions fall
+    /// back to conservative DISAGG (same outcome as the evaluator returning
+    /// `CostEvalResponse::unavailable()`).
+    evaluator: OnceLock<SharedCostEvaluator>,
 }
 
 impl RegressionConditionalPrefillPolicy {
-    pub fn from_config(config: Option<&KvRouterConfig>, evaluator: SharedCostEvaluator) -> Self {
-        let Some(config) = config else {
-            return Self::with_defaults(evaluator);
+    pub fn from_config(
+        config: Option<&KvRouterConfig>,
+        evaluator: Option<SharedCostEvaluator>,
+    ) -> Self {
+        let policy = match config {
+            Some(cfg) => Self {
+                enabled: cfg.conditional_prefill_enabled,
+                large_prompt_threshold_tokens: cfg
+                    .conditional_prefill_regression_large_prompt_threshold_tokens,
+                roomy_available_ratio_threshold: cfg
+                    .conditional_prefill_regression_roomy_available_ratio,
+                roomy_queued_blocks_threshold: cfg
+                    .conditional_prefill_regression_roomy_queued_blocks,
+                evaluator: OnceLock::new(),
+            },
+            None => Self::with_defaults(),
         };
-        Self {
-            enabled: config.conditional_prefill_enabled,
-            large_prompt_threshold_tokens: config
-                .conditional_prefill_regression_large_prompt_threshold_tokens,
-            roomy_available_ratio_threshold: config
-                .conditional_prefill_regression_roomy_available_ratio,
-            roomy_queued_blocks_threshold: config
-                .conditional_prefill_regression_roomy_queued_blocks,
-            evaluator,
+        if let Some(evaluator) = evaluator {
+            // Best-effort: only `Err`s if already set, which can't happen on
+            // a freshly-constructed policy.
+            let _ = policy.evaluator.set(evaluator);
         }
+        policy
     }
 
-    pub fn with_defaults(evaluator: SharedCostEvaluator) -> Self {
+    pub fn with_defaults() -> Self {
         Self {
             enabled: false,
             large_prompt_threshold_tokens: DEFAULT_REGRESSION_LARGE_PROMPT_THRESHOLD_TOKENS,
             roomy_available_ratio_threshold: DEFAULT_REGRESSION_ROOMY_AVAILABLE_RATIO,
             roomy_queued_blocks_threshold: DEFAULT_REGRESSION_ROOMY_QUEUED_BLOCKS,
-            evaluator,
+            evaluator: OnceLock::new(),
         }
     }
 
@@ -481,12 +504,18 @@ impl ConditionalPrefillPolicy for RegressionConditionalPrefillPolicy {
         }
 
         // Slow path — consult the regression-backed evaluator. Conservative
-        // DISAGG fallback when the DISAGG-side credit is missing (skip the
-        // RPC entirely) or when either regression is cold.
+        // DISAGG fallback when:
+        //  - the DISAGG-side credit is missing (skip the RPC entirely),
+        //  - the evaluator hasn't been bound yet (pre-activate, or
+        //    Regression selected without a sidecar), or
+        //  - either regression is cold.
         let Some(request) = self.cost_eval_request(input) else {
             return false;
         };
-        let resp = self.evaluator.evaluate(request).await;
+        let Some(evaluator) = self.evaluator.get() else {
+            return false;
+        };
+        let resp = evaluator.evaluate(request).await;
         match (resp.agg_ttft_ms, resp.disagg_ttft_ms) {
             (Some(agg_ms), Some(disagg_ms)) if resp.agg_warm && resp.disagg_warm => {
                 agg_ms < disagg_ms
@@ -497,7 +526,8 @@ impl ConditionalPrefillPolicy for RegressionConditionalPrefillPolicy {
 
     async fn evaluate_costs(&self, input: ConditionalPrefillDecisionInput) -> Option<(f64, f64)> {
         let request = self.cost_eval_request(input)?;
-        let resp = self.evaluator.evaluate(request).await;
+        let evaluator = self.evaluator.get()?;
+        let resp = evaluator.evaluate(request).await;
         match (resp.agg_ttft_ms, resp.disagg_ttft_ms) {
             (Some(agg_ms), Some(disagg_ms)) if resp.agg_warm && resp.disagg_warm => {
                 Some((agg_ms, disagg_ms))
@@ -505,18 +535,9 @@ impl ConditionalPrefillPolicy for RegressionConditionalPrefillPolicy {
             _ => None,
         }
     }
-}
 
-/// `CostEvaluator` that always reports unavailable. Used as the default when
-/// the Regression policy is selected without a real evaluator wired up — the
-/// policy then takes its conservative DISAGG fallback on every slow-path
-/// decision. Cheap to construct; useful in tests and during bootstrap.
-pub struct UnavailableCostEvaluator;
-
-#[async_trait]
-impl CostEvaluator for UnavailableCostEvaluator {
-    async fn evaluate(&self, _request: CostEvalRequest) -> CostEvalResponse {
-        CostEvalResponse::unavailable()
+    fn try_set_cost_evaluator(&self, evaluator: Arc<dyn CostEvaluator>) {
+        let _ = self.evaluator.set(evaluator);
     }
 }
 
@@ -648,12 +669,26 @@ mod tests {
     }
 
     fn make_regression_policy(response: CostEvalResponse) -> RegressionConditionalPrefillPolicy {
+        let policy = RegressionConditionalPrefillPolicy {
+            enabled: true,
+            large_prompt_threshold_tokens: 16_384,
+            roomy_available_ratio_threshold: 0.5,
+            roomy_queued_blocks_threshold: 0,
+            evaluator: OnceLock::new(),
+        };
+        policy.try_set_cost_evaluator(Arc::new(StubCostEvaluator { response }));
+        policy
+    }
+
+    /// Same as `make_regression_policy` but leaves the evaluator unbound,
+    /// to verify slow-path conservative-DISAGG fallback.
+    fn make_regression_policy_without_evaluator() -> RegressionConditionalPrefillPolicy {
         RegressionConditionalPrefillPolicy {
             enabled: true,
             large_prompt_threshold_tokens: 16_384,
             roomy_available_ratio_threshold: 0.5,
             roomy_queued_blocks_threshold: 0,
-            evaluator: Arc::new(StubCostEvaluator { response }),
+            evaluator: OnceLock::new(),
         }
     }
 
@@ -771,6 +806,44 @@ mod tests {
         let policy = make_regression_policy(CostEvalResponse::unavailable());
         assert!(
             !policy
+                .should_bypass_remote_prefill(regression_input_slow_path())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_slow_path_unbound_evaluator_falls_back_to_disagg() {
+        // Policy constructed without an evaluator (the pre-activate state for
+        // the live router). Slow path must take conservative DISAGG without
+        // panicking on the missing evaluator.
+        let policy = make_regression_policy_without_evaluator();
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(regression_input_slow_path())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_try_set_cost_evaluator_late_binds() {
+        // Construct with no evaluator → slow-path returns DISAGG. After
+        // binding an AGG-favorable evaluator, slow path now picks AGG.
+        let policy = make_regression_policy_without_evaluator();
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(regression_input_slow_path())
+                .await
+        );
+        policy.try_set_cost_evaluator(Arc::new(StubCostEvaluator {
+            response: CostEvalResponse {
+                agg_ttft_ms: Some(10.0),
+                disagg_ttft_ms: Some(100.0),
+                agg_warm: true,
+                disagg_warm: true,
+            },
+        }));
+        assert!(
+            policy
                 .should_bypass_remote_prefill(regression_input_slow_path())
                 .await
         );

@@ -25,6 +25,7 @@ use crate::{
 };
 
 mod activation;
+mod cost_eval_client;
 mod execution;
 mod inner;
 mod types;
@@ -51,6 +52,10 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    /// Conditional-prefill bypass policy. Immutable after construction; for
+    /// the Regression policy, the inner request-plane `CostEvaluator` is
+    /// late-bound at `activate()` time via the trait's
+    /// `try_set_cost_evaluator()` hook (interior `OnceLock` on the policy).
     conditional_prefill_policy: Box<dyn ConditionalPrefillPolicy>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
