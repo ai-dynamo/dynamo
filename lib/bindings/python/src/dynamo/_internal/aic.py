@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 
 logger = logging.getLogger(__name__)
+
+_NEXTN_ACCEPT_RATES_LEN = 5
 
 DEFAULT_BACKEND_VERSIONS = {
     "vllm": "0.14.0",
@@ -36,6 +39,37 @@ def resolve_backend_version(backend_name: str, backend_version: str | None) -> s
     if backend_version is not None:
         return backend_version
     return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
+
+
+def resolve_nextn(
+    nextn: int | None,
+    nextn_accept_rates: list[float] | None,
+) -> tuple[int, list[float]] | tuple[None, None]:
+    """Resolve MTP/Eagle speculative-decoding params from args or env vars.
+
+    Explicit args win; otherwise falls back to ``DYN_AIC_NEXTN`` and
+    ``DYN_AIC_NEXTN_ACCEPT_RATES`` (comma-separated). Returns ``(None, None)``
+    when spec-dec is not requested. When requested, accept_rates is padded to
+    length 5 with trailing zeros to match AIC's fixed-shape slot.
+    """
+    if nextn is None:
+        env_nextn = os.environ.get("DYN_AIC_NEXTN")
+        if env_nextn is not None and env_nextn.strip():
+            nextn = int(env_nextn)
+    if not nextn:
+        return None, None
+
+    if nextn_accept_rates is None:
+        env_rates = os.environ.get("DYN_AIC_NEXTN_ACCEPT_RATES")
+        if env_rates is not None and env_rates.strip():
+            nextn_accept_rates = [float(x) for x in env_rates.split(",")]
+
+    rates = list(nextn_accept_rates) if nextn_accept_rates else []
+    if len(rates) < _NEXTN_ACCEPT_RATES_LEN:
+        rates = rates + [0.0] * (_NEXTN_ACCEPT_RATES_LEN - len(rates))
+    elif len(rates) > _NEXTN_ACCEPT_RATES_LEN:
+        rates = rates[:_NEXTN_ACCEPT_RATES_LEN]
+    return nextn, rates
 
 
 def _load_aiconfigurator():
@@ -78,9 +112,12 @@ class AicSession:
         moe_tp_size: int | None = None,
         moe_ep_size: int | None = None,
         attention_dp_size: int | None = None,
+        nextn: int | None = None,
+        nextn_accept_rates: list[float] | None = None,
     ):
         aic = _load_aiconfigurator()
         version = resolve_backend_version(backend_name, backend_version)
+        nextn, nextn_accept_rates = resolve_nextn(nextn, nextn_accept_rates)
 
         database = aic["get_database"](
             system=system, backend=backend_name, version=version
@@ -96,12 +133,16 @@ class AicSession:
                 f"Supported versions for this system/backend: {supported_versions}"
             )
 
-        model_config = aic["config"].ModelConfig(
+        model_config_kwargs: dict = dict(
             tp_size=tp_size,
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
             attention_dp_size=attention_dp_size or 1,
         )
+        if nextn:
+            model_config_kwargs["nextn"] = nextn
+            model_config_kwargs["nextn_accept_rates"] = nextn_accept_rates
+        model_config = aic["config"].ModelConfig(**model_config_kwargs)
         model = aic["get_model"](
             model_path=model_path,
             model_config=model_config,
@@ -117,11 +158,12 @@ class AicSession:
         self._model = model
         self._model_name = getattr(model, "model_name", None) or model_path
         logger.info(
-            "AIC session initialized: backend=%s, system=%s, model=%s, tp=%d",
+            "AIC session initialized: backend=%s, system=%s, model=%s, tp=%d, nextn=%s",
             backend_name,
             system,
             model_path,
             tp_size,
+            nextn or 0,
         )
 
     def _predict_context_latency(
@@ -291,8 +333,16 @@ def create_session(
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
+    nextn: int | None = None,
+    nextn_accept_rates: list[float] | None = None,
 ) -> AicSession:
-    """Factory function called from Rust via PyO3."""
+    """Factory function called from Rust via PyO3.
+
+    Spec-dec (``nextn`` / ``nextn_accept_rates``) is only reachable from
+    callers that pass kwargs (e.g. Python ``replay/main.py``). Rust callers
+    pass positional args and rely on the ``DYN_AIC_NEXTN`` /
+    ``DYN_AIC_NEXTN_ACCEPT_RATES`` env-var fallback in :func:`resolve_nextn`.
+    """
     return AicSession(
         backend_name,
         system,
@@ -302,6 +352,8 @@ def create_session(
         moe_tp_size,
         moe_ep_size,
         attention_dp_size,
+        nextn=nextn,
+        nextn_accept_rates=nextn_accept_rates,
     )
 
 

@@ -151,35 +151,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 )
         if self.conditional_prefill_max_new_tokens < 0:
             raise ValueError("--router-conditional-prefill-max-new-tokens must be >= 0")
-        if self.conditional_prefill_transfer_cost_scale < 0.0:
-            raise ValueError(
-                "--router-conditional-prefill-transfer-cost-scale must be >= 0.0"
-            )
-        if self.conditional_prefill_agg_thrash_factor < 0.0:
-            raise ValueError(
-                "--router-conditional-prefill-agg-thrash-factor must be >= 0.0"
-            )
-        if self.conditional_prefill_policy not in (
-            "token_cap",
-            "cost",
-            "joint_sigmoid",
-        ):
-            raise ValueError(
-                "--router-conditional-prefill-policy must be one of "
-                "'token_cap', 'cost', 'joint_sigmoid'"
-            )
-        if self.conditional_prefill_joint_sigmoid_load_scale <= 0:
-            raise ValueError(
-                "--router-conditional-prefill-joint-sigmoid-load-scale must be > 0"
-            )
-        if self.conditional_prefill_joint_sigmoid_isl_scale <= 0:
-            raise ValueError(
-                "--router-conditional-prefill-joint-sigmoid-isl-scale must be > 0"
-            )
-        if not (0.0 <= self.conditional_prefill_joint_sigmoid_bypass_threshold <= 1.0):
-            raise ValueError(
-                "--router-conditional-prefill-joint-sigmoid-bypass-threshold must be in [0, 1]"
-            )
+        if self.conditional_prefill_policy not in ("token_cap",):
+            raise ValueError("--router-conditional-prefill-policy must be 'token_cap'")
         if self.conditional_prefill_enabled and self.router_mode != "kv":
             raise ValueError("--router-conditional-prefill requires --router-mode=kv")
         self.apply_no_admission_control()

@@ -1377,13 +1377,6 @@ class KvRouterConfig:
         conditional_prefill_enabled: bool = False,
         conditional_prefill_max_new_tokens: int = 5000,
         conditional_prefill_policy: str = "token_cap",
-        conditional_prefill_transfer_cost_scale: float = 0.0,
-        conditional_prefill_agg_thrash_factor: float = 2.0,
-        conditional_prefill_joint_sigmoid_load_threshold: float = 100.0,
-        conditional_prefill_joint_sigmoid_load_scale: float = 50.0,
-        conditional_prefill_joint_sigmoid_isl_threshold: float = 1000.0,
-        conditional_prefill_joint_sigmoid_isl_scale: float = 500.0,
-        conditional_prefill_joint_sigmoid_bypass_threshold: float = 0.5,
         router_predicted_ttl_secs: Optional[float] = None,
         *,
         overlap_score_credit: float = 1.0,
@@ -1437,29 +1430,6 @@ class KvRouterConfig:
             conditional_prefill_max_new_tokens: Net-new prompt token cap for conditional prefill (default: 5000).
             conditional_prefill_policy: Which conditional-prefill bypass policy to use (default: "token_cap").
                 "token_cap": bypass when net-new prompt tokens <= conditional_prefill_max_new_tokens. Load-agnostic.
-                "cost": bypass when the selector cost equation says local prefill on decode is cheaper than
-                    remote prefill + standard decode re-pick. Uses observed prefill/decode pool load.
-                "joint_sigmoid": bypass when sigmoid(prefill_load - T_L) * sigmoid(T_isl - net_new) > T_bypass.
-                    Smooth, multiplicative AND-gate over prefill loadness and effective ISL smallness.
-            conditional_prefill_transfer_cost_scale: Per-block cost of an actual KV transfer in disagg,
-                block-equivalent units (default: 0.0 = treat transfer as free). Used by the refined CostEquation
-                policy's delta-aware transfer term as `transfer_cost_scale * (prompt_blocks - decode_min_overlap_blocks)`.
-                Physically-anchored rough default for GB200 NVLink5 + Kimi-K2.5 fp8 + block_size=512 is ~0.005.
-            conditional_prefill_agg_thrash_factor: CostEquation policy. Multiplicative penalty on the AGG-side
-                worker's projected load (default: 2.0). Captures dual-role contention — the cache-hot decode
-                worker serves both prefill compute and decode iterations for the bypassed request. Values < 2.0
-                weaken the penalty (favor bypass more); values > 2.0 strengthen it. Empirical IFB-inflation in
-                published benchmarks lands in 1.3-2.0×; default 2.0 is on the conservative end.
-            conditional_prefill_joint_sigmoid_load_threshold: Center of the prefill-load sigmoid in blocks
-                (default: 100.0). joint_sigmoid policy only.
-            conditional_prefill_joint_sigmoid_load_scale: Transition width of the prefill-load sigmoid in blocks
-                (default: 50.0). Smaller = sharper. joint_sigmoid policy only.
-            conditional_prefill_joint_sigmoid_isl_threshold: Center of the effective-ISL sigmoid in tokens
-                (default: 1000.0). joint_sigmoid policy only.
-            conditional_prefill_joint_sigmoid_isl_scale: Transition width of the ISL sigmoid in tokens
-                (default: 500.0). joint_sigmoid policy only.
-            conditional_prefill_joint_sigmoid_bypass_threshold: Final score (in [0, 1]) must exceed this for
-                bypass to fire (default: 0.5). joint_sigmoid policy only.
             router_predicted_ttl_secs: Enables predict-on-route when set. This TTL
                 applies to entries in the local side indexer and requires
                 use_kv_events=True. Set to None to disable. Independent of

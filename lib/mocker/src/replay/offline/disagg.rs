@@ -447,7 +447,7 @@ impl DisaggRuntime {
         if self.conditional_prefill_policy.is_enabled()
             && self.decode_router.is_some()
             && let Some(bypass_worker_idx) =
-                self.try_conditional_prefill_bypass(uuid, &queued_request, &replay_hashes)?
+                self.try_conditional_prefill_bypass(&queued_request, &replay_hashes)?
         {
             self.handle_conditional_prefill_bypass(
                 uuid,
@@ -487,7 +487,6 @@ impl DisaggRuntime {
     /// default.
     fn try_conditional_prefill_bypass(
         &mut self,
-        uuid: Uuid,
         request: &DirectRequest,
         replay_hashes: &Option<ReplayRequestHashes>,
     ) -> Result<Option<usize>> {
@@ -554,15 +553,6 @@ impl DisaggRuntime {
             decode_pool_min_load_blocks,
             decode_min_overlap_blocks,
         };
-
-        // Record the policy's computed costs (if any) before making the
-        // bypass decision, so downstream analysis tools can inspect the cost
-        // distribution regardless of which way the threshold tipped.
-        if let Some((agg_cost, disagg_cost)) = self.conditional_prefill_policy.evaluate_costs(input)
-        {
-            self.collector
-                .on_conditional_prefill_costs(uuid, agg_cost, disagg_cost);
-        }
 
         if self
             .conditional_prefill_policy

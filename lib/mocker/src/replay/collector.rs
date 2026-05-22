@@ -308,15 +308,6 @@ struct TraceRequestStats {
     /// single-shot request lists.
     session_id: Option<String>,
     turn_index: Option<usize>,
-    /// Cost-equation policy's evaluated AGG-mode cost for this request at
-    /// probe time, in block-equivalent units. `None` when the active policy
-    /// doesn't compute costs (TokenCap, JointSigmoid, baseline) or when
-    /// required input fields are missing. Set by the offline disagg replay
-    /// probe via `on_conditional_prefill_costs`.
-    conditional_prefill_agg_cost: Option<f64>,
-    /// Cost-equation policy's evaluated DISAGG-mode cost (same caveats as
-    /// `conditional_prefill_agg_cost`).
-    conditional_prefill_disagg_cost: Option<f64>,
 }
 
 /// Flat per-request record for `--report-jsonl` emission. One JSON line per
@@ -349,13 +340,6 @@ pub struct PerRequestRecord {
     pub reused_input_tokens: usize,
     pub prefill_worker_idx: Option<usize>,
     pub decode_worker_idx: Option<usize>,
-    /// Cost-equation policy's `agg_cost` at probe time, in block-equivalent
-    /// units. `null` when the active policy doesn't compute costs (TokenCap,
-    /// JointSigmoid, baseline) or required inputs were missing.
-    pub conditional_prefill_agg_cost: Option<f64>,
-    /// Cost-equation policy's `disagg_cost` at probe time, in block-equivalent
-    /// units. Same caveats as `conditional_prefill_agg_cost`.
-    pub conditional_prefill_disagg_cost: Option<f64>,
 }
 
 #[cfg(test)]
@@ -445,31 +429,8 @@ impl TraceCollector {
                 session_id: None,
                 turn_index: None,
                 first_admission_reused_input_tokens: 0,
-                conditional_prefill_agg_cost: None,
-                conditional_prefill_disagg_cost: None,
             },
         );
-    }
-
-    /// Record the cost-equation policy's evaluated `(agg_cost, disagg_cost)`
-    /// at probe time for `uuid`. Called by the offline disagg-replay probe
-    /// whenever the active policy implements `evaluate_costs` (i.e.
-    /// CostEquation), regardless of whether bypass fired. Records the values
-    /// once per request — subsequent calls are no-ops, since a request is
-    /// only probed once. Always recorded (not gated on `capture_per_request`)
-    /// so future analysis paths can read them off the snapshot.
-    pub(crate) fn on_conditional_prefill_costs(
-        &mut self,
-        uuid: Uuid,
-        agg_cost: f64,
-        disagg_cost: f64,
-    ) {
-        if let Some(stats) = self.requests.get_mut(&uuid)
-            && stats.conditional_prefill_agg_cost.is_none()
-        {
-            stats.conditional_prefill_agg_cost = Some(agg_cost);
-            stats.conditional_prefill_disagg_cost = Some(disagg_cost);
-        }
     }
 
     /// Record one request as having taken the conditional-prefill bypass
@@ -700,8 +661,6 @@ impl TraceCollector {
                 reused_input_tokens: stats.reused_input_tokens,
                 prefill_worker_idx: stats.prefill_worker_idx,
                 decode_worker_idx: stats.decode_worker_idx,
-                conditional_prefill_agg_cost: stats.conditional_prefill_agg_cost,
-                conditional_prefill_disagg_cost: stats.conditional_prefill_disagg_cost,
             });
         }
         // Stable ordering: by arrival_time_ms (with uuid as tiebreaker) so the
