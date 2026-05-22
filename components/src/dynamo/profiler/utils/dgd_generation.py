@@ -128,6 +128,9 @@ def assemble_final_config(
     config_maps: list[dict] = []
 
     if planner:
+        planner_cfg = dgdr.features.planner if dgdr.features else None
+        if planner_cfg is not None:
+            enable_planner_worker_scaling_adapters(base, planner_cfg)
         planner_cm = add_planner_to_config(
             dgdr,
             base,
@@ -244,6 +247,94 @@ def generate_mocker_config(
             main_container["args"] = args_list
 
     return mocker_config
+
+
+def enable_planner_worker_scaling_adapters(
+    config_dict: dict, planner_config: PlannerConfig
+) -> None:
+    """Opt worker services into DGDSA when non-advisory Planner manages replicas."""
+    if planner_config.advisory:
+        return
+
+    services = config_dict.get("spec", {}).get("services", {})
+    if not isinstance(services, dict):
+        return
+
+    target_subcomponents = _planner_scaling_subcomponents(planner_config.mode)
+    untyped_worker_count = sum(
+        1
+        for service_name, service_config in services.items()
+        if isinstance(service_config, dict)
+        and service_config.get("componentType") == "worker"
+        and not service_config.get("subComponentType")
+        and _infer_subcomponent_from_service_name(service_name) is None
+    )
+
+    for service_name, service_config in services.items():
+        if not isinstance(service_config, dict):
+            continue
+        if not _is_planner_scalable_worker_service(
+            service_name,
+            service_config,
+            target_subcomponents,
+            planner_config.mode,
+            untyped_worker_count,
+        ):
+            continue
+        scaling_adapter = service_config.setdefault("scalingAdapter", {})
+        if not isinstance(scaling_adapter, dict):
+            service_config["scalingAdapter"] = {"enabled": True}
+            continue
+        scaling_adapter["enabled"] = True
+
+
+def _is_planner_scalable_worker_service(
+    service_name: str,
+    service_config: dict,
+    target_subcomponents: set[str],
+    planner_mode: str,
+    untyped_worker_count: int,
+) -> bool:
+    if service_config.get("componentType") != "worker":
+        return False
+
+    sub_component_type = service_config.get("subComponentType")
+    if sub_component_type:
+        return sub_component_type in target_subcomponents
+
+    inferred_type = _infer_subcomponent_from_service_name(service_name)
+    if inferred_type is not None:
+        if inferred_type in target_subcomponents:
+            service_config["subComponentType"] = inferred_type
+            return True
+        return False
+
+    # Some agg templates have one generic worker name and no subComponentType.
+    # Mark it as decode so the Kubernetes planner can rediscover the target.
+    if planner_mode == "agg" and untyped_worker_count == 1:
+        service_config["subComponentType"] = "decode"
+        return True
+
+    return False
+
+
+def _planner_scaling_subcomponents(planner_mode: str) -> set[str]:
+    if planner_mode == "prefill":
+        return {"prefill"}
+    if planner_mode in {"decode", "agg"}:
+        return {"decode"}
+    if planner_mode == "disagg":
+        return {"prefill", "decode"}
+    return set()
+
+
+def _infer_subcomponent_from_service_name(service_name: str) -> Optional[str]:
+    normalized = service_name.lower()
+    if "prefill" in normalized:
+        return "prefill"
+    if "decode" in normalized:
+        return "decode"
+    return None
 
 
 def _mocker_aic_worker_picks(
@@ -496,6 +587,33 @@ def _build_planner_config(
 
     if aic_spec is not None:
         planner_cfg.aic_interpolation = aic_spec
+
+    # Propagate SLA targets from spec.sla so the post-deployment planner enforces
+    # the same SLA used at sweep time. Without this, the planner silently uses
+    # SLAPlannerDefaults ttft_ms=500 / itl_ms=50.
+    #
+    # Gate on model_fields_set: run_profile() calls valid_dgdr_spec() first, which
+    # injects a defaulted SLASpec() (ttft=2000, itl=30) when spec.sla is omitted.
+    # Only values the user explicitly set are in model_fields_set, so a defaulted
+    # SLASpec falls through and keeps the prior planner defaults.
+    #
+    # Explicit user overrides on features.planner.{ttft_ms, itl_ms} take precedence.
+
+    sla = dgdr.sla
+    if (
+        sla is not None
+        and sla.e2eLatency is None
+        and ("ttft" in sla.model_fields_set or "itl" in sla.model_fields_set)
+    ):
+        explicit = (
+            dgdr.features.planner.model_fields_set
+            if dgdr.features and dgdr.features.planner
+            else set()
+        )
+        if "ttft_ms" not in explicit:
+            planner_cfg.ttft_ms = float(sla.ttft)
+        if "itl_ms" not in explicit:
+            planner_cfg.itl_ms = float(sla.itl)
 
     return planner_cfg
 

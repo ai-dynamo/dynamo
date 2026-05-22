@@ -331,8 +331,6 @@ async def wait_for_workers_ready(
             kv_python_router=router,
             model_name=model_name,
             token_ids=test_token_ids,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,
                 "max_tokens": 2,
@@ -449,7 +447,7 @@ def get_runtime(store_backend="etcd", request_plane="tcp"):
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "tcp".
+        request_plane: How frontend talks to backend ("tcp", "nats"). Defaults to "tcp".
     """
     try:
         # Try to get running loop (works in async context)
@@ -563,8 +561,8 @@ async def send_request_via_python_kv_router(
     kv_python_router: KvRouter,
     model_name: str,
     token_ids: list,
-    initial_wait: float,
-    max_retries: int,
+    initial_wait: float = 0.25,
+    max_retries: int = 8,
     stop_conditions: Optional[dict] = None,
     sampling_options: Optional[dict] = None,
     output_options: Optional[dict] = None,

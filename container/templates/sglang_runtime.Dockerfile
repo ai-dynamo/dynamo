@@ -40,12 +40,11 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
-# Runtime uses upstream lmsysorg/sglang's NIXL Python stack; --no-deps keeps
-# pip from replacing it. Dev/local-dev build from source after bind-mount.
-#
-# Glob is ai_dynamo*.whl (not *.whl): wheel_builder also produces nixl-cu*.whl
-# which is only needed by the dev stage's SDK COPY (see dev.Dockerfile).
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/ai_dynamo*.whl /opt/dynamo/wheelhouse/
+# Runtime target installs only the prebuilt Dynamo wheels. SGLang and its NIXL
+# packages come from the upstream lmsysorg/sglang runtime image; --no-deps keeps
+# pip from replacing that stack. Dev/local-dev build from source later in the
+# shared dev stage after the workspace is bind-mounted.
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
@@ -58,6 +57,15 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps "accelerate==1.13.0"
+
+# Install distro: openai>=1.x's _base_client imports it unconditionally, and
+# sglang 0.5.11's server_args eagerly imports sglang.srt.entrypoints.openai.protocol
+# which pulls in openai.types.responses → triggers openai pkg init → import distro.
+# The upstream lmsysorg/sglang runtime installs openai with --no-deps so distro is
+# missing; without this any dynamo.sglang worker fails to import at startup.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --no-deps "distro==1.9.0"
 
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
@@ -78,21 +86,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
-# The upstream lmsysorg/sglang v0.5.10.post1 runtime image bundles the mooncake
-# python engine (`.so`) but does not declare its runtime apt dep libjsoncpp25,
-# so `from mooncake.engine import TransferEngine` fails with
-# `ImportError: libjsoncpp.so.25: cannot open shared object file`.
-# TODO: re-check whether this apt install is still needed after upgrading sglang
-# past v0.5.10.post1 — upstream may fix the packaging.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends libjsoncpp25 && \
-    rm -rf /var/lib/apt/lists/*
-
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/sglang /workspace/components/src/dynamo/sglang
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/

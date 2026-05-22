@@ -11,11 +11,19 @@ use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
     convert_sse_stream,
-    openai::ParsingOptions,
+    openai::{ParsingOptions, nvext::merge_response_nvext},
 };
 
-use dynamo_protocols::types::{ChatCompletionMessageContent, StopReason};
+use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_runtime::engine::DataStream;
+
+fn is_harmony_parser(parser: &str) -> bool {
+    parser == "harmony"
+}
+
+fn contains_harmony_protocol(text: &str) -> bool {
+    text.contains("<|channel|>")
+}
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
 /// [`NvCreateChatCompletionResponse`]. This struct accumulates incremental responses
@@ -52,8 +60,6 @@ struct DeltaChoice {
     role: Option<dynamo_protocols::types::Role>,
     /// The reason the completion was finished (if applicable).
     finish_reason: Option<dynamo_protocols::types::FinishReason>,
-    /// The stop string or token that triggered the stop condition.
-    stop_reason: Option<StopReason>,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
     // Tool-call chunks accumulated in the order they arrived from the stream,
@@ -238,10 +244,7 @@ impl DeltaAggregator {
                         aggregator.system_fingerprint = Some(system_fingerprint);
                     }
 
-                    // Aggregate nvext field (take the last non-None value)
-                    if delta.nvext.is_some() {
-                        aggregator.nvext = delta.nvext;
-                    }
+                    merge_response_nvext(&mut aggregator.nvext, delta.nvext);
 
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
@@ -254,7 +257,6 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     role: choice.delta.role,
                                     finish_reason: None,
-                                    stop_reason: None,
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
                                     tool_calls: None,
@@ -305,11 +307,6 @@ impl DeltaAggregator {
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
-                        }
-
-                        // Update stop reason if provided.
-                        if let Some(stop_reason) = choice.stop_reason {
-                            state_choice.stop_reason = Some(stop_reason);
                         }
 
                         // Update logprobs
@@ -393,6 +390,8 @@ impl DeltaAggregator {
                 if !tool_calls.is_empty() {
                     choice.tool_calls = Some(tool_calls);
                     choice.text = content.unwrap_or_default();
+                } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
+                    choice.text = content.unwrap_or_default();
                 }
             }
         }
@@ -466,7 +465,6 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
             },
             index: delta.index,
             finish_reason,
-            stop_reason: delta.stop_reason,
             logprobs: delta.logprobs,
         }
     }
@@ -581,7 +579,6 @@ mod tests {
             index,
             delta,
             finish_reason,
-            stop_reason: None,
             logprobs,
         };
 
@@ -631,7 +628,6 @@ mod tests {
             index,
             delta,
             finish_reason,
-            stop_reason: None,
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
@@ -1041,6 +1037,43 @@ mod tests {
         assert_eq!(choice.message.role, dynamo_protocols::types::Role::User);
     }
 
+    #[tokio::test]
+    async fn test_multiple_deltas_merge_nvext_fields() {
+        let mut annotated_delta1 = create_test_delta(
+            0,
+            "Hello",
+            Some(dynamo_protocols::types::Role::Assistant),
+            None,
+            None,
+            None,
+        );
+        annotated_delta1.data.as_mut().expect("delta data").nvext =
+            Some(serde_json::json!({ "engine_data": { "trace_id": "abc" } }));
+        let mut annotated_delta2 = create_test_delta(
+            0,
+            " world",
+            None,
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        annotated_delta2.data.as_mut().expect("delta data").nvext =
+            Some(serde_json::json!({ "stop_reason": 128001 }));
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta1, annotated_delta2]));
+        let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregate stream");
+
+        assert_eq!(
+            response.nvext,
+            Some(serde_json::json!({
+                "engine_data": { "trace_id": "abc" },
+                "stop_reason": 128001,
+            }))
+        );
+    }
+
     #[allow(deprecated)]
     #[tokio::test]
     async fn test_multiple_choices() {
@@ -1068,7 +1101,6 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
-                        stop_reason: None,
                         logprobs: None,
                     },
                     dynamo_protocols::types::ChatChoiceStream {
@@ -1084,7 +1116,6 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
-                        stop_reason: None,
                         logprobs: None,
                     },
                 ],
@@ -1545,6 +1576,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_harmony_aggregate_zero_call_drops_internal_analysis() {
+        let annotated_delta = create_test_delta(
+            0,
+            r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("harmony".to_string()), None),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+        assert_eq!(choice.message.content, None);
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_harmony_aggregate_plain_text_without_markers_stays_plain_text() {
+        let annotated_delta = create_test_delta(
+            0,
+            "plain response",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("harmony".to_string()), None),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(
+                "plain response".to_string()
+            ))
+        );
+        assert!(choice.message.tool_calls.is_none());
+    }
+
     #[test]
     fn test_reasoning_only_response_serializes_content_key_as_null() {
         // DGH-651: when a response carries reasoning_content but no text or
@@ -1557,7 +1647,6 @@ mod tests {
             text: String::new(),
             role: Some(dynamo_protocols::types::Role::Assistant),
             finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
-            stop_reason: None,
             logprobs: None,
             tool_call_chunks: BTreeMap::new(),
             tool_calls: None,

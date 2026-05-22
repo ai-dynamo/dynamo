@@ -75,7 +75,7 @@ tilt-up: kubectl helm ## Start Tilt for local operator development.
 manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
 	# allowDangerousTypes=true is needed for the EndpointPickerConfig from gateway-api-inference-extension which contains float fields
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true,generateEmbeddedObjectMeta=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("mainContainer")) | .mainContainer.required) |= (. - ["name"])' -i --indent 2 $$file || exit 1; \
@@ -89,10 +89,6 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
-	done
-	echo "Fixing profilingJob template metadata: controller-gen emits bare type: object for metav1.ObjectMeta, add x-kubernetes-preserve-unknown-fields so labels/annotations are accepted"
-	for file in config/crd/bases/*.yaml; do \
-		$(YQ) eval '(.. | select(has("profilingJob")) | .profilingJob.properties.template.properties.metadata)."x-kubernetes-preserve-unknown-fields" = true' -i --indent 2 $$file || exit 1; \
 	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
@@ -154,6 +150,23 @@ test: manifests generate fmt vet envtest ## Run tests.
 .PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
 test-e2e:
 	go test ./test/e2e/ -v -ginkgo.v
+
+# DGDR e2e test configuration.
+# Override these via the command line, e.g.:
+#   make test-e2e-dgdr DGDR_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0
+DGDR_TEST_TIMEOUT ?= 75m
+DGDR_NAMESPACE ?= dynamo-test
+DGDR_IMAGE ?=
+
+.PHONY: test-e2e-dgdr  # Run DGDR e2e tests against a live cluster with the operator installed.
+test-e2e-dgdr:
+ifndef DGDR_IMAGE
+	$(error DGDR_IMAGE is required. Example: make test-e2e-dgdr DGDR_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0)
+endif
+	go test ./test/e2e/dgdr/ -v -ginkgo.v -timeout=$(DGDR_TEST_TIMEOUT) \
+		-dgdr-namespace=$(DGDR_NAMESPACE) \
+		-dgdr-image=$(DGDR_IMAGE) \
+		$(DGDR_TEST_FLAGS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint

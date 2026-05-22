@@ -256,6 +256,11 @@ impl LocalModelBuilder {
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
 
+        // Pick up a stable routing id from `DYN_STABLE_ROUTING_ID`. No-op if the caller
+        // already supplied one or the env var is unset. Published in etcd so routing
+        // layers can keep cache assignments stable across worker restarts.
+        self.runtime_config.populate_stable_routing_id_from_env();
+
         let template = self
             .template_file
             .as_deref()
@@ -470,15 +475,23 @@ impl LocalModel {
     ///
     /// For base models, pass `lora_name = None`.
     /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
+    ///
+    /// `worker_type` and `needs` carry the topology readiness fields. Pass
+    /// `None` / empty `Vec` for callers that haven't been updated to declare
+    /// their role yet — readers apply the missing-field shim.
     pub async fn attach(
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
         lora_info: Option<crate::model_card::LoraInfo>,
+        worker_type: Option<crate::worker_type::WorkerType>,
+        needs: Vec<Vec<crate::worker_type::WorkerType>>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
+        self.card.worker_type = worker_type;
+        self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
         // Compute model_suffix from lora_name if present
@@ -560,13 +573,10 @@ impl LocalModel {
         let registry = drt.metadata_artifacts();
 
         let mut rewritten = 0usize;
-        for cf in self.card.iter_metadata_files_mut() {
+        for (cf, _) in self.card.iter_metadata_files_mut() {
             let Some(local_path) = cf.path().map(Path::to_path_buf) else {
                 continue;
             };
-            // Filename from the original path — HF cache symlinks would
-            // otherwise canonicalize to the LFS SHA1 and break downstream
-            // lookups by literal name (e.g. `parent.join("generation_config.json")`).
             let Some(filename) = local_path
                 .file_name()
                 .and_then(|f| f.to_str())
@@ -574,14 +584,13 @@ impl LocalModel {
             else {
                 continue;
             };
-            // Canonicalize so the handler serves the resolved HF blob, not the symlink.
-            let absolute = match fs::canonicalize(&local_path) {
+            let absolute = match std::path::absolute(&local_path) {
                 Ok(p) => p,
                 Err(err) => {
                     tracing::warn!(
                         path = %local_path.display(),
                         %err,
-                        "failed to canonicalize self-host metadata path; skipping",
+                        "failed to absolutize self-host metadata path; skipping",
                     );
                     continue;
                 }
@@ -678,9 +687,7 @@ pub(crate) fn self_host_base_url(
         .unwrap_or_default()
         .system_host;
     let host = match configured.as_str() {
-        "0.0.0.0" | "::" | "[::]" => {
-            dynamo_runtime::utils::ip_resolver::get_local_ip_for_advertise()
-        }
+        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
         _ => configured,
     };
 

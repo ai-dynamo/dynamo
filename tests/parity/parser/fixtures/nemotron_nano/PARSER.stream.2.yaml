@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# `|2+` simply means a single newline ("\n"); see tests/parity/README.md for the full decode.
+
+family: nemotron_nano
+model_label: Nemotron Nano
+mode: stream
+cases:
+  PARSER.stream.2:
+    description: Multiple tool calls split across multiple content chunks
+    ref: derived from PARSER.batch.2.a
+    chunks:
+    - delta_text: <tool_cal
+    - delta_text: |-
+        l>
+        <fun
+    - delta_text: ction=get_wea
+    - delta_text: ther>
+    - delta_text: |2-
+
+        <parameter=locat
+    - delta_text: ion
+    - delta_text: |-
+        >
+        NYC
+        </p
+    - delta_text: aramete
+    - delta_text: |-
+        r>
+        </function
+    - delta_text: |-
+        >
+        </t
+    - delta_text: |-
+        ool_call>
+        <tool_c
+    - delta_text: all
+    - delta_text: |-
+        >
+        <functi
+    - delta_text: on=get_
+    - delta_text: |-
+        time>
+        <parame
+    - delta_text: ter=t
+    - delta_text: |-
+        imezone>
+        EST
+        </pa
+    - delta_text: ram
+    - delta_text: |-
+        eter>
+        </f
+    - delta_text: unction
+    - delta_text: |-
+        >
+        </tool_call
+    - delta_text: '>'
+    - delta_text: ''
+      finish_reason: tool_calls
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: |2+
+
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'

@@ -1052,6 +1052,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             (provider, None, None)
         };
 
+        // Register the provider globally so direct OTel API users
+        // (`opentelemetry::global::tracer(...)`) hit the same exporter as
+        // the tracing-opentelemetry bridge below. Without this, ad-hoc
+        // OTel spans created via `global::tracer()` go to the default
+        // no-op provider and are silently dropped.
+        // Cheap — `SdkTracerProvider` is Arc-shared internally.
+        opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+
         // Get a tracer from the provider
         let tracer = tracer_provider.tracer(service_name.clone());
 
@@ -1085,6 +1093,16 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     } else {
+        // Caller asked for OTLP export but the OTel layer is only installed on
+        // the JSONL path — surface the misconfig instead of silently dropping
+        // traces.
+        if otlp_exporter_enabled() {
+            eprintln!(
+                "WARNING: OTEL_EXPORT_ENABLED=1 has no effect without DYN_LOGGING_JSONL=1. \
+                 OTel layers and OTLP exporter are not installed. Set DYN_LOGGING_JSONL=1 \
+                 to enable trace/log export."
+            );
+        }
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))

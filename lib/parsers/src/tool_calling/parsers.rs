@@ -146,14 +146,15 @@ pub async fn detect_and_parse_tool_call_with_recovery(
         }
         ParserConfig::Xml(c) => {
             let mut c = c.clone();
-            c.allow_eof_recovery = true;
+            // Strict-match families opt out — flipping recovery here would
+            // contradict their per-spec strictness.
+            if !c.strict_match {
+                c.allow_eof_recovery = true;
+            }
             ParserConfig::Xml(c)
         }
-        ParserConfig::Glm47(c) => {
-            let mut c = c.clone();
-            c.allow_eof_recovery = true;
-            ParserConfig::Glm47(c)
-        }
+        // GLM-4.7 intentionally omitted: match upstream vLLM/SGLang behavior
+        // (drop the call when </tool_call> is missing).
         // Other parsers don't have an EOF-recovery flag — pass through.
         other => other.clone(),
     };
@@ -560,6 +561,99 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         assert_eq!(content, Some("Hey How are you?".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
+    }
+
+    /// Hermes-style models emit `arguments` as compact JSON (no spaces) on the
+    /// wire. The parser must preserve those exact bytes so the next turn's
+    /// rendered prompt is byte-equivalent to [turn-N prompt + model output],
+    /// keeping KV-cache prefix matching intact across multi-step tool use.
+    /// See PR 9301 for the matching prompt-rendering fix.
+    #[tokio::test]
+    async fn parser_preserves_compact_arguments_byte_span() {
+        let input = r#"<tool_call>{"name": "get_weather", "arguments": {"location":"San Francisco, USA","unit":"celsius"}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].function.arguments, r#"{"location":"San Francisco, USA","unit":"celsius"}"#,
+            "arguments must be preserved byte-for-byte (no `, ` or `: ` injected)"
+        );
+    }
+
+    /// HashMap iteration order is randomized; key order in the output of a
+    /// `HashMap` round-trip would not match what the model emitted. With
+    /// RawValue passthrough, the order survives.
+    #[tokio::test]
+    async fn parser_preserves_argument_key_order() {
+        let input = r#"<tool_call>{"name":"f","arguments":{"z":1,"a":2,"m":3}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].function.arguments, r#"{"z":1,"a":2,"m":3}"#);
+    }
+
+    /// Numeric formatting (e.g. `1.0` vs `1`) must survive round-tripping;
+    /// `serde_json::Value` parses `1.0` as `Number::F64(1.0)` and may
+    /// serialize differently than what the model emitted.
+    #[tokio::test]
+    async fn parser_preserves_numeric_formatting() {
+        let input = r#"<tool_call>{"name":"f","arguments":{"x":1.0,"y":42}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].function.arguments, r#"{"x":1.0,"y":42}"#);
+    }
+
+    /// Parallel tool_calls each go through the array-deserialization path
+    /// (`Vec<Box<RawValue>>`); each element's byte span must be independent.
+    #[tokio::test]
+    async fn parser_preserves_byte_span_for_parallel_calls() {
+        let input = r#"<tool_call>{"name":"a","arguments":{"k":"v1"}}</tool_call>
+<tool_call>{"name":"b","arguments":{"k":"v2"}}</tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("hermes"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].function.arguments, r#"{"k":"v1"}"#);
+        assert_eq!(result[1].function.arguments, r#"{"k":"v2"}"#);
+    }
+
+    /// Single-token-start parsers (`functools`, `[TOOL_CALLS]`,
+    /// `<|python_tag|>`) route arrays through
+    /// `handle_single_token_tool_calls`. That helper previously round-tripped
+    /// each element through `serde_json::Value` + `to_string`, which dropped
+    /// whitespace and reordered keys in `arguments` before the downstream
+    /// `Vec<Box<RawValue>>` parser ever saw them. The fix parses the array
+    /// directly as `Vec<Box<RawValue>>` so each element retains its original
+    /// byte span end-to-end.
+    #[tokio::test]
+    async fn single_token_array_preserves_argument_byte_span_phi4() {
+        let input = r#"functools[{"name":"f","arguments":{"z":1,"a":2,"unit":"celsius"}}]"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("phi4"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].function.arguments, r#"{"z":1,"a":2,"unit":"celsius"}"#,
+            "phi4/functools path must preserve key order and absent whitespace verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_token_array_preserves_argument_byte_span_mistral() {
+        let input = r#"[TOOL_CALLS] [{"name":"f","arguments":{"z":1,"a":2}}, {"name":"g","arguments":{"b":3.0}}]"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("mistral"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].function.arguments, r#"{"z":1,"a":2}"#);
+        assert_eq!(
+            result[1].function.arguments, r#"{"b":3.0}"#,
+            "numeric formatting (3.0 vs 3) must be preserved"
+        );
     }
 
     #[tokio::test]
@@ -1639,14 +1733,11 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
     #[tokio::test]
     async fn test_harmony_parser_basic() {
         let input = r#"
-        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}"#;
+        <|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (result, content) = detect_and_parse_tool_call(input, Some("harmony"), None)
             .await
             .unwrap();
-        assert_eq!(
-            content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(content, Some("".to_string()));
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -2898,10 +2989,7 @@ fahrenheit
             .unwrap();
         assert_eq!(
             content,
-            Some(
-                "I'll help you check the weather.  Let me get that information for you."
-                    .to_string()
-            )
+            Some("I'll help you check the weather. ".to_string())
         );
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());

@@ -67,6 +67,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
@@ -452,8 +453,8 @@ func main() {
 	case *operatorCfg.DRA.Enabled:
 		if !draDetected {
 			setupLog.Error(nil,
-				"DRA is explicitly enabled in config but the resource.k8s.io API group"+
-					" was not detected in the cluster (requires Kubernetes 1.32+)",
+				"DRA is explicitly enabled in config but the resource.k8s.io/v1 API"+
+					" was not detected in the cluster (requires Kubernetes 1.34+)",
 			)
 			os.Exit(1)
 		}
@@ -475,7 +476,7 @@ func main() {
 		"istio", runtimeConfig.IstioAvailable,
 	)
 
-	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
+	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader())
 	// refresh whenever a secret is created/deleted/updated
 	// Set up informer
 	var factory informers.SharedInformerFactory
@@ -540,12 +541,13 @@ func main() {
 		setupLog.Error(err, "unable to add event handler to secret informer")
 		os.Exit(1)
 	}
+	if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
+		setupLog.Error(err, "initial docker secrets index refresh failed")
+		os.Exit(1)
+	}
+	setupLog.Info("initial docker secrets index refreshed")
 	// launch a goroutine to refresh the docker secret indexer in any case every minute
 	go func() {
-		// Initial refresh
-		if err := dockerSecretRetriever.RefreshIndex(context.Background()); err != nil {
-			setupLog.Error(err, "initial docker secrets index refresh failed")
-		}
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -738,6 +740,14 @@ func registerWebhooks(
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
 	}
 
+	// Temporary internal gate for GMS + Snapshot.
+	if os.Getenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar) == "1" {
+		setupLog.Info(
+			"INTERNAL OVERRIDE: GMS + Snapshot admission rule disabled via env var; do NOT enable in production",
+			"envVar", consts.DynamoOperatorAllowGMSSnapshotEnvVar,
+		)
+	}
+
 	setupLog.Info("Registering validation webhooks")
 
 	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
@@ -748,6 +758,11 @@ func registerWebhooks(
 	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal, runtimeConfig.GroveEnabled)
 	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
+	}
+
+	dckptHandler := webhookvalidation.NewDynamoCheckpointHandler()
+	if err := dckptHandler.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoCheckpoint webhook: %w", err)
 	}
 
 	dmHandler := webhookvalidation.NewDynamoModelHandler()

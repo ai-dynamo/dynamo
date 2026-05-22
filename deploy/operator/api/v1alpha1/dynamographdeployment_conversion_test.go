@@ -1585,7 +1585,7 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 // an aggregated frontend+worker service pair where the frontend has no
 // explicit container resources (so `containers[*].resources` projects as an
 // empty object) and `sharedMemorySize="0"` (which exercises the Disabled=true
-// path in convertSharedMemoryFrom). It is shared by the idempotence tests
+// path in ConvertToSharedMemorySpec). It is shared by the idempotence tests
 // below so the linter does not flag the identical fixture builders as dupl.
 func newIdempotenceDGDFixture() *v1beta1.DynamoGraphDeployment {
 	replicas := int32(1)
@@ -1646,7 +1646,7 @@ func newIdempotenceDGDFixture() *v1beta1.DynamoGraphDeployment {
 // round-trip, so kubectl apply is idempotent for any v1beta1 input.
 func TestDGD_ApplyIdempotence_GenerationBump(t *testing.T) {
 	// sharedMemorySize=\"0\" is the critical trigger: it exercises the
-	// Disabled=true path in convertSharedMemoryFrom, which previously left
+	// Disabled=true path in ConvertToSharedMemorySpec, which previously left
 	// SharedMemorySpec.Size as a bare Quantity{}.
 	newSrc := newIdempotenceDGDFixture
 
@@ -1691,13 +1691,13 @@ func TestDGD_ApplyIdempotence_GenerationBump(t *testing.T) {
 // a non-pointer struct, so encoding/json's omitempty does not drop it); after
 // the etcd JSON round-trip the Size becomes a canonical zero Quantity that is
 // not reflect.DeepEqual to the Go zero value. Without the fix in
-// convertSharedMemoryFrom, every reapply of a v1beta1 object carrying the
+// ConvertToSharedMemorySpec, every reapply of a v1beta1 object carrying the
 // sparse save would bump .metadata.generation.
 func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
 	// Seed a v1alpha1 object whose only non-default bit is SharedMemory =
 	// &SharedMemorySpec{}, then run it through ConvertTo once so the
 	// produced v1beta1 carries the sparse save we need to exercise the empty
-	// branch of convertSharedMemoryFrom.
+	// branch of shared-memory restoration.
 	a1 := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "shm-empty", Namespace: "ns"},
 		Spec: DynamoGraphDeploymentSpec{
@@ -1859,4 +1859,111 @@ func TestDGD_ApplyIdempotence_CSAMergePatch(t *testing.T) {
 	if !reflect.DeepEqual(oldMap, newMap) {
 		t.Errorf("unstructured spec DeepEqual mismatch after CSA merge-patch flow:\nold=%#v\nnew=%#v", oldMap, newMap)
 	}
+}
+
+// TestDGD_RoundTrip_KvTransferPolicy verifies that KvTransferPolicy survives a
+// v1beta1 → v1alpha1 → v1beta1 round-trip (and vice versa) without data loss.
+func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
+	t.Run("v1beta1_roundtrip", func(t *testing.T) {
+		src := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "topo", Namespace: "ns"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:    "topology.kubernetes.io/zone",
+						Domain:      v1beta1.TopologyDomain("zone"),
+						Enforcement: v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		got := roundTripFromV1beta1(t, src)
+		if diff := cmp.Diff(src, got); diff != "" {
+			t.Errorf("v1beta1 round-trip mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("v1beta1_roundtrip_preferred_policy", func(t *testing.T) {
+		src := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "topo-preferred", Namespace: "ns"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						LabelKey:        "nvidia.com/rack",
+						Domain:          v1beta1.TopologyDomain("rack"),
+						Enforcement:     v1beta1.KvTransferEnforcementPreferred,
+						PreferredWeight: ptr.To[float32](0.85),
+					},
+				},
+			},
+		}
+		got := roundTripFromV1beta1(t, src)
+		if diff := cmp.Diff(src, got); diff != "" {
+			t.Errorf("v1beta1 round-trip mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("v1alpha1_roundtrip", func(t *testing.T) {
+		src := &DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "topo-alpha", Namespace: "ns"},
+			Spec: DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*DynamoComponentDeploymentSharedSpec{
+					"frontend": {ComponentType: "frontend"},
+				},
+				Experimental: &DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &KvTransferPolicy{
+						LabelKey:    "topology.kubernetes.io/zone",
+						Domain:      TopologyDomain("zone"),
+						Enforcement: KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		got := roundTripFromV1alpha1(t, src)
+		if diff := cmp.Diff(src.Spec.Experimental, got.Spec.Experimental); diff != "" {
+			t.Errorf("v1alpha1 round-trip Experimental mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("nil_policy_roundtrip", func(t *testing.T) {
+		src := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "no-topo", Namespace: "ns"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: backendFrameworkSGLang,
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+			},
+		}
+		got := roundTripFromV1beta1(t, src)
+		if got.Spec.Experimental != nil {
+			t.Errorf("expected nil Experimental, got %+v", got.Spec.Experimental)
+		}
+	})
+
+	t.Run("empty_experimental_roundtrip", func(t *testing.T) {
+		src := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "empty-experimental", Namespace: "ns"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: backendFrameworkSGLang,
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{},
+			},
+		}
+		got := roundTripFromV1beta1(t, src)
+		if diff := cmp.Diff(src, got); diff != "" {
+			t.Errorf("v1beta1 empty experimental round-trip mismatch (-want +got):\n%s", diff)
+		}
+	})
 }

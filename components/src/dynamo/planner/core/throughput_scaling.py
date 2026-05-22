@@ -203,8 +203,8 @@ class ThroughputScalingMixin:
             isl=isl,
             osl=osl,
             max_num_batched_tokens=max_tokens,
-            ttft_sla=self._config.ttft,
-            itl_sla=self._config.itl,
+            ttft_sla=self._config.ttft_ms,
+            itl_sla=self._config.itl_ms,
             max_kv_tokens=d_caps.max_kv_tokens if d_caps else None,
             max_num_seqs=d_caps.max_num_seqs if d_caps else None,
             kv_hit_rate=kv_hit_rate,
@@ -213,7 +213,7 @@ class ThroughputScalingMixin:
             logger.warning("Agg perf model not ready, skipping throughput scaling")
             self._diag_throughput_reason = "model_not_ready"
             return None
-        if actual_ttft > self._config.ttft or actual_itl > self._config.itl:
+        if actual_ttft > self._config.ttft_ms or actual_itl > self._config.itl_ms:
             logger.warning(
                 f"Agg SLA not fully met: TTFT={actual_ttft:.1f}ms, ITL={actual_itl:.1f}ms"
             )
@@ -249,7 +249,7 @@ class ThroughputScalingMixin:
         effective_isl = isl * (1.0 - _clamp_kv_hit_rate(kv_hit_rate))
         p_caps = self._capabilities.prefill
         engine_rps, ttft_ms = self._prefill_regression.find_best_engine_prefill_rps(
-            ttft_sla=self._config.ttft,
+            ttft_sla=self._config.ttft_ms,
             isl=effective_isl,
             max_num_batched_tokens=p_caps.max_num_batched_tokens if p_caps else None,
         )
@@ -258,12 +258,12 @@ class ThroughputScalingMixin:
             self._diag_throughput_reason = "model_not_ready"
             return None
         sla_floor = 1
-        if ttft_ms > self._config.ttft:
+        if ttft_ms > self._config.ttft_ms:
             logger.warning(
-                f"Prefill TTFT SLA not met: {ttft_ms:.1f}ms > {self._config.ttft:.1f}ms"
+                f"Prefill TTFT SLA not met: {ttft_ms:.1f}ms > {self._config.ttft_ms:.1f}ms"
             )
             # Latency-driven floor
-            sla_floor = math.ceil(ttft_ms / self._config.ttft)
+            sla_floor = math.ceil(ttft_ms / self._config.ttft_ms)
 
         self._diag_engine_rps_prefill = engine_rps
 
@@ -282,7 +282,7 @@ class ThroughputScalingMixin:
     ) -> Optional[int]:
         d_caps = self._capabilities.decode
         engine_rps, itl_ms = self._decode_regression.find_best_engine_decode_rps(
-            itl=self._config.itl,
+            itl=self._config.itl_ms,
             context_length=isl + osl / 2,
             osl=osl,
             max_kv_tokens=d_caps.max_kv_tokens if d_caps else None,
@@ -292,9 +292,9 @@ class ThroughputScalingMixin:
             logger.warning("Decode perf model not ready, skipping throughput scaling")
             self._diag_throughput_reason = "model_not_ready"
             return None
-        if itl_ms > self._config.itl:
+        if itl_ms > self._config.itl_ms:
             logger.warning(
-                f"Decode ITL SLA not met: {itl_ms:.1f}ms > {self._config.itl:.1f}ms"
+                f"Decode ITL SLA not met: {itl_ms:.1f}ms > {self._config.itl_ms:.1f}ms"
             )
 
         self._diag_engine_rps_decode = engine_rps

@@ -57,6 +57,7 @@ BUN_VERSION = "1.3.12"
 NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
 OPENRESPONSES_SHA = "fa29df5"
+OPENRESPONSES_MAX_OUTPUT_TOKENS = 512
 
 # Retry budget for network-touching installs. Exponential backoff starting
 # at 2s; 3 attempts caps the worst-case wait at ~6s before we surface a
@@ -285,6 +286,7 @@ def _openresponses_suite(_tools_cache, _bun_binary) -> Path:
             capture_output=True,
             text=True,
         )
+        _patch_openresponses_suite(install_dir)
         _retry_network_op(
             lambda: subprocess.run(
                 [str(_bun_binary), "install", "--frozen-lockfile"],
@@ -297,6 +299,56 @@ def _openresponses_suite(_tools_cache, _bun_binary) -> Path:
         )
         sentinel.touch()
     return install_dir
+
+
+def _patch_openresponses_suite(install_dir: Path) -> None:
+    """Bound upstream compliance generations so CI failures are deterministic."""
+    target = install_dir / "src" / "lib" / "compliance-tests.ts"
+    text = target.read_text()
+    old = "    body: JSON.stringify({ ...body, stream: streaming }),"
+    new = (
+        "    body: JSON.stringify({\n"
+        "      ...body,\n"
+        "      max_output_tokens: body.max_output_tokens ?? "
+        f"{OPENRESPONSES_MAX_OUTPUT_TOKENS},\n"
+        "      stream: streaming,\n"
+        "    }),"
+    )
+    if new in text:
+        return
+    if old not in text:
+        raise RuntimeError(
+            "OpenResponses compliance harness changed; update "
+            "_patch_openresponses_suite before running frontend compliance."
+        )
+    target.write_text(text.replace(old, new, 1))
+
+
+@pytest.mark.unit
+@pytest.mark.sglang
+@pytest.mark.core
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_patch_openresponses_suite_adds_output_cap(tmp_path):
+    """Assert the OpenResponses harness patch injects a deterministic output cap."""
+    source = tmp_path / "src" / "lib" / "compliance-tests.ts"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "export async function makeRequest() {\n"
+        "  return fetch(url, {\n"
+        "    body: JSON.stringify({ ...body, stream: streaming }),\n"
+        "  });\n"
+        "}\n"
+    )
+
+    _patch_openresponses_suite(tmp_path)
+
+    text = source.read_text()
+    assert (
+        f"max_output_tokens: body.max_output_tokens ?? "
+        f"{OPENRESPONSES_MAX_OUTPUT_TOKENS}" in text
+    )
+    assert "body: JSON.stringify({ ...body, stream: streaming })," not in text
 
 
 def _install_npm_cli(
@@ -368,8 +420,8 @@ def _claude_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model(COMPLIANCE_MODEL)
-@pytest.mark.profiled_vram_gib(6.0)
-@pytest.mark.requested_sglang_kv_tokens(512)
+@pytest.mark.profiled_vram_gib(14.2)
+@pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
 # codex exec (up to 180s) + claude exec (up to 180s) + two inter-suite
@@ -605,8 +657,15 @@ def _write_codex_config(codex_home, frontend_port: int) -> None:
     """
     codex_home.mkdir(parents=True, exist_ok=True)
     config_path = codex_home / "config.toml"
+    # Bound the per-request output budget so the smoke test stays well within
+    # the 180s subprocess timeout. Codex omits `max_output_tokens` by default,
+    # and the Dynamo Responses handler forwards `None` to the engine — sglang
+    # then generates up to `max_model_len`, which is far more than this test
+    # needs and easily exceeds the timeout for reasoning models.
     config_path.write_text(
         f"""
+model_max_output_tokens = 4096
+
 [model_providers.local]
 name = "local-dynamo"
 base_url = "http://localhost:{frontend_port}/v1"

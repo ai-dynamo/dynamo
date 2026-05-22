@@ -250,6 +250,7 @@ struct MetricsHandlerState {
 }
 
 pub struct Metrics {
+    request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
     /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility until Phase 3.
     inflight_gauge: IntGaugeVec,
@@ -497,6 +498,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let request_started_counter = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::REQUESTS_STARTED_TOTAL),
+                "Total number of LLM requests accepted by the frontend handler",
+            ),
+            &["model", "endpoint", "request_type"],
+        )
+        .unwrap();
+
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
@@ -731,6 +741,7 @@ impl Metrics {
         .unwrap();
 
         Metrics {
+            request_started_counter,
             request_counter,
             inflight_gauge,
             active_requests_gauge,
@@ -805,6 +816,18 @@ impl Metrics {
             .inc()
     }
 
+    /// Increment the counter for requests accepted by the frontend handler.
+    fn inc_request_started_counter(
+        &self,
+        model: &str,
+        endpoint: &Endpoint,
+        request_type: &RequestType,
+    ) {
+        self.request_started_counter
+            .with_label_values(&[model, endpoint.as_str(), request_type.as_str()])
+            .inc()
+    }
+
     /// Get the number if inflight requests for the given model
     pub fn get_inflight_count(&self, model: &str) -> i64 {
         self.inflight_gauge.with_label_values(&[model]).get()
@@ -839,6 +862,7 @@ impl Metrics {
     }
 
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.request_started_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
         registry.register(Box::new(self.active_requests_gauge.clone()))?;
@@ -1018,7 +1042,7 @@ impl Metrics {
 
         InflightGuard::new(
             self.clone(),
-            model.to_string().to_lowercase(),
+            model.to_string(),
             endpoint,
             request_type,
             request_id.to_string(),
@@ -1027,7 +1051,7 @@ impl Metrics {
 
     /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
     pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(self, model.to_string().to_lowercase())
+        ResponseMetricCollector::new(self, model.to_string())
     }
 
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
@@ -1035,7 +1059,7 @@ impl Metrics {
     /// This guard tracks requests from HTTP handler start until first token generation,
     /// providing visibility into HTTP processing queue time before actual LLM processing begins.
     pub fn create_http_queue_guard(self: Arc<Self>, model: &str) -> HttpQueueGuard {
-        HttpQueueGuard::new(self, model.to_string().to_lowercase())
+        HttpQueueGuard::new(self, model.to_string())
     }
 }
 
@@ -1065,6 +1089,7 @@ impl InflightGuard {
     ) -> Self {
         let timer = Instant::now();
         metrics.inc_inflight_gauge(&model);
+        metrics.inc_request_started_counter(&model, &endpoint, &request_type);
 
         tracing::Span::current().record("model", model.as_str());
 
@@ -2320,6 +2345,16 @@ mod tests {
             ])
             .get();
         assert_eq!(counter_value, 1);
+
+        let started_counter_value = metrics
+            .request_started_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+            ])
+            .get();
+        assert_eq!(started_counter_value, 1);
     }
 
     #[test]
@@ -2453,6 +2488,53 @@ mod tests {
                 .get(),
             0
         );
+    }
+
+    #[test]
+    fn test_lifecycle_constructors_preserve_model_label_casing() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "Llama-3.1-8B-Instruct";
+
+        let _inflight = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-case",
+        );
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.observe_response(100, 1);
+        let _queue = metrics.clone().create_http_queue_guard(model);
+
+        // Drop the lifecycle guards so their Drop impls record
+        // completion-time metrics (request_counter, request_duration,
+        // detokenize observations) before we gather. Without this the
+        // regression only covers constructor-time labels.
+        drop(_inflight);
+        drop(collector);
+        drop(_queue);
+
+        let metric_families = registry.gather();
+        let observed: Vec<String> = metric_families
+            .iter()
+            .flat_map(|mf| mf.get_metric())
+            .flat_map(|m| m.get_label())
+            .filter(|l| l.name() == "model")
+            .map(|l| l.value().to_string())
+            .collect();
+
+        assert!(
+            !observed.is_empty(),
+            "expected at least one metric to carry a model label"
+        );
+        for value in &observed {
+            assert_eq!(
+                value, model,
+                "model label was modified; expected original casing to be preserved"
+            );
+        }
     }
 
     #[test]

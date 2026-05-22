@@ -48,7 +48,6 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
     KvEventPublisher,
@@ -62,6 +61,10 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.kv_connector_protocols import (
+    KvConnectorProtocol,
+    make_kv_connector_protocol,
+)
 
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
@@ -263,7 +266,7 @@ class LoRAInfo:
 
 
 def _compute_mm_uuids(
-    multi_modal_data: Dict[str, Any] | None
+    multi_modal_data: Dict[str, Any] | None,
 ) -> Dict[str, list[str]] | None:
     """
     Compute multi_modal_uuids from multi_modal_data.
@@ -369,6 +372,15 @@ def build_sampling_params(
         ):
             existing = sampling_params.stop_token_ids or []
             sampling_params.stop_token_ids = list(set(existing).union(value))
+        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
+        # the same concept as `thinking_token_budget` on SamplingParams and
+        # enforces it via the builtin thinking-budget logits processor.
+        if (
+            key == "max_thinking_tokens"
+            and value is not None
+            and hasattr(sampling_params, "thinking_token_budget")
+        ):
+            sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
     output_options = request.get("output_options", {})
@@ -584,6 +596,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
 
     _benchmark_results: Optional[dict] = None
+    # Class-level default so test doubles that bypass __init__ via
+    # __new__ still have a sane value; __init__ overrides this from
+    # hf_config.use_unified_vision_chunk on real instances.
+    _use_unified_vision_chunk: bool = False
 
     def __init__(
         self,
@@ -636,6 +652,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
+
+        # Some models (Kimi-K2.5) declare their image modality as
+        # "vision_chunk" rather than "image". vLLM's openai entrypoint
+        # renames the dict key + wraps images via the chat_utils tracker,
+        # but dynamo bypasses chat_utils and builds `multi_modal_data`
+        # directly — so we mirror the rename + wrap here. The flag lives
+        # on the model's HF config; defaults to False for all other
+        # families.
+        self._use_unified_vision_chunk = bool(
+            getattr(
+                self.engine_client.vllm_config.model_config.hf_config,
+                "use_unified_vision_chunk",
+                False,
+            )
+        )
 
         # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
         # bootstrap creates a fresh TCPStore per scale operation and stores it
@@ -1700,17 +1731,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
 
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-        if "image" not in vllm_mm_data and image_mm_items:
+        # Kimi-K2.5 (and any model with `use_unified_vision_chunk=True`)
+        # consumes images under the `vision_chunk` modality, not `image`,
+        # and expects each item to be a `VisionChunkImage` TypedDict.
+        # See chat_utils.use_unified_vision_chunk_modality for the
+        # upstream rename + wrap path.
+        image_modality_key = (
+            "vision_chunk" if self._use_unified_vision_chunk else "image"
+        )
+        if image_modality_key not in vllm_mm_data and image_mm_items:
             with _nvtx.annotate("mm_backend:image_download", color="green"):
                 images = await self.image_loader.load_image_batch(
                     image_mm_items,
                 )
 
             if images:
-                # vLLM expects single image or list
-                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                if self._use_unified_vision_chunk:
+                    # `VisionChunkImage` is a TypedDict — a plain dict
+                    # with `type`/`image`/`uuid` keys is structurally
+                    # equivalent. uuid=None matches vLLM's chat_utils
+                    # path when the request doesn't pre-supply one.
+                    chunks = [
+                        {"type": "image", "image": img, "uuid": None} for img in images
+                    ]
+                    vllm_mm_data["vision_chunk"] = (
+                        chunks[0] if len(chunks) == 1 else chunks
+                    )
+                else:
+                    # vLLM expects single image or list
+                    vllm_mm_data["image"] = images[0] if len(images) == 1 else images
                 logger.debug(
-                    f"Extracted {len(images)} image(s) for multimodal processing"
+                    f"Extracted {len(images)} image(s) for multimodal "
+                    f"processing under modality={image_modality_key!r}"
                 )
 
         video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
@@ -1863,7 +1915,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         forwarded_hashes = extra_args.get("mm_hashes")
         mm_uuids: dict[str, Any] | None = None
         if forwarded_hashes:
-            mm_uuids = {"image": forwarded_hashes}
+            # vLLM binds multi_modal_uuids by modality key string match.
+            # For models with use_unified_vision_chunk=True (e.g. Kimi-K2.5)
+            # images live under `vision_chunk`, not `image`; hardcoding
+            # `image` here would silently fail to bind and force vLLM back
+            # to its own content-derived hash, breaking router/worker
+            # cache-key alignment.
+            mm_modality_key = (
+                "vision_chunk" if self._use_unified_vision_chunk else "image"
+            )
+            mm_uuids = {mm_modality_key: forwarded_hashes}
         elif self.embedding_loader is None:
             mm_uuids = _compute_mm_uuids(multi_modal_data)
             if mm_uuids and multi_modal_data:
@@ -2338,7 +2399,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
@@ -2403,7 +2464,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -2562,22 +2623,16 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             request, self.default_sampling_params, self.model_max_len
         )
 
-        # Configure for prefill-only mode with remote decode
+        # One protocol instance per request; carries per-request state
+        # (e.g. Mooncake's transfer_id) into the response loop below.
+        kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
+            self.engine_client.vllm_config
+        )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
-        sampling_params.extra_args["kv_transfer_params"] = {
-            "do_remote_decode": True,
-        }
-        sampling_params_defaults = {
-            "do_remote_prefill": False,
-            "remote_engine_id": None,
-            "remote_block_ids": None,
-            "remote_host": None,
-            "remote_port": None,
-        }
-        # Add only missing keys
-        for k, v in sampling_params_defaults.items():
-            sampling_params.extra_args["kv_transfer_params"].setdefault(k, v)
+        sampling_params.extra_args[
+            "kv_transfer_params"
+        ] = kv_protocol.prefill_request_kv_transfer_params()
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -2599,7 +2654,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
         priority = -int(routing.get("priority", 0))
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
@@ -2634,10 +2689,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 embedding_params = self._build_embedding_params(
                     multi_modal_data or {}, res.prompt_token_ids
                 )
+
                 output: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": self._build_disaggregated_params(
-                        res.kv_transfer_params,
+                        kv_protocol.decode_request_kv_transfer_params(res),
                         embedding_params,
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
@@ -2692,3 +2748,324 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # as request input.
             return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
         return None
+
+
+class EmbeddingWorkerHandler:
+    """Standalone handler for OpenAI /v1/embeddings requests on vLLM.
+
+    Does NOT inherit BaseWorkerHandler. The base class does generation-only
+    init (media loaders, KV-block lookup via get_dp_range_for_worker, embedding
+    cache manager) that would either fail or be meaningless on a pooling
+    engine. Embedding inference is a single forward pass with no KV cache, no
+    multimodal data, and no streamed decode.
+    """
+
+    def __init__(
+        self,
+        runtime,
+        engine: Any,
+        config: Config,
+        shutdown_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        self.runtime = runtime
+        self.engine_client = engine
+        self.config = config
+        self.shutdown_event = shutdown_event
+        # Dead-engine detection: VllmEngineMonitor polls AsyncLLM and triggers
+        # shutdown_event + process exit on EngineDeadError. Without this, a
+        # crashed pooling engine leaves the endpoint registered and serves
+        # failures.
+        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
+        logger.info("Embedding worker handler initialized")
+
+    def cleanup(self) -> None:
+        """Release resources owned by this handler.
+
+        AsyncLLM lifecycle is owned by the worker factory / runtime; the
+        engine monitor cancels its background tasks via ``__del__``.
+        """
+        return None
+
+    async def _monitor_abort(self, context: Context, request_id: str) -> None:
+        """Background task: abort the encode if context is cancelled or
+        shutdown_event fires. Raises EngineShutdown on shutdown so the
+        ``_abort_monitor`` context manager can propagate it.
+
+        Mirrors ``BaseWorkerHandler._monitor_abort`` but trimmed for the
+        embedding path (no ``is_prefill``, no ``abort_guard``).
+        """
+        shutdown_task: Optional[asyncio.Task] = None
+        try:
+            # `list[Any]` mirrors BaseWorkerHandler._monitor_abort: the
+            # iterable mixes the Future from async_killed_or_stopped() with
+            # the Task from shutdown_event.wait().
+            wait_for: list[Any] = [context.async_killed_or_stopped()]
+            if self.shutdown_event is not None:
+                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+                wait_for.append(shutdown_task)
+
+            done, pending = await asyncio.wait(
+                wait_for, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            logger.debug(f"Aborting embedding request ID: {request_id}")
+            try:
+                await asyncio.shield(self.engine_client.abort(request_id))
+            except asyncio.CancelledError:
+                logger.debug(
+                    f"Abort shielded from cancellation for embedding request "
+                    f"{request_id}, continuing in background"
+                )
+
+            if shutdown_task is not None and shutdown_task in done:
+                raise EngineShutdown("Engine was shut down during embedding.")
+        except asyncio.CancelledError:
+            pass
+        except EngineShutdown:
+            raise
+        except Exception as e:
+            # Unexpected failure in the monitor task — log and propagate so
+            # `_abort_monitor.__aexit__` surfaces it via ``task.result()``
+            # rather than silently leaving the encode unmanaged.
+            logger.error(
+                f"Error in embedding abort monitor for request {request_id}: {e}"
+            )
+            raise
+        finally:
+            # On the success path the wrapping ``_abort_monitor`` cancels
+            # this coroutine while it's blocked in ``asyncio.wait``, which
+            # short-circuits past the pending-task cleanup loop above and
+            # leaves ``shutdown_task`` (the ``shutdown_event.wait()`` task)
+            # pending forever — one leaked task per embedding request.
+            # Cancel it here on every exit path.
+            if shutdown_task is not None and not shutdown_task.done():
+                shutdown_task.cancel()
+                try:
+                    await shutdown_task
+                except asyncio.CancelledError:
+                    pass
+
+    @asynccontextmanager
+    async def _abort_monitor(self, context: Context, request_id: str):
+        """Create + tear down an abort monitor task around one encode call.
+
+        On exit, re-raises EngineShutdown if the monitor caught a shutdown.
+        """
+        task = asyncio.create_task(self._monitor_abort(context, request_id))
+        try:
+            yield task
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            else:
+                # Re-raise EngineShutdown if the monitor task raised it.
+                task.result()
+
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Handle one OpenAI /v1/embeddings request.
+
+        The Rust frontend forwards the request dict directly. Expected keys:
+        ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``.
+        Optional ``dimensions`` (Matryoshka truncation; first N floats of each
+        embedding). ``encoding_format=base64`` is not yet supported end-to-end
+        (the Rust response type rejects strings); tracked as a separate
+        follow-up.
+        """
+        # Lazy import to avoid pulling PoolingParams into handlers.py at module
+        # load time for non-embedding workers.
+        from vllm import PoolingParams
+
+        model_name = request.get("model") or self.config.served_model_name or ""
+        input_field = request.get("input")
+        if input_field is None:
+            raise ValueError("Embedding request missing required 'input' field")
+
+        # Per OpenAI spec, `input` can be:
+        #   - str           : single text prompt
+        #   - list[str]     : batch of text prompts
+        #   - list[int]     : single pre-tokenized prompt (token IDs)
+        #   - list[list[int]]: batch of pre-tokenized prompts
+        # Token-id forms must be passed to vLLM as TokensPrompt so the engine
+        # skips its own tokenizer; the previous str()-coercion path turned
+        # `[1, 2, 3]` into three text prompts ("1", "2", "3") instead of one.
+        prompts: list[Any] = _classify_embedding_input(input_field)
+
+        dimensions = request.get("dimensions")
+        if dimensions is not None and not isinstance(dimensions, int):
+            raise TypeError(
+                f"Invalid 'dimensions' type {type(dimensions).__name__}; "
+                "expected int"
+            )
+        if dimensions is not None and dimensions < 1:
+            raise ValueError(f"dimensions must be >= 1, got {dimensions}")
+
+        pooling_params = PoolingParams()
+        # Use the per-request context id (same as the chat/completion paths
+        # in this file) so concurrent embeddings never collide inside
+        # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
+        # shared by every request in a trace and ``id(context)`` can be
+        # reused across short-lived ``Context`` objects, so neither is
+        # unique enough to scope a vLLM ``request_id``.
+        base_request_id = context.id()
+
+        embedding_objects: list[Dict[str, Any]] = []
+        prompt_tokens = 0
+
+        for idx, prompt in enumerate(prompts):
+            request_id = f"{base_request_id}-{idx}"
+            encode_arg: Any = (
+                prompt
+                if isinstance(prompt, str)
+                else TokensPrompt(prompt_token_ids=prompt)
+            )
+            final_output = None
+            async with self._abort_monitor(context, request_id):
+                async for out in self.engine_client.encode(
+                    prompt=encode_arg,
+                    pooling_params=pooling_params,
+                    request_id=request_id,
+                ):
+                    final_output = out
+
+            if final_output is None:
+                raise RuntimeError(
+                    f"vLLM engine.encode produced no output for input index {idx}"
+                )
+
+            embedding = _pooling_output_to_list(final_output.outputs.data)
+            if dimensions is not None:
+                if dimensions > len(embedding):
+                    raise ValueError(
+                        f"dimensions={dimensions} exceeds model embedding "
+                        f"dimension {len(embedding)}"
+                    )
+                embedding = embedding[:dimensions]
+
+            embedding_objects.append(
+                {
+                    "object": "embedding",
+                    "embedding": embedding,
+                    "index": idx,
+                }
+            )
+            token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(token_ids)
+
+        yield {
+            "object": "list",
+            "data": embedding_objects,
+            "model": model_name,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            },
+        }
+
+
+def _is_token_id(x: Any) -> bool:
+    """True iff ``x`` is an int that could be a vLLM token id.
+
+    Filters out ``bool`` (subclass of int) so ``[True, False]`` is not
+    accepted as a tokenized prompt.
+    """
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _classify_embedding_input(input_field: Any) -> list[Any]:
+    """Map an OpenAI ``input`` payload to a list of vLLM-ready prompts.
+
+    Returns a list whose elements are either:
+      - ``str``        — passed straight to ``engine.encode`` as text, or
+      - ``list[int]``  — wrapped in ``TokensPrompt`` by the caller.
+
+    Rejects mixed lists (e.g. ``["foo", 42]`` or ``[[1, 2], "bar"]``) with
+    a clear ``TypeError`` rather than silently coercing.
+    """
+    if isinstance(input_field, str):
+        return [input_field]
+    if not isinstance(input_field, list):
+        raise TypeError(
+            f"Invalid 'input' type {type(input_field).__name__}; "
+            "expected str, list[str], list[int], or list[list[int]]"
+        )
+    if not input_field:
+        raise ValueError("Embedding request 'input' must be non-empty")
+
+    first = input_field[0]
+    if isinstance(first, str):
+        texts: list[str] = []
+        for item in input_field:
+            if not isinstance(item, str):
+                raise TypeError(
+                    "'input' list mixes str and non-str entries; pass either "
+                    "all strings or all token-id arrays"
+                )
+            texts.append(item)
+        return texts
+    if _is_token_id(first):
+        token_ids: list[int] = []
+        for item in input_field:
+            if not _is_token_id(item):
+                raise TypeError(
+                    "'input' list mixes int and non-int entries; for tokenized "
+                    "input pass all integers (single prompt) or list[list[int]]"
+                )
+            token_ids.append(item)
+        # Single tokenized prompt.
+        return [token_ids]
+    if isinstance(first, list):
+        prompts: list[list[int]] = []
+        for i, item in enumerate(input_field):
+            if not isinstance(item, list):
+                raise TypeError(
+                    f"'input' list element at index {i} must be a list of "
+                    "ints (token IDs); mixed batches are not supported"
+                )
+            inner: list[int] = []
+            for x in item:
+                if not _is_token_id(x):
+                    raise TypeError(
+                        f"'input' list element at index {i} must be a list of "
+                        "ints (token IDs); mixed batches are not supported"
+                    )
+                inner.append(x)
+            prompts.append(inner)
+        return prompts
+    raise TypeError(
+        f"Unsupported 'input' element type {type(first).__name__}; "
+        "expected str, int, or list[int]"
+    )
+
+
+def _pooling_output_to_list(data: Any) -> list[float]:
+    """Convert a vLLM PoolingOutput.data tensor (or list) to a flat list[float].
+
+    vLLM's pooling pipeline can return a tensor with a singleton batch dim
+    (shape ``(1, hidden_dim)``) instead of a 1D vector (shape ``(hidden_dim,)``).
+    The OpenAI ``/v1/embeddings`` response expects ``data[].embedding`` to be a
+    flat array of floats, so we flatten unconditionally.
+    """
+    if isinstance(data, torch.Tensor):
+        return data.detach().cpu().flatten().tolist()
+    if isinstance(data, (list, tuple)):
+        # Already a list — flatten one level if it's a list-of-lists.
+        if data and isinstance(data[0], (list, tuple)):
+            return [float(x) for row in data for x in row]
+        return [float(x) for x in data]
+    raise TypeError(
+        f"Unsupported PoolingOutput.data type {type(data).__name__}; "
+        "expected torch.Tensor or list"
+    )

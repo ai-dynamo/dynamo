@@ -46,7 +46,7 @@ flowchart TD
     MockerBase --> PlannerCheck{planner?}
     PlannerCheck -->|yes| AddPlanner["add_planner_to_config()"]
     PlannerCheck -->|no| ProfileCheck
-    AddPlanner --> ProfileCheck{"needs profile data?\n(mocker or throughput\nplanner enabled)"}
+    AddPlanner --> ProfileCheck{"needs profile data?\n(thorough mocker or\nthorough throughput planner)"}
     ProfileCheck -->|yes| AddProfile["add_profile_data_to_config()"]
     ProfileCheck -->|no| Final
     AddProfile --> Final["final_config.yaml"]
@@ -64,12 +64,12 @@ flowchart TD
 
 4. **DGD Generation**: The picked configuration is rendered into a complete DGD YAML via AIC's generator pipeline, including correct parallelization, replica counts, container image, and PVC mounts.
 
-5. **Interpolation** (throughput planner/mocker): When the planner is enabled, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. These are stored as NPZ files and later packaged into a ConfigMap during final assembly.
+5. **Interpolation** (throughput planner/mocker): When the planner or mocker needs throughput data, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. In thorough sweeping, these are stored as NPZ files and later packaged into a ConfigMap during final assembly. In rapid sweeping, consumers use AIC performance-model flags or in-process interpolation instead, so no profile-data ConfigMap is generated.
 
 6. **Final Assembly** (3 composable layers):
    1. **Mocker base**: If mocker is enabled, the base DGD is swapped for the mocker DGD template (`generate_mocker_config`). Otherwise the AIC-picked DGD is kept.
    2. **Planner service**: If the planner is enabled, the Planner pod and its planner-config ConfigMap are injected into the DGD (`add_planner_to_config`).
-   3. **Profile data**: If mocker is enabled or planner throughput-based scaling is enabled, the interpolation data ConfigMap is created and mounted into all consumers — the Planner service and/or mocker workers (`add_profile_data_to_config`).
+   3. **Profile data**: In thorough sweeping, if mocker is enabled or planner throughput-based scaling is enabled, the interpolation data ConfigMap is created and mounted into all consumers — the Planner service and/or mocker workers (`add_profile_data_to_config`). Rapid sweeping does not create this ConfigMap.
 
    The result is written to `final_config.yaml`.
 
@@ -133,15 +133,15 @@ features:
     enable_throughput_scaling: true
 ```
 
-`optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft`/`itl` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft`/`itl` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
+`optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft_ms`/`itl_ms` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft_ms`/`itl_ms` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
 
-- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs)
-- **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h)
+- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIC performance-model flags or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
+- **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h). When profile data is needed, the profiler packages it into `planner-profile-data-XXXX`.
 - **none**: Skips interpolation. Only valid when using load-based scaling without throughput-based scaling.
 
-The profiler saves two ConfigMaps into the generated DGD:
+The generated DGD can include these ConfigMaps:
 - **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `profile_results_dir` pointing to the profiling data mount)
-- **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON). Only emitted when `optimization_target: sla` is set alongside `enable_throughput_scaling: true` (or when mocker is enabled).
+- **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON). Only emitted when `pre_deployment_sweeping_mode: thorough` and either `optimization_target: sla` is set alongside `enable_throughput_scaling: true`, or mocker is enabled. Rapid mode does not emit this ConfigMap.
 
 See the [Planner Guide](../planner/planner-guide.md) for the full `PlannerConfig` reference.
 
@@ -198,7 +198,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -215,7 +215,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1"
 ```
 
 **Step 2: Apply the DGDR**
@@ -352,7 +352,7 @@ If GPU discovery is disabled, provide hardware config manually in the DGDR:
 spec:
   hardware:
     numGpusPerNode: 8
-    gpuSku: "H100-SXM5-80GB"
+    gpuSku: h100_sxm
     vramMb: 81920
 ```
 
@@ -372,7 +372,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1"
 
   searchStrategy: rapid  # or thorough
   autoApply: true
@@ -514,7 +514,7 @@ The Profiler generates interpolation data that the SLA Planner uses for autoscal
 When using DGDR, the Dynamo Operator:
 
 1. Creates profiling jobs automatically
-2. Stores profiling data in ConfigMaps (`planner-profile-data`)
+2. Stores profiler output in ConfigMaps (`dgdr-output-<name>` and, when thorough profile data is needed, `planner-profile-data`)
 3. Generates optimized DGD configurations
 4. Deploys the DGD with SLA Planner integration
 
@@ -584,11 +584,11 @@ spec:
   autoApply: true
 ```
 
-Profiling still runs against the real backend to collect performance data. The mocker uses this data to simulate realistic timing behavior. Useful for large-scale experiments, testing Planner behavior, and validating configurations.
+With thorough sweeping, profiling still runs against the real backend to collect performance data and stores it in `planner-profile-data`. With rapid sweeping, the mocker uses AIC performance-model flags instead of a profile-data ConfigMap. Useful for large-scale experiments, testing Planner behavior, and validating configurations.
 
 ### Accessing Profiling Artifacts
 
-By default, profiling data is stored in ConfigMaps. For detailed artifacts (plots, logs, raw data), attach a PVC via overrides:
+By default, profiler output is stored in ConfigMaps. For detailed artifacts (plots, logs, raw data), attach a PVC via overrides:
 
 ```yaml
 overrides:
@@ -601,9 +601,9 @@ overrides:
             claimName: "dynamo-pvc"
 ```
 
-**ConfigMaps (always created):**
+**ConfigMaps:**
 - `dgdr-output-<name>`: Generated DGD configuration
-- `planner-profile-data`: Profiling data for Planner (JSON)
+- `planner-profile-data`: Profiling data for Planner and mocker consumers (JSON). Only created for thorough sweeping when profile data is needed.
 
 **PVC artifacts (optional):**
 - Performance plots (PNGs)
