@@ -5,6 +5,131 @@
 
 use super::*;
 
+// ---------------------------------------------------------------------------
+// Test-only DeviceAllocator — dispatches to CUDA or SYCL based on feature
+// ---------------------------------------------------------------------------
+
+/// Create a test DeviceAllocator for the active backend.
+#[cfg(feature = "testing-cuda")]
+fn test_device_ctx() -> std::sync::Arc<dyn DeviceAllocator> {
+    std::sync::Arc::new(
+        TestCudaAllocator::new(0).expect("CUDA device 0 required for tests"),
+    )
+}
+
+#[cfg(all(feature = "testing-xpu-sycl", not(feature = "testing-cuda")))]
+fn test_device_ctx() -> std::sync::Arc<dyn DeviceAllocator> {
+    std::sync::Arc::new(
+        TestSyclAllocator::new(0).expect("XPU device 0 required for tests"),
+    )
+}
+
+// ---- CUDA test allocator ----
+
+#[cfg(feature = "testing-cuda")]
+#[derive(Debug)]
+struct TestCudaAllocator {
+    ctx: std::sync::Arc<cudarc::driver::CudaContext>,
+    device_id: u32,
+}
+
+#[cfg(feature = "testing-cuda")]
+impl TestCudaAllocator {
+    fn new(device_id: u32) -> anyhow::Result<Self> {
+        let ctx = cudarc::driver::CudaContext::new(device_id as usize)?;
+        Ok(Self { ctx, device_id })
+    }
+}
+
+#[cfg(feature = "testing-cuda")]
+impl DeviceAllocator for TestCudaAllocator {
+    fn allocate_device(&self, size: usize) -> Result<u64> {
+        self.ctx
+            .bind_to_thread()
+            .map_err(|e| StorageError::AllocationFailed(e.to_string()))?;
+        unsafe { cudarc::driver::result::malloc_sync(size) }
+            .map_err(|e| StorageError::AllocationFailed(e.to_string()))
+    }
+
+    fn free_device(&self, ptr: u64) -> Result<()> {
+        self.ctx
+            .bind_to_thread()
+            .map_err(|e| StorageError::OperationFailed(e.to_string()))?;
+        unsafe { cudarc::driver::result::free_sync(ptr) }
+            .map_err(|e| StorageError::OperationFailed(e.to_string()))
+    }
+
+    fn allocate_pinned(&self, size: usize) -> Result<u64> {
+        self.ctx
+            .bind_to_thread()
+            .map_err(|e| StorageError::AllocationFailed(e.to_string()))?;
+        unsafe { cudarc::driver::result::malloc_host(size, 0) }
+            .map(|ptr| ptr as u64)
+            .map_err(|e| StorageError::AllocationFailed(e.to_string()))
+    }
+
+    fn free_pinned(&self, ptr: u64) -> Result<()> {
+        unsafe { cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void) }
+            .map_err(|e| StorageError::OperationFailed(e.to_string()))
+    }
+
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+}
+
+// ---- SYCL/XPU test allocator ----
+
+#[cfg(feature = "testing-xpu-sycl")]
+#[derive(Debug)]
+struct TestSyclAllocator {
+    context: std::sync::Arc<oneapi_rs::safe::SyclContext>,
+    device: std::sync::Arc<oneapi_rs::safe::SyclDevice>,
+    device_id: u32,
+}
+
+#[cfg(feature = "testing-xpu-sycl")]
+impl TestSyclAllocator {
+    fn new(device_id: u32) -> anyhow::Result<Self> {
+        let device = oneapi_rs::safe::SyclDevice::by_ordinal(device_id as usize)?;
+        let context = oneapi_rs::safe::SyclContext::new(&device)?;
+        Ok(Self { context, device, device_id })
+    }
+}
+
+#[cfg(feature = "testing-xpu-sycl")]
+impl DeviceAllocator for TestSyclAllocator {
+    fn allocate_device(&self, size: usize) -> Result<u64> {
+        self.context
+            .malloc_device(&self.device, size)
+            .map(|ptr| ptr as u64)
+            .map_err(|e| StorageError::AllocationFailed(e.to_string()))
+    }
+
+    fn free_device(&self, ptr: u64) -> Result<()> {
+        self.context
+            .free_raw(ptr as *mut std::ffi::c_void)
+            .map_err(|e| StorageError::OperationFailed(e.to_string()))
+    }
+
+    fn allocate_pinned(&self, size: usize) -> Result<u64> {
+        self.context
+            .malloc_host(size)
+            .map(|ptr| ptr as u64)
+            .map_err(|e| StorageError::AllocationFailed(e.to_string()))
+    }
+
+    fn free_pinned(&self, ptr: u64) -> Result<()> {
+        self.context
+            .free_raw(ptr as *mut std::ffi::c_void)
+            .map_err(|e| StorageError::OperationFailed(e.to_string()))
+    }
+
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+}
+
 /// Helper function to validate NIXL descriptor consistency.
 ///
 /// For any MemoryDescriptor that returns Some from nixl_descriptor(),
@@ -287,13 +412,13 @@ fn test_disk_storage_unregistered_no_nixl_descriptor() {
     assert!(storage.nixl_descriptor().is_none());
 }
 
-#[cfg(feature = "testing-cuda")]
-mod cuda_tests {
+#[cfg(any(feature = "testing-cuda", feature = "testing-xpu-sycl"))]
+mod device_tests {
     use super::*;
 
     #[test]
     fn test_pinned_storage() {
-        let storage = PinnedStorage::new(2048).unwrap();
+        let storage = PinnedStorage::new(2048, test_device_ctx()).unwrap();
         assert_eq!(storage.size(), 2048);
         assert_eq!(storage.storage_kind(), StorageKind::Pinned);
         assert!(storage.addr() != 0);
@@ -301,7 +426,7 @@ mod cuda_tests {
 
     #[test]
     fn test_pinned_storage_zero_size() {
-        let storage = PinnedStorage::new(0);
+        let storage = PinnedStorage::new(0, test_device_ctx());
         assert!(storage.is_err());
         assert!(matches!(
             storage.unwrap_err(),
@@ -311,7 +436,7 @@ mod cuda_tests {
 
     #[test]
     fn test_device_storage() {
-        let storage = DeviceStorage::new(4096, 0).unwrap();
+        let storage = DeviceStorage::new(4096, test_device_ctx()).unwrap();
         assert_eq!(storage.size(), 4096);
         assert_eq!(storage.storage_kind(), StorageKind::Device(0));
         assert!(storage.addr() != 0);
@@ -320,7 +445,7 @@ mod cuda_tests {
 
     #[test]
     fn test_device_storage_zero_size() {
-        let result = DeviceStorage::new(0, 0);
+        let result = DeviceStorage::new(0, test_device_ctx());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -330,13 +455,13 @@ mod cuda_tests {
 
     #[test]
     fn test_pinned_storage_unregistered_no_nixl_descriptor() {
-        let storage = PinnedStorage::new(1024).unwrap();
+        let storage = PinnedStorage::new(1024, test_device_ctx()).unwrap();
         assert!(storage.nixl_descriptor().is_none());
     }
 
     #[test]
     fn test_device_storage_unregistered_no_nixl_descriptor() {
-        let storage = DeviceStorage::new(4096, 0).unwrap();
+        let storage = DeviceStorage::new(4096, test_device_ctx()).unwrap();
         assert!(storage.nixl_descriptor().is_none());
     }
 }
@@ -411,13 +536,12 @@ mod nixl_tests {
     }
 
     // CUDA tests (when both testing-nixl and testing-cuda are enabled)
-    #[cfg(feature = "testing-all")]
-    mod cuda_nixl_tests {
+    mod device_nixl_tests {
         use super::*;
 
         #[test]
         fn test_pinned_storage_registration() {
-            let storage = PinnedStorage::new(2048).unwrap();
+            let storage = PinnedStorage::new(2048, test_device_ctx()).unwrap();
             let agent = NixlAgent::with_backends("test_agent", &["UCX"]).unwrap();
             let registered = register_with_nixl(storage, &agent, None).unwrap();
 
@@ -429,7 +553,7 @@ mod nixl_tests {
 
         #[test]
         fn test_pinned_storage_descriptor_consistency() {
-            let storage = PinnedStorage::new(1024).unwrap();
+            let storage = PinnedStorage::new(1024, test_device_ctx()).unwrap();
             let agent = NixlAgent::with_backends("test_agent", &["UCX"]).unwrap();
             let registered = register_with_nixl(storage, &agent, None).unwrap();
 
@@ -445,7 +569,7 @@ mod nixl_tests {
 
         #[test]
         fn test_device_storage_registration() {
-            let storage = DeviceStorage::new(4096, 0).unwrap();
+            let storage = DeviceStorage::new(4096, test_device_ctx()).unwrap();
             let agent = NixlAgent::with_backends("test_agent", &["UCX"]).unwrap();
             let registered = register_with_nixl(storage, &agent, None).unwrap();
 
@@ -457,7 +581,7 @@ mod nixl_tests {
 
         #[test]
         fn test_device_storage_descriptor_consistency() {
-            let storage = DeviceStorage::new(2048, 0).unwrap();
+            let storage = DeviceStorage::new(2048, test_device_ctx()).unwrap();
             let agent = NixlAgent::with_backends("test_agent", &["UCX"]).unwrap();
             let registered = register_with_nixl(storage, &agent, None).unwrap();
 
@@ -491,10 +615,10 @@ mod nixl_tests {
         assert_eq!(desc.size, buffer.size());
     }
 
-    #[cfg(feature = "testing-cuda")]
+    #[cfg(any(feature = "testing-cuda", feature = "testing-xpu-sycl"))]
     #[test]
     fn test_type_erasure_pinned_storage() {
-        let storage = PinnedStorage::new(2048).unwrap();
+        let storage = PinnedStorage::new(2048, test_device_ctx()).unwrap();
         let agent = NixlAgent::with_backends("test_agent", &["UCX"]).unwrap();
         let registered = register_with_nixl(storage, &agent, None).unwrap();
 
@@ -504,10 +628,10 @@ mod nixl_tests {
         assert_eq!(buffer.storage_kind(), StorageKind::Pinned);
     }
 
-    #[cfg(feature = "testing-cuda")]
+    #[cfg(any(feature = "testing-cuda", feature = "testing-xpu-sycl"))]
     #[test]
     fn test_type_erasure_device_storage() {
-        let storage = DeviceStorage::new(4096, 0).unwrap();
+        let storage = DeviceStorage::new(4096, test_device_ctx()).unwrap();
         let agent = NixlAgent::with_backends("test_agent", &["UCX"]).unwrap();
         let registered = register_with_nixl(storage, &agent, None).unwrap();
 
@@ -656,13 +780,13 @@ mod arena_nixl_tests {
         assert_eq!(desc2.size, PAGE_SIZE * 5);
     }
 
-    #[cfg(feature = "testing-cuda")]
-    mod cuda_arena_tests {
+    #[cfg(any(feature = "testing-cuda", feature = "testing-xpu-sycl"))]
+    mod device_arena_tests {
         use super::*;
 
         #[test]
         fn test_arena_with_pinned_storage() {
-            let storage = PinnedStorage::new(TOTAL_SIZE).unwrap();
+            let storage = PinnedStorage::new(TOTAL_SIZE, test_device_ctx()).unwrap();
             let agent = NixlAgent::with_backends("test_agent", &["UCX"]).unwrap();
             let registered = register_with_nixl(storage, &agent, None).unwrap();
 
@@ -680,7 +804,7 @@ mod arena_nixl_tests {
 
         #[test]
         fn test_arena_with_device_storage() {
-            let storage = DeviceStorage::new(TOTAL_SIZE, 0).unwrap();
+            let storage = DeviceStorage::new(TOTAL_SIZE, test_device_ctx()).unwrap();
             let agent = NixlAgent::with_backends("test_agent", &["UCX"]).unwrap();
             let registered = register_with_nixl(storage, &agent, None).unwrap();
 

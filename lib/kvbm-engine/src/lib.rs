@@ -23,7 +23,7 @@ pub struct G3;
 #[derive(Clone, Copy, Debug)]
 pub struct G4;
 
-#[cfg(feature = "collectives")]
+#[cfg(any(feature = "nccl", feature = "oneccl"))]
 pub mod collectives;
 #[doc = include_str!("../docs/leader.md")]
 pub mod leader;

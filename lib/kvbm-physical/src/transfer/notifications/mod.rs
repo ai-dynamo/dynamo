@@ -17,12 +17,12 @@ use tracing::{error, warn};
 use uuid::Uuid;
 use velo::{EventHandle, EventManager};
 
-pub mod cuda_event;
+pub mod device_event;
 pub mod nixl_events;
 pub mod nixl_status;
 pub mod notification;
 
-pub use cuda_event::CudaEventChecker;
+pub use device_event::DeviceEventChecker;
 pub use nixl_events::{RegisterNixlNotification, process_nixl_notification_events};
 pub use nixl_status::NixlStatusChecker;
 pub use notification::TransferCompleteNotification;

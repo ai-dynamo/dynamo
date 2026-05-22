@@ -20,13 +20,25 @@ unsafe-slices = []
 # test features for hardware-specific tests
 testing-cuda = []
 testing-nixl = []
-testing-all = ["testing-cuda", "testing-nixl"]
+testing-xpu-sycl = ["xpu-sycl"]
+testing-all = ["testing-cuda", "testing-nixl", "testing-xpu-sycl"]
+
+# Production xpu-sycl gate — pulls SyclMemPool / SyclMemPoolBuilder via
+# the `pool::sycl` submodule. dynamo-memory keeps cudarc unconditionally
+# because `pool::cuda::CudaMemPool` is core production code; oneapi-rs
+# is opt-in because the SYCL pool is the only consumer.
+xpu-sycl = ["dep:oneapi-rs"]
 
 [dependencies]
 anyhow = { workspace = true }
+# `pool::cuda::CudaMemPool` is production code that uses cudarc directly
+# — dynamo-memory's storage-tier memory pools are the legitimate home
+# for SDK-specific pool primitives. This crate does NOT depend on any
+# `kvbm-*` crate; the dep-direction rule is `kvbm-* → dynamo-*`.
 cudarc = { workspace = true }
+oneapi-rs = { workspace = true, optional = true }
 nixl-sys = { version = "=0.10.1" }
-serde = { workspace = true}
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
@@ -34,10 +46,6 @@ libc = { version = "0.2" }
 libloading = "0.8"
 nix = { version = "0.30", features = ["fs"] }
 offset-allocator = "0.2"
-
-[[bin]]
-name = "validate_numa_placement"
-path = "bin/validate_numa_placement.rs"
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -19,6 +19,7 @@ velo = { workspace = true }
 
 # Workspace deps
 dynamo-memory = { workspace = true }
+dynamo-device = { workspace = true }
 anyhow = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
@@ -39,6 +40,7 @@ oneshot = "0.1.11"
 
 # Optional
 cudarc = { workspace = true, optional = true }
+oneapi-rs = { workspace = true, optional = true, features = ["oneccl"] }
 aws-sdk-s3 = { version = "1.120.0", optional = true }
 aws-config = { version = "1.8.11", optional = true }
 rayon = { version = "1", optional = true }
@@ -57,9 +59,12 @@ default = ["s3"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:chrono"]
 collectives = ["nccl"]
 nccl = ["dep:cudarc"]
+oneccl = ["dep:oneapi-rs"]
 testing-nccl = ["collectives"]
+testing-oneccl = ["oneccl"]
 nats = ["dep:async-nats", "dep:flume"]
 testing = ["kvbm-logical/testing", "kvbm-physical/testing"]
+testing-xpu-sycl = ["testing", "kvbm-physical/testing-xpu-sycl"]
 testing-s3 = ["s3", "testing"]
 nvtx = ["kvbm-config/nvtx", "dep:nvtx"]
 bench = ["dep:clap", "dep:figment", "dep:libc", "dep:tracing-subscriber", "dep:chrono", "testing"]
@@ -67,6 +72,11 @@ bench = ["dep:clap", "dep:figment", "dep:libc", "dep:tracing-subscriber", "dep:c
 [[bin]]
 name = "bench_engine"
 path = "bin/bench_engine.rs"
+required-features = ["bench"]
+
+[[bin]]
+name = "bench_collectives"
+path = "bin/bench_collectives.rs"
 required-features = ["bench"]
 
 [package.metadata.cargo-machete]

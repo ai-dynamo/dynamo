@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dynamo_memory::{DeviceStorage, PinnedStorage};
+use dynamo_memory::{DeviceAllocator, DeviceStorage, PinnedStorage};
 
 const REGION_ALIGNMENT: usize = 512;
 
@@ -45,13 +45,13 @@ pub enum LayoutKind {
 #[derive(Debug, Clone)]
 enum AllocationKind {
     System,
-    /// Pinned (page-locked) host memory. If `device_id` is Some, NUMA-aware
-    /// allocation is used on the GPU's NUMA node (when NUMA is enabled).
+    /// Pinned (page-locked) host memory via a [`DeviceAllocator`].
     Pinned {
-        device_id: Option<u32>,
+        ctx: Arc<dyn DeviceAllocator>,
     },
+    /// Device memory via a [`DeviceAllocator`].
     Device {
-        device_id: u32,
+        ctx: Arc<dyn DeviceAllocator>,
     },
     Disk {
         path: Option<PathBuf>,
@@ -228,21 +228,23 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     /// Allocate pinned (page-locked) host memory.
     ///
     /// # Arguments
-    /// * `device_id` - If `Some(id)`, enables NUMA-aware allocation on the GPU's NUMA node
-    ///   (disable with `DYN_MEMORY_DISABLE_NUMA=1`). If `None`, uses direct allocation.
+    /// * `ctx` - Device allocator providing pinned memory allocation.
     pub fn allocate_pinned(
         self,
-        device_id: Option<u32>,
+        ctx: Arc<dyn DeviceAllocator>,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Pinned { device_id }))
+        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Pinned { ctx }))
     }
 
-    /// Allocate device memory on the specified CUDA device (or the context device if `None`).
+    /// Allocate device memory on the specified device.
+    ///
+    /// # Arguments
+    /// * `ctx` - Device allocator providing device memory allocation.
     pub fn allocate_device(
         self,
-        device_id: u32,
+        ctx: Arc<dyn DeviceAllocator>,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Device { device_id }))
+        self.set_memory_plan(MemoryPlan::Allocate(AllocationKind::Device { ctx }))
     }
 
     /// Allocate disk-backed storage. When `path` is `None`, a temporary file is used.
@@ -459,11 +461,11 @@ fn allocate_regions(
 
     let base_entry = match strategy {
         AllocationKind::System => allocate_system_entry(reserve_size, agent)?,
-        AllocationKind::Pinned { device_id } => {
-            allocate_pinned_entry(reserve_size, agent, device_id)?
+        AllocationKind::Pinned { ctx } => {
+            allocate_pinned_entry(reserve_size, agent, ctx)?
         }
-        AllocationKind::Device { device_id } => {
-            allocate_device_entry(reserve_size, agent, device_id)?
+        AllocationKind::Device { ctx } => {
+            allocate_device_entry(reserve_size, agent, ctx)?
         }
         AllocationKind::Disk { path } => allocate_disk_entry(reserve_size, agent, path)?,
     };
@@ -480,20 +482,22 @@ fn allocate_system_entry(size: usize, agent: &NixlAgent) -> Result<MemoryEntry> 
 fn allocate_pinned_entry(
     size: usize,
     agent: &NixlAgent,
-    device_id: Option<u32>,
+    ctx: Arc<dyn DeviceAllocator>,
 ) -> Result<MemoryEntry> {
-    let storage = PinnedStorage::new_for_device(size, device_id)
+    let storage = PinnedStorage::new(size, ctx)
         .map_err(|e| anyhow!("failed to allocate pinned memory ({size} bytes): {e}"))?;
     register_storage(storage, agent)
 }
 
-fn allocate_device_entry(size: usize, agent: &NixlAgent, device_id: u32) -> Result<MemoryEntry> {
-    let storage = DeviceStorage::new(size, device_id).map_err(|e| {
-        anyhow!("failed to allocate device memory ({size} bytes) on device {device_id}: {e}")
-    })?;
+fn allocate_device_entry(
+    size: usize,
+    agent: &NixlAgent,
+    ctx: Arc<dyn DeviceAllocator>,
+) -> Result<MemoryEntry> {
+    let storage = DeviceStorage::new(size, ctx.clone())
+        .map_err(|e| anyhow!("failed to allocate device memory ({size} bytes): {e}"))?;
     register_storage(storage, agent)
 }
-
 fn allocate_disk_entry(
     size: usize,
     agent: &NixlAgent,

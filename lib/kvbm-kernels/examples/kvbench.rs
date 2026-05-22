@@ -32,6 +32,54 @@ use cudarc::runtime::sys as cuda_runtime;
 
 use kvbm_kernels::{MemcpyBatchMode, memcpy_batch, vectorized_copy};
 
+/// Print the selected CUDA devices: backend, BDF, name. Best-effort —
+/// failures fall back to "unknown" rather than aborting the bench.
+fn eprint_selected_devices(device_ids: &[u32]) {
+    use cudarc::driver::sys as cu;
+    use std::ffi::CStr;
+
+    eprintln!("Selected devices ({}):", device_ids.len());
+    for (slot, &dev_id) in device_ids.iter().enumerate() {
+        let mut bdf = String::from("unknown");
+        let mut name = String::from("unknown");
+        unsafe {
+            let mut dev = std::mem::MaybeUninit::uninit();
+            if cu::cuDeviceGet(dev.as_mut_ptr(), dev_id as i32).result().is_ok() {
+                let dev = dev.assume_init();
+                let mut domain = 0i32;
+                let mut bus = 0i32;
+                let mut slot_num = 0i32;
+                let dom_ok = cu::cuDeviceGetAttribute(
+                    &mut domain,
+                    cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
+                    dev,
+                ).result().is_ok();
+                let bus_ok = cu::cuDeviceGetAttribute(
+                    &mut bus,
+                    cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
+                    dev,
+                ).result().is_ok();
+                let slot_ok = cu::cuDeviceGetAttribute(
+                    &mut slot_num,
+                    cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+                    dev,
+                ).result().is_ok();
+                if dom_ok && bus_ok && slot_ok {
+                    bdf = format!("{:04x}:{:02x}:{:02x}.0", domain, bus, slot_num);
+                }
+                let mut buf = [0i8; 256];
+                if cu::cuDeviceGetName(buf.as_mut_ptr(), buf.len() as i32, dev).result().is_ok() {
+                    name = CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned();
+                }
+            }
+        }
+        eprintln!(
+            "  device[{}] backend=cuda  bdf={}  name=\"{}\"",
+            slot, bdf, name,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Llama 3.1 70B, bf16 KV cache dimensions
 // ---------------------------------------------------------------------------
@@ -646,6 +694,8 @@ fn main() {
     let ctx = CudaContext::new(0).expect("Failed to create CUDA context");
     let stream = ctx.new_stream().expect("Failed to create CUDA stream");
     let stream_raw = stream.cu_stream() as cuda_runtime::cudaStream_t;
+
+    eprint_selected_devices(&[0]);
 
     // Print config to stderr
     eprintln!("KV Cache Transfer Benchmark");

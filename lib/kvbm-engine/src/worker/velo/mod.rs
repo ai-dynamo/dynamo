@@ -64,7 +64,7 @@ impl From<SerializableTransferOptions> for TransferOptions {
             nixl_write_notification: opts.nixl_write_notification,
             // bounce_buffer requires TransportManager to resolve handle to layout
             bounce_buffer: None,
-            cuda_stream: None,
+            device_stream: None,
             // KV layout overrides are not serialized; they must be set locally
             src_kv_layout: None,
             dst_kv_layout: None,

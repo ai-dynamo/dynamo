@@ -11,6 +11,7 @@
 //!
 //! These capability flags enable optional direct paths that bypass host staging.
 
+use crate::device::{DeviceBackend, DeviceContext};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -111,7 +112,7 @@ impl TransferCapabilities {
         let src = PhysicalLayout::builder(agent.clone())
             .with_config(config.clone())
             .fully_contiguous()
-            .allocate_device(0)
+            .allocate_device(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0)?))
             .build()?;
         let dst = PhysicalLayout::builder(agent.clone())
             .with_config(config)
@@ -124,7 +125,7 @@ impl TransferCapabilities {
 
         let ctx = TransferManager::builder()
             .nixl_agent(agent)
-            .cuda_device_id(0)
+            .device_id(0)
             .build()?;
 
         execute_transfer(

@@ -29,12 +29,34 @@ pub(crate) mod nvml;
 pub mod topology;
 pub mod worker_pool;
 
-use cudarc::driver::{result::device as cuda_device, sys as cuda_sys};
 use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::{fs, mem, process::Command};
+
+#[cfg(all(test, feature = "testing-cuda"))]
+use cudarc::driver::CudaContext;
+#[cfg(all(test, feature = "testing-cuda"))]
+use std::sync::Arc;
+
+/// Get or create a CUDA context for NUMA-aware operations.
+///
+/// Used only by the in-tree CUDA test fixtures. Real device-context
+/// management lives in `dynamo-device`.
+#[cfg(all(test, feature = "testing-cuda"))]
+pub(crate) fn cuda_context(device_id: u32) -> crate::Result<Arc<CudaContext>> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
+    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
+    if let Some(existing) = map.get(&device_id) {
+        return Ok(existing.clone());
+    }
+    let ctx = CudaContext::new(device_id as usize).map_err(|e| {
+        crate::StorageError::AllocationFailed(format!("CUDA context creation failed: {e}"))
+    })?;
+    map.insert(device_id, ctx.clone());
+    Ok(ctx)
+}
 
 /// Cache for GPU PCI address → NUMA node lookups.
 /// The mapping never changes at runtime, so we cache results (including negative
@@ -109,7 +131,7 @@ pub fn get_current_cpu_numa_node() -> NumaNode {
 ///
 /// Reads `/sys/bus/pci/devices/<pci_address>/numa_node`. Returns `None` if the
 /// file doesn't exist, can't be read, or contains `-1` (no NUMA affinity).
-fn read_numa_node_from_sysfs(pci_address: &str) -> Option<NumaNode> {
+pub fn read_numa_node_from_sysfs(pci_address: &str) -> Option<NumaNode> {
     let path = format!("/sys/bus/pci/devices/{}/numa_node", pci_address);
     let content = fs::read_to_string(&path).ok()?;
     let node: i32 = content.trim().parse().ok()?;
@@ -142,25 +164,189 @@ fn get_numa_node_from_nvidia_smi(pci_address: &str) -> Option<NumaNode> {
     Some(NumaNode(node))
 }
 
-/// Get NUMA node for a GPU device.
+/// Fallback: query NUMA node from xpu-smi using PCI bus address.
 ///
-/// Queries the PCI bus address from the CUDA driver API, then reads the NUMA
-/// node from sysfs. Falls back to nvidia-smi with the PCI address. Returns
-/// `None` if the NUMA node cannot be determined, signaling the caller to skip
-/// NUMA-aware allocation entirely rather than guessing wrong.
+/// Uses `xpu-smi discovery` to enumerate devices and match by PCI BDF,
+/// then reads the NUMA affinity from device properties.
 ///
-/// `CUDA_VISIBLE_DEVICES` is handled transparently because `CudaContext::new(ordinal)`
-/// operates on the process-local device index.
+/// Falls back gracefully if xpu-smi is not installed.
+fn get_numa_node_from_xpu_smi(pci_address: &str) -> Option<NumaNode> {
+    // xpu-smi topology -d <device_id> shows NUMA affinity, but we need
+    // to first map PCI address → device ID. Use `xpu-smi discovery` which
+    // lists all devices with their PCI BDF.
+    //
+    // `xpu-smi discovery` output format (example):
+    //   +-----------+----------------------+
+    //   | Device ID | Device Information   |
+    //   +-----------+----------------------+
+    //   | 0         | ...                  |
+    //   |           | PCI BDF Address: 0000:04:00.0 |
+    //   +-----------+----------------------+
+    //
+    // We parse this to find the device ID matching the PCI address, then
+    // query its NUMA node via `xpu-smi topology -d <id>`.
+
+    let output = Command::new("xpu-smi")
+        .args(["discovery"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    let pci_upper = pci_address.to_lowercase();
+
+    // Find device ID whose PCI BDF matches
+    let mut current_device_id: Option<&str> = None;
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        // Lines like "| 0         |" or "| 1         |" indicate device IDs
+        if trimmed.starts_with('|') && trimmed.ends_with('|') {
+            let parts: Vec<&str> = trimmed.split('|').collect();
+            if parts.len() >= 3 {
+                let maybe_id = parts[1].trim();
+                if maybe_id.parse::<u32>().is_ok() {
+                    current_device_id = Some(maybe_id);
+                }
+            }
+        }
+        // Look for PCI BDF line
+        if let Some(_dev_id) = current_device_id {
+            if trimmed.to_lowercase().contains(&pci_upper) {
+                // Found the device. Now query its NUMA node.
+                let topo_output = Command::new("xpu-smi")
+                    .args(["topology", "-d", _dev_id])
+                    .output()
+                    .ok()?;
+
+                if !topo_output.status.success() {
+                    return None;
+                }
+
+                let topo_stdout = std::str::from_utf8(&topo_output.stdout).ok()?;
+                // Look for "CPU Affinity" or "NUMA" in topology output
+                for topo_line in topo_stdout.lines() {
+                    let tl = topo_line.to_lowercase();
+                    if tl.contains("numa") || tl.contains("cpu affinity") {
+                        // Try to extract a number from this line
+                        for word in topo_line.split_whitespace() {
+                            if let Ok(n) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u32>() {
+                                return Some(NumaNode(n));
+                            }
+                        }
+                    }
+                }
+                return None;
+            }
+        }
+    }
+
+    None
+}
+
+/// Get NUMA node for a device given its PCI BDF address (backend-agnostic).
+///
+/// Reads `/sys/bus/pci/devices/<pci_address>/numa_node`. Falls back to
+/// nvidia-smi for NVIDIA GPUs. Returns `None` if the NUMA node cannot be
+/// determined.
+///
+/// This is the preferred entry point for callers that already have a PCI
+/// address (e.g. via `DeviceContext::pci_bdf_address()`).
 ///
 /// # Arguments
-/// * `device_id` - CUDA device index (0, 1, 2, ...) as seen by the process
+/// * `pci_address` - PCI BDF address string, e.g. "0000:04:00.0"
 ///
 /// # Returns
-/// The NUMA node closest to the specified GPU, or `None` if it cannot be determined.
+/// The NUMA node closest to the device, or `None` if it cannot be determined.
+pub fn get_numa_node_for_pci_address(pci_address: &str) -> Option<NumaNode> {
+    // Check cache
+    let cache = NUMA_NODE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(cached) = guard.get(pci_address) {
+            return *cached;
+        }
+    }
+
+    // Read from sysfs (backend-agnostic: works for any PCI device).
+    // If sysfs has no NUMA info (e.g. -1 or missing), try vendor management
+    // tools as fallback: nvidia-smi for NVIDIA GPUs, xpu-smi for Intel XPUs.
+    let result = read_numa_node_from_sysfs(pci_address)
+        .or_else(|| get_numa_node_from_nvidia_smi(pci_address))
+        .or_else(|| get_numa_node_from_xpu_smi(pci_address));
+
+    match result {
+        Some(node) => {
+            tracing::trace!("PCI {} on NUMA node {}", pci_address, node.0);
+        }
+        None => {
+            tracing::debug!(
+                "Could not determine NUMA node for PCI {}, skipping NUMA optimization",
+                pci_address
+            );
+        }
+    }
+
+    // Cache (including None for negative lookups)
+    cache
+        .lock()
+        .unwrap()
+        .insert(pci_address.to_string(), result);
+    result
+}
+
+/// Resolve a CUDA device ordinal to its PCI BDF via the CUDA driver API.
+///
+/// Returns a normalized address string like `"0000:3b:00.0"`. The
+/// `device_id` is a CUDA ordinal (affected by `CUDA_VISIBLE_DEVICES`).
+///
+/// Lives in `dynamo-memory` because `cudarc` is an unconditional dep of
+/// this crate already, and the function is a leaf primitive — no
+/// backend-aware dispatch. Both `dynamo-device::topology` and the
+/// `testing-cuda` tests in this crate consume it as the canonical
+/// CUDA-BDF helper.
+pub fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
+    use cudarc::driver::{result::device as cuda_device, sys as cuda_sys};
+    unsafe {
+        let mut dev = std::mem::MaybeUninit::uninit();
+        if cuda_sys::cuDeviceGet(dev.as_mut_ptr(), device_id as i32)
+            .result()
+            .is_err()
+        {
+            return None;
+        }
+        let dev = dev.assume_init();
+        let domain = cuda_device::get_attribute(
+            dev,
+            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
+        )
+        .ok()?;
+        let bus = cuda_device::get_attribute(
+            dev,
+            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
+        )
+        .ok()?;
+        let device = cuda_device::get_attribute(
+            dev,
+            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+        )
+        .ok()?;
+        Some(format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device))
+    }
+}
+
+/// Get NUMA node for a CUDA device by ordinal — CUDA-only legacy helper.
+///
+/// Queries the PCI bus address via the CUDA driver API, then delegates
+/// to [`get_numa_node_for_pci_address`]. Production code should obtain
+/// the PCI BDF from `dynamo_device::DeviceContextOps::pci_bdf_address()`
+/// and call [`get_numa_node_for_pci_address`] directly — that path is
+/// backend-agnostic.
 pub fn get_device_numa_node(device_id: u32) -> Option<NumaNode> {
-    // Step 1: Get PCI bus address from CUDA driver
     let pci_address = match get_pci_bus_address_from_cuda(device_id) {
-        Some(addr) => addr,
+        Some(a) => a,
         None => {
             tracing::warn!(
                 "Failed to get PCI address from CUDA for device {}, skipping NUMA optimization",
@@ -169,42 +355,9 @@ pub fn get_device_numa_node(device_id: u32) -> Option<NumaNode> {
             return None;
         }
     };
-
-    // Step 2: Check cache (includes negative lookups)
-    let cache = NUMA_NODE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    {
-        let guard = cache.lock().unwrap();
-        if let Some(cached) = guard.get(&pci_address) {
-            return *cached;
-        }
-    }
-
-    // Step 3: Read NUMA node from sysfs
-    let result = read_numa_node_from_sysfs(&pci_address)
-        .or_else(|| get_numa_node_from_nvidia_smi(&pci_address));
-
-    match result {
-        Some(node) => {
-            tracing::trace!(
-                "GPU {} (PCI {}) on NUMA node {}",
-                device_id,
-                pci_address,
-                node.0
-            );
-        }
-        None => {
-            tracing::warn!(
-                "Could not determine NUMA node for GPU {} (PCI {}), skipping NUMA optimization",
-                device_id,
-                pci_address
-            );
-        }
-    }
-
-    // Cache result (including None for negative lookups)
-    cache.lock().unwrap().insert(pci_address, result);
-    result
+    get_numa_node_for_pci_address(&pci_address)
 }
+
 
 /// Pin the current thread to a specific NUMA node's CPUs.
 ///
@@ -254,209 +407,106 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
     Ok(())
 }
 
-/// Get PCI bus address for a CUDA device via the CUDA driver API.
+/// GPU info with PCI address and NUMA node.
 ///
-/// Returns a normalized PCI address string like "0000:3b:00.0".
-/// The device_id here is a CUDA ordinal (affected by CUDA_VISIBLE_DEVICES).
-fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
-    // SAFETY: We're calling CUDA driver API functions with valid device ordinals.
-    // cuDeviceGet and get_attribute are safe as long as CUDA is initialized
-    // (which CudaContext::new handles).
-    unsafe {
-        let mut dev = std::mem::MaybeUninit::uninit();
-        if cuda_sys::cuDeviceGet(dev.as_mut_ptr(), device_id as i32)
-            .result()
-            .is_err()
-        {
-            return None;
-        }
-        let dev = dev.assume_init();
-
-        let domain = cuda_device::get_attribute(
-            dev,
-            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
-        )
-        .ok()?;
-        let bus = cuda_device::get_attribute(
-            dev,
-            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
-        )
-        .ok()?;
-        let device = cuda_device::get_attribute(
-            dev,
-            cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
-        )
-        .ok()?;
-
-        Some(format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device))
-    }
-}
-
-/// GPU info with PCI address and NUMA node, used for CPU set subdivision.
+/// Used by `dynamo-device::topology` for CPU-set subdivision; exposed
+/// publicly so the device tier can construct and consume these without
+/// re-defining the type.
 #[derive(Debug, Clone)]
-struct GpuTopoInfo {
-    pci_address: String,
-    numa_node: Option<u32>,
+pub struct GpuTopoInfo {
+    /// PCI BDF address, normalized as `"DDDD:BB:DD.F"` (e.g. `"0000:3b:00.0"`).
+    pub pci_address: String,
+    /// NUMA node closest to the device, or `None` if the system reports
+    /// no NUMA affinity for this device's PCI BDF.
+    pub numa_node: Option<u32>,
 }
 
-/// Enumerate all GPUs visible to CUDA with their PCI addresses and NUMA nodes.
-fn enumerate_cuda_gpus() -> Vec<GpuTopoInfo> {
-    let count = match cuda_device::get_count() {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    (0..count as u32)
-        .filter_map(|i| {
-            let pci = get_pci_bus_address_from_cuda(i)?;
-            let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
-            Some(GpuTopoInfo {
-                pci_address: pci,
-                numa_node: numa,
+/// Enumerate every NVIDIA GPU on the system via NVML, regardless of
+/// `CUDA_VISIBLE_DEVICES`. Returns `None` if NVML cannot be loaded or
+/// enumerates no devices.
+///
+/// This is the CUDA-side input to `dynamo-device::topology::get_device_cpu_set`'s
+/// fair CPU-set subdivision. It lives in `dynamo-memory` (rather than
+/// `dynamo-device`) because the NVML FFI is logically a sysfs/topology
+/// concern, not a device-handle concern, and it has no cudarc dep.
+pub fn enumerate_nvml_gpus() -> Option<Vec<GpuTopoInfo>> {
+    let nvml = nvml::try_nvml()?;
+    let nvml_gpus = nvml.enumerate_gpus();
+    if nvml_gpus.is_empty() {
+        return None;
+    }
+    Some(
+        nvml_gpus
+            .into_iter()
+            .map(|g| {
+                let numa = read_numa_node_from_sysfs(&g.pci_address).map(|n| n.0);
+                GpuTopoInfo {
+                    pci_address: g.pci_address,
+                    numa_node: numa,
+                }
             })
-        })
-        .collect()
+            .collect(),
+    )
 }
 
-/// Enumerate all GPUs on the system, preferring NVML (sees all GPUs)
-/// over CUDA driver (only sees CUDA_VISIBLE_DEVICES).
-fn enumerate_all_gpus() -> Vec<GpuTopoInfo> {
-    // Try NVML first — it sees all GPUs regardless of CUDA_VISIBLE_DEVICES
-    if let Some(nvml) = nvml::try_nvml() {
-        let nvml_gpus = nvml.enumerate_gpus();
-        if !nvml_gpus.is_empty() {
-            tracing::debug!(
-                "NVML enumerated {} GPUs (ignoring CUDA_VISIBLE_DEVICES)",
-                nvml_gpus.len()
-            );
-            return nvml_gpus
-                .into_iter()
-                .map(|g| {
-                    let numa = read_numa_node_from_sysfs(&g.pci_address).map(|n| n.0);
-                    GpuTopoInfo {
-                        pci_address: g.pci_address,
-                        numa_node: numa,
-                    }
-                })
-                .collect();
-        }
+// ---------------------------------------------------------------------------
+// Shared CPU-set subdivision logic (backend-agnostic)
+// ---------------------------------------------------------------------------
+
+/// Subdivide a NUMA node's CPUs among all GPUs sharing that node.
+///
+/// Given a list of GPUs (from one backend's enumeration) and a target
+/// PCI address, returns the CPU subset assigned to that particular
+/// device. This primitive is consumed by `dynamo-device::topology` for
+/// backend-aware CPU-set lookup; callers wanting backend-agnostic NUMA
+/// info should prefer [`get_numa_node_for_pci_address`].
+pub fn subdivide_cpu_set_for_device(
+    all_gpus: &[GpuTopoInfo],
+    target_pci: &str,
+    topology: &topology::NumaTopology,
+) -> Option<Vec<usize>> {
+    // Find the target GPU and its NUMA node
+    let target = all_gpus.iter().find(|g| g.pci_address == target_pci)?;
+    let target_node = target.numa_node?;
+
+    // Collect all GPUs on the same NUMA node, sorted by PCI address
+    let mut siblings: Vec<&str> = all_gpus
+        .iter()
+        .filter(|g| g.numa_node == Some(target_node))
+        .map(|g| g.pci_address.as_str())
+        .collect();
+    siblings.sort();
+
+    let position = siblings.iter().position(|&addr| addr == target_pci)?;
+    let all_cpus = topology.cpus_for_node(target_node)?;
+
+    if all_cpus.is_empty() || siblings.is_empty() {
+        return None;
     }
 
-    // Fallback: enumerate via CUDA driver (may miss hidden devices)
-    tracing::debug!("Falling back to CUDA driver GPU enumeration");
-    enumerate_cuda_gpus()
-}
+    // Divide CPUs into N equal slices
+    let n = siblings.len();
+    let chunk_size = all_cpus.len() / n;
+    if chunk_size == 0 {
+        // More GPUs than CPUs on this node — give all CPUs to everyone
+        return Some(all_cpus.to_vec());
+    }
 
-/// Cached CPU set results per CUDA device ordinal.
-static DEVICE_CPU_SETS: OnceLock<HashMap<u32, Option<Vec<usize>>>> = OnceLock::new();
-
-/// Get a deterministic CPU subset for a CUDA device, subdivided among ALL GPUs
-/// sharing the same NUMA node (including those hidden by CUDA_VISIBLE_DEVICES).
-///
-/// # Algorithm
-/// 1. Get PCI address + NUMA node for target device (CUDA driver API)
-/// 2. Enumerate ALL GPUs on the system:
-///    - Try NVML first (sees all GPUs, ignores CUDA_VISIBLE_DEVICES)
-///    - Fall back to CUDA driver API (only sees visible devices)
-/// 3. For each GPU, get its NUMA node via sysfs (PCI address → /sys/.../numa_node)
-/// 4. Group GPUs by NUMA node
-/// 5. Sort by PCI address within each group (deterministic)
-/// 6. Get full CPU set for the node via topology
-/// 7. Divide into N equal slices (N = GPUs on same node)
-/// 8. Return the slice for the target device's position
-///
-/// # Example
-/// System: 8 GPUs, 2 NUMA nodes, 4 GPUs per node.
-/// CUDA_VISIBLE_DEVICES=0,1 (only 2 visible).
-/// NVML sees all 8 → correctly subdivides into 4 slices per node.
-///
-/// Returns None if NUMA node can't be determined.
-pub fn get_device_cpu_set(device_id: u32) -> Option<Vec<usize>> {
-    DEVICE_CPU_SETS
-        .get_or_init(compute_all_device_cpu_sets)
-        .get(&device_id)
-        .cloned()
-        .flatten()
-}
-
-fn compute_all_device_cpu_sets() -> HashMap<u32, Option<Vec<usize>>> {
-    let topology = match topology::get_numa_topology() {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!("Cannot subdivide CPU sets: {e}");
-            return HashMap::new();
-        }
+    let start = position * chunk_size;
+    let end = if position == n - 1 {
+        all_cpus.len() // last slice gets remainder
+    } else {
+        start + chunk_size
     };
 
-    // Get the target device's PCI address and NUMA node
-    let cuda_count = cuda_device::get_count().unwrap_or(0);
-    if cuda_count == 0 {
-        return HashMap::new();
-    }
-
-    // Build info for each visible CUDA device
-    let mut cuda_devices: Vec<(u32, String, Option<u32>)> = Vec::new();
-    for i in 0..cuda_count as u32 {
-        if let Some(pci) = get_pci_bus_address_from_cuda(i) {
-            let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
-            cuda_devices.push((i, pci, numa));
-        }
-    }
-
-    // Enumerate ALL GPUs on the system (NVML preferred)
-    let all_gpus = enumerate_all_gpus();
-
-    // Group all GPUs by NUMA node
-    let mut node_groups: HashMap<u32, Vec<String>> = HashMap::new();
-    for gpu in &all_gpus {
-        if let Some(node) = gpu.numa_node {
-            node_groups
-                .entry(node)
-                .or_default()
-                .push(gpu.pci_address.clone());
-        }
-    }
-
-    // Sort each group by PCI address for deterministic ordering
-    for group in node_groups.values_mut() {
-        group.sort();
-    }
-
-    // For each CUDA device, find its position in its NUMA group and subdivide
-    let mut results = HashMap::new();
-    for (device_id, pci_addr, numa_node) in &cuda_devices {
-        let cpu_set = numa_node.and_then(|node| {
-            let group = node_groups.get(&node)?;
-            let position = group.iter().position(|addr| addr == pci_addr)?;
-            let all_cpus = topology.cpus_for_node(node)?;
-
-            if all_cpus.is_empty() || group.is_empty() {
-                return None;
-            }
-
-            // Divide CPUs into N equal slices
-            let n = group.len();
-            let chunk_size = all_cpus.len() / n;
-            if chunk_size == 0 {
-                // More GPUs than CPUs on this node — give all CPUs to everyone
-                return Some(all_cpus.to_vec());
-            }
-
-            let start = position * chunk_size;
-            let end = if position == n - 1 {
-                all_cpus.len() // last slice gets remainder
-            } else {
-                start + chunk_size
-            };
-
-            Some(all_cpus[start..end].to_vec())
-        });
-
-        results.insert(*device_id, cpu_set);
-    }
-
-    results
+    Some(all_cpus[start..end].to_vec())
 }
+
+// Backend-aware CPU-set lookup (`get_device_cpu_set(backend, pci)`)
+// lives in `dynamo-device::topology`, which dispatches the
+// per-backend GPU enumeration (CUDA/NVML, SYCL/sysfs) and calls back
+// into `subdivide_cpu_set_for_device` above for the
+// backend-agnostic subdivision.
 
 #[cfg(test)]
 mod tests {
@@ -587,3 +637,87 @@ mod cuda_tests {
         }
     }
 }
+
+
+#[cfg(all(test, feature = "testing-xpu-sycl"))]
+mod sycl_tests {
+    use super::*;
+    use oneapi_rs::safe::SyclDevice;
+
+    fn xpu_pci_address() -> Option<String> {
+        let dev = SyclDevice::by_ordinal(0).ok()?;
+        dev.info().ok()?.pci_address
+    }
+
+    #[test]
+    fn test_xpu_pci_address_format() {
+        let pci = match xpu_pci_address() {
+            Some(p) => p,
+            None => { println!("No PCI address for XPU 0, skipping"); return; }
+        };
+        // Expected format: DDDD:BB:DD.F (e.g. "0000:04:00.0")
+        assert!(pci.len() >= 10, "PCI address too short: {}", pci);
+        assert!(pci.contains(':'), "PCI address should contain ':'");
+        assert!(pci.contains('.'), "PCI address should contain '.'");
+        println!("XPU 0 PCI address: {}", pci);
+    }
+
+    #[test]
+    fn test_get_numa_node_for_xpu() {
+        let pci = match xpu_pci_address() {
+            Some(p) => p,
+            None => { println!("No PCI address, skipping"); return; }
+        };
+
+        let result = get_numa_node_for_pci_address(&pci);
+        match result {
+            Some(node) => {
+                assert!(!node.is_unknown());
+                assert!(node.0 < 16, "NUMA node {} seems unreasonably high", node.0);
+                println!("XPU PCI {} → NUMA node {}", pci, node.0);
+            }
+            None => {
+                println!("XPU PCI {} → no NUMA affinity (single-socket expected)", pci);
+            }
+        }
+    }
+
+
+    #[test]
+    fn test_sysfs_numa_node_for_xpu() {
+        let pci = match xpu_pci_address() {
+            Some(p) => p,
+            None => { println!("No PCI address, skipping"); return; }
+        };
+
+        let result = read_numa_node_from_sysfs(&pci);
+        match result {
+            Some(node) => {
+                println!("sysfs reports NUMA node {} for PCI {}", node.0, pci);
+            }
+            None => {
+                println!("sysfs has no NUMA info for PCI {} (returns -1 or missing)", pci);
+            }
+        }
+    }
+
+    #[test]
+    fn test_numa_cache_consistency_xpu() {
+        let pci = match xpu_pci_address() {
+            Some(p) => p,
+            None => { println!("No PCI address, skipping"); return; }
+        };
+
+        // Call twice — second should be cached
+        let r1 = get_numa_node_for_pci_address(&pci);
+        let r2 = get_numa_node_for_pci_address(&pci);
+        assert_eq!(r1, r2, "Cached result should match first lookup");
+    }
+
+    #[test]
+    fn test_bogus_pci_address_returns_none() {
+        let result = get_numa_node_for_pci_address("ffff:ff:ff.f");
+        assert!(result.is_none(), "Bogus PCI address should return None");
+    }
+}
+

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-device"
+version = "1.2.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Backend-agnostic device handle traits (DeviceContext, DeviceStream, DeviceEvent, DeviceMemPool) and CUDA / SYCL implementations."
+
+[dependencies]
+# Tier-1 Dynamo primitive: dynamo-device does NOT depend on any kvbm-* crate.
+# CudaMemPool / SyclMemPool are used by the per-backend DeviceContext impls.
+dynamo-memory = { workspace = true }
+# kvbm-kernels is consumed by the CUDA and SYCL DeviceContext impls for
+# vectorized_copy / memcpy_batch / sycl_vectorized_copy. Gated by the
+# matching backend features below. Note: this is the one structural
+# wart — kvbm-kernels is named kvbm-* but consumed by dynamo-device. If
+# we ever decide to enforce the dep-direction rule strictly, kernel
+# launchers should move into a `dynamo-kernels` (or similar) crate.
+kvbm-kernels = { workspace = true, optional = true }
+
+anyhow = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+# Backend FFI deps — gated.
+cudarc = { workspace = true, features = ["nccl"], optional = true }
+oneapi-rs = { workspace = true, optional = true }
+
+[features]
+# Default to CUDA so that consumers depending on `dynamo-device` without
+# specifying features get the same shape they had when these traits and
+# impls lived inside `kvbm-physical`.
+default = ["cuda"]
+cuda = ["dep:cudarc", "dep:kvbm-kernels"]
+xpu-sycl = [
+    "dep:oneapi-rs",
+    "dep:kvbm-kernels",
+    "kvbm-kernels/xpu-sycl",
+    "dynamo-memory/xpu-sycl",
+]

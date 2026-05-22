@@ -71,13 +71,21 @@ mod tests {
     use super::*;
     use crate::block_manager::v2::physical::layout::{LayoutConfig, PhysicalLayout};
     use crate::block_manager::v2::physical::transfer::nixl_agent::NixlAgent;
+    use crate::block_manager::v2::device::DeviceBackend;
 
     fn create_test_agent(name: &str) -> NixlAgent {
         NixlAgent::require_backends(name, &[]).expect("failed to create wrapped agent")
     }
 
+    fn get_test_backend() -> (DeviceBackend, u32) {
+        let backend = DeviceBackend::auto_detect()
+            .expect("No device backend available for test");
+        (backend, 0)
+    }
+
     fn make_test_layout() -> PhysicalLayout {
         let agent = create_test_agent("test-local");
+        let (backend, device_id) = get_test_backend();
         let config = LayoutConfig::builder()
             .num_blocks(2)
             .num_layers(2)
@@ -88,7 +96,7 @@ mod tests {
             .build()
             .unwrap();
 
-        PhysicalLayout::builder(agent)
+        PhysicalLayout::builder(agent, backend, device_id)
             .with_config(config)
             .fully_contiguous()
             .allocate_system()

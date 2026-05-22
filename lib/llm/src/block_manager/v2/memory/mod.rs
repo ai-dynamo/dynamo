@@ -14,6 +14,12 @@ pub use dynamo_memory::actions;
 mod torch;
 pub use torch::{TorchDevice, TorchTensor};
 
+// Multi-backend storage implementations (v2)
+mod device_storage;
+mod pinned_storage;
+pub use device_storage::DeviceStorage;
+pub use pinned_storage::PinnedStorage;
+
 // Keep tests
 #[cfg(test)]
 mod tests;
@@ -26,9 +32,11 @@ pub use dynamo_memory::MemoryDescriptor as MemoryRegion;
 /// The simple descriptor struct (was `MemoryDescriptor` here, now `MemoryRegion` in dynamo-memory).
 pub use dynamo_memory::MemoryRegion as MemoryDescriptor;
 
-// === Storage types (same names) ===
+// === Storage types ===
+// Note: DeviceStorage and PinnedStorage are now local multi-backend implementations
+// (see device_storage.rs and pinned_storage.rs)
 pub use dynamo_memory::{
-    DeviceStorage, DiskStorage, PinnedStorage, StorageError, StorageKind, SystemStorage,
+    DiskStorage, StorageError, StorageKind, SystemStorage,
 };
 
 // === NIXL types ===
