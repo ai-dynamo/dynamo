@@ -156,9 +156,7 @@ fn find_raw_block_end(template: &str, start: usize) -> Option<usize> {
     let mut i = start;
     while let Some(relative_open) = template[i..].find("{%") {
         let open = i + relative_open;
-        let Some(end) = find_tag_end(template, open + 2, "%}") else {
-            return None;
-        };
+        let end = find_tag_end(template, open + 2, "%}")?;
         if is_jinja_block_name(&template[open + 2..end - 2], "endraw") {
             return Some(end);
         }
