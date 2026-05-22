@@ -63,14 +63,13 @@ class TestConfigureMxPorts:
 
 
 # torch is required to import model_loader.py (top-level `import torch`)
-if not HAS_TORCH:
-    pytest.skip("torch required for model_loader", allow_module_level=True)
-
-from gpu_memory_service.integrations.vllm.model_loader import (  # noqa: E402
-    get_mx_load_context,
-)
+if HAS_TORCH:
+    from gpu_memory_service.integrations.vllm.model_loader import (  # noqa: E402
+        get_mx_load_context,
+    )
 
 
+@pytest.mark.skipif(not HAS_TORCH, reason="torch required for model_loader")
 class TestGetMxLoadContext:
     """Tests for get_mx_load_context() guard logic."""
 
