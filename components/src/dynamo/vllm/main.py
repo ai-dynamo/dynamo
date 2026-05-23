@@ -585,8 +585,8 @@ def setup_vllm_engine(
 
     # Record model load time. ``component_gauges`` is None on the
     # embedding-worker path -- pooling engines have no chat-shaped gauges
-    # registered (DIS-2107), so model_load_time has no collector to
-    # publish to. Skip rather than fabricating a zero-valued sample.
+    # registered, so model_load_time has no collector to publish to.
+    # Skip rather than fabricating a zero-valued sample.
     if component_gauges is not None:
         component_gauges.set_model_load_time(load_time)
 
