@@ -43,6 +43,7 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
     MediaDecoder,
@@ -508,6 +509,9 @@ async def init_llm_worker(
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
         attention_dp_size = engine.get_attention_dp_size()
         runtime_config.data_parallel_size = attention_dp_size
+
+        # Set topology and KV transfer policy for topology-aware routing
+        apply_topology_config(runtime_config)
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(

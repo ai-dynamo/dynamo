@@ -14,6 +14,7 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     MediaDecoder,
     MediaFetcher,
@@ -294,6 +295,9 @@ async def _get_runtime_config(
                 "Failed to attach SGLang worker group metadata to registration: %s",
                 e,
             )
+
+    # Set topology and KV transfer policy for topology-aware routing
+    apply_topology_config(runtime_config)
 
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)

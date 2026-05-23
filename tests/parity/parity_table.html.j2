@@ -22,7 +22,7 @@ td.parser a { color: inherit; text-decoration: none; }
 td.parser a:hover { background: #ffd; }
 td.cell { text-align: center; min-width: 24px; }
 td.cell.ok         { color: #0a7d2c; }
-td.cell.documented { color: #555; }
+td.cell.documented { color: #0a7d2c; }
 td.cell.research   { color: #c63;    font-weight: bold; }
 td.cell.leak       { color: #555;    font-weight: bold; }
 td.cell.err        { color: #b00;    font-weight: bold; }
@@ -146,7 +146,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   <strong>Legend:</strong>
   <span style="color:#0a7d2c">=</span> full parity
   (Dynamo, vLLM, and SGLang produce the same results) ·
-  <span style="color:#555">V/S</span> divergence
+  <span style="color:#0a7d2c">V/S</span> divergence
   (V = vLLM, S = SGLang; intentional, has <code>reason:</code>) ·
   <span style="color:#c63">?</span> more research needed
   (e.g. V?, S? — diverges with no <code>reason:</code> yet) ·
@@ -177,7 +177,7 @@ td.cell .ttip a:hover, td.parser .ttip a:hover { color: #dbeafe; background: tra
   = {{ panel.stats.slots }} grid slots ({{ panel.stats.na }} n/a, {{ panel.stats.missing }} missing).
   <strong>{{ panel.stats.real }}</strong> real cases:
   <span style="color:#0a7d2c">{{ panel.stats.parity }} full parity</span> ·
-  <span style="color:#555">{{ panel.stats.documented }} documented divergences</span>
+  <span style="color:#0a7d2c">{{ panel.stats.documented }} documented divergences</span>
   (have <code>reason:</code>) ·
   <span style="color:#c63">{{ panel.stats.research }} research-needed</span>
   (no <code>reason:</code> yet) ·

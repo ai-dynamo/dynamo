@@ -388,6 +388,10 @@ impl CommonExtProvider for UnifiedRequest {
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.inner.common.skip_special_tokens
     }
+
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        self.inner.common.prompt_logprobs
+    }
 }
 
 impl OpenAIStopConditionsProvider for UnifiedRequest {

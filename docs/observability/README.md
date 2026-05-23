@@ -123,6 +123,6 @@ The following configuration files are located in the `dev/observability/` direct
 - [loki.yaml](../../dev/observability/loki.yaml): Loki log aggregation configuration
 - [loki-datasource.yml](../../dev/observability/loki-datasource.yml): Grafana Loki datasource with trace ID linking to Tempo
 - [grafana_dashboards/dashboard-providers.yml](../../dev/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/dynamo.json](../../dev/observability/grafana_dashboards/dynamo.json): A general Dynamo Dashboard for both SW and HW metrics
+- [grafana_dashboards/dynamo.json](../../dev/observability/grafana_dashboards/dynamo.json): Engine-agnostic per-model dashboard covering frontend, KV-router, and worker metrics. Filterable by `model`. See the [per-model dashboard guide](prometheus-grafana.md#per-model-dynamo-dashboard) for details.
 - [grafana_dashboards/dcgm-metrics.json](../../dev/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
 - [grafana_dashboards/kvbm.json](../../dev/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics
