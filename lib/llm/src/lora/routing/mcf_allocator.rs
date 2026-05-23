@@ -333,10 +333,16 @@ impl McfPlacementSolver {
                 }
             }
 
-            // Overflow edge
+            // Overflow edge: capacity must match the LoRA's residual demand so
+            // that a single LoRA needing multiple replicas can route all of
+            // them through overflow when no real worker has free capacity.
+            // Using cap=1 here would silently bound per-LoRA overflow to 1 and
+            // surface as `InsufficientFlow` from the MCF solver.
             if let Some(ov) = overflow_node {
+                let frozen_count = frozen_hosts.get(&l.name).map(|s| s.len()).unwrap_or(0);
+                let overflow_cap = l.replicas.saturating_sub(frozen_count) as i64;
                 let edge_idx = mcf.edge_count(lora_node_id);
-                mcf.add_edge(lora_node_id, ov, 1, self.params.overflow_cost);
+                mcf.add_edge(lora_node_id, ov, overflow_cap, self.params.overflow_cost);
                 edges.push((edge_idx, WorkerWithDpRank::new(u64::MAX, 0))); // sentinel
             }
 
@@ -557,6 +563,30 @@ mod tests {
 
         let result = solver.solve(&workers, &loras, &prev, None, None).unwrap();
         assert!(result.overflow_count > 0, "Should detect overflow");
+    }
+
+    #[test]
+    fn test_overflow_single_lora_multiple_replicas() {
+        // 1 worker, capacity 1, single LoRA needing 3 replicas. 1 replica fits;
+        // the other 2 must overflow. Regression test for the per-LoRA overflow
+        // edge capacity bug (cap=1 silently bounded overflow per LoRA).
+        let solver = McfPlacementSolver::new(McfSolveParams::default());
+        let workers = make_workers(1, 1);
+        let loras = vec![make_lora("A", 3)];
+        let prev = HashMap::new();
+
+        let result = solver
+            .solve(&workers, &loras, &prev, None, None)
+            .expect("MCF should solve when overflow has correct capacity");
+        assert_eq!(
+            result.overflow_count, 2,
+            "2 of 3 replicas must overflow when only 1 worker slot is available"
+        );
+        assert_eq!(
+            result.assignment.get("A").map(|s| s.len()).unwrap_or(0),
+            1,
+            "exactly 1 replica should be placed on the available worker"
+        );
     }
 
     #[test]
