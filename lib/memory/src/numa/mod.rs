@@ -107,14 +107,24 @@ pub fn get_current_cpu_numa_node() -> NumaNode {
 
 /// Read the NUMA node for a PCI device from sysfs.
 ///
-/// Reads `/sys/bus/pci/devices/<pci_address>/numa_node`. Returns `None` if the
-/// file doesn't exist, can't be read, or contains `-1` (no NUMA affinity).
+/// The input may be in any of the PCI BDF string forms (4- or 8-char domain,
+/// any case). The actual sysfs directory name on the running kernel is
+/// resolved via [`pci_sysfs_dirnames`] and used to construct the path, so
+/// callers do not have to know the kernel's preferred width. Returns `None`
+/// if the entry can't be found, can't be read, or contains `-1`.
 fn read_numa_node_from_sysfs(pci_address: &str) -> Option<NumaNode> {
-    let path = format!("/sys/bus/pci/devices/{}/numa_node", pci_address);
+    let parsed = PciAddress::parse(pci_address);
+    let dirname = match parsed {
+        Some(addr) => pci_sysfs_dirnames()
+            .get(&addr)
+            .cloned()
+            .unwrap_or_else(|| addr.to_string()),
+        None => pci_address.to_lowercase(),
+    };
+    let path = format!("/sys/bus/pci/devices/{}/numa_node", dirname);
     let content = fs::read_to_string(&path).ok()?;
     let node: i32 = content.trim().parse().ok()?;
     if node < 0 {
-        // -1 means no NUMA affinity info available
         None
     } else {
         Some(NumaNode(node as u32))
@@ -254,6 +264,75 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
     Ok(())
 }
 
+/// Numeric components of a PCI BDF address.
+///
+/// The PCI sysfs ABI (`Documentation/PCI/sysfs-pci.rst`) defines the
+/// serialization as `DOMAIN:BUS:DEVICE.FUNCTION`, each field a lowercase
+/// hex number. The serialization width varies (4 hex chars for `domain`
+/// on most x86 systems, 8 on platforms with 32-bit PCI domains such as
+/// Grace / GB200; bus/device are typically 2 chars; function is 1).
+/// Width and capitalization differences across kernels and reporting
+/// tools (CUDA, NVML, lspci) are normalized away by parsing into this
+/// tuple — equality on a `PciAddress` is the only safe way to match
+/// addresses from different sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PciAddress {
+    /// PCI domain (segment) ID. Up to 32 bits per Linux kernel.
+    pub domain: u32,
+    /// PCI bus number, 0–255.
+    pub bus: u8,
+    /// Device (slot) number within the bus, 0–31.
+    pub device: u8,
+    /// Function number, 0–7.
+    pub function: u8,
+}
+
+impl PciAddress {
+    /// Parse a PCI BDF address string. Accepts any domain width and either
+    /// case; rejects anything that cannot be decomposed into the four
+    /// hex components.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let parts: Vec<&str> = s.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let domain = u32::from_str_radix(parts[0], 16).ok()?;
+        let bus = u8::from_str_radix(parts[1], 16).ok()?;
+        let (dev_str, fn_str) = parts[2].split_once('.')?;
+        let device = u8::from_str_radix(dev_str, 16).ok()?;
+        let function = u8::from_str_radix(fn_str, 16).ok()?;
+        Some(Self {
+            domain,
+            bus,
+            device,
+            function,
+        })
+    }
+}
+
+impl std::fmt::Display for PciAddress {
+    /// Render with the kernel's native sysfs domain width on this host,
+    /// so the result is a valid `/sys/bus/pci/devices/<this>/...` path
+    /// component on the running system.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let w = sysfs_pci_domain_width();
+        if w >= 8 {
+            write!(
+                f,
+                "{:08x}:{:02x}:{:02x}.{:x}",
+                self.domain, self.bus, self.device, self.function
+            )
+        } else {
+            write!(
+                f,
+                "{:04x}:{:02x}:{:02x}.{:x}",
+                self.domain, self.bus, self.device, self.function
+            )
+        }
+    }
+}
+
 /// Detect the hex-character width the kernel uses for PCI domain components
 /// in sysfs directory names (typically 4 on x86, 8 on platforms with 32-bit
 /// PCI domains such as Grace / GB200). Falls back to 4 if `/sys/bus/pci/devices`
@@ -273,24 +352,31 @@ fn sysfs_pci_domain_width() -> usize {
     })
 }
 
-/// Re-emit a PCI address string with the domain padded to the sysfs-native
-/// width on the running kernel, so addresses from different sources (CUDA's
-/// 4-char, NVML's 8-char, sysfs's native) all join correctly. Returns `None`
-/// if `s` is not a parseable `DDDD...:BB:DD.F` address.
+/// Map from a parsed PCI address to the exact directory name the kernel
+/// uses under `/sys/bus/pci/devices/`. Built once by walking sysfs. This is
+/// the safe way to construct a sysfs path from an address obtained from
+/// CUDA/NVML, since we never reconstruct the directory name from format
+/// assumptions.
+fn pci_sysfs_dirnames() -> &'static HashMap<PciAddress, String> {
+    static MAP: OnceLock<HashMap<PciAddress, String>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut m: HashMap<PciAddress, String> = HashMap::new();
+        if let Ok(entries) = fs::read_dir("/sys/bus/pci/devices") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(addr) = PciAddress::parse(&name) {
+                    m.insert(addr, name);
+                }
+            }
+        }
+        m
+    })
+}
+
+/// Parse `s` and re-emit it in the canonical form for this kernel.
+/// Returns `None` if `s` is not a parseable PCI BDF address.
 fn normalize_pci_address(s: &str) -> Option<String> {
-    let s = s.to_lowercase();
-    let parts: Vec<&str> = s.splitn(3, ':').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let domain = u32::from_str_radix(parts[0], 16).ok()?;
-    let w = sysfs_pci_domain_width();
-    let domain_hex = if w >= 8 {
-        format!("{:08x}", domain)
-    } else {
-        format!("{:04x}", domain)
-    };
-    Some(format!("{}:{}", domain_hex, parts[1..].join(":")))
+    Some(PciAddress::parse(s)?.to_string())
 }
 
 /// Get the PCI bus address for a CUDA device via the CUDA driver API.
@@ -331,13 +417,15 @@ pub fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
         )
         .ok()?;
 
-        let w = sysfs_pci_domain_width();
-        let domain_hex = if w >= 8 {
-            format!("{:08x}", domain)
-        } else {
-            format!("{:04x}", domain)
-        };
-        Some(format!("{}:{:02x}:{:02x}.0", domain_hex, bus, device))
+        Some(
+            PciAddress {
+                domain: domain as u32,
+                bus: bus as u8,
+                device: device as u8,
+                function: 0,
+            }
+            .to_string(),
+        )
     }
 }
 
@@ -566,6 +654,76 @@ fn compute_cpu_slices_by_pci() -> HashMap<String, Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pci_address_parse_canonical_forms() {
+        let want = PciAddress {
+            domain: 0,
+            bus: 0x89,
+            device: 0,
+            function: 0,
+        };
+        // 4-char domain
+        assert_eq!(PciAddress::parse("0000:89:00.0"), Some(want));
+        // 8-char domain (Grace/GB200 sysfs form)
+        assert_eq!(PciAddress::parse("00000000:89:00.0"), Some(want));
+        // Uppercase
+        assert_eq!(PciAddress::parse("0000:89:00.0"), Some(want));
+        assert_eq!(PciAddress::parse("0000:89:0.0"), Some(want));
+        // Leading/trailing whitespace
+        assert_eq!(PciAddress::parse("  0000:89:00.0  "), Some(want));
+    }
+
+    #[test]
+    fn test_pci_address_parse_uppercase_and_short_function() {
+        let want = PciAddress {
+            domain: 0x0000_0001,
+            bus: 0xAB,
+            device: 0x1F,
+            function: 7,
+        };
+        assert_eq!(PciAddress::parse("0001:AB:1F.7"), Some(want));
+        assert_eq!(PciAddress::parse("00000001:ab:1f.7"), Some(want));
+    }
+
+    #[test]
+    fn test_pci_address_parse_rejects_garbage() {
+        assert_eq!(PciAddress::parse(""), None);
+        assert_eq!(PciAddress::parse("not-a-pci-addr"), None);
+        assert_eq!(PciAddress::parse("0000:89"), None);
+        assert_eq!(PciAddress::parse("0000:89:00"), None);
+        assert_eq!(PciAddress::parse("0000:89:zz.0"), None);
+    }
+
+    #[test]
+    fn test_pci_address_round_trip_identity() {
+        // Whatever Display produces must parse back to the same tuple, so
+        // callers that stringify-then-reparse don't drift.
+        let cases = [
+            PciAddress {
+                domain: 0,
+                bus: 0,
+                device: 0,
+                function: 0,
+            },
+            PciAddress {
+                domain: 0,
+                bus: 0xc2,
+                device: 0,
+                function: 0,
+            },
+            PciAddress {
+                domain: 0xdead_beef,
+                bus: 0xff,
+                device: 0x1f,
+                function: 7,
+            },
+        ];
+        for a in &cases {
+            let s = a.to_string();
+            assert_eq!(PciAddress::parse(&s), Some(*a), "round trip for {}", s);
+        }
+    }
 
     #[test]
     fn test_numa_node_equality() {

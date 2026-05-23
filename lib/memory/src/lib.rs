@@ -45,7 +45,7 @@ pub use device::DeviceStorage;
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
 #[cfg(target_os = "linux")]
-pub use numa::{NumaNode, is_numa_disabled, is_numa_enabled};
+pub use numa::{NumaNode, PciAddress, is_numa_disabled, is_numa_enabled};
 #[cfg(target_os = "linux")]
 pub use resources::{GpuView, NumaNodeView, Resources, SliceSource, SlicingMode};
 pub use offset::OffsetBuffer;
