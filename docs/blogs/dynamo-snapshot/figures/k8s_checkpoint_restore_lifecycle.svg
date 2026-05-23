@@ -42,18 +42,20 @@
 <rect x="830.0" y="270" width="320" height="120" fill="#000000" stroke="#2a2a2a" stroke-width="1"/>
 <text class="card-title" x="990.0" y="334.0" text-anchor="middle">Placeholder</text>
 <text class="card-meta" x="990.0" y="354.0" text-anchor="middle">sleep &#8734;</text>
+<circle cx="830.0" cy="224" r="11" fill="#74b711"/>
+<text class="step-num-green" x="830.0" y="228" text-anchor="middle">1</text>
 <rect x="810.0" y="440" width="360" height="90" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <text class="card-title" x="856.0" y="470">snapshot-agent</text>
 <text class="card-meta" x="856.0" y="492">privileged DaemonSet</text>
 <circle cx="830.0" cy="466" r="11" fill="#74b711"/>
-<text class="step-num-green" x="830.0" y="470" text-anchor="middle">1</text>
+<text class="step-num-green" x="830.0" y="470" text-anchor="middle">2</text>
 <line x1="180.0" y1="410" x2="180.0" y2="432" stroke="#5a5a5a" stroke-width="1" stroke-dasharray="3 3"/>
 <polygon points="175.0,432 185.0,432 180.0,440" fill="#5a5a5a"/>
 <text class="arrow-meta" x="192.0" y="429.0">Observe from host</text>
 <line x1="880.0" y1="440" x2="880.0" y2="418" stroke="#74b711" stroke-width="1.5"/>
 <polygon points="875.0,418 885.0,418 880.0,410" fill="#74b711"/>
 <circle cx="902.0" cy="425.0" r="11" fill="#74b711"/>
-<text class="step-num-green" x="902.0" y="429.0" text-anchor="middle">2</text>
+<text class="step-num-green" x="902.0" y="429.0" text-anchor="middle">3</text>
 <text class="arrow-meta" x="920.0" y="429.0">Enter and restore inside NS</text>
 <rect x="570.0" y="430.0" width="140" height="110" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
 <text class="card-title" x="640.0" y="481.0" text-anchor="middle">PVC</text>
