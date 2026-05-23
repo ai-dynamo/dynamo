@@ -797,6 +797,12 @@ jobs:
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
       - dynamo-pipeline
+      - parser-build
+      - parser-test
+      - parser-vllm-build
+      - parser-vllm-test
+      - parser-sglang-build
+      - parser-sglang-test
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

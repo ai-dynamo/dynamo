@@ -109,7 +109,6 @@ jobs:
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
       with:
         path: |
-          ~/.cargo/bin/
           ~/.cargo/registry
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-
@@ -121,6 +120,8 @@ jobs:
       run: cargo test --locked -p dynamo-parsers --all-targets --no-run
     - name: Run parser unit tests
       run: cargo test --locked -p dynamo-parsers --all-targets
+    - name: Check downstream crates compile
+      run: cargo check --locked -p dynamo-llm
 
   parser-rust-clippy:
     needs: changed-files
@@ -139,7 +140,6 @@ jobs:
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
       with:
         path: |
-          ~/.cargo/bin/
           ~/.cargo/registry
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-
@@ -147,6 +147,8 @@ jobs:
       run: rustup component add clippy
     - name: Run parser clippy
       run: cargo clippy -p dynamo-parsers --no-deps --all-targets -- -D warnings
+    - name: Check downstream crates compile
+      run: cargo check --locked -p dynamo-llm
 
   rust-tests:
     needs: changed-files
