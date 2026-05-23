@@ -5,9 +5,10 @@ use kvbm_physical::manager::SerializedLayout;
 
 use super::{
     Arc, ConnectRemoteMessage, DirectWorker, ExecuteRemoteOnboardForInstanceMessage,
-    LocalTransferMessage, ObjectGetBlocksMessage, ObjectHasBlocksMessage, ObjectHasBlocksResponse,
-    ObjectPutBlocksMessage, ObjectPutGetBlocksResponse, RemoteOffloadMessage, RemoteOnboardMessage,
-    Result, TransferOptions, WorkerTransfers,
+    ExecuteRemoteOnboardForInstanceRankMessage, LocalTransferMessage, ObjectGetBlocksMessage,
+    ObjectHasBlocksMessage, ObjectHasBlocksResponse, ObjectPutBlocksMessage,
+    ObjectPutGetBlocksResponse, RemoteOffloadMessage, RemoteOnboardMessage, RemotePullPlanMessage,
+    Result, TransferOptions, WorkerTransfers, handler_names,
 };
 use crate::object::ObjectBlockOps;
 
@@ -55,6 +56,8 @@ impl VeloWorkerService {
         self.register_export_metadata_handler()?;
         self.register_connect_remote_handler()?;
         self.register_execute_remote_onboard_for_instance_handler()?;
+        self.register_execute_remote_onboard_for_instance_rank_handler()?;
+        self.register_execute_remote_pull_plan_handler()?;
         // Object storage handlers
         self.register_object_has_blocks_handler()?;
         self.register_object_put_blocks_handler()?;
@@ -66,7 +69,7 @@ impl VeloWorkerService {
         let worker = self.worker.clone();
 
         // Use unary_handler_async for explicit response (client waits for transfer completion)
-        let handler = Handler::unary_handler_async("kvbm.worker.local_transfer", move |ctx| {
+        let handler = Handler::unary_handler_async(handler_names::LOCAL_TRANSFER, move |ctx| {
             let worker = worker.clone();
 
             async move {
@@ -105,7 +108,7 @@ impl VeloWorkerService {
         let worker = self.worker.clone();
 
         // Use unary_handler_async for explicit response (works with unary client)
-        let handler = Handler::unary_handler_async("kvbm.worker.remote_onboard", move |ctx| {
+        let handler = Handler::unary_handler_async(handler_names::REMOTE_ONBOARD, move |ctx| {
             let worker = worker.clone();
 
             async move {
@@ -140,7 +143,7 @@ impl VeloWorkerService {
         let worker = self.worker.clone();
 
         // Use unary_handler_async for explicit response (works with unary client)
-        let handler = Handler::unary_handler_async("kvbm.worker.remote_offload", move |ctx| {
+        let handler = Handler::unary_handler_async(handler_names::REMOTE_OFFLOAD, move |ctx| {
             let worker = worker.clone();
 
             async move {
@@ -174,7 +177,7 @@ impl VeloWorkerService {
     fn register_import_metadata_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = Handler::unary_handler("kvbm.worker.import_metadata", move |ctx| {
+        let handler = Handler::unary_handler(handler_names::IMPORT_METADATA, move |ctx| {
             let metadata = SerializedLayout::from_bytes(ctx.payload.to_vec());
             let handles = worker.import_metadata(metadata)?;
             Ok(Some(Bytes::from(serde_json::to_vec(&handles)?)))
@@ -188,7 +191,7 @@ impl VeloWorkerService {
     fn register_export_metadata_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = Handler::unary_handler("kvbm.worker.export_metadata", move |_ctx| {
+        let handler = Handler::unary_handler(handler_names::EXPORT_METADATA, move |_ctx| {
             let response = worker.export_metadata()?;
             Ok(Some(Bytes::from(response.as_bytes().to_vec())))
         })
@@ -202,7 +205,7 @@ impl VeloWorkerService {
     fn register_connect_remote_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = Handler::unary_handler("kvbm.worker.connect_remote", move |ctx| {
+        let handler = Handler::unary_handler(handler_names::CONNECT_REMOTE, move |ctx| {
             let message: ConnectRemoteMessage = serde_json::from_slice(&ctx.payload)?;
 
             // Deserialize metadata (SerializedLayout stored as raw bytes)
@@ -229,7 +232,7 @@ impl VeloWorkerService {
         let worker = self.worker.clone();
 
         let handler =
-            Handler::unary_handler_async("kvbm.worker.remote_onboard_for_instance", move |ctx| {
+            Handler::unary_handler_async(handler_names::REMOTE_ONBOARD_FOR_INSTANCE, move |ctx| {
                 let worker = worker.clone();
                 async move {
                     let message: ExecuteRemoteOnboardForInstanceMessage =
@@ -262,6 +265,67 @@ impl VeloWorkerService {
         Ok(())
     }
 
+    /// Register handler for execute_remote_onboard_for_instance_rank — the
+    /// rank-aware variant introduced by AB-1c.
+    fn register_execute_remote_onboard_for_instance_rank_handler(&self) -> Result<()> {
+        let worker = self.worker.clone();
+
+        let handler = Handler::unary_handler_async(
+            handler_names::REMOTE_ONBOARD_FOR_INSTANCE_RANK,
+            move |ctx| {
+                let worker = worker.clone();
+                async move {
+                    let message: ExecuteRemoteOnboardForInstanceRankMessage =
+                        serde_json::from_slice(&ctx.payload)?;
+
+                    let bounce_buffer_parts = message.options.bounce_buffer_parts();
+                    let mut options: TransferOptions = message.options.into();
+                    if let Some((handle, block_ids)) = bounce_buffer_parts {
+                        options.bounce_buffer =
+                            Some(worker.create_bounce_buffer(handle, block_ids)?);
+                    }
+
+                    let notification = worker.execute_remote_onboard_for_instance_rank(
+                        message.instance_id,
+                        message.remote_rank,
+                        message.remote_logical_type,
+                        message.src_block_ids,
+                        message.dst,
+                        Arc::from(message.dst_block_ids),
+                        options,
+                    )?;
+
+                    notification.await?;
+                    Ok(Some(Bytes::new()))
+                }
+            },
+        )
+        .build();
+
+        self.messenger.register_handler(handler)?;
+        Ok(())
+    }
+
+    /// Register handler for execute_remote_pull_plan — the AB-3
+    /// multi-shard cross-parallelism pull entrypoint.
+    fn register_execute_remote_pull_plan_handler(&self) -> Result<()> {
+        let worker = self.worker.clone();
+
+        let handler = Handler::unary_handler_async(handler_names::REMOTE_PULL_PLAN, move |ctx| {
+            let worker = worker.clone();
+            async move {
+                let message: RemotePullPlanMessage = serde_json::from_slice(&ctx.payload)?;
+                let notification = worker.execute_remote_pull_plan(message.plan)?;
+                notification.await?;
+                Ok(Some(Bytes::new()))
+            }
+        })
+        .build();
+
+        self.messenger.register_handler(handler)?;
+        Ok(())
+    }
+
     // ========================================================================
     // Object Storage Handlers
     // ========================================================================
@@ -270,7 +334,7 @@ impl VeloWorkerService {
     fn register_object_has_blocks_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = Handler::unary_handler_async("kvbm.worker.object_has_blocks", move |ctx| {
+        let handler = Handler::unary_handler_async(handler_names::OBJECT_HAS_BLOCKS, move |ctx| {
             let worker = worker.clone();
 
             async move {
@@ -293,7 +357,7 @@ impl VeloWorkerService {
     fn register_object_put_blocks_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = Handler::unary_handler_async("kvbm.worker.object_put_blocks", move |ctx| {
+        let handler = Handler::unary_handler_async(handler_names::OBJECT_PUT_BLOCKS, move |ctx| {
             let worker = worker.clone();
 
             async move {
@@ -319,7 +383,7 @@ impl VeloWorkerService {
     fn register_object_get_blocks_handler(&self) -> Result<()> {
         let worker = self.worker.clone();
 
-        let handler = Handler::unary_handler_async("kvbm.worker.object_get_blocks", move |ctx| {
+        let handler = Handler::unary_handler_async(handler_names::OBJECT_GET_BLOCKS, move |ctx| {
             let worker = worker.clone();
 
             async move {

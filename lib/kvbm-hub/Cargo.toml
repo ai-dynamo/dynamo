@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "kvbm-hub"
+version.workspace = true
+edition.workspace = true
+description = "Central coordination hub for KVBM velo clients (connector/engine) — HTTP PeerDiscovery + control plane"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+figment     = { version = "0.10", features = ["env", "toml", "json"] }
+clap        = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { workspace = true }
+
+
+# Velo (discovery trait, Velo facade, handlers, messenger-backed work queues)
+velo     = { workspace = true, features = ["queue-messenger"] }
+velo-ext = { workspace = true }
+
+# KVBM
+kvbm-common    = { workspace = true }
+kvbm-protocols = { workspace = true, features = ["client"] }
+kvbm-logical   = { workspace = true }
+dynamo-tokens  = { workspace = true }
+# Pure config crate (no velo, no CUDA — runtime construction lives in
+# `kvbm-runtime`). Used by the `kvbm_hub` server's `--kvbm`/`--kvbm-config`
+# flags and the `kvbmctl` render module to apply + round-trip-validate a
+# `kv_connector_extra_config` through the same parser the connector uses.
+# Acyclic (kvbm-config does not depend on kvbm-hub) and CUDA-free, so it is a
+# base dependency; the hub server stays CUDA-free.
+kvbm-config    = { workspace = true }
+
+# KV index feature (positional block index + ZMQ event ingest)
+dashmap      = { workspace = true }
+rmp-serde    = { workspace = true }
+tmq          = { workspace = true }
+
+# Async / core
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+parking_lot  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+url          = { workspace = true }
+uuid         = { workspace = true }
+
+# HTTP server
+axum       = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+[features]
+# Enables the `kvbmctl` CLI binary and its `render` module. `kvbm-config` is now
+# a CUDA-free base dependency, so this feature is just a compile gate for the
+# CLI/render surface — it no longer governs CUDA. The hub server stays CUDA-free
+# either way.
+default = ["kvbmctl"]
+kvbmctl = []
+
+# The `kvbm_hub` server binary is auto-discovered and needs no features.
+# `kvbmctl` is gated so a default build never pulls `kvbm-config`/CUDA; build it
+# with `cargo run --bin kvbmctl --features kvbmctl`.
+[[bin]]
+name = "kvbmctl"
+path = "src/bin/kvbmctl.rs"
+required-features = ["kvbmctl"]
+
+[dev-dependencies]
+tokio              = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tracing-subscriber = { workspace = true }
+velo-transports    = { version = "0.1.0" }
+# Used by the indexer find_blocks integration test to build real PLHs and seed
+# the index, the same way the in-crate index unit tests do.
+kvbm-logical       = { workspace = true }
+dynamo-tokens      = { workspace = true }

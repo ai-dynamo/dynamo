@@ -418,7 +418,7 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
             multi_connectors.append(
                 {
                     "kv_connector": "DynamoConnector",
-                    "kv_connector_module_path": "kvbm.vllm_integration.connector",
+                    "kv_connector_module_path": "kvbm.v2.vllm.connector",
                     "kv_role": "kv_both",
                 }
             )
@@ -431,7 +431,7 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
             "kv_connector": "PdConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"connectors": multi_connectors},
-            "kv_connector_module_path": "kvbm.vllm_integration.connector",
+            "kv_connector_module_path": "kvbm.v2.vllm.connector",
         }
     )
 

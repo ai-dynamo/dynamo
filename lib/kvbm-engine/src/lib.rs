@@ -23,14 +23,17 @@ pub struct G3;
 #[derive(Clone, Copy, Debug)]
 pub struct G4;
 
+pub mod audit;
 #[cfg(feature = "collectives")]
 pub mod collectives;
+
 #[doc = include_str!("../docs/leader.md")]
 pub mod leader;
 #[doc = include_str!("../docs/object.md")]
 pub mod object;
 #[doc = include_str!("../docs/offload.md")]
 pub mod offload;
+pub mod p2p;
 pub mod pubsub;
 #[doc = include_str!("../docs/runtime.md")]
 pub mod runtime;

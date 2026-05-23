@@ -6,10 +6,13 @@
 //! Configures which NixL backends (UCX, GDS, etc.) are enabled for RDMA transfers,
 //! along with optional parameters for each backend.
 
-use dynamo_memory::nixl::NixlBackendConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use validator::Validate;
+
+// Conversion to `dynamo_memory::nixl::NixlBackendConfig` lives in the
+// `kvbm-runtime` crate (`kvbm_runtime::nixl_backend_config`) so this crate
+// stays free of the `dynamo-memory` (CUDA) dependency.
 
 /// NixL backend configuration.
 ///
@@ -77,15 +80,6 @@ impl NixlConfig {
         }
     }
 
-    pub fn from_nixl_backend_config(config: NixlBackendConfig) -> Self {
-        let backends: HashMap<String, HashMap<String, String>> = config
-            .iter()
-            .map(|(backend, params)| (backend.to_string(), params.clone()))
-            .collect();
-
-        Self { backends }
-    }
-
     /// Add a backend with default parameters.
     /// Backend name is normalized to uppercase.
     pub fn with_backend(mut self, name: impl Into<String>) -> Self {
@@ -127,12 +121,6 @@ impl NixlConfig {
     /// Iterate over all enabled backends and their parameters.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &HashMap<String, String>)> {
         self.backends.iter()
-    }
-}
-
-impl From<NixlConfig> for NixlBackendConfig {
-    fn from(config: NixlConfig) -> Self {
-        NixlBackendConfig::new(config.backends)
     }
 }
 

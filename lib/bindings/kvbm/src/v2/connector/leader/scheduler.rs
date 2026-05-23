@@ -15,7 +15,7 @@ use crate::to_pyerr;
 /// This provides a PyO3 interface to the Rust SchedulerOutput struct,
 /// enabling Python code to build scheduler outputs that can be passed
 /// to the connector leader's build_connector_meta method.
-#[pyclass(name = "SchedulerOutput")]
+#[pyclass(name = "SchedulerOutput", skip_from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PySchedulerOutput {
     inner: RustSchedulerOutput,

@@ -5,22 +5,6 @@
 
 pub mod connector;
 pub mod runtime;
-// pub mod scheduler;
-//
-// DEFERRED — the on-disk `scheduler/{mod,config,status}.rs` files reference
-// `dynamo_kvbm::v2::integrations::scheduler::{Scheduler, KVCacheManager}`,
-// `dynamo_kvbm::v2::logical::{BlockRegistry, manager::BlockManager}`,
-// `dynamo_kvbm::v2::utils::tinylfu::TinyLFUTracker`, and `dynamo_kvbm::G1`
-// — all from the pre-decomposition `dynamo_kvbm` crate. Re-enabling the
-// module requires porting those types into the new decomposed kvbm-* crates
-// (likely `kvbm-engine` + `kvbm-logical`).
-//
-// The Python layer (`kvbm/v2/vllm/schedulers/dynamo.py:39-55`) already has
-// a `_RUST_SCHEDULER_AVAILABLE = False` fallback that degrades to a vLLM
-// passthrough — KV transfer offload still routes through the v2
-// ConnectorLeader/Worker, which IS exported below. Phase 5 of the
-// ACTIVE_PLAN does not need the Rust scheduler; restoring it is shadow-mode
-// divergence work and can wait for an explicit driver.
 pub mod torch;
 pub mod vllm;
 

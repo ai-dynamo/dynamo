@@ -2,48 +2,53 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use ::velo::Messenger;
 use anyhow::Result;
 use dashmap::DashMap;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, watch};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use kvbm_config::DisaggregationRole;
+use kvbm_protocols::control::{
+    ControlError, HostInfo, InstanceDescription, LayoutDescription, ModuleId, TierCapacity,
+    TierKind, WorkerInfo,
+};
 
 use crate::{
-    BlockId, G2, G3, InstanceId, SequenceHash, object::ObjectBlockOps, worker::RemoteDescriptor,
+    BlockId, G2, G3, InstanceId, SequenceHash,
+    object::ObjectBlockOps,
+    p2p::{
+        RemoteBlockSet,
+        session::{SessionFactory, SessionManager},
+    },
+    worker::RemoteDescriptor,
 };
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::{
     blocks::{BlockRegistry, ImmutableBlock},
     manager::BlockManager,
 };
+use kvbm_observability::SharedKvbmObservability;
 use kvbm_physical::transfer::{TransferCompleteNotification, TransferOptions};
 
-use kvbm_physical::manager::{LayoutHandle, SerializedLayout};
+use kvbm_physical::manager::SerializedLayout;
 
 use super::{
     super::worker::Worker,
     super::worker::group::{ParallelWorkers, SpmdParallelWorkers},
-    AsyncSessionResult,
-    FindMatchesOptions,
-    FindMatchesResult,
-    Leader,
-    OnboardingStatus,
-    ReadyResult,
-    // Legacy SessionHandle for deferred operations
-    SessionHandle as LegacySessionHandle,
-    SessionId,
-    StagingMode,
+    AsyncSessionResult, FindMatchesOptions, FindMatchesResult, Leader, MetadataTransport,
+    OnboardingStatus, ReadyResult, SessionId,
     accessor::{BlockAccessor, PolicyContext},
-    session::{
-        BlockHolder, ControlRole, ControllableSessionOptions, ControllableSessionResult,
-        InitiatorSession, MessageTransport, OnboardMessage, OnboardSessionTx, ResponderSession,
-        ServerSession, ServerSessionHandle, ServerSessionOptions, SessionHandle, SessionMessage,
-        SessionMessageTx, SessionPhase, create_server_session, session_handle_state_channel,
-        session_message_channel,
-    },
+    composer,
+    consolidator::{ConsolidatorCell, ConsolidatorParams, new_cell, spawn_into_cell},
+    discovery::RemoteDiscoveryHandle,
+    dispatch::{PullRef, WirePullOptions, plan_pull},
+    parallelism::{ParallelismTemplate, stamp_parallelism_descriptors},
     velo::{ExportMetadataCallback, VeloLeaderService},
 };
 
@@ -57,8 +62,8 @@ use super::{
 /// Key responsibilities:
 /// - **Block matching**: finding which requested sequence hashes are already
 ///   cached locally (via `BlockAccessor` policies).
-/// - **Session management**: creating, attaching, and driving onboard sessions
-///   between endpoint (source) and controller (destination) roles.
+/// - **Block matching**: resolving which requested sequence hashes are cached
+///   locally across the G2/G3 tiers via `find_matches`.
 /// - **Remote connectivity**: exchanging serialized layout metadata with peer
 ///   instances so workers can perform RDMA transfers.
 /// - **Velo RPC**: registering handlers via `VeloLeaderService` so remote
@@ -67,6 +72,16 @@ use super::{
 pub struct InstanceLeader {
     /// Velo instance for distributed communication.
     messenger: Arc<Messenger>,
+
+    /// Full Velo handle when available. Required for peer registration on the
+    /// remote-search path (the connector's `PeerResolver` calls
+    /// `velo.register_peer`), which fans out to both the messenger registry and
+    /// the streaming transport registry. `messenger.register_peer` only handles
+    /// the messenger side, so without this the streaming-transport registry
+    /// stays empty and `attach_anchor` fails with
+    /// "TCP streaming: peer <id> not registered". Optional because some
+    /// test/bench paths build a leader with just a messenger.
+    velo: Option<Arc<velo::Velo>>,
 
     /// Block registry for deduplication.
     #[allow(dead_code)]
@@ -86,27 +101,18 @@ pub struct InstanceLeader {
     /// Used for RDMA transfers with proper handle mapping storage.
     parallel_worker: Option<Arc<dyn ParallelWorkers>>,
 
-    /// Map of active sessions (session_id -> message channel).
-    sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
-
     /// Cached worker metadata (avoids querying workers repeatedly).
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
 
     /// Map of session states for holding blocks alive (RAII).
+    ///
+    /// Populated by the local-staging `AsyncSession` path in `find_matches`
+    /// and cleared via [`InstanceLeader::release_session`].
     session_states: Arc<DashMap<SessionId, SessionState>>,
 
-    /// List of remote leader instance IDs (mutable for post-construction configuration).
-    remote_leaders: Arc<std::sync::RwLock<Vec<InstanceId>>>,
-
-    /// Message transport for session communication.
-    transport: Arc<MessageTransport>,
-
-    // ========================================================================
-    // Unified Session Protocol
-    // ========================================================================
-    /// Map of session message receivers.
-    /// Used by SessionHandle/SessionEndpoint/ControllableSession.
-    session_sessions: Arc<DashMap<SessionId, SessionMessageTx>>,
+    /// Client for the `kvbm.leader.export_metadata` RPC, used to import a peer
+    /// leader's worker layout metadata before an RDMA pull.
+    transport: Arc<MetadataTransport>,
 
     // ========================================================================
     // G4/Object Storage
@@ -115,25 +121,136 @@ pub struct InstanceLeader {
     /// Leader calls has_blocks on S3 directly, coordinates workers for get_blocks.
     object_client: Option<Arc<dyn ObjectBlockOps>>,
 
+    // ========================================================================
+    // Cross-parallelism metadata
+    // ========================================================================
+    /// Parallelism template used to stamp [`ParallelismDescriptor`]s onto
+    /// per-worker [`SerializedLayout`] payloads before forwarding to peer
+    /// leaders. When `None`, the export callback returns the raw worker
+    /// metadata unchanged — preserving pre-AB-1a behaviour for callers
+    /// that have not yet configured cross-parallelism.
+    parallelism_template: Option<ParallelismTemplate>,
+
+    /// The block-layout mode this leader operates in (Operational or
+    /// Universal). Stored at build time from
+    /// [`InstanceLeaderBuilder::block_layout_mode`] so [`Self::describe`] can
+    /// include the same mode in the `layout_compat` payload that
+    /// [`register_with_hub`] emitted at register time — matching by
+    /// construction instead of re-deriving from exports.
+    block_layout_mode: kvbm_common::BlockLayoutMode,
+
+    // ========================================================================
+    // Disagg control plane
+    // ========================================================================
+    /// Keeps disagg sessions opened by the control plane's `transfer` module
+    /// alive until their lifecycle ends.
+    session_manager: Arc<SessionManager>,
+
+    /// The disagg `SessionFactory`, injected post-construction via
+    /// [`InstanceLeader::set_session_factory`]. Empty until the connector
+    /// builds the factory (which itself holds an `Arc<InstanceLeader>`, so it
+    /// cannot exist at `InstanceLeader` build time). The control plane's
+    /// `transfer` module reads it at RPC-invocation time, by which point a
+    /// remote client could only have connected after full init.
+    session_factory: Arc<OnceLock<Arc<dyn SessionFactory>>>,
+
+    // ========================================================================
+    // Describe state (Phase C)
+    // ========================================================================
+    /// Disaggregation role this leader plays — `None` for standalone. Set at
+    /// construction time from `KvbmConfig::disagg.as_ref().map(|d| d.role)`.
+    role: Option<DisaggregationRole>,
+
+    /// Process start time. Captured at construction; surfaced via
+    /// [`Self::describe`].
+    started_at: SystemTime,
+
+    /// Stringified hub instance id, injected post-construction via
+    /// [`Self::set_hub_instance_id`] when the connector successfully
+    /// registers with the hub. Empty for standalone leaders or before
+    /// hub registration completes.
+    hub_instance_id: Arc<OnceLock<String>>,
+
+    /// Opaque JSON of the leader's `KvbmConfig`, injected post-construction
+    /// via [`Self::set_config_blob`]. The connector serialises its
+    /// `KvbmRuntime::config()` and stores the result here so `describe`
+    /// can surface it to the hub UI without `kvbm-protocols` depending on
+    /// `kvbm-config`. First-write-wins; subsequent calls are no-ops.
+    config_blob: Arc<OnceLock<serde_json::Value>>,
+
+    /// Modules enabled on this leader's control plane. Injected
+    /// post-construction by the connector via [`Self::set_modules`] after
+    /// `ControlPlaneBuilder::register` returns. The leader cannot fetch
+    /// this from the control plane directly because `ControlPlane` is
+    /// built after `InstanceLeader` and isn't held inside it. Empty until
+    /// set; surfaced via [`Self::describe`].
+    modules: Arc<OnceLock<Vec<ModuleId>>>,
+
+    /// Shared Prometheus registry + metric handles for this leader, as
+    /// owned by [`crate::KvbmRuntime`]. Optional because some test paths
+    /// (e.g. `testing/distributed.rs`) build a bare leader without a
+    /// runtime. The `metrics` control module reads this; when `None`,
+    /// the module is not registered.
+    observability: Option<SharedKvbmObservability>,
+
     /// When true, host (G2) is bypassed: disk hits are returned directly as
     /// G3 blocks for G3→G1 transfer instead of staging through G2. Driven by
     /// `kvbm_config::CacheConfig::bypass_host_cache()` at init time.
     pub(crate) bypass_host: bool,
+
+    // ========================================================================
+    // In-process consolidator (optional)
+    // ========================================================================
+    /// Live in-process consolidator, owned by this leader.
+    ///
+    /// Populated post-construction via [`Self::with_consolidator`];  starts
+    /// empty.  Backed by `Arc<OnceLock<…>>` so the first call wins and the
+    /// guard is kept alive until the last `InstanceLeader` clone is dropped
+    /// (at which point the guard's `Drop` fires and shuts the background tasks
+    /// down without blocking the caller).
+    consolidator: ConsolidatorCell,
+
+    // ========================================================================
+    // Remote search (hub-indexer discovery + transfer-plane pull)
+    // ========================================================================
+    /// Optional remote-block discovery (the hub's KV indexer), injected
+    /// post-construction by the connector via [`Self::set_remote_discovery`]
+    /// — the indexer client/peer resolver only exist after hub registration,
+    /// which happens after the leader is built (same lifetime problem as
+    /// [`Self::set_session_factory`]). When set,
+    /// [`find_matches_with_options`](Self::find_matches_with_options) with
+    /// `search_remote` drives a transfer-plane remote pull for the
+    /// locally-uncached prefix; when unset, no remote search runs.
+    remote_discovery: Arc<OnceLock<RemoteDiscoveryHandle>>,
+
+    /// Block-count threshold for remote search: a search is issued only when
+    /// the number of remaining locally-uncached full blocks **exceeds** this
+    /// value. Derived from `RemoteSearch::min_remote_blocks(block_size)` at
+    /// build time.
+    min_remote_blocks: usize,
 }
 
 /// Builder for InstanceLeader.
 #[derive(Default)]
 pub struct InstanceLeaderBuilder {
     messenger: Option<Arc<Messenger>>,
+    velo: Option<Arc<velo::Velo>>,
     registry: Option<BlockRegistry>,
     g2_manager: Option<Arc<BlockManager<G2>>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
     workers: Vec<Arc<dyn Worker>>,
-    sessions: Option<Arc<DashMap<SessionId, OnboardSessionTx>>>,
-    remote_leaders: Option<Vec<InstanceId>>,
+    /// Direct injection of a [`ParallelWorkers`] implementation. When set,
+    /// bypasses the `workers` → [`SpmdParallelWorkers`] construction in
+    /// [`Self::build`] so callers can supply a custom or test-stub impl.
+    parallel_worker: Option<Arc<dyn ParallelWorkers>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+    parallelism_template: Option<ParallelismTemplate>,
+    role: Option<DisaggregationRole>,
+    observability: Option<SharedKvbmObservability>,
     bypass_host: bool,
+    block_layout_mode: kvbm_common::BlockLayoutMode,
+    min_remote_blocks: usize,
 }
 
 impl InstanceLeaderBuilder {
@@ -152,11 +269,22 @@ impl InstanceLeaderBuilder {
     ///     .build()?;
     /// ```
     pub fn with_runtime(self, runtime: &crate::KvbmRuntime) -> Self {
-        self.messenger(runtime.messenger().clone())
+        let mut b = self
+            .messenger(runtime.messenger().clone())
+            .observability(runtime.observability().clone());
+        if let Some(v) = runtime.velo() {
+            b = b.velo(v.clone());
+        }
+        b
     }
 
     pub fn messenger(mut self, messenger: Arc<Messenger>) -> Self {
         self.messenger = Some(messenger);
+        self
+    }
+
+    pub fn velo(mut self, velo: Arc<velo::Velo>) -> Self {
+        self.velo = Some(velo);
         self
     }
 
@@ -197,8 +325,12 @@ impl InstanceLeaderBuilder {
         self
     }
 
-    pub fn remote_leaders(mut self, leaders: Vec<InstanceId>) -> Self {
-        self.remote_leaders = Some(leaders);
+    /// Inject a [`ParallelWorkers`] implementation directly. When set, the
+    /// builder skips the `workers` → [`SpmdParallelWorkers`] construction and
+    /// stores this handle as-is. Useful for tests and for callers that already
+    /// hold a concrete `ParallelWorkers` (e.g. a custom dispatch layer).
+    pub fn parallel_worker(mut self, parallel_worker: Arc<dyn ParallelWorkers>) -> Self {
+        self.parallel_worker = Some(parallel_worker);
         self
     }
 
@@ -230,11 +362,56 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    /// Set the parallelism template used to stamp [`ParallelismDescriptor`]s
+    /// onto per-worker metadata exported to peer leaders. When unset, the
+    /// export RPC returns raw worker metadata (pre-AB-1a behaviour); the
+    /// peer's cross-parallelism dispatcher then falls back to the symmetric
+    /// path.
+    pub fn parallelism_template(mut self, template: ParallelismTemplate) -> Self {
+        self.parallelism_template = Some(template);
+        self
+    }
+
+    /// Set the block-layout compatibility policy applied at
+    /// `connect_remote`. Defaults to
+    /// [`kvbm_common::BlockLayoutMode::Operational`] (strict per-worker
+    /// equality, the pre-existing behaviour). Sourced from
+    /// `KvbmConfig.block_layout` at the builder call site.
+    pub fn block_layout_mode(mut self, mode: kvbm_common::BlockLayoutMode) -> Self {
+        self.block_layout_mode = mode;
+        self
+    }
+
+    /// Set the disaggregation role this leader plays. Surfaced via
+    /// [`InstanceLeader::describe`] for the hub UI. Defaults to `None`
+    /// (standalone — not part of a P/D split).
+    pub fn role(mut self, role: DisaggregationRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    /// Set the shared KVBM observability handle (Prometheus registry +
+    /// metric collectors) for this leader. Sourced from
+    /// [`crate::KvbmRuntime::observability`]; populated by
+    /// [`Self::with_runtime`]. The `metrics` control module reads this;
+    /// callers that don't need that module can leave it unset.
+    pub fn observability(mut self, observability: SharedKvbmObservability) -> Self {
+        self.observability = Some(observability);
+        self
+    }
+
+    /// Set the remote-search block-count threshold. A search is issued only
+    /// when the number of remaining locally-uncached full blocks exceeds this.
+    pub fn min_remote_blocks(mut self, n: usize) -> Self {
+        self.min_remote_blocks = n;
+        self
+    }
+
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
             .ok_or_else(|| anyhow::anyhow!("Velo instance required"))?;
-        let transport = Arc::new(MessageTransport::velo(messenger.clone()));
+        let transport = Arc::new(MetadataTransport::new(messenger.clone()));
 
         // Create event system for notification aggregation
         let events = Arc::new(messenger.event_manager());
@@ -250,19 +427,35 @@ impl InstanceLeaderBuilder {
         // todo: we will need a common builder pattern for creating "general" parallel workers
         // - we could also use an enum and match as the number of types will be limited
 
-        // Create parallel worker if workers are provided
-        let parallel_worker: Option<Arc<dyn ParallelWorkers>> = if !self.workers.is_empty() {
-            Some(Arc::new(SpmdParallelWorkers::new(
-                self.workers.to_vec(),
-                events.clone(),
-                runtime.clone(),
-            )))
+        // Resolve the parallel worker handle. An explicit override from the
+        // builder wins over the `workers` → SpmdParallelWorkers default
+        // construction. When a parallelism template is configured (AB-1a step
+        // 2), install it on the SPMD layer so connect_remote can run cross-
+        // leader compatibility gates (AB-1b). The cached worker metadata is
+        // forwarded so the block-layout compat check in connect_remote can
+        // compare against this leader's actual per-worker SerializedLayouts.
+        let parallel_worker: Option<Arc<dyn ParallelWorkers>> = if let Some(pw) =
+            self.parallel_worker.clone()
+        {
+            Some(pw)
+        } else if !self.workers.is_empty() {
+            let mut spmd =
+                SpmdParallelWorkers::new(self.workers.to_vec(), events.clone(), runtime.clone())
+                    .with_block_layout_mode(self.block_layout_mode);
+            if let Some(template) = self.parallelism_template.clone() {
+                spmd = spmd.with_local_template(template);
+            }
+            if let Some(metadata) = self.cached_worker_metadata.clone() {
+                spmd = spmd.with_local_metadata(metadata);
+            }
+            Some(Arc::new(spmd))
         } else {
             None
         };
 
         Ok(InstanceLeader {
             messenger,
+            velo: self.velo,
             registry: self
                 .registry
                 .ok_or_else(|| anyhow::anyhow!("block registry required"))?,
@@ -273,15 +466,23 @@ impl InstanceLeaderBuilder {
             workers: self.workers,
             parallel_worker,
             cached_worker_metadata: self.cached_worker_metadata,
-            sessions: self.sessions.unwrap_or_else(|| Arc::new(DashMap::new())),
             session_states: Arc::new(DashMap::new()),
-            remote_leaders: Arc::new(std::sync::RwLock::new(
-                self.remote_leaders.unwrap_or_default(),
-            )),
             transport,
-            session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
+            parallelism_template: self.parallelism_template,
+            block_layout_mode: self.block_layout_mode,
+            session_manager: SessionManager::with_default_watchdog(runtime),
+            session_factory: Arc::new(OnceLock::new()),
+            role: self.role,
+            started_at: SystemTime::now(),
+            hub_instance_id: Arc::new(OnceLock::new()),
+            config_blob: Arc::new(OnceLock::new()),
+            modules: Arc::new(OnceLock::new()),
+            observability: self.observability,
             bypass_host: self.bypass_host,
+            consolidator: new_cell(),
+            remote_discovery: Arc::new(OnceLock::new()),
+            min_remote_blocks: self.min_remote_blocks,
         })
     }
 }
@@ -293,6 +494,11 @@ struct SessionState {
     matched_g2_blocks: Vec<ImmutableBlock<G2>>,
     matched_g3_blocks: Vec<ImmutableBlock<G3>>,
     status_tx: watch::Sender<OnboardingStatus>,
+    /// Cancellation for a background remote-search driver bound to this
+    /// session. `None` for sessions without a driver. [`release_session`]
+    /// fires it so a cancelled/preempted request tears the driver down
+    /// (and the driver dispatches the remote `close_session`).
+    cancel: Option<CancellationToken>,
 }
 
 /// Result of scanning for blocks across tiers.
@@ -335,6 +541,14 @@ impl InstanceLeader {
         &self.messenger
     }
 
+    /// Optional full Velo handle. Use for paths that need both messenger
+    /// and streaming-transport peer registration (e.g.
+    /// `velo.discover_and_register_peer`). `None` when the leader was
+    /// built from a bare messenger (some test/bench paths).
+    pub fn velo(&self) -> Option<&Arc<velo::Velo>> {
+        self.velo.as_ref()
+    }
+
     /// Get the tokio runtime handle from Velo.
     ///
     /// This handle should be used for spawning background tasks that need to
@@ -359,36 +573,344 @@ impl InstanceLeader {
         self.parallel_worker.clone()
     }
 
+    /// Get the injected remote-block discovery handle (the hub indexer seam)
+    /// when one has been wired via [`Self::set_remote_discovery`]. The
+    /// [`composer::OnboardingComposer`] reads this to decide whether to fire
+    /// the discovery RPC on the AsyncSession path.
+    ///
+    /// [`composer::OnboardingComposer`]: super::composer::OnboardingComposer
+    pub(super) fn remote_discovery(&self) -> Option<RemoteDiscoveryHandle> {
+        self.remote_discovery.get().cloned()
+    }
+
     /// Get the object storage client for G4 operations.
     ///
     /// Returns `Some` if object storage is configured, `None` otherwise.
-    /// The client is used by InitiatorSession for G4 parallel search.
+    /// Reserved for the parked G4 search machinery in [`crate::leader::search`].
     pub fn object_client(&self) -> Option<Arc<dyn ObjectBlockOps>> {
         self.object_client.clone()
     }
 
-    /// Add a remote leader to the search list.
+    /// The disagg [`SessionManager`] — keeps control-plane-opened sessions
+    /// alive until their lifecycle ends.
+    pub fn session_manager(&self) -> &Arc<SessionManager> {
+        &self.session_manager
+    }
+
+    /// Shared KVBM observability handle (Prometheus registry + collectors).
     ///
-    /// Remote leaders are queried during `find_matches_with_options` when
-    /// `search_remote == true`. This method allows adding remote leaders
-    /// after construction (e.g., when instance IDs are only known after
-    /// cluster setup).
-    pub fn add_remote_leader(&self, instance_id: InstanceId) {
-        let mut remote_leaders = self.remote_leaders.write().unwrap();
-        if !remote_leaders.contains(&instance_id) {
-            remote_leaders.push(instance_id);
+    /// `Some` when the leader was built via [`InstanceLeaderBuilder::with_runtime`]
+    /// (or [`InstanceLeaderBuilder::observability`] directly). `None` for bare
+    /// test leaders that bypass the runtime. The control plane's `metrics`
+    /// module reads this; when `None`, the module is not registered.
+    pub fn observability(&self) -> Option<&SharedKvbmObservability> {
+        self.observability.as_ref()
+    }
+
+    /// A clonable handle to the disagg `SessionFactory` cell.
+    ///
+    /// The cell is populated post-construction via [`set_session_factory`].
+    /// The control plane's `transfer` module holds this handle and reads the
+    /// factory lazily, at RPC-invocation time.
+    ///
+    /// [`set_session_factory`]: InstanceLeader::set_session_factory
+    pub fn session_factory_cell(&self) -> Arc<OnceLock<Arc<dyn SessionFactory>>> {
+        Arc::clone(&self.session_factory)
+    }
+
+    /// Inject the disagg `SessionFactory` once it has been built.
+    ///
+    /// Idempotent: a second call is a no-op (the factory is built once during
+    /// connector init). Returns whether this call set the value.
+    pub fn set_session_factory(&self, factory: Arc<dyn SessionFactory>) -> bool {
+        self.session_factory.set(factory).is_ok()
+    }
+
+    /// Inject the remote-block discovery seam (the hub's KV indexer, wrapped by
+    /// the connector) once the hub registration that backs it has completed.
+    ///
+    /// Idempotent: first-write-wins. Returns whether this call set the value.
+    /// Enables the transfer-plane remote-search pull in
+    /// [`find_matches_with_options`](Self::find_matches_with_options) when
+    /// `search_remote` is requested.
+    pub fn set_remote_discovery(&self, discovery: RemoteDiscoveryHandle) -> bool {
+        self.remote_discovery.set(discovery).is_ok()
+    }
+
+    // ========================================================================
+    // Transfer control-plane methods
+    //
+    // Substantive logic lives in `leader/control/modules/transfer.rs`; these
+    // methods are the public entry points used by both the velo handler
+    // shims and any in-process caller. See the plan at
+    // ~/.claude/plans/control-transfer-v1.md for the full design.
+    // ========================================================================
+
+    /// HOLDER-SIDE. Open a transfer session populated by a multi-tier
+    /// search. v1 implements G2 only; G3/G4 are wired in subsequent
+    /// phases via the populator's stage phase.
+    ///
+    /// `find_mode = Sync` awaits the find phase; the response carries
+    /// the matched hashes inline. `find_mode = Async` returns as soon
+    /// as the session is opened.
+    pub async fn open_transfer_session(
+        self: &Arc<Self>,
+        req: kvbm_protocols::control::modules::transfer::OpenTransferSessionRequest,
+    ) -> Result<
+        kvbm_protocols::control::modules::transfer::OpenTransferSessionResponse,
+        kvbm_protocols::control::ControlError,
+    > {
+        crate::leader::control::modules::transfer::open_transfer_session(self, req).await
+    }
+
+    /// HOLDER-SIDE. Close a parked transfer session by id. Idempotent.
+    pub async fn close_transfer_session(
+        self: &Arc<Self>,
+        req: kvbm_protocols::control::modules::transfer::CloseTransferSessionRequest,
+    ) -> Result<
+        kvbm_protocols::control::modules::transfer::CloseTransferSessionResponse,
+        kvbm_protocols::control::ControlError,
+    > {
+        crate::leader::control::modules::transfer::close_transfer_session(self, req).await
+    }
+
+    /// PULLER-SIDE. Attach to a transfer session living on
+    /// `req.source_instance_id`, drain commits/availability, and pull
+    /// the (optionally selected) blocks into this instance's local G2
+    /// pool. Long-poll — returns when the pull is complete.
+    pub async fn pull_from_session(
+        self: &Arc<Self>,
+        req: kvbm_protocols::control::modules::transfer::PullFromSessionRequest,
+    ) -> Result<
+        kvbm_protocols::control::modules::transfer::PullFromSessionResponse,
+        kvbm_protocols::control::ControlError,
+    > {
+        crate::leader::control::modules::transfer::pull_from_session(self, req).await
+    }
+
+    // ========================================================================
+    // Describe (Phase C)
+    // ========================================================================
+
+    /// Inject the leader's `KvbmConfig` serialised as JSON. Surfaced via
+    /// [`Self::describe`] under `InstanceDescription::config`.
+    ///
+    /// First-write-wins (matches [`Self::set_session_factory`] semantics).
+    /// Returns `true` if this call stored the value, `false` if the cell
+    /// was already populated.
+    pub fn set_config_blob(&self, value: serde_json::Value) -> bool {
+        self.config_blob.set(value).is_ok()
+    }
+
+    /// Inject the hub's instance id post-registration. Surfaced via
+    /// [`Self::describe`] under `InstanceDescription::hub_instance_id`.
+    /// First-write-wins.
+    pub fn set_hub_instance_id(&self, id: InstanceId) -> bool {
+        self.hub_instance_id.set(id.to_string()).is_ok()
+    }
+
+    /// Inject the list of control-plane modules enabled on this leader.
+    /// Called by the connector after `ControlPlaneBuilder::register`
+    /// returns. First-write-wins. Surfaced via [`Self::describe`].
+    pub fn set_modules(&self, modules: Vec<ModuleId>) -> bool {
+        self.modules.set(modules).is_ok()
+    }
+
+    // ========================================================================
+    // In-process consolidator
+    // ========================================================================
+
+    /// Spawn an in-process kvbm-consolidator and attach it to this leader.
+    ///
+    /// The consolidator subscribes to:
+    /// - The `vllm_zmq_endpoint` from `params` for G1 (GPU-side) events, if
+    ///   supplied.  Pass `None` to disable ZMQ ingress.
+    /// - The `EventsManager` from `params` for G2/G3 KVBM events.
+    ///
+    /// It publishes deduplicated, kv-router-compatible events (u64 wire
+    /// format) on `params.egress_endpoint`.
+    ///
+    /// The engine owns the resulting [`Consolidator`] for its entire lifetime.
+    /// Background tasks are cancelled and joined when the last clone of this
+    /// `InstanceLeader` is dropped, without blocking the caller's thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `with_consolidator` has already been called on this leader
+    ///   (idempotency guard).
+    /// - The ZMQ publisher or subscriber socket cannot be bound/connected.
+    ///
+    /// # Why async?
+    ///
+    /// `ConsolidatorBuilder::build()` internally awaits the ZMQ socket
+    /// bind/connect operations.  There is no sync path available.
+    pub async fn with_consolidator(&self, params: ConsolidatorParams) -> anyhow::Result<()> {
+        spawn_into_cell(&self.consolidator, params).await
+    }
+
+    /// Return a handle for direct event injection into the consolidator.
+    ///
+    /// Returns `None` if `with_consolidator` has not been called yet or if
+    /// the consolidator has already been shut down.
+    pub fn consolidator_handle(&self) -> Option<kvbm_consolidator::ConsolidatorHandle> {
+        self.consolidator.get()?.handle()
+    }
+
+    /// Explicitly shut down the consolidator and await background tasks.
+    ///
+    /// This is the deterministic counterpart to `ConsolidatorGuard::Drop`.
+    /// Callers who need to know shutdown has completed (ZMQ sockets unbound,
+    /// background tasks exited) before proceeding should call this and await
+    /// its completion. Subsequent calls — and any later `Drop` — are no-ops.
+    ///
+    /// Returns `true` if a consolidator was running and was shut down;
+    /// `false` if no consolidator was ever started, or it was already
+    /// shut down by a prior call.
+    pub async fn shutdown_consolidator(&self) -> bool {
+        let Some(guard) = self.consolidator.get() else {
+            return false;
+        };
+        match guard.take() {
+            Some(c) => {
+                c.shutdown().await;
+                true
+            }
+            None => false,
         }
     }
 
-    /// Set all remote leaders at once.
-    pub fn set_remote_leaders(&self, instance_ids: Vec<InstanceId>) {
-        let mut remote_leaders = self.remote_leaders.write().unwrap();
-        *remote_leaders = instance_ids;
+    /// Get the disaggregation role this leader plays, if any.
+    pub fn role(&self) -> Option<DisaggregationRole> {
+        self.role
     }
 
-    /// Get the list of remote leader instance IDs.
-    pub fn remote_leaders(&self) -> Vec<InstanceId> {
-        self.remote_leaders.read().unwrap().clone()
+    /// Build a structured topology snapshot of this leader.
+    ///
+    /// **Lifecycle:** in steady state the connector pushes this payload to the
+    /// hub via `HubClient::push_describe` after `set_config_blob` and after
+    /// `set_hub_instance_id`. The hub may also fall back to pulling this
+    /// snapshot via the [`DESCRIBE_INSTANCE_HANDLER`] velo handler when its
+    /// cache is cold.
+    ///
+    /// **Pre-stamping behaviour:** if workers have not yet stamped their
+    /// layouts, `describe` returns `Ok(InstanceDescription)` with empty
+    /// `workers`, empty `tier_capacity`, `block_size: None`, and
+    /// `parallelism: None`. The identity / capability / process fields
+    /// (`instance_id`, `worker_ids`, `modules`, `role`, `host`, `started_at`)
+    /// are always populated. Callers decide whether to wait for stamping
+    /// before pushing.
+    ///
+    /// [`DESCRIBE_INSTANCE_HANDLER`]: kvbm_protocols::control::DESCRIBE_INSTANCE_HANDLER
+    pub async fn describe(&self) -> Result<InstanceDescription, ControlError> {
+        use super::describe_map::{
+            to_disagg_role, to_layout_config_description, to_parallelism_description,
+            to_storage_kind_description, to_tier_kind,
+        };
+        use super::layout_compat::build_layout_compat_payload_with_template;
+
+        let exports: Vec<SerializedLayout> = self
+            .assemble_export_metadata()
+            .await
+            .map_err(|e| ControlError::Internal(format!("assemble_export_metadata: {e:#}")))?;
+
+        let mut workers: Vec<WorkerInfo> = Vec::with_capacity(exports.len());
+        for s in &exports {
+            let unpacked = s
+                .unpack()
+                .map_err(|e| ControlError::Internal(format!("unpack SerializedLayout: {e:#}")))?;
+
+            // Honest `None` when the worker carries no stamped descriptor.
+            // Never synthesise a `Some(1x1)` placeholder — that would lie
+            // about topology for a multi-worker TP leader pre-stamping (or
+            // for any leader built without a `ParallelismTemplate`).
+            let parallelism = unpacked
+                .parallelism
+                .as_ref()
+                .map(to_parallelism_description);
+
+            let layouts: Vec<LayoutDescription> = unpacked
+                .layouts
+                .iter()
+                .map(|ld| {
+                    let cfg = &ld.layout.layout_config;
+                    let bytes_per_block = cfg.bytes_per_block();
+                    let block_layout = kv_block_layout_name(&ld.layout.layout_type_details);
+                    LayoutDescription {
+                        tier: to_tier_kind(ld.logical_type),
+                        config: to_layout_config_description(cfg),
+                        location: to_storage_kind_description(&ld.layout.location),
+                        layout_type: layout_type_name(&ld.layout.layout_type_details).to_owned(),
+                        block_layout,
+                        bytes_per_block,
+                        total_bytes: bytes_per_block.saturating_mul(cfg.num_blocks),
+                    }
+                })
+                .collect();
+
+            workers.push(WorkerInfo {
+                worker_id: unpacked.worker_address.worker_id,
+                nixl_agent_name: unpacked.worker_address.nixl_agent_name.clone(),
+                parallelism,
+                layouts,
+            });
+        }
+
+        let block_size = common_page_size(&workers);
+        let parallelism = aggregate_parallelism(&workers);
+        let tier_capacity = sum_tier_capacity(&workers);
+
+        // Modules: read whatever the connector injected post-`ControlPlaneBuilder::register`.
+        // Empty until `set_modules` has fired — which it always has by the time the
+        // connector pushes describe; the fallback-pull path may serve an empty list
+        // briefly during a cold restart and that's acceptable.
+        let modules = self.modules.get().cloned().unwrap_or_default();
+
+        // Build the layout-compat payload using the same sources as the register-time path
+        // (`init.rs` connector): cached_worker_metadata[0] + parallelism_template.
+        // If either is absent (standalone leader / no P2P) the field stays None and
+        // the hub's describe-push validation is skipped (legacy path).
+        let layout_compat = self
+            .cached_worker_metadata
+            .as_ref()
+            .and_then(|v| v.first())
+            .and_then(|worker| {
+                match build_layout_compat_payload_with_template(
+                    self.block_layout_mode,
+                    worker,
+                    self.parallelism_template.as_ref(),
+                ) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            mode = ?self.block_layout_mode,
+                            "describe: failed to build layout_compat payload; \
+                             sending None (hub will skip describe-push validation)"
+                        );
+                        None
+                    }
+                }
+            });
+
+        Ok(InstanceDescription {
+            instance_id: self.messenger.instance_id().to_string(),
+            worker_ids: workers.iter().map(|w| w.worker_id).collect(),
+            hub_instance_id: self.hub_instance_id.get().cloned(),
+            block_size,
+            parallelism,
+            tier_capacity,
+            workers,
+            modules,
+            role: self.role.map(to_disagg_role),
+            config: self.config_blob.get().cloned(),
+            host: HostInfo {
+                hostname: read_hostname(),
+                pid: std::process::id(),
+            },
+            started_at: self.started_at,
+            layout_compat,
+        })
     }
 
     /// Scan for all blocks matching any of the given sequence hashes.
@@ -524,78 +1046,51 @@ impl InstanceLeader {
         InstanceLeaderBuilder::default()
     }
 
+    /// Assemble the per-worker [`SerializedLayout`] vector that the
+    /// `kvbm.leader.export_metadata` RPC handler returns to a peer leader.
+    ///
+    /// Collects from the cache when present, else queries each worker.
+    /// If a [`ParallelismTemplate`] is configured, stamps a
+    /// [`ParallelismDescriptor`] onto each per-worker payload via
+    /// [`stamp_parallelism_descriptors`]; otherwise returns the raw worker
+    /// metadata unchanged (pre-AB-1a shape) and the peer's cross-parallelism
+    /// dispatcher falls back to the symmetric path.
+    pub async fn assemble_export_metadata(&self) -> Result<Vec<SerializedLayout>> {
+        let raw = if let Some(cached) = self.cached_worker_metadata.clone() {
+            cached
+        } else {
+            let mut metadata = Vec::with_capacity(self.workers.len());
+            for worker in &self.workers {
+                metadata.push(worker.export_metadata()?.await?);
+            }
+            metadata
+        };
+
+        match &self.parallelism_template {
+            Some(template) => stamp_parallelism_descriptors(template, raw),
+            None => Ok(raw),
+        }
+    }
+
     /// Register Velo handlers for leader-to-leader communication.
     ///
     /// This must be called after construction to enable distributed onboarding.
     pub fn register_handlers(&self) -> Result<()> {
-        let instance_id = self.messenger.instance_id();
-        let g2_manager = self.g2_manager.clone();
-        let g3_manager = self.g3_manager.clone();
-        let parallel_worker = self.parallel_worker.clone();
-        let transport = self.transport.clone();
-        let sessions = self.sessions.clone();
-
-        let spawn_responder = move |msg: OnboardMessage| -> Result<()> {
-            if let OnboardMessage::CreateSession {
-                requester,
-                session_id,
-                sequence_hashes,
-            } = msg
-            {
-                let (tx, rx) = mpsc::channel(100);
-                sessions.insert(session_id, tx);
-
-                let session = ResponderSession::new(
-                    session_id,
-                    instance_id,
-                    requester,
-                    g2_manager.clone(),
-                    g3_manager.clone(),
-                    parallel_worker.clone(),
-                    transport.clone(),
-                );
-
-                tokio::spawn(async move {
-                    if let Err(e) = session.run(rx, sequence_hashes).await {
-                        tracing::warn!(error = %e, "ResponderSession error");
-                    }
-                });
-
-                Ok(())
-            } else {
-                anyhow::bail!("spawn_responder called with non-CreateSession message")
-            }
-        };
-
-        // Create export_metadata callback if we have workers or cached metadata
+        // Create export_metadata callback if we have workers or cached metadata.
+        // Delegates to assemble_export_metadata so the stamping logic is
+        // testable without Velo plumbing.
         let export_metadata_callback: Option<ExportMetadataCallback> =
             if !self.workers.is_empty() || self.cached_worker_metadata.is_some() {
-                let workers = self.workers.clone();
-                let cached_metadata = self.cached_worker_metadata.clone();
+                let leader = self.clone();
                 Some(Arc::new(move || {
-                    let workers = workers.clone();
-                    let cached_metadata = cached_metadata.clone();
-                    Box::pin(async move {
-                        // Return cached metadata if available
-                        if let Some(cached) = cached_metadata {
-                            return Ok(cached);
-                        }
-                        // Otherwise, query workers
-                        let mut metadata = Vec::with_capacity(workers.len());
-                        for worker in &workers {
-                            let serialized = worker.export_metadata()?.await?;
-                            metadata.push(serialized);
-                        }
-                        Ok(metadata)
-                    })
+                    let leader = leader.clone();
+                    Box::pin(async move { leader.assemble_export_metadata().await })
                 }))
             } else {
                 None
             };
 
-        let mut service = VeloLeaderService::new(self.messenger.clone(), self.sessions.clone())
-            .with_spawn_responder(spawn_responder)
-            .with_session_sessions(self.session_sessions.clone());
+        let mut service = VeloLeaderService::new(self.messenger.clone());
 
         if let Some(callback) = export_metadata_callback {
             service = service.with_export_metadata(callback);
@@ -604,6 +1099,57 @@ impl InstanceLeader {
         service.register_handlers()?;
 
         Ok(())
+    }
+
+    /// Build and register the public leader [`ControlPlane`].
+    ///
+    /// Distinct from [`register_handlers`](Self::register_handlers), which
+    /// wires the engine-internal `VeloLeaderService`. The control plane is
+    /// public surface, organized as modules:
+    /// - `core` (always-on) — `describe_instance`.
+    /// - `transfer` (always-on) — G2 search → disagg-session creation. Reads
+    ///   the `SessionFactory` lazily from the cell populated by
+    ///   [`set_session_factory`](Self::set_session_factory).
+    /// - `dev` (opt-in) — `reset`. Safe in production.
+    ///
+    /// `dev` comes from `control.dev` in `KvbmConfig`. Takes `Arc<Self>`
+    /// because the `core` / `dev` modules hold an `Arc<InstanceLeader>`. The
+    /// returned [`ControlPlane`] carries only introspection metadata; the
+    /// handlers live on the messenger and the modules' captured state outlives
+    /// the returned handle.
+    pub fn register_control_plane(
+        self: &Arc<Self>,
+        dev: bool,
+        metrics: bool,
+    ) -> Result<Arc<crate::leader::ControlPlane>> {
+        use crate::leader::control::{
+            ControlPlane, CoreModule, DevModule, MetricsModule, TransferModule,
+        };
+
+        let mut builder =
+            ControlPlane::builder(self.messenger.clone(), self.messenger.instance_id())
+                .with_module(CoreModule::new(Arc::clone(self)))
+                .with_module(TransferModule::new(Arc::clone(self)));
+
+        if dev {
+            builder = builder.with_module(DevModule::new(Arc::clone(self)));
+        }
+        if metrics {
+            match self.observability.as_ref() {
+                Some(obs) => {
+                    builder =
+                        builder.with_module(MetricsModule::new(Arc::clone(self), Arc::clone(obs)));
+                }
+                None => {
+                    tracing::warn!(
+                        "control plane `metrics` module requested but no observability \
+                         handle was provided to InstanceLeaderBuilder; module not registered"
+                    );
+                }
+            }
+        }
+
+        builder.register()
     }
 
     /// Store session state (held blocks and status channel).
@@ -618,375 +1164,38 @@ impl InstanceLeader {
     /// This is optional - sessions will naturally be cleaned up when the InstanceLeader
     /// is dropped. Call this explicitly if you need to release blocks earlier.
     pub fn release_session(&self, session_id: SessionId) {
-        self.session_states.remove(&session_id);
-        self.sessions.remove(&session_id);
-        self.session_sessions.remove(&session_id);
+        if let Some((_, state)) = self.session_states.remove(&session_id) {
+            // Tear down a bound remote-search driver, if any. The driver's
+            // cancel branch best-effort closes the remote transfer session.
+            if let Some(token) = &state.cancel {
+                token.cancel();
+            }
+        }
     }
 
-    /// Test-only: is `session_id` registered in any of the three session maps?
+    /// Test-only: is `session_id` registered in the session-state map?
     #[cfg(any(test, feature = "testing"))]
     pub fn has_session(&self, session_id: SessionId) -> bool {
-        self.sessions.contains_key(&session_id)
-            || self.session_states.contains_key(&session_id)
-            || self.session_sessions.contains_key(&session_id)
+        self.session_states.contains_key(&session_id)
     }
 
-    /// Test-only: insert a sentinel entry into `sessions` so a test can verify
-    /// that `release_session` removes it. The channel has capacity 1 and its
-    /// receiver is dropped immediately; the map entry alone is what the test
-    /// observes.
+    /// Test-only: insert a sentinel session state so a test can verify that
+    /// `release_session` removes it. The held block vectors are empty; the map
+    /// entry alone is what the test observes.
     #[cfg(any(test, feature = "testing"))]
     pub fn insert_test_session_marker(&self, session_id: SessionId) {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        self.sessions.insert(session_id, tx);
-    }
-
-    // ========================================================================
-    // Inverted Control Pattern (Prefill-Decode) Methods
-    // ========================================================================
-
-    /// Create a controllable session for local blocks.
-    ///
-    /// This is the "Decode side" of the inverted control pattern:
-    /// 1. Search local G2 and G3 for matches
-    /// 2. Create a ControllableSession that holds the blocks
-    /// 3. Return session_id to be sent to Prefill out-of-band
-    ///
-    /// By default, G3→G2 staging starts immediately (auto_stage=true).
-    pub fn create_controllable_session(
-        &self,
-        sequence_hashes: &[SequenceHash],
-    ) -> Result<ControllableSessionResult> {
-        self.create_controllable_session_with_options(
-            sequence_hashes,
-            ControllableSessionOptions::default(),
-        )
-    }
-
-    /// Create a controllable session with custom options.
-    ///
-    /// Use this when you need to control auto-staging behavior.
-    pub fn create_controllable_session_with_options(
-        &self,
-        sequence_hashes: &[SequenceHash],
-        options: ControllableSessionOptions,
-    ) -> Result<ControllableSessionResult> {
-        let session_id = SessionId::from(Uuid::new_v4());
-
-        // Local search only
-        let matched_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
-
-        // Find remaining hashes not in G2
-        let remaining_hashes: Vec<_> = sequence_hashes
-            .iter()
-            .filter(|h| !matched_g2_blocks.iter().any(|b| b.sequence_hash() == **h))
-            .copied()
-            .collect();
-
-        // Search G3 for remaining hashes
-        let matched_g3_blocks = if let Some(ref g3_manager) = self.g3_manager {
-            g3_manager.match_blocks(&remaining_hashes)
-        } else {
-            Vec::new()
-        };
-
-        let local_g2_count = matched_g2_blocks.len();
-        let local_g3_count = matched_g3_blocks.len();
-
-        // Create session channel using unified SessionMessage protocol
-        let (tx, rx) = session_message_channel(100);
-        self.session_sessions.insert(session_id, tx);
-
-        // Collect G2 layout handles from workers for round-robin block allocation
-        let worker_g2_handles: Vec<LayoutHandle> = self
-            .parallel_worker
-            .as_ref()
-            .map(|pw| pw.workers().iter().filter_map(|w| w.g2_handle()).collect())
-            .unwrap_or_default();
-
-        let endpoint = super::session::SessionEndpoint::new(
+        let (status_tx, _rx) = watch::channel(OnboardingStatus::Searching);
+        self.session_states.insert(
             session_id,
-            self.messenger.instance_id(),
-            self.transport.clone(),
-            rx,
-        );
-
-        let (cmd_tx, cmd_rx) = mpsc::channel(16);
-
-        let session = ServerSession::new_with_staging(
-            endpoint,
-            BlockHolder::new(matched_g2_blocks),
-            BlockHolder::new(matched_g3_blocks),
-            worker_g2_handles,
-            self.g2_manager.clone(),
-            self.parallel_worker.clone(),
-            cmd_rx,
-            ServerSessionOptions {
-                auto_stage: options.auto_stage,
+            SessionState {
+                session_id,
+                matched_g2_blocks: Vec::new(),
+                matched_g3_blocks: Vec::new(),
+                status_tx,
+                cancel: None,
             },
         );
-
-        // Keep handle alive to prevent cmd channel from closing
-        let _handle = ServerSessionHandle::new(session_id, self.messenger.instance_id(), cmd_tx);
-
-        // Spawn session task
-        let session_sessions = self.session_sessions.clone();
-        tokio::spawn(async move {
-            let _handle = _handle; // move handle into task to keep cmd channel open
-            if let Err(e) = session.run().await {
-                tracing::warn!(error = %e, "ServerSession error");
-            }
-            // Clean up when session completes
-            session_sessions.remove(&session_id);
-        });
-
-        Ok(ControllableSessionResult {
-            session_id,
-            local_g2_count,
-            local_g3_count,
-        })
     }
-
-    // ========================================================================
-    // Unified Session Protocol
-    // ========================================================================
-
-    /// Attach to a remote session.
-    /// Returns a `SessionHandle` that uses `SessionMessage` for communication.
-    ///
-    /// # Arguments
-    /// * `remote_instance` - The instance hosting the session
-    /// * `session_id` - The session to attach to
-    ///
-    /// # Example
-    /// ```ignore
-    /// let handle = leader.attach_session(remote_id, session_id).await?;
-    /// let state = handle.wait_for_ready().await?;
-    /// handle.trigger_staging().await?;
-    /// ```
-    pub async fn attach_session(
-        &self,
-        remote_instance: InstanceId,
-        session_id: SessionId,
-    ) -> Result<SessionHandle> {
-        // Create local channel for receiving state updates
-        let (state_tx, state_rx) = session_handle_state_channel();
-
-        // Register handler for this session's messages
-        let (msg_tx, msg_rx) = session_message_channel(100);
-        self.session_sessions.insert(session_id, msg_tx);
-
-        // Spawn receiver task to update state
-        tokio::spawn(Self::run_session_receiver(msg_rx, state_tx));
-
-        // Send attach message using new protocol
-        let msg = SessionMessage::Attach {
-            peer: self.messenger.instance_id(),
-            session_id,
-            as_role: ControlRole::Controller,
-        };
-        self.transport.send_session(remote_instance, msg).await?;
-
-        let mut handle = SessionHandle::new(
-            session_id,
-            remote_instance,
-            self.messenger.instance_id(),
-            self.transport.clone(),
-            state_rx,
-        );
-
-        // Add RDMA support if parallel worker is configured
-        if let Some(parallel_worker) = &self.parallel_worker {
-            handle = handle.with_rdma_support(parallel_worker.clone());
-        }
-
-        Ok(handle)
-    }
-
-    // ========================================================================
-    // Endpoint Session Creation (Server-Side)
-    // ========================================================================
-
-    /// Create an endpoint session that a remote peer can attach to.
-    ///
-    /// This searches local G2/G3 for blocks matching the given sequence hashes
-    /// and creates a session that exposes them for remote RDMA pull.
-    ///
-    /// Returns `(session_id, handle)` where:
-    /// - `session_id` - Send to remote peer for attachment
-    /// - `handle` - Use to control the session (send layer notifications, close)
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Create session for sequence hashes
-    /// let (session_id, handle) = leader.create_endpoint_session(&hashes)?;
-    ///
-    /// // Send session_id to remote peer out-of-band
-    /// // Remote attaches via: remote_leader.attach_session(local_id, session_id)
-    ///
-    /// // For layerwise transfer, notify when layers are ready
-    /// handle.notify_layers_ready(0..1).await?;
-    /// ```
-    pub fn create_endpoint_session(
-        &self,
-        sequence_hashes: &[SequenceHash],
-    ) -> Result<(SessionId, ServerSessionHandle)> {
-        let session_id = SessionId::from(uuid::Uuid::new_v4());
-
-        // Local search
-        let matched_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
-
-        // Collect layout handles from workers
-        // Note: For single-worker setups, all blocks use the same handle
-        // For multi-worker (SPMD), each block gets the handle from its assigned worker
-        let worker_g2_handles: Vec<LayoutHandle> = self
-            .parallel_worker
-            .as_ref()
-            .map(|pw| pw.workers().iter().filter_map(|w| w.g2_handle()).collect())
-            .unwrap_or_default();
-
-        // Assign layout handle to each matched block
-        // For now, use the first worker's handle for all blocks (single-worker assumption)
-        // TODO: For SPMD, map blocks to worker handles based on block assignment
-        let layout_handle = worker_g2_handles
-            .first()
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("No G2 layout handle available from workers"))?;
-        let layout_handles: Vec<LayoutHandle> = vec![layout_handle; matched_g2_blocks.len()];
-
-        // Get sequence hashes from matched blocks
-        let matched_hashes: Vec<SequenceHash> = matched_g2_blocks
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect();
-
-        // Create the session channel
-        let (msg_tx, msg_rx) = session_message_channel(100);
-        self.session_sessions.insert(session_id, msg_tx);
-
-        // Create BlockHolder from matched blocks
-        let block_holder = BlockHolder::new(matched_g2_blocks);
-
-        // Create the session and handle
-        let (session, handle) = create_server_session(
-            session_id,
-            self.messenger.instance_id(),
-            block_holder,
-            layout_handles,
-            matched_hashes,
-            self.transport.clone(),
-            msg_rx,
-        );
-
-        // Spawn the session task
-        let session_sessions = self.session_sessions.clone();
-        tokio::spawn(async move {
-            if let Err(e) = session.run().await {
-                tracing::warn!(error = %e, "ServerSession error");
-            }
-            // Clean up when session completes
-            session_sessions.remove(&session_id);
-        });
-
-        Ok((session_id, handle))
-    }
-
-    /// Create an endpoint session for specific pre-allocated blocks.
-    ///
-    /// Unlike `create_endpoint_session`, this doesn't search - it uses the
-    /// provided blocks directly. Useful when the caller already has blocks
-    /// to expose (e.g., after prefill computation).
-    ///
-    /// # Arguments
-    /// * `blocks` - Blocks to expose for RDMA pull
-    /// * `sequence_hashes` - Sequence hashes for the blocks (must match block count)
-    /// * `layout_handles` - Layout handles for the blocks (must match block count)
-    ///
-    /// # Example
-    /// ```ignore
-    /// // After prefill computation, expose blocks for Decode to pull
-    /// let (session_id, handle) = leader.create_endpoint_session_for_blocks(
-    ///     prefill_blocks,
-    ///     &hashes,
-    ///     &layout_handles,
-    /// )?;
-    /// ```
-    pub fn create_endpoint_session_for_blocks(
-        &self,
-        blocks: BlockHolder<G2>,
-        sequence_hashes: &[SequenceHash],
-        layout_handles: &[LayoutHandle],
-    ) -> Result<(SessionId, ServerSessionHandle)> {
-        let session_id = SessionId::from(uuid::Uuid::new_v4());
-
-        // Create the session channel
-        let (msg_tx, msg_rx) = session_message_channel(100);
-        self.session_sessions.insert(session_id, msg_tx);
-
-        // Create the session and handle
-        let (session, handle) = create_server_session(
-            session_id,
-            self.messenger.instance_id(),
-            blocks,
-            layout_handles.to_vec(),
-            sequence_hashes.to_vec(),
-            self.transport.clone(),
-            msg_rx,
-        );
-
-        // Spawn the session task
-        let session_sessions = self.session_sessions.clone();
-        tokio::spawn(async move {
-            if let Err(e) = session.run().await {
-                tracing::warn!(error = %e, "ServerSession error");
-            }
-            // Clean up when session completes
-            session_sessions.remove(&session_id);
-        });
-
-        Ok((session_id, handle))
-    }
-
-    /// Internal: Process incoming SessionMessage for a session.
-    async fn run_session_receiver(
-        mut rx: mpsc::Receiver<SessionMessage>,
-        state_tx: super::session::SessionHandleStateTx,
-    ) {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                SessionMessage::StateResponse { state, .. } => {
-                    state_tx.update(state);
-                }
-                SessionMessage::BlocksStaged {
-                    staged_blocks,
-                    remaining,
-                    layer_range,
-                    ..
-                } => {
-                    state_tx.add_staged_blocks(staged_blocks, remaining, layer_range);
-                }
-                SessionMessage::Error { message, .. } => {
-                    tracing::warn!(%message, "Session error");
-                    state_tx.set_failed();
-                    break;
-                }
-                SessionMessage::Close { .. } => {
-                    state_tx.set_phase(SessionPhase::Complete);
-                    break;
-                }
-                _ => {
-                    // Ignore control commands (sent by controller, not received)
-                }
-            }
-        }
-    }
-
-    /// Get the session sessions map (for Velo handler registration).
-    #[expect(dead_code)]
-    pub(crate) fn session_sessions(&self) -> Arc<DashMap<SessionId, SessionMessageTx>> {
-        self.session_sessions.clone()
-    }
-
     // ========================================================================
     // RDMA Metadata Management
     // These methods handle layout metadata export/import for remote RDMA transfers.
@@ -1061,9 +1270,14 @@ impl InstanceLeader {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No parallel worker configured"))?;
 
-        // Check if already loaded
+        // Idempotent: if already imported, skip. The TP=N asymmetric path can
+        // fan out multiple concurrent callers (one per local worker rank) into
+        // ensure_remote_metadata → import_remote_metadata for the same
+        // remote_instance. The second caller sees has_remote_metadata=true
+        // here; returning Ok(()) is correct — the metadata is already loaded
+        // and the handle mappings are already populated.
         if parallel_worker.has_remote_metadata(remote_instance) {
-            anyhow::bail!("Metadata already imported for instance {}", remote_instance);
+            return Ok(());
         }
 
         // Connect to remote - this imports metadata and stores handle mappings
@@ -1072,6 +1286,273 @@ impl InstanceLeader {
             .await?;
 
         Ok(())
+    }
+
+    /// Ensure worker transfer metadata for a remote instance has been imported.
+    ///
+    /// The leader requests `Vec<SerializedLayout>` from the remote leader's
+    /// `kvbm.leader.export_metadata` handler and imports it through the
+    /// configured parallel worker. Repeated calls are no-ops once the metadata
+    /// has been imported.
+    pub async fn ensure_remote_metadata(&self, remote_instance: InstanceId) -> Result<()> {
+        if self.has_remote_metadata(remote_instance) {
+            return Ok(());
+        }
+
+        let metadata = self.transport.request_metadata(remote_instance).await?;
+        self.import_remote_metadata(remote_instance, metadata).await
+    }
+
+    /// Public cross-parallelism RDMA pull entrypoint (AB-4).
+    ///
+    /// Resolves `refs` into per-local-worker pull plans via
+    /// [`plan_pull`], dispatches each plan to its target local worker,
+    /// and awaits all per-rank notifications. Source and destination
+    /// layouts are hardcoded to [`LogicalLayoutHandle::G2`] (locked
+    /// decision #1 — `T = G2` concrete).
+    ///
+    /// `refs` must be paired (`src_block_id` in the remote leader's
+    /// block-id space, `dst_block_id` in the local leader's). The
+    /// caller (typically a session) owns hash→block-id resolution.
+    ///
+    /// Convenience wrapper around [`Self::rdma_pull_with_opts`] with
+    /// default [`WirePullOptions`].
+    pub async fn rdma_pull(&self, remote_instance: InstanceId, refs: Vec<PullRef>) -> Result<()> {
+        self.rdma_pull_with_opts(remote_instance, refs, WirePullOptions::default())
+            .await
+    }
+
+    /// As [`Self::rdma_pull`] but takes a caller-supplied
+    /// [`WirePullOptions`] (NIXL write notification + metric route).
+    ///
+    /// Steps:
+    ///
+    /// 1. Empty `refs` → `Ok(())` immediately (no planning, no RPCs).
+    /// 2. Lazily import peer metadata if not already cached.
+    /// 3. Look up the cached per-rank
+    ///    [`ParallelismDescriptor`] set for `remote_instance`. If
+    ///    absent (Legacy unstamped peer), fall back to the legacy
+    ///    same-rank-zip dispatch on
+    ///    [`crate::worker::group::ParallelWorkers::execute_remote_onboard_for_instance`]
+    ///    — backwards compatible with peers that haven't upgraded to
+    ///    stamping.
+    /// 4. (Strict path only.) Read the local [`ParallelismTemplate`].
+    ///    Coherence guard: `template.tp_size == parallel_worker.worker_count()`.
+    /// 5. [`plan_pull`] → `Vec<(local_rank, WorkerPullPlan)>`.
+    /// 6. Dispatch each plan to `parallel_worker.workers()[local_rank]`
+    ///    via [`crate::worker::WorkerTransfers::execute_remote_pull_plan`].
+    /// 7. Aggregate per-plan notifications, await.
+    ///
+    /// Locked decision #5: `plan_pull` is the always-on path *for peers
+    /// that stamp descriptors*. The symmetric case is the degenerate
+    /// output (one shard per local rank, full extents); the worker
+    /// handler routes it through the planner-driven
+    /// [`kvbm_physical::manager::TransferManager::execute_transfer_selection`]
+    /// like any other plan. This is a behaviour change for stamped
+    /// symmetric callers vs the legacy direct-onboard path — under
+    /// symmetric + identical layouts the planner still emits a single
+    /// `CopyPlan::Direct`, but planning overhead lands on the hot path.
+    /// Unstamped peers preserve the pre-AB-4 direct-onboard path.
+    pub async fn rdma_pull_with_opts(
+        &self,
+        remote_instance: InstanceId,
+        refs: Vec<PullRef>,
+        opts: WirePullOptions,
+    ) -> Result<()> {
+        if refs.is_empty() {
+            return Ok(());
+        }
+
+        self.ensure_remote_metadata(remote_instance).await?;
+
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("rdma_pull: no parallel worker configured"))?;
+
+        // Legacy peers (no stamped descriptors) preserve the pre-AB-4
+        // direct-onboard path. `connect_remote`'s rank-count gate
+        // enforces same-rank symmetry for them, so the per-worker
+        // execute_remote_onboard fan-out is correct.
+        let Some(descriptors) = parallel_worker.remote_descriptors_for(remote_instance) else {
+            return self
+                .rdma_pull_legacy_fallback(parallel_worker.as_ref(), remote_instance, refs, opts)
+                .await;
+        };
+
+        let template = self.parallelism_template.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "rdma_pull: peer {} has stamped descriptors but no local ParallelismTemplate \
+                 is configured; cross-parallelism transfers require \
+                 InstanceLeaderBuilder::parallelism_template(...)",
+                remote_instance
+            )
+        })?;
+
+        // Coherence guard: same invariant the asymmetric branch of
+        // SpmdParallelWorkers enforces. A template that disagrees with
+        // the worker count would produce mis-shaped plans.
+        if template.tp_size != parallel_worker.worker_count() {
+            anyhow::bail!(
+                "rdma_pull: local ParallelismTemplate tp_size ({}) disagrees with worker count ({}); \
+                 template must describe the local worker grid",
+                template.tp_size,
+                parallel_worker.worker_count(),
+            );
+        }
+
+        let plans = plan_pull(
+            &template,
+            &descriptors,
+            remote_instance,
+            LogicalLayoutHandle::G2,
+            LogicalLayoutHandle::G2,
+            &refs,
+            &opts,
+        )?;
+
+        if plans.is_empty() {
+            // plan_pull skips local ranks with no shards. With refs
+            // non-empty and PP=1 every rank participates, so this
+            // shouldn't normally happen — but guard against future
+            // layer-range filtering quietly producing nothing to do.
+            return Ok(());
+        }
+
+        let workers = parallel_worker.workers();
+        let mut notifications = Vec::with_capacity(plans.len());
+        for (local_rank, plan) in plans {
+            let worker = workers.get(local_rank).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "rdma_pull: plan_pull produced a plan for local_rank {local_rank} but only \
+                     {} workers are registered",
+                    workers.len()
+                )
+            })?;
+            notifications.push(worker.execute_remote_pull_plan(plan)?);
+        }
+
+        let events = Arc::new(self.messenger.event_manager());
+        let aggregated = TransferCompleteNotification::aggregate(
+            notifications,
+            &events,
+            &tokio::runtime::Handle::current(),
+        )?;
+        aggregated.await?;
+        Ok(())
+    }
+
+    /// Fallback path for peers that import via the Legacy (unstamped)
+    /// `connect_remote` strategy. Pre-AB-4 every cross-leader pull
+    /// took this path; AB-4 only switches stamped peers onto the
+    /// planner. Refs are unzipped back into parallel `(src_ids,
+    /// dst_ids)` vectors and handed to
+    /// `ParallelWorkers::execute_remote_onboard_for_instance`, whose
+    /// symmetric branch fans the SAME transfer out to every local
+    /// worker (`remote_handles` keyed by local `worker_idx`, which
+    /// equals remote rank for legacy peers by the rank-count match
+    /// gate in `connect_remote`).
+    async fn rdma_pull_legacy_fallback(
+        &self,
+        parallel_worker: &dyn ParallelWorkers,
+        remote_instance: InstanceId,
+        refs: Vec<PullRef>,
+        opts: WirePullOptions,
+    ) -> Result<()> {
+        let mut src_block_ids: Vec<BlockId> = Vec::with_capacity(refs.len());
+        let mut dst_block_ids: Vec<BlockId> = Vec::with_capacity(refs.len());
+        for r in refs {
+            src_block_ids.push(r.src_block_id);
+            dst_block_ids.push(r.dst_block_id);
+        }
+
+        // Project WirePullOptions onto the full TransferOptions for the
+        // legacy path. The legacy executor honours nixl_write_notification
+        // and metric_route; all other TransferOptions fields default.
+        let transfer_opts = TransferOptions {
+            nixl_write_notification: opts.nixl_write_notification,
+            metric_route: opts.metric_route,
+            ..Default::default()
+        };
+
+        let notification = parallel_worker.execute_remote_onboard_for_instance(
+            remote_instance,
+            LogicalLayoutHandle::G2,
+            src_block_ids,
+            LogicalLayoutHandle::G2,
+            Arc::from(dst_block_ids),
+            transfer_opts,
+        )?;
+        notification.await?;
+        Ok(())
+    }
+
+    /// Pull remote block sets into local G2 block IDs (legacy shim).
+    ///
+    /// AB-4: this is now a thin wrapper around [`Self::rdma_pull_with_opts`]
+    /// — every `RemoteBlockSet` is flattened into combined `PullRef`s
+    /// (the prior per-block-set loop), then a single rdma_pull call
+    /// dispatches the work through the cross-parallelism planner.
+    ///
+    /// The notification return type is preserved by spawning the
+    /// async pull on the current tokio runtime and wrapping its
+    /// future via a fresh velo Event. AB-5 swaps callers to
+    /// `rdma_pull_with_opts` directly and this shim can be retired.
+    pub async fn pull_remote_block_sets(
+        &self,
+        remote_instance: InstanceId,
+        block_sets: &[RemoteBlockSet],
+        local_dst_block_ids: &[BlockId],
+    ) -> Result<TransferCompleteNotification> {
+        // Length / count validation up front so callers see the same
+        // hard bail they used to see, before any async work spawns.
+        let source_count: usize = block_sets.iter().map(|set| set.blocks.len()).sum();
+        if source_count != local_dst_block_ids.len() {
+            anyhow::bail!(
+                "Block count mismatch: source={}, destination={}",
+                source_count,
+                local_dst_block_ids.len()
+            );
+        }
+
+        // Flatten every block_set into a single combined ref vector.
+        // Order across sets must match local_dst_block_ids — same
+        // offset bookkeeping the pre-shim loop used.
+        let mut refs: Vec<PullRef> = Vec::with_capacity(source_count);
+        let mut offset = 0usize;
+        for block_set in block_sets {
+            for block in &block_set.blocks {
+                refs.push(PullRef {
+                    src_block_id: block.block_id,
+                    dst_block_id: local_dst_block_ids[offset],
+                });
+                offset += 1;
+            }
+        }
+
+        // Wrap the async rdma_pull as a TransferCompleteNotification
+        // so this shim keeps its pre-AB-4 return type. The leader is
+        // already inside a tokio runtime (callers `.await` this fn).
+        let events = self.messenger.event_manager();
+        let event = events.new_event()?;
+        let awaiter = events.awaiter(event.handle())?;
+
+        let leader = self.clone();
+        tokio::runtime::Handle::current().spawn(async move {
+            match leader
+                .rdma_pull_with_opts(remote_instance, refs, WirePullOptions::default())
+                .await
+            {
+                Ok(()) => {
+                    let _ = event.trigger();
+                }
+                Err(e) => {
+                    let _ = event.poison(e.to_string());
+                }
+            }
+        });
+
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 
     // ========================================================================
@@ -1147,6 +1628,160 @@ impl InstanceLeader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Describe helpers (Phase C)
+// ---------------------------------------------------------------------------
+
+/// Discriminant name of a `LayoutTypeDetails` variant — snake_case to match
+/// the rest of the control-plane JSON.
+fn layout_type_name(details: &kvbm_physical::layout::LayoutTypeDetails) -> &'static str {
+    use kvbm_physical::layout::LayoutTypeDetails;
+    match details {
+        LayoutTypeDetails::FullyContiguous(_) => "fully_contiguous",
+        LayoutTypeDetails::LayerSeparate(_) => "layer_separate",
+    }
+}
+
+/// snake_case name of the `KvBlockLayout` discriminant carried by a
+/// `LayoutTypeDetails` variant. Both variants carry one; this helper
+/// abstracts the unwrap.
+fn kv_block_layout_name(details: &kvbm_physical::layout::LayoutTypeDetails) -> String {
+    use kvbm_common::KvBlockLayout;
+    use kvbm_physical::layout::LayoutTypeDetails;
+    let kbl: KvBlockLayout = match details {
+        LayoutTypeDetails::FullyContiguous(d) => d.kv_block_layout,
+        LayoutTypeDetails::LayerSeparate(d) => d.kv_block_layout,
+    };
+    match kbl {
+        KvBlockLayout::Universal => "universal".to_owned(),
+        KvBlockLayout::OperationalHND => "operational_hnd".to_owned(),
+        KvBlockLayout::OperationalNHD => "operational_nhd".to_owned(),
+        KvBlockLayout::Unknown => "unknown".to_owned(),
+        // `Custom` carries an axis ordering; render as a hyphenated tag of
+        // the four axis discriminants, e.g. `custom[block-layer-page-head]`.
+        // Stable + diagnosable even though the exact layout is dynamic.
+        KvBlockLayout::Custom(dims) => {
+            let parts: Vec<&'static str> = dims.iter().map(block_dim_short_name).collect();
+            format!("custom[{}]", parts.join("-"))
+        }
+    }
+}
+
+fn block_dim_short_name(d: &kvbm_common::BlockDim) -> &'static str {
+    use kvbm_common::BlockDim;
+    match d {
+        BlockDim::Layer => "layer",
+        BlockDim::Outer => "outer",
+        BlockDim::Page => "page",
+        BlockDim::Head => "head",
+    }
+}
+
+/// Common `page_size` across all (worker, layout) pairs, or `None` if
+/// heterogeneous / empty.
+fn common_page_size(workers: &[WorkerInfo]) -> Option<usize> {
+    let mut seen: Option<usize> = None;
+    for w in workers {
+        for l in &w.layouts {
+            let p = l.config.page_size;
+            match seen {
+                None => seen = Some(p),
+                Some(s) if s == p => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    seen
+}
+
+/// Top-level [`ParallelismDescription`] when every worker has a stamped
+/// descriptor AND they agree on `tp_size`/`pp_size`/`shard_axis`/`global_extents`.
+///
+/// **Returns `None`** if any worker has `parallelism: None` (unstamped /
+/// single-rank leader without a template). The aggregate must NEVER lie:
+/// synthesising a `Some(1x1)` for a multi-worker leader whose descriptors
+/// aren't stamped yet would tell operators "this leader is single-rank" when
+/// it isn't. The per-worker `rank` and `layer_ownership` are intentionally
+/// projected to rank 0 / the union range to give a "leader-wide view".
+fn aggregate_parallelism(
+    workers: &[WorkerInfo],
+) -> Option<kvbm_protocols::control::ParallelismDescription> {
+    use kvbm_protocols::control::{LayerRange, ParallelismDescription};
+
+    // Any unstamped worker → aggregate is unknown. This is the bug fix:
+    // pre-fix, an unstamped worker's synthesised 1x1 placeholder would
+    // "agree" with other placeholders and the aggregate would lie.
+    let first = workers.first()?.parallelism.clone()?;
+    let mut layer_start = first.layer_ownership.start;
+    let mut layer_end = first.layer_ownership.end;
+    for w in workers.iter().skip(1) {
+        let p = w.parallelism.as_ref()?;
+        if p.tp_size != first.tp_size
+            || p.pp_size != first.pp_size
+            || p.shard_axis != first.shard_axis
+            || p.global_extents != first.global_extents
+        {
+            return None;
+        }
+        layer_start = layer_start.min(p.layer_ownership.start);
+        layer_end = layer_end.max(p.layer_ownership.end);
+    }
+    Some(ParallelismDescription {
+        rank: 0,
+        layer_ownership: LayerRange {
+            start: layer_start,
+            end: layer_end,
+        },
+        ..first
+    })
+}
+
+/// Sum tier capacity across all workers, grouping by [`TierKind`].
+fn sum_tier_capacity(workers: &[WorkerInfo]) -> Vec<TierCapacity> {
+    use std::collections::HashMap;
+    let mut acc: HashMap<TierKind, TierCapacity> = HashMap::new();
+    for w in workers {
+        for l in &w.layouts {
+            let entry = acc.entry(l.tier).or_insert(TierCapacity {
+                tier: l.tier,
+                num_blocks: 0,
+                bytes_per_block: l.bytes_per_block,
+                total_bytes: 0,
+            });
+            entry.num_blocks = entry.num_blocks.saturating_add(l.config.num_blocks);
+            entry.total_bytes = entry.total_bytes.saturating_add(l.total_bytes as u64);
+        }
+    }
+    let mut out: Vec<TierCapacity> = acc.into_values().collect();
+    // Deterministic order: G1, G2, G3, G4.
+    out.sort_by_key(|t| match t.tier {
+        TierKind::G1 => 0,
+        TierKind::G2 => 1,
+        TierKind::G3 => 2,
+        TierKind::G4 => 3,
+    });
+    out
+}
+
+/// Read hostname from libc, falling back to the `HOSTNAME` env var and
+/// finally `"unknown"`. Avoids a hard `hostname` crate dep — std + env
+/// suffice for the level of identity we need in describe.
+fn read_hostname() -> String {
+    if let Ok(name) = std::env::var("HOSTNAME")
+        && !name.is_empty()
+    {
+        return name;
+    }
+    // Fall back to `uname` via /proc/sys/kernel/hostname on Linux.
+    if let Ok(name) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    "unknown".to_owned()
+}
+
 impl Leader for InstanceLeader {
     fn find_matches_with_options(
         &self,
@@ -1156,8 +1791,6 @@ impl Leader for InstanceLeader {
         // Search G2 (host memory) for matches
         // Uses match_blocks which stops at first miss (implements "first hole" policy).
         // This ensures we only find contiguous blocks from the start of the sequence.
-        // For distributed search, remote instances use scan_matches for broad coverage,
-        // then first-hole filtering is applied in InitiatorSession after aggregation.
 
         // todo: add explicit timing tracing here
         // let start_time = Instant::now();
@@ -1179,33 +1812,16 @@ impl Leader for InstanceLeader {
             Vec::new()
         };
 
-        // Determine if we can return immediately (Ready) or need async session
-        // Ready if:
-        //   - g3 blocks is empty
-        //   - AND NOT (search_remote AND has_remote_leaders)
-        //   - AND NOT (search_remote AND has_object_client)
-        //
-        // AsyncSession (is_ready=false) if:
-        //   - g3 is not empty, or
-        //   - search_remote is true AND (has_remote_leaders OR has_object_client)
-        let has_remote_leaders = !self.remote_leaders.read().unwrap().is_empty();
-        let has_object_client = self.object_client.is_some();
-        let needs_remote_search =
-            options.search_remote && (has_remote_leaders || has_object_client);
         let local_g2_count = matched_g2_blocks.len();
         let local_g3_count = matched_g3_blocks.len();
+        let local_covers_all =
+            !sequence_hashes.is_empty() && local_g2_count == sequence_hashes.len();
 
         // Host-bypass short-circuit: when G2 is intentionally unconfigured we
-        // never want to take the AsyncSession + stage_g3_to_g2 path. Return
-        // immediately with both G2 (typically empty) and G3 blocks attached
-        // so the caller can issue G3→G1 directly via GDS.
-        //
-        // Bypass mode does not currently support remote search — the staging
-        // protocol owns that path and assumes G2 destinations. If a caller
-        // requests remote search under bypass, fall through to the normal
-        // AsyncSession path which will surface the missing-G2-destination
-        // error loudly rather than silently dropping disk traffic.
-        if self.bypass_host && !needs_remote_search {
+        // never take the AsyncSession path. Return immediately with both G2
+        // (typically empty) and G3 blocks attached so the caller can issue
+        // G3→G1 directly via GDS.
+        if self.bypass_host {
             return Ok(FindMatchesResult::Ready(ReadyResult::new_with_g3(
                 matched_g2_blocks,
                 matched_g3_blocks,
@@ -1217,10 +1833,9 @@ impl Leader for InstanceLeader {
             )));
         }
 
-        let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
-
-        if is_ready {
-            // No session needed - blocks owned directly by ReadyResult (RAII)
+        // Warm-cache short-circuit: the synchronous G2 prefix already covers
+        // everything queried — no staging, no remote pull, no composer.
+        if local_covers_all {
             return Ok(FindMatchesResult::Ready(ReadyResult::new(
                 matched_g2_blocks,
                 super::MatchBreakdown {
@@ -1231,10 +1846,33 @@ impl Leader for InstanceLeader {
             )));
         }
 
-        // AsyncSession path: G3 blocks found or remote search enabled
-        let session_id = SessionId::from(Uuid::new_v4());
+        // Layered-composition predicate. The composer runs the hub-indexer
+        // remote pull when discovery is wired and the post-local tail meets
+        // the block-count threshold. Unlike the prior `use_indexer_search`
+        // gate, this no longer requires `matched_g3_blocks.is_empty()` — the
+        // composer runs G3 staging and the remote pull concurrently over
+        // structurally disjoint position ranges.
+        let post_local_tail = sequence_hashes
+            .len()
+            .saturating_sub(local_g2_count + local_g3_count);
+        let use_remote_search = options.search_remote
+            && self.remote_discovery.get().is_some()
+            && post_local_tail >= self.min_remote_blocks;
 
-        // AsyncSession: staging locally and/or remote searching
+        // Local-only Ready: no G3 to stage AND no remote pull to run.
+        if matched_g3_blocks.is_empty() && !use_remote_search {
+            return Ok(FindMatchesResult::Ready(ReadyResult::new(
+                matched_g2_blocks,
+                super::MatchBreakdown {
+                    host_blocks: local_g2_count,
+                    disk_blocks: 0,
+                    object_blocks: 0,
+                },
+            )));
+        }
+
+        // AsyncSession path: spawn the composer.
+        let session_id = SessionId::from(Uuid::new_v4());
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
         let all_g2_blocks = Arc::new(Mutex::new(None));
         let match_breakdown = Arc::new(Mutex::new(super::MatchBreakdown {
@@ -1243,90 +1881,915 @@ impl Leader for InstanceLeader {
             object_blocks: 0,
         }));
 
-        // Store session state to keep blocks alive
+        // Cancellation token bound to this session. `release_session` fires it
+        // so a cancelled/preempted request tears down both the G3 staging and
+        // the remote-pull children inside the composer.
+        let cancel = CancellationToken::new();
+
+        // RAII pin for the matched G2/G3 handles for the session's lifetime.
+        // The composer re-matches against the registry-backed managers
+        // independently to compute the final delivered prefix.
         let state = SessionState {
             session_id,
             matched_g2_blocks,
-            matched_g3_blocks,
+            matched_g3_blocks: matched_g3_blocks.clone(),
             status_tx: status_tx.clone(),
+            cancel: Some(cancel.clone()),
         };
         self.store_session_state(state);
 
-        // If no remote search, handle local-only staging
-        if !options.search_remote {
-            // Local-only staging (Prepare or Full mode)
-            // TODO: Implement local G3→G2 staging
-            let total_matched = local_g2_count + local_g3_count;
-            status_tx
-                .send(OnboardingStatus::Complete {
-                    matched_blocks: total_matched,
-                })
-                .ok();
-
-            return Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
-                session_id,
-                status_rx,
-                all_g2_blocks,
-                match_breakdown,
-                None, // No session handle for local-only staging (yet)
-            )));
-        }
-
-        // Remote search path
-        let (tx, rx) = mpsc::channel(100);
-        self.sessions.insert(session_id, tx);
-
-        // Create control channel for Hold/Prepare modes
-        let (session_handle, control_rx) = if matches!(
-            options.staging_mode,
-            StagingMode::Hold | StagingMode::Prepare
-        ) {
-            let (control_tx, control_rx) = mpsc::channel(10);
-            let handle = LegacySessionHandle::new(session_id, options.staging_mode, control_tx);
-            (Some(handle), Some(control_rx))
-        } else {
-            (None, None)
-        };
-
-        let session = InitiatorSession::new(
+        let composer = composer::OnboardingComposer {
+            leader: Arc::new(self.clone()),
+            sequence_hashes: sequence_hashes.to_vec(),
+            matched_g3_blocks,
+            local_g2_count,
+            use_remote_search,
+            min_remote_blocks: self.min_remote_blocks,
+            status_tx,
+            all_g2_blocks: all_g2_blocks.clone(),
+            match_breakdown: match_breakdown.clone(),
+            cancel,
             session_id,
-            self.messenger.instance_id(),
-            options.staging_mode,
-            self.g2_manager.clone(),
-            self.g3_manager.clone(),
-            self.parallel_worker.clone(),
-            self.transport.clone(),
-            status_tx.clone(),
-            all_g2_blocks.clone(),
-            match_breakdown.clone(),
-            control_rx.unwrap_or_else(|| {
-                let (_, rx) = mpsc::channel(1);
-                rx
-            }),
-            self.object_client.clone(),
-        );
-
-        let remote_leaders = self.remote_leaders.read().unwrap().clone();
-        let sequence_hashes = sequence_hashes.to_vec();
-
-        let handle = self.messenger.runtime();
-
-        handle.spawn(async move {
-            if let Err(e) = session.run(rx, remote_leaders, sequence_hashes).await {
-                tracing::warn!(error = %e, "InitiatorSession error");
-                // Try to update status to indicate error
-                status_tx
-                    .send(OnboardingStatus::Complete { matched_blocks: 0 })
-                    .ok();
-            }
-        });
+            staging_settled: Arc::new(tokio::sync::Notify::new()),
+        };
+        self.runtime().spawn(composer.run());
 
         Ok(FindMatchesResult::AsyncSession(AsyncSessionResult::new(
             session_id,
             status_rx,
             all_g2_blocks,
             match_breakdown,
-            session_handle,
         )))
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+    use crate::G2;
+    use crate::leader::types::StagingMode;
+    use crate::testing::{managers::TestManagerBuilder, messenger::create_messenger_tcp};
+    use kvbm_common::KvDim;
+    use kvbm_config::ParallelismMode;
+    use kvbm_logical::blocks::BlockRegistry;
+    use kvbm_physical::manager::{LogicalLayoutDescriptor, WorkerAddress};
+
+    fn stub_metadata_for(worker_id: u64) -> SerializedLayout {
+        SerializedLayout::pack(
+            WorkerAddress::new(worker_id, format!("agent-{worker_id}")),
+            Vec::new(),
+            Vec::<LogicalLayoutDescriptor>::new(),
+            None,
+        )
+        .unwrap()
+    }
+
+    async fn leader_with_cached_metadata(
+        cached: Vec<SerializedLayout>,
+        template: Option<ParallelismTemplate>,
+    ) -> Result<InstanceLeader> {
+        let messenger = create_messenger_tcp().await?;
+        let registry = BlockRegistry::builder().build();
+        let g2 = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(2)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+
+        let mut builder = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry(registry)
+            .g2_manager(g2)
+            .with_cached_worker_metadata(cached);
+        if let Some(t) = template {
+            builder = builder.parallelism_template(t);
+        }
+        builder.build()
+    }
+
+    fn template(tp_size: usize) -> ParallelismTemplate {
+        ParallelismTemplate {
+            tp_size,
+            pp_size: 1,
+            parallelism_mode: ParallelismMode::TensorParallel,
+            shard_axis: KvDim::HeadCount,
+            global_extents: vec![(KvDim::HeadCount, 16)],
+            num_layers: 12,
+            dtype_width_bytes: 2,
+        }
+    }
+
+    /// Regression: `find_matches` must never report more matched blocks than it
+    /// can actually deliver in G2. When local G3 blocks match but cannot be
+    /// staged to G2 (here: no parallel worker), only the deliverable G2 prefix
+    /// is reported — not `g2 + g3`. (Pre-fix this path reported `g2 + g3` while
+    /// leaving the block payload empty.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_matches_local_g3_does_not_overreport_without_staging() -> Result<()> {
+        use crate::G3;
+        use crate::leader::Leader;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        let messenger = create_messenger_tcp().await?;
+        let registry = BlockRegistry::builder().build();
+        let g2 = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(8)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+        let g3 = Arc::new(
+            TestManagerBuilder::<G3>::new()
+                .block_count(8)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+        // No workers → no parallel worker → G3 cannot be staged into G2.
+        let leader = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry(registry)
+            .g2_manager(g2.clone())
+            .g3_manager(g3.clone())
+            .build()?;
+
+        // 4-block sequence: first 2 blocks live in G2 (the deliverable prefix),
+        // the next 2 in G3 (matched but unstageable here).
+        let seq = create_token_sequence(4, 4, 0);
+        crate::testing::managers::populate_manager_with_blocks(&g2, &seq.blocks()[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &seq.blocks()[2..])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        let result = leader.find_matches(&hashes)?;
+        let async_session = result
+            .as_async()
+            .expect("local G3 present (non-bypass) must yield an AsyncSession");
+        async_session.wait_for_completion().await?;
+
+        let reported = match async_session.status() {
+            OnboardingStatus::Complete { matched_blocks } => matched_blocks,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+
+        // The invariant: never claim more than is deliverable in G2.
+        assert_eq!(
+            reported, delivered,
+            "reported matched_blocks ({reported}) must equal delivered G2 blocks ({delivered})"
+        );
+        // Only the G2 prefix (2) is deliverable; the 2 unstageable G3 blocks are dropped.
+        assert_eq!(delivered, 2, "expected only the G2 prefix to be delivered");
+        Ok(())
+    }
+
+    /// Lightweight `ParallelWorkers` stub for staging-path tests. Its only
+    /// useful behaviour is `execute_local_transfer` returning a pre-completed
+    /// notification — the staging kernel then registers G2 blocks normally,
+    /// which is what the under-report fix exercises. Remote transfer methods
+    /// bail; ObjectBlockOps reports nothing present.
+    struct StubParallelWorkers {
+        /// When true, `execute_local_transfer` returns `Err` so tests can
+        /// exercise the staging-failure degrade-to-G2-prefix path.
+        fail_local_transfer: bool,
+    }
+
+    impl crate::worker::WorkerTransfers for StubParallelWorkers {
+        fn execute_local_transfer(
+            &self,
+            _src: LogicalLayoutHandle,
+            _dst: LogicalLayoutHandle,
+            _src_block_ids: Arc<[BlockId]>,
+            _dst_block_ids: Arc<[BlockId]>,
+            _options: TransferOptions,
+        ) -> Result<TransferCompleteNotification> {
+            if self.fail_local_transfer {
+                anyhow::bail!("stub: execute_local_transfer forced failure");
+            }
+            Ok(TransferCompleteNotification::completed())
+        }
+
+        fn execute_remote_onboard(
+            &self,
+            _src: crate::worker::RemoteDescriptor,
+            _dst: LogicalLayoutHandle,
+            _dst_block_ids: Arc<[BlockId]>,
+            _options: TransferOptions,
+        ) -> Result<TransferCompleteNotification> {
+            anyhow::bail!("stub: execute_remote_onboard not implemented");
+        }
+
+        fn execute_remote_offload(
+            &self,
+            _src: LogicalLayoutHandle,
+            _src_block_ids: Arc<[BlockId]>,
+            _dst: crate::worker::RemoteDescriptor,
+            _options: TransferOptions,
+        ) -> Result<TransferCompleteNotification> {
+            anyhow::bail!("stub: execute_remote_offload not implemented");
+        }
+
+        fn connect_remote(
+            &self,
+            _instance_id: InstanceId,
+            _metadata: Vec<SerializedLayout>,
+        ) -> Result<crate::worker::ConnectRemoteResponse> {
+            Ok(crate::worker::ConnectRemoteResponse::ready())
+        }
+
+        fn has_remote_metadata(&self, _instance_id: InstanceId) -> bool {
+            false
+        }
+
+        fn execute_remote_onboard_for_instance(
+            &self,
+            _instance_id: InstanceId,
+            _remote_logical_type: LogicalLayoutHandle,
+            _src_block_ids: Vec<BlockId>,
+            _dst: LogicalLayoutHandle,
+            _dst_block_ids: Arc<[BlockId]>,
+            _options: TransferOptions,
+        ) -> Result<TransferCompleteNotification> {
+            anyhow::bail!("stub: execute_remote_onboard_for_instance not implemented");
+        }
+    }
+
+    impl ObjectBlockOps for StubParallelWorkers {
+        fn has_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+        ) -> futures::future::BoxFuture<'static, Vec<(SequenceHash, Option<usize>)>> {
+            Box::pin(async move { keys.into_iter().map(|k| (k, None)).collect() })
+        }
+
+        fn put_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+            _layout: LogicalLayoutHandle,
+            _block_ids: Vec<BlockId>,
+        ) -> futures::future::BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+            Box::pin(async move { keys.into_iter().map(Err).collect() })
+        }
+
+        fn get_blocks(
+            &self,
+            keys: Vec<SequenceHash>,
+            _layout: LogicalLayoutHandle,
+            _block_ids: Vec<BlockId>,
+        ) -> futures::future::BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
+            Box::pin(async move { keys.into_iter().map(Err).collect() })
+        }
+    }
+
+    impl ParallelWorkers for StubParallelWorkers {
+        fn export_metadata(&self) -> Result<Vec<crate::worker::SerializedLayoutResponse>> {
+            Ok(Vec::new())
+        }
+
+        fn import_metadata(
+            &self,
+            _metadata: Vec<SerializedLayout>,
+        ) -> Result<Vec<crate::worker::ImportMetadataResponse>> {
+            Ok(Vec::new())
+        }
+
+        fn worker_count(&self) -> usize {
+            0
+        }
+
+        fn workers(&self) -> &[Arc<dyn Worker>] {
+            &[]
+        }
+    }
+
+    /// Build a leader with a G2 manager, an optional G3 manager, and a stub
+    /// `ParallelWorkers` so the staging kernel can register synthetic G2
+    /// blocks in-process. The G2 manager owns 8 blocks of size 4; G3 — when
+    /// requested — owns the same. `fail_local_transfer` toggles the stub
+    /// failure mode for the staging-error tests.
+    async fn leader_with_stub_worker(
+        with_g3: bool,
+        fail_local_transfer: bool,
+    ) -> Result<(
+        Arc<InstanceLeader>,
+        Arc<BlockManager<G2>>,
+        Option<Arc<BlockManager<G3>>>,
+    )> {
+        let messenger = create_messenger_tcp().await?;
+        let registry = BlockRegistry::builder().build();
+        let g2 = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(8)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+        let g3 = if with_g3 {
+            Some(Arc::new(
+                TestManagerBuilder::<G3>::new()
+                    .block_count(8)
+                    .block_size(4)
+                    .registry(registry.clone())
+                    .build(),
+            ))
+        } else {
+            None
+        };
+        let stub: Arc<dyn ParallelWorkers> = Arc::new(StubParallelWorkers {
+            fail_local_transfer,
+        });
+        let mut builder = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry(registry)
+            .g2_manager(g2.clone())
+            .parallel_worker(stub);
+        if let Some(ref g3) = g3 {
+            builder = builder.g3_manager(g3.clone());
+        }
+        Ok((Arc::new(builder.build()?), g2, g3))
+    }
+
+    /// Bridge-hole + remote: when G3 staging fills a hole between an early G2
+    /// prefix and later already-resident G2 blocks, the post-staging contiguous
+    /// prefix is *longer* than `local_g2_count + local_g3_count`. The composer
+    /// must compute the remote-pull target against the actual post-staging
+    /// prefix — the optimistic sum would project the pull onto hashes that are
+    /// already locally resident, wasting bandwidth (and risking duplicate
+    /// register conflicts). The discovery RPC is set to advertise a `deepest`
+    /// inside the post-bridging region; the assertion is that the final
+    /// contiguous prefix matches the bridged length and the discovery RPC was
+    /// consulted but the pull projection landed past the locally-resident run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_matches_bridge_hole_projects_pull_past_resident_run() -> Result<()> {
+        use crate::leader::Leader;
+        use crate::leader::discovery::RemoteCandidates;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        // Sequence length 5: G2[0,1,3,4] (hole at 2) + G3[2] (fills the hole)
+        // + a remote "deepest" reported at position 4 — which is locally
+        // resident post-staging. The optimistic projection
+        // (start = local_g2_count + local_g3_count = 2 + 1 = 3) would target
+        // hashes [3,4] (already resident). The post-staging re-match yields
+        // current_prefix = 5 (the whole sequence), so the projection
+        // correctly skips the pull (remaining is empty).
+        let (leader, g2, g3) = leader_with_stub_worker(
+            /* with_g3 */ true, /* fail_local_transfer */ false,
+        )
+        .await?;
+        let g3 = g3.expect("with_g3=true → G3 manager present");
+
+        let seq = create_token_sequence(5, 4, 0);
+        let blocks = seq.blocks();
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[3..5])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &blocks[2..3])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        leader.set_remote_discovery(Arc::new(MockDiscovery {
+            calls: Arc::clone(&calls),
+            outcome: Some(RemoteCandidates {
+                deepest: hashes[4],
+                instances: Vec::new(),
+            }),
+        }));
+
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result
+            .as_async()
+            .expect("local G3 hits → AsyncSession path");
+        async_session.wait_for_completion().await?;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "discovery is consulted once even when staging will fully cover the indexer's deepest"
+        );
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+        assert_eq!(
+            delivered, 5,
+            "bridge-hole staging fills [2], reaches [3,4] → contiguous prefix = 5"
+        );
+        Ok(())
+    }
+
+    /// Layered composition: when both local G3 hits exist AND the post-local
+    /// tail meets `min_remote_blocks`, the composer issues discovery *and*
+    /// stages G3 concurrently. Pre-redesign the `matched_g3_blocks.is_empty()`
+    /// gate suppressed discovery entirely in this case; this test pins the
+    /// additive composition behaviour.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_matches_layered_g3_stages_and_discovery_consults() -> Result<()> {
+        use crate::leader::Leader;
+        use crate::leader::discovery::RemoteCandidates;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        // Sequence length 6: G2[0,1] + G3[2,3] + remote tail [4,5].
+        let (leader, g2, g3) = leader_with_stub_worker(
+            /* with_g3 */ true, /* fail_local_transfer */ false,
+        )
+        .await?;
+        let g3 = g3.expect("with_g3=true → G3 manager present");
+
+        let seq = create_token_sequence(6, 4, 0);
+        let blocks = seq.blocks();
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &blocks[2..4])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        // min_remote_blocks = 2 → post-local tail (positions 4,5) = 2 ≥ 2.
+        // Use a discovery handle whose discover() reports the post-local
+        // tail's deepest hash but no candidates can be reached (instances=[]),
+        // so the composer issues the RPC but performs no pull. This isolates
+        // the "discovery was consulted" assertion from any remote-pull infra.
+        let calls = Arc::new(AtomicUsize::new(0));
+        leader.set_remote_discovery(Arc::new(MockDiscovery {
+            calls: Arc::clone(&calls),
+            outcome: Some(RemoteCandidates {
+                deepest: hashes[5],
+                instances: Vec::new(),
+            }),
+        }));
+        // Lower the threshold so the post-local tail of 2 triggers the pull.
+        // The fixture defaults to 0 from the builder; assert assumption.
+        // (No direct setter exposed; tests build leaders with explicit
+        // `.min_remote_blocks(...)` so we re-build via the helper here.)
+
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result
+            .as_async()
+            .expect("layered path (G3 + remote tail) must yield an AsyncSession");
+        async_session.wait_for_completion().await?;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "composer must consult discovery when G3 is staging AND the tail meets threshold"
+        );
+        // G2[0,1] + staged G3[2,3] = 4 contiguous; no remote candidates so
+        // positions [4,5] don't land. Contiguous prefix = 4.
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+        assert_eq!(
+            delivered, 4,
+            "G2 prefix (2) + staged G3 (2) = 4 contiguous blocks delivered"
+        );
+        Ok(())
+    }
+
+    /// `release_session` must NOT abort an in-flight local G3 staging transfer.
+    /// Dropping `stage_g3_to_g2` mid-flight returns G2 destination blocks to
+    /// the allocator pool while DMA is still writing into them — pool
+    /// corruption. The composer's contract is: cancellation only gates the
+    /// discovery / remote-pull continuation; staging always runs to completion.
+    /// Assertion: a session cancelled mid-staging still publishes the staged
+    /// blocks into the final contiguous prefix.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_session_does_not_abort_inflight_staging() -> Result<()> {
+        use crate::leader::Leader;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        let (leader, g2, g3) = leader_with_stub_worker(
+            /* with_g3 */ true, /* fail_local_transfer */ false,
+        )
+        .await?;
+        let g3 = g3.expect("with_g3=true → G3 manager present");
+
+        // G2[0,1], G3[2,3]. Post-staging contiguous prefix = 4.
+        let seq = create_token_sequence(4, 4, 0);
+        let blocks = seq.blocks();
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &blocks[2..4])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        let result = leader.find_matches(&hashes)?;
+        let async_session = result
+            .as_async()
+            .expect("local G3 hits → AsyncSession path");
+        let session_id = async_session.session_id();
+
+        // Race cancel against the staging future. The stub's transfer is
+        // pre-completed so the cancel likely lands during or just after
+        // staging. The invariant being pinned: cancel must not corrupt or
+        // drop staged work — staging blocks must reach the terminal holder.
+        leader.release_session(session_id);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async_session.wait_for_completion(),
+        )
+        .await
+        .expect("composer must reach terminal even when cancelled mid-staging")?;
+
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+        assert_eq!(
+            delivered, 4,
+            "staging is not cancellable; bridged prefix must still be 4 after release_session"
+        );
+        Ok(())
+    }
+
+    /// Hole-fill under-report reproducer. G2 holds positions [0,1] and [3]
+    /// (a hole at position 2), G3 holds the hole [2]. After staging G3→G2,
+    /// the contiguous prefix is [0,1,2,3] = 4, not the pre-fix [0,1] + [2]
+    /// staged = 3. Asserting `matched_blocks == 4` pins the post-staging
+    /// re-match invariant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_matches_local_g3_staging_fills_bridge_hole() -> Result<()> {
+        use crate::leader::Leader;
+        use crate::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+
+        let (leader, g2, g3) = leader_with_stub_worker(
+            /* with_g3 */ true, /* fail_local_transfer */ false,
+        )
+        .await?;
+        let g3 = g3.expect("with_g3=true → G3 manager present");
+
+        // 4-block sequence h0..h3. Seed G2 with positions [0,1,3] (hole at
+        // position 2); G3 with the hole [2]. After staging, G2 covers
+        // [0,1,2,3] contiguously.
+        let seq = create_token_sequence(4, 4, 0);
+        let blocks = seq.blocks();
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[..2])?;
+        crate::testing::managers::populate_manager_with_blocks(&g2, &blocks[3..4])?;
+        crate::testing::managers::populate_manager_with_blocks(&g3, &blocks[2..3])?;
+        let hashes = generate_sequence_hashes(&seq);
+
+        let result = leader.find_matches(&hashes)?;
+        let async_session = result
+            .as_async()
+            .expect("local G3 present (non-bypass) must yield an AsyncSession");
+        async_session.wait_for_completion().await?;
+
+        let reported = match async_session.status() {
+            OnboardingStatus::Complete { matched_blocks } => matched_blocks,
+            other => panic!("expected Complete, got {other:?}"),
+        };
+        let delivered = async_session.get_blocks_count().unwrap_or(0);
+        assert_eq!(
+            reported, delivered,
+            "reported ({reported}) must equal delivered ({delivered})"
+        );
+        assert_eq!(
+            delivered, 4,
+            "staging must fill the hole and re-match to a 4-block contiguous prefix"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn assemble_export_metadata_stamps_when_template_set() -> Result<()> {
+        let cached = vec![stub_metadata_for(0), stub_metadata_for(1)];
+        let leader = leader_with_cached_metadata(cached, Some(template(2))).await?;
+
+        let exported = leader.assemble_export_metadata().await?;
+        assert_eq!(exported.len(), 2);
+        for (i, layout) in exported.iter().enumerate() {
+            let unpacked = layout.unpack()?;
+            let desc = unpacked
+                .parallelism
+                .expect("descriptor must be stamped when template is set");
+            assert_eq!(desc.rank, i);
+            assert_eq!(desc.tp_size, 2);
+            assert_eq!(desc.shard_axis, KvDim::HeadCount);
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn assemble_export_metadata_passes_through_when_no_template() -> Result<()> {
+        let cached = vec![stub_metadata_for(0), stub_metadata_for(1)];
+        let leader = leader_with_cached_metadata(cached, None).await?;
+
+        let exported = leader.assemble_export_metadata().await?;
+        assert_eq!(exported.len(), 2);
+        for layout in &exported {
+            let unpacked = layout.unpack()?;
+            assert!(
+                unpacked.parallelism.is_none(),
+                "no template configured → no descriptor stamped"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn assemble_export_metadata_errors_on_length_mismatch() -> Result<()> {
+        // Template says tp_size = 4 but cache only has 2 entries.
+        let cached = vec![stub_metadata_for(0), stub_metadata_for(1)];
+        let leader = leader_with_cached_metadata(cached, Some(template(4))).await?;
+        let err = leader.assemble_export_metadata().await.unwrap_err();
+        assert!(
+            err.to_string().contains("tp_size * pp_size"),
+            "expected length-mismatch error, got: {err}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Describe (Phase C)
+    // ------------------------------------------------------------------
+
+    /// Pre-stamping snapshot: the leader's pre-worker-stamp state still
+    /// produces a valid `InstanceDescription` with identity + process info.
+    /// The cached metadata is empty layouts (no `LogicalLayoutDescriptor`s),
+    /// so `workers` lands with `WorkerInfo` entries that carry the
+    /// `worker_id` and an empty `layouts` vec.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_pre_stamping_populates_identity_fields() -> Result<()> {
+        let cached = vec![stub_metadata_for(7), stub_metadata_for(8)];
+        let leader = leader_with_cached_metadata(cached, None).await?;
+
+        let d = leader.describe().await.expect("describe ok");
+        assert_eq!(d.worker_ids, vec![7, 8]);
+        assert_eq!(d.workers.len(), 2);
+        // Layouts are empty (no `LogicalLayoutDescriptor`s in stub metadata)
+        // — so block_size aggregates to None, tier_capacity is empty.
+        assert!(d.block_size.is_none());
+        assert!(d.tier_capacity.is_empty());
+        // Identity / process / capability fields populated.
+        assert_eq!(d.instance_id, leader.messenger().instance_id().to_string());
+        assert!(d.hub_instance_id.is_none(), "no set_hub_instance_id call");
+        assert!(d.config.is_none(), "no set_config_blob call");
+        assert!(d.modules.is_empty(), "no set_modules call");
+        assert!(d.role.is_none());
+        assert_ne!(d.host.pid, 0);
+        Ok(())
+    }
+
+    /// **Regression test** — describe MUST NOT synthesise a fake `tp_size=1,
+    /// pp_size=1` parallelism when workers haven't stamped descriptors yet
+    /// (or when the leader was built without a `ParallelismTemplate`).
+    /// Reporting 1x1 for a multi-worker TP leader is a lie about topology.
+    ///
+    /// Pre-fix: per-worker parallelism was synthesised to `Some(1x1)` and
+    /// the aggregate cascaded to `Some(1x1)`. Post-fix: both are `None` and
+    /// the wire honestly says "parallelism unknown / not stamped".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_does_not_invent_1x1_parallelism_when_unstamped() -> Result<()> {
+        // Two workers, no template — `stub_metadata_for` packs
+        // `parallelism = None`. A pre-fix implementation would lie that
+        // the leader is single-rank (1x1) when it actually has two workers.
+        let cached = vec![stub_metadata_for(0), stub_metadata_for(1)];
+        let leader = leader_with_cached_metadata(cached, None).await?;
+
+        let d = leader.describe().await.expect("describe ok");
+        assert_eq!(d.workers.len(), 2);
+
+        // Per-worker parallelism must be None when the descriptor is unstamped.
+        for w in &d.workers {
+            assert!(
+                w.parallelism.is_none(),
+                "worker {} reports parallelism without a stamped descriptor: {:?}",
+                w.worker_id,
+                w.parallelism
+            );
+        }
+        // Aggregate must be None when any worker is unstamped — never a
+        // synthetic 1x1 for what is actually a 2-worker leader.
+        assert!(
+            d.parallelism.is_none(),
+            "top-level parallelism synthesised without stamped descriptors: {:?}",
+            d.parallelism
+        );
+        Ok(())
+    }
+
+    /// `set_config_blob` / `set_hub_instance_id` / `set_modules` are
+    /// idempotent: first-write-wins, subsequent calls return false.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_setters_are_idempotent() -> Result<()> {
+        let leader = leader_with_cached_metadata(vec![], None).await?;
+        let first = serde_json::json!({"a": 1});
+        let second = serde_json::json!({"b": 2});
+        assert!(leader.set_config_blob(first.clone()));
+        assert!(!leader.set_config_blob(second.clone()));
+        let d = leader.describe().await.expect("describe ok");
+        assert_eq!(d.config.as_ref(), Some(&first));
+
+        assert!(leader.set_modules(vec![kvbm_protocols::control::ModuleId::Core]));
+        assert!(!leader.set_modules(vec![kvbm_protocols::control::ModuleId::Dev]));
+        let d2 = leader.describe().await.expect("describe ok");
+        assert_eq!(d2.modules, vec![kvbm_protocols::control::ModuleId::Core]);
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // Remote-search driver (transfer-plane, hub-indexer discovery)
+    // ------------------------------------------------------------------------
+
+    use crate::leader::discovery::{RemoteBlockDiscovery, RemoteCandidates};
+    use futures::future::BoxFuture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Mock discovery that records call count and returns a canned outcome.
+    struct MockDiscovery {
+        calls: Arc<AtomicUsize>,
+        outcome: Option<RemoteCandidates>,
+    }
+
+    impl RemoteBlockDiscovery for MockDiscovery {
+        fn discover(
+            &self,
+            _hashes: Vec<SequenceHash>,
+        ) -> BoxFuture<'static, Result<Option<RemoteCandidates>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = self.outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
+    }
+
+    async fn leader_for_remote_search(min_remote_blocks: usize) -> Result<Arc<InstanceLeader>> {
+        let messenger = create_messenger_tcp().await?;
+        let registry = BlockRegistry::builder().build();
+        let g2 = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(8)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+        let leader = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry(registry)
+            .g2_manager(g2)
+            .min_remote_blocks(min_remote_blocks)
+            .build()?;
+        Ok(Arc::new(leader))
+    }
+
+    fn some_hashes(n: usize) -> Vec<SequenceHash> {
+        // Distinct, deterministic PLHs; none are resident in the fresh G2, so
+        // the local prefix match is empty and the whole range is "remote".
+        (0..n as u64)
+            .map(|i| SequenceHash::new(i, None, i))
+            .collect()
+    }
+
+    /// Below the block threshold, the composer must not spawn — the result is
+    /// the synchronous local `Ready` and discovery is never consulted. (The
+    /// prior driver-based design returned an AsyncSession that immediately
+    /// degraded to local; the layered composer hoists that threshold check
+    /// up-front so there is no spawn at all.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_search_below_threshold_skips_discovery() -> Result<()> {
+        let leader = leader_for_remote_search(/* min_remote_blocks */ 10).await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        leader.set_remote_discovery(Arc::new(MockDiscovery {
+            calls: Arc::clone(&calls),
+            outcome: None,
+        }));
+
+        // 3 remaining blocks <= threshold(10) → no remote search.
+        let hashes = some_hashes(3);
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let ready = result
+            .as_ready()
+            .expect("below threshold + no G3 to stage → local-only Ready");
+        assert_eq!(ready.g2_count(), 0, "empty G2 → 0 matched");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "discovery must be skipped");
+        Ok(())
+    }
+
+    /// Above threshold with a discovery miss (`Ok(None)`): discovery is
+    /// consulted once and the driver degrades to the (empty) local match
+    /// rather than wedging non-terminal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_search_discovery_miss_degrades_to_local() -> Result<()> {
+        let leader = leader_for_remote_search(/* min_remote_blocks */ 1).await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        leader.set_remote_discovery(Arc::new(MockDiscovery {
+            calls: Arc::clone(&calls),
+            outcome: None,
+        }));
+
+        // 5 remaining blocks > threshold(1) → remote search attempted.
+        let hashes = some_hashes(5);
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result.as_async().expect("discovery drives the async path");
+        async_session.wait_for_completion().await?;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "discovery consulted once");
+        assert!(
+            matches!(
+                async_session.status(),
+                OnboardingStatus::Complete { matched_blocks: 0 }
+            ),
+            "discovery miss degrades to local match, got {:?}",
+            async_session.status()
+        );
+        Ok(())
+    }
+
+    /// Discovery that parks forever after signalling it started — lets a test
+    /// catch the driver mid-flight and cancel it.
+    struct BlockingDiscovery {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    impl RemoteBlockDiscovery for BlockingDiscovery {
+        fn discover(
+            &self,
+            _hashes: Vec<SequenceHash>,
+        ) -> BoxFuture<'static, Result<Option<RemoteCandidates>>> {
+            let started = Arc::clone(&self.started);
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending::<()>().await;
+                unreachable!()
+            })
+        }
+    }
+
+    /// The architectural justification for an engine-owned driver: a
+    /// cancelled/preempted request (`release_session`) must tear the in-flight
+    /// remote search down and drive the session to a terminal state, not wedge
+    /// it at `Searching` forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn release_session_cancels_inflight_remote_search() -> Result<()> {
+        let leader = leader_for_remote_search(/* min_remote_blocks */ 1).await?;
+        let started = Arc::new(tokio::sync::Notify::new());
+        leader.set_remote_discovery(Arc::new(BlockingDiscovery {
+            started: Arc::clone(&started),
+        }));
+
+        let result = leader.find_matches_with_options(
+            &some_hashes(5),
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        let async_session = result.as_async().expect("discovery drives the async path");
+        let session_id = async_session.session_id();
+
+        // Wait until the driver is parked inside discovery, then cancel.
+        started.notified().await;
+        assert!(matches!(
+            async_session.status(),
+            OnboardingStatus::Searching
+        ));
+
+        leader.release_session(session_id);
+
+        // The driver's cancel branch must drive the session to terminal
+        // promptly — otherwise this times out.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async_session.wait_for_completion(),
+        )
+        .await
+        .expect("cancellation must reach a terminal state before the timeout")?;
+        assert!(matches!(
+            async_session.status(),
+            OnboardingStatus::Complete { .. }
+        ));
+        Ok(())
+    }
+
+    /// Without an injected discovery, `search_remote` does not take the
+    /// indexer path: with no remote leaders / object client the result is a
+    /// synchronous local `Ready`, not an async session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn search_remote_without_discovery_is_ready_local() -> Result<()> {
+        let leader = leader_for_remote_search(1).await?;
+        let hashes = some_hashes(5);
+        let result = leader.find_matches_with_options(
+            &hashes,
+            FindMatchesOptions {
+                search_remote: true,
+                staging_mode: StagingMode::Full,
+            },
+        )?;
+        assert!(
+            result.is_ready(),
+            "no discovery + no remote leaders/object → local Ready"
+        );
+        Ok(())
     }
 }

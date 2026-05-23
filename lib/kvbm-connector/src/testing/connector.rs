@@ -536,6 +536,17 @@ pub struct TestConnectorInstance {
     pub workers: Vec<TestConnectorWorker>,
     /// Leader's Messenger instance for cross-registration.
     pub leader_nova: Arc<Messenger>,
+    /// Sole owner of the tokio runtime for sync (`#[test]`) constructions.
+    ///
+    /// Components borrow the runtime via `Handle` (`RuntimeHandle::Handle`) and
+    /// never own an `Arc<Runtime>`, so this field is the only owner. Declared
+    /// last so it drops *after* leader/workers/messenger — on the dropping
+    /// thread, which for sync tests is the main thread where blocking shutdown
+    /// is allowed. For async (`#[tokio::test]`) constructions this is `None`
+    /// (components borrow the ambient test runtime), so nothing drops a runtime
+    /// from within the async context. Either way avoids tokio's "Cannot drop a
+    /// runtime in a context where blocking is not allowed" panic.
+    _owned_runtime: Option<Arc<tokio::runtime::Runtime>>,
 }
 
 impl TestConnectorInstance {
@@ -994,8 +1005,11 @@ impl TestConnectorClusterBuilder {
 
     /// Use a shared tokio runtime (for sync factory methods).
     ///
-    /// When set, all instances and their KvbmRuntimes will share
-    /// ownership of this runtime via Arc.
+    /// The runtime is retained as the sole owner inside each resulting
+    /// `TestConnectorInstance` (`_owned_runtime`); the instances' KvbmRuntimes
+    /// only *borrow* it via `Handle::current()` (resolved inside `block_on`).
+    /// This keeps the runtime from being dropped on a runtime worker thread at
+    /// teardown, which tokio rejects.
     #[must_use]
     pub fn with_shared_runtime(mut self, runtime: Arc<tokio::runtime::Runtime>) -> Self {
         self.shared_runtime = Some(runtime);
@@ -1150,8 +1164,11 @@ impl TestConnectorInstanceBuilder {
 
     /// Use a shared tokio runtime (for sync factory methods).
     ///
-    /// When set, all KvbmRuntimes created by this builder will share
-    /// ownership of this runtime via Arc.
+    /// The runtime is retained as the sole owner inside the resulting
+    /// `TestConnectorInstance` (`_owned_runtime`); KvbmRuntimes only *borrow*
+    /// it via `Handle::current()` (resolved inside `block_on`). This keeps the
+    /// runtime from being dropped on a runtime worker thread at teardown, which
+    /// tokio rejects.
     #[must_use]
     pub fn with_shared_runtime(mut self, runtime: Arc<tokio::runtime::Runtime>) -> Self {
         self.shared_runtime = Some(runtime);
@@ -1191,11 +1208,15 @@ impl TestConnectorInstanceBuilder {
 
         for (rank, worker_nova) in worker_novas.into_iter().enumerate() {
             let worker_runtime = {
-                let mut builder =
-                    KvbmRuntime::builder(worker_config.clone()).with_messenger(worker_nova.clone());
-                if let Some(rt) = &self.shared_runtime {
-                    builder = builder.with_runtime(rt.clone());
-                }
+                // Borrow the ambient runtime via Handle rather than owning an
+                // Arc<Runtime>. `Handle::current()` resolves to the shared
+                // runtime in sync factory paths (build() runs inside its
+                // block_on) or to the test runtime under `#[tokio::test]`.
+                // Owning would cause the runtime to be dropped from a runtime
+                // worker thread at teardown, which tokio rejects.
+                let builder = KvbmRuntime::builder(worker_config.clone())
+                    .with_messenger(worker_nova.clone())
+                    .with_runtime_handle(tokio::runtime::Handle::current());
                 builder.build_worker().await?
             };
 
@@ -1234,14 +1255,34 @@ impl TestConnectorInstanceBuilder {
                 })
                 .collect();
 
+            // Build a labeled `KvDimLayout` matching the synthetic
+            // `[num_blocks, outer_dim, page_size, inner_dim]` shape produced
+            // by `MockTensor::from_memory_region` above. The trailing axis
+            // is labeled `HeadSize` because the test layout has no
+            // `HeadCount` axis (num_heads = None on its `LayoutConfig`),
+            // so the entire `inner_dim` is treated as opaque per-token bytes.
+            let dim_layout = kvbm_common::KvDimLayout::new(
+                vec![
+                    kvbm_common::KvDim::Block,
+                    kvbm_common::KvDim::Outer,
+                    kvbm_common::KvDim::Page,
+                    kvbm_common::KvDim::HeadSize,
+                ],
+                vec![
+                    self.layout_config.num_blocks,
+                    self.layout_config.outer_dim,
+                    self.layout_config.page_size,
+                    self.layout_config.inner_dim,
+                ],
+            )?;
+
             connector_worker
                 .register_kv_caches(
                     tensors,
                     self.layout_config.num_blocks,
-                    self.layout_config.page_size,
                     self.layout_config.dtype_width_bytes,
-                    None,
-                    None,
+                    dim_layout,
+                    kvbm_common::KvBlockLayout::Unknown,
                 )
                 .context("Failed to register KV caches")?;
 
@@ -1259,11 +1300,10 @@ impl TestConnectorInstanceBuilder {
         // 4. Build LEADER runtime AFTER workers
         let leader_config = self.test_config.build_leader_config()?;
         let leader_runtime = {
-            let mut builder =
-                KvbmRuntime::builder(leader_config).with_messenger(leader_nova.clone());
-            if let Some(rt) = &self.shared_runtime {
-                builder = builder.with_runtime(rt.clone());
-            }
+            // See worker_runtime above: borrow the ambient runtime via Handle.
+            let builder = KvbmRuntime::builder(leader_config)
+                .with_messenger(leader_nova.clone())
+                .with_runtime_handle(tokio::runtime::Handle::current());
             builder.build_leader().await?
         };
 
@@ -1273,6 +1313,9 @@ impl TestConnectorInstanceBuilder {
             leader,
             workers,
             leader_nova,
+            // Retain sole ownership of the runtime for sync constructions so it
+            // is dropped on the main thread; `None` for async constructions.
+            _owned_runtime: self.shared_runtime,
         })
     }
 }
@@ -1418,10 +1461,14 @@ impl TensorDescriptor for MockTensor {
 
 #[cfg(test)]
 mod tests {
+    // Only the NIXL-gated instance tests configure tracing.
+    #[cfg(feature = "testing-nixl")]
     use tracing_subscriber::EnvFilter;
 
     use super::*;
 
+    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    #[cfg(feature = "testing-nixl")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_single_worker_initialization() {
         let _ = tracing_subscriber::fmt()
@@ -1477,6 +1524,8 @@ mod tests {
             .expect("Cleanup should succeed");
     }
 
+    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    #[cfg(feature = "testing-nixl")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_multi_worker_initialization() {
         let _ = tracing_subscriber::fmt()
@@ -1708,6 +1757,8 @@ mod tests {
     // Sync factory tests - regular #[test], not #[tokio::test]
     // =========================================================================
 
+    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    #[cfg(feature = "testing-nixl")]
     #[test]
     fn test_sync_single_worker_creation() {
         let _ = tracing_subscriber::fmt()
@@ -1731,6 +1782,8 @@ mod tests {
         );
     }
 
+    // Builds a real cluster (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    #[cfg(feature = "testing-nixl")]
     #[test]
     fn test_sync_cluster_creation() {
         let _ = tracing_subscriber::fmt()

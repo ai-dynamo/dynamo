@@ -3,13 +3,18 @@
 
 //! Transport manager for local and remote physical layouts with transfer execution.
 
+pub mod canonical;
 mod handle;
 mod local;
 mod metadata;
 mod remote;
 
+pub use canonical::canonical_shape_from_worker;
 pub use handle::LayoutHandle;
-pub use metadata::{LogicalLayoutDescriptor, SerializedLayout, WorkerAddress};
+pub use metadata::{
+    LogicalLayoutDescriptor, ParallelismDescriptor, RdmaLayoutDescriptors, SerializedLayout,
+    WorkerAddress, select_transfer_canonical_layout, select_transfer_canonical_tier,
+};
 
 pub(crate) use local::LocalLayout;
 pub(crate) use metadata::LocalLayoutDescriptor;
@@ -127,8 +132,9 @@ impl TransferManager {
     /// Vector of handles for the imported remote layouts
     ///
     /// # Errors
-    /// Returns an error if the remote worker was already loaded or if metadata
-    /// loading/reconstruction fails
+    /// Returns an error if metadata loading or layout reconstruction fails.
+    /// Duplicate imports for an already-loaded remote are idempotent — returns
+    /// the same handles without re-registering NIXL state.
     pub fn import_metadata(&self, metadata: SerializedLayout) -> Result<Vec<LayoutHandle>> {
         self.registry.write().unwrap().import_metadata(metadata)
     }
@@ -234,7 +240,81 @@ impl TransferManager {
         dst_blocks: &[BlockId],
         options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // Clone layouts inside the lock, then drop lock before transfer
+        let (src_layout, dst_layout, internal_options) =
+            self.resolve_and_dissolve(src_handle, dst_handle, options, None)?;
+        tracing::debug!(
+            src_handle = src_handle.to_string(),
+            dst_handle = dst_handle.to_string(),
+            "Executing transfer; src_blocks = {:?}; dst_blocks = {:?}",
+            src_blocks,
+            dst_blocks,
+        );
+        self.dispatch_resolved(
+            &src_layout,
+            &dst_layout,
+            src_blocks,
+            dst_blocks,
+            internal_options,
+        )
+    }
+
+    /// Sliced cross-leader transfer — AB-1d.
+    ///
+    /// The caller supplies a [`crate::transfer::TransferSelection`] carrying
+    /// `(src_block_id, dst_block_id)` pairs and the per-axis coordinate-space
+    /// restrictions (`axis_slices`) describing the slice of each block to move.
+    /// Typical construction: intersect two [`crate::layout::LayoutView`]s via
+    /// [`crate::layout::intersect_views`] and drop the resulting
+    /// `Vec<AxisIntersection>` into a [`crate::transfer::TransferSelection`].
+    ///
+    /// Routes through the planner-driven NIXL/Cuda path
+    /// (`use_planner = true` is forced internally; `axis_slices` cannot
+    /// be expressed on the legacy executor). `layer_range` is incompatible
+    /// with the planner today; passing both errors. Empty `axis_slices`
+    /// is accepted and degenerates to a full-extent transfer through the
+    /// planner.
+    pub fn execute_transfer_selection(
+        &self,
+        src_handle: LayoutHandle,
+        dst_handle: LayoutHandle,
+        selection: crate::transfer::TransferSelection,
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        let (src_blocks, dst_blocks): (Vec<BlockId>, Vec<BlockId>) =
+            selection.block_pairs.iter().copied().unzip();
+        let (src_layout, dst_layout, internal_options) = self.resolve_and_dissolve(
+            src_handle,
+            dst_handle,
+            options,
+            Some(selection.axis_slices),
+        )?;
+        self.dispatch_resolved(
+            &src_layout,
+            &dst_layout,
+            &src_blocks,
+            &dst_blocks,
+            internal_options,
+        )
+    }
+
+    /// Resolve `(src_handle, dst_handle)` to layouts and turn the
+    /// caller-supplied [`TransferOptions`] into the executor-internal
+    /// [`TransferOptionsInternal`].
+    ///
+    /// `selection_slices = Some(_)` means selection-flavored: forces
+    /// `use_planner = true` and attaches the axis slices (the caller's
+    /// `use_planner` choice is ignored — `axis_slices` is only
+    /// meaningful on the planner path). `None` means standard transfer:
+    /// the caller's `use_planner` choice is honored and no slices are
+    /// attached.
+    fn resolve_and_dissolve(
+        &self,
+        src_handle: LayoutHandle,
+        dst_handle: LayoutHandle,
+        options: TransferOptions,
+        selection_slices: Option<Vec<kvbm_common::AxisIntersection>>,
+    ) -> Result<(PhysicalLayout, PhysicalLayout, TransferOptionsInternal)> {
+        // Clone layouts inside the lock, then drop lock before transfer.
         let (src_layout, dst_layout) = {
             let registry = self.registry.read().unwrap();
             let src = registry
@@ -246,7 +326,7 @@ impl TransferManager {
                 .ok_or_else(|| anyhow!("invalid destination handle: {}", dst_handle))?
                 .clone();
             (src, dst)
-        }; // Lock released here
+        };
 
         let (
             layer_range,
@@ -256,59 +336,63 @@ impl TransferManager {
             src_kv_layout,
             dst_kv_layout,
             metric_route,
+            use_planner,
         ) = options.dissolve();
 
-        let mut internal_options = TransferOptionsInternal::builder();
-
+        let force_planner = selection_slices.is_some();
+        let mut builder = TransferOptionsInternal::builder()
+            .use_planner(force_planner || use_planner)
+            .handles(src_handle, dst_handle);
+        if let Some(slices) = selection_slices {
+            builder = builder.axis_slices(slices);
+        }
         if let Some(range) = layer_range {
-            internal_options = internal_options.layer_range(range);
+            builder = builder.layer_range(range);
         }
-
         if let Some(notification) = nixl_write_notification {
-            internal_options = internal_options.nixl_write_notification(notification);
+            builder = builder.nixl_write_notification(notification);
         }
-
         if let Some(bounce) = bounce_buffer {
             let (handle, block_ids) = bounce.into_parts();
             let bounce_buffer = self.create_bounce_buffer(handle, block_ids)?;
-            internal_options = internal_options.bounce_buffer(bounce_buffer);
+            builder = builder.bounce_buffer(bounce_buffer);
         }
-
         if let Some(stream) = cuda_stream {
-            internal_options = internal_options.cuda_stream(stream);
+            builder = builder.cuda_stream(stream);
         }
-
         if let Some(layout) = src_kv_layout {
-            internal_options = internal_options.src_kv_layout(layout);
+            builder = builder.src_kv_layout(layout);
         }
-
         if let Some(layout) = dst_kv_layout {
-            internal_options = internal_options.dst_kv_layout(layout);
+            builder = builder.dst_kv_layout(layout);
         }
-
         if let Some(route) = metric_route {
-            internal_options = internal_options.metric_route(route);
+            builder = builder.metric_route(route);
         }
 
-        let options = internal_options.build()?;
-        let metric_route = options.metric_route;
+        Ok((src_layout, dst_layout, builder.build()?))
+    }
+
+    /// Drive the executor with already-resolved layouts + internal
+    /// options, then wrap the resulting notification with metrics when
+    /// a `metric_route` was attached.
+    fn dispatch_resolved(
+        &self,
+        src_layout: &PhysicalLayout,
+        dst_layout: &PhysicalLayout,
+        src_blocks: &[BlockId],
+        dst_blocks: &[BlockId],
+        internal_options: TransferOptionsInternal,
+    ) -> Result<TransferCompleteNotification> {
+        let metric_route = internal_options.metric_route;
         let transfer_start = metric_route.map(|_| Instant::now());
 
-        tracing::debug!(
-            src_handle = src_handle.to_string(),
-            dst_handle = dst_handle.to_string(),
-            "Executing transfer; src_blocks = {:?}; dst_blocks = {:?}",
-            src_blocks,
-            dst_blocks,
-        );
-
-        // Execute transfer with no lock held
         let notification = super::transfer::executor::execute_transfer(
-            &src_layout,
-            &dst_layout,
+            src_layout,
+            dst_layout,
             src_blocks,
             dst_blocks,
-            options,
+            internal_options,
             &self.context,
         );
 
@@ -381,6 +465,48 @@ impl TransferManager {
     /// A clone of the physical layout, or None if the handle is not found.
     pub fn get_physical_layout(&self, handle: LayoutHandle) -> Option<PhysicalLayout> {
         self.registry.read().unwrap().get_layout(handle).cloned()
+    }
+
+    /// Read the prepared-plan cache statistics: entries, hits, misses,
+    /// approximate bytes. Safe to call concurrently with active transfers.
+    pub fn prepared_plan_cache_stats(&self) -> crate::transfer::prepared::PreparedPlanCacheStats {
+        self.context.prepared_plan_cache().stats()
+    }
+
+    /// Prewarm the prepared-plan cache for both directions of a local
+    /// (G1↔G2-style) handle pair.
+    ///
+    /// Builds and caches a prepared transfer plan for `src→dst` and `dst→src`
+    /// using the strategy that [`crate::transfer::strategy::select_strategy`]
+    /// would pick for each direction. No-op when the prepared-plan cache is
+    /// disabled or when either handle is not local to this worker.
+    ///
+    /// Safe to call multiple times — subsequent calls are cache hits.
+    /// `axis_slices` is always empty for prewarm (full transfers); sliced
+    /// transfers populate the cache lazily on first use.
+    ///
+    /// Returns `Ok(stats)` reporting prepared-plan cache state after warmup
+    /// so callers can verify the prewarm landed.
+    pub fn prewarm_local_pair(
+        &self,
+        a_handle: LayoutHandle,
+        b_handle: LayoutHandle,
+    ) -> Result<crate::transfer::prepared::PreparedPlanCacheStats> {
+        let registry = self.registry.read().unwrap();
+        let a_layout = registry
+            .get_layout(a_handle)
+            .ok_or_else(|| anyhow!("prewarm_local_pair: invalid handle: {}", a_handle))?
+            .clone();
+        let b_layout = registry
+            .get_layout(b_handle)
+            .ok_or_else(|| anyhow!("prewarm_local_pair: invalid handle: {}", b_handle))?
+            .clone();
+        drop(registry);
+        self.context
+            .prewarm_prepared_plan(a_handle, &a_layout, b_handle, &b_layout)?;
+        self.context
+            .prewarm_prepared_plan(b_handle, &b_layout, a_handle, &a_layout)?;
+        Ok(self.context.prepared_plan_cache().stats())
     }
 
     /// Create a bounce buffer specification from a layout handle and block IDs.
@@ -640,8 +766,10 @@ impl LayoutRegistry {
             }
         }
 
-        // Pack into managed metadata
-        SerializedLayout::pack(worker_address, nixl_metadata, serialized_layouts)
+        // Pack into managed metadata. AB-1a: ParallelismDescriptor not
+        // available at this layer; populated by the leader-side caller
+        // when assembling cross-leader exports.
+        SerializedLayout::pack(worker_address, nixl_metadata, serialized_layouts, None)
     }
 
     /// Import remote layout metadata.
@@ -671,17 +799,28 @@ impl LayoutRegistry {
         // Unpack metadata
         let inner = metadata.unpack()?;
 
-        // Validate not already loaded
         let remote_key = (
             inner.worker_address.nixl_agent_name.clone(),
             inner.worker_address.worker_id,
         );
+
+        // Idempotent: if this remote is already loaded, return the handles
+        // claimed by the metadata. The layouts were inserted under these
+        // handle keys during the first successful import, so the caller's
+        // contract is preserved without re-registering NIXL state.
+        //
+        // Cross-parallelism wiring lets multiple code paths import the same
+        // remote_instance (session setup + REMOTE_PULL_PLAN handler + …),
+        // and on the first request after attach they can interleave such
+        // that the second call sees `loaded_remotes` already populated and
+        // would otherwise bail with "Remote worker already loaded" — which
+        // bubbled up through `rdma_pull_with_opts` as a poisoned-event chain
+        // and tripped vLLM's kv_load_failure_policy=recompute retry loop.
+        // Treating the duplicate as a no-op matches the function's
+        // `ensure_*` semantic and is what every caller already wanted.
         if self.loaded_remotes.contains(&remote_key) {
-            bail!(
-                "Remote worker already loaded: {} (worker_id={})",
-                remote_key.0,
-                remote_key.1
-            );
+            let handles: Vec<LayoutHandle> = inner.layouts.iter().map(|l| l.handle).collect();
+            return Ok(handles);
         }
 
         // Load NIXL metadata
@@ -923,7 +1062,7 @@ mod tests {
 
     #[test]
     #[ignore] // Requires actual NIXL memory registration
-    fn test_import_duplicate_remote_fails() {
+    fn test_import_duplicate_remote_is_idempotent() {
         let source_agent = make_test_agent("source2");
         let mut source_manager = LayoutRegistry::new(source_agent.clone(), 10);
 
@@ -936,14 +1075,14 @@ mod tests {
         let dest_agent = make_test_agent("dest2");
         let mut dest_manager = LayoutRegistry::new(dest_agent, 20);
 
-        // First import succeeds
+        // First import succeeds and returns the imported handles.
         let metadata_clone = SerializedLayout::from_bytes(metadata.as_bytes().to_vec());
-        dest_manager.import_metadata(metadata).unwrap();
+        let first = dest_manager.import_metadata(metadata).unwrap();
 
-        // Second import should fail
-        let result = dest_manager.import_metadata(metadata_clone);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already loaded"));
+        // Second import for the same remote is idempotent: returns the same
+        // handles, does not re-register NIXL state, does not error.
+        let second = dest_manager.import_metadata(metadata_clone).unwrap();
+        assert_eq!(first, second);
     }
 
     #[test]

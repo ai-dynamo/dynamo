@@ -39,6 +39,32 @@ mod service;
 pub use client::VeloWorkerClient;
 pub use service::{VeloWorkerService, VeloWorkerServiceBuilder};
 
+/// Canonical handler names for the Velo RPCs this worker exposes.
+///
+/// Centralising these as constants keeps the client (`client.rs`) and
+/// service (`service.rs`) in lock-step — a rename or addition lands in
+/// exactly one place and the compiler enforces both sides see the same
+/// string. Adding a new RPC: add a const here, register a handler in
+/// `service.rs`, and use the const at the call site in `client.rs`.
+pub(crate) mod handler_names {
+    pub const LOCAL_TRANSFER: &str = "kvbm.worker.local_transfer";
+    pub const REMOTE_ONBOARD: &str = "kvbm.worker.remote_onboard";
+    pub const REMOTE_OFFLOAD: &str = "kvbm.worker.remote_offload";
+    pub const IMPORT_METADATA: &str = "kvbm.worker.import_metadata";
+    pub const EXPORT_METADATA: &str = "kvbm.worker.export_metadata";
+    pub const CONNECT_REMOTE: &str = "kvbm.worker.connect_remote";
+    pub const REMOTE_ONBOARD_FOR_INSTANCE: &str = "kvbm.worker.remote_onboard_for_instance";
+    pub const REMOTE_ONBOARD_FOR_INSTANCE_RANK: &str =
+        "kvbm.worker.remote_onboard_for_instance_rank";
+    /// AB-3: multi-shard cross-parallelism pull. Carries a
+    /// `crate::leader::dispatch::WorkerPullPlan` whose `shards` list
+    /// drives one or more sliced reads from rank-aware remote handles.
+    pub const REMOTE_PULL_PLAN: &str = "kvbm.worker.remote_pull_plan";
+    pub const OBJECT_HAS_BLOCKS: &str = "kvbm.worker.object_has_blocks";
+    pub const OBJECT_PUT_BLOCKS: &str = "kvbm.worker.object_put_blocks";
+    pub const OBJECT_GET_BLOCKS: &str = "kvbm.worker.object_get_blocks";
+}
+
 use super::DirectWorker;
 use super::*;
 use kvbm_common::KvbmTransferRoute;
@@ -71,6 +97,15 @@ impl From<SerializableTransferOptions> for TransferOptions {
             src_kv_layout: None,
             dst_kv_layout: None,
             metric_route: opts.metric_route,
+            // use_planner is a per-side optimization toggle; the wire form
+            // intentionally does not propagate it. Each receiver picks its
+            // own planner policy. c6 made the receiver-side rule load-
+            // bearing: `executor::execute_transfer` auto-promotes
+            // use_planner = true when `requires_transform(src, dst)` is
+            // true, so the `false` hardcode here is safe for the
+            // cross-leader case (Universal↔Universal under c3 semantics
+            // → requires_transform = false → auto-promote never fires).
+            use_planner: false,
         }
     }
 }
@@ -149,6 +184,39 @@ struct ExecuteRemoteOnboardForInstanceMessage {
     dst: LogicalLayoutHandle,
     dst_block_ids: Vec<BlockId>,
     options: SerializableTransferOptions,
+}
+
+/// Rank-aware variant for AB-1c. Targets a specific remote rank under
+/// `instance_id` so the worker can resolve via its
+/// `remote_handles_rank` map and serve asymmetric-TP pulls.
+#[derive(Serialize, Deserialize)]
+struct ExecuteRemoteOnboardForInstanceRankMessage {
+    instance_id: InstanceId,
+    remote_rank: usize,
+    remote_logical_type: LogicalLayoutHandle,
+    src_block_ids: Vec<BlockId>,
+    dst: LogicalLayoutHandle,
+    dst_block_ids: Vec<BlockId>,
+    options: SerializableTransferOptions,
+}
+
+/// Multi-shard pull message for AB-3. The plan was produced by the
+/// peer leader's [`crate::leader::dispatch::plan_pull`] and carries
+/// everything one local worker needs to execute its share of an
+/// asymmetric-TP transfer: a target [`InstanceId`], source/destination
+/// [`LogicalLayoutHandle`]s, paired `(src_block_id, dst_block_id)`
+/// vectors that apply to every shard, the per-remote-rank shard list
+/// with coordinate-space slices on both sides, and a
+/// [`crate::leader::dispatch::WirePullOptions`].
+///
+/// On the wire we wrap the plan in a one-field struct so future
+/// additions (e.g. retry hints) can land without re-encoding existing
+/// fields — serde_json named fields handle the forward-compat
+/// gracefully, but the wrapper keeps the door open for sibling fields
+/// without forcing a fresh top-level type.
+#[derive(Serialize, Deserialize)]
+struct RemotePullPlanMessage {
+    plan: crate::leader::dispatch::WorkerPullPlan,
 }
 
 // ============================================================================

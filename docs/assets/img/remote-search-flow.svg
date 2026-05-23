@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 940" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" class="connFill"/>
+    </marker>
+    <marker id="arrowData" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1a7f37"/>
+    </marker>
+  </defs>
+
+  <style>
+    /* ----- light theme (default) ----- */
+    .bg      { fill: #ffffff; }
+    .ink     { fill: #0d1117; }     /* primary text on any surface */
+    .muted   { fill: #57606a; }     /* subtitles, code refs */
+    .accB    { fill: #1f6feb; }     /* instance B / blue */
+    .accHub  { fill: #9a6700; }     /* hub / amber */
+    .accA    { fill: #1a7f37; }     /* instance A / green */
+    .pillc   { fill: #8250df; }     /* kvbm_audit markers */
+    .notec   { fill: #cf222e; }     /* stall callout */
+    .cardB   { fill: #e7f0ff; }
+    .cardB2  { fill: #dbeafe; }
+    .cardHub { fill: #fff4d6; }
+    .cardA   { fill: #e6f6ea; }
+    .cardN   { fill: #f6f8fa; }
+    .conn    { stroke: #30363d; }
+    .connFill{ fill: #30363d; }
+    .divider { stroke: #d0d7de; }
+
+    .title  { font-size: 23px; font-weight: 700; }
+    .sub    { font-size: 13.5px; }
+    .lane   { font-size: 15px; font-weight: 700; }
+    .step   { font-size: 13px; }
+    .stepb  { font-size: 13px; font-weight: 600; }
+    .arrlbl { font-size: 12.5px; }
+    .ref    { font-size: 10px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+    .pill   { font-size: 11px; font-weight: 700; font-family: ui-monospace, Menlo, Consolas, monospace; }
+    .note   { font-size: 12px; font-weight: 600; }
+
+    /* ----- dark theme ----- */
+    @media (prefers-color-scheme: dark) {
+      .bg      { fill: #0d1117; }
+      .ink     { fill: #e6edf3; }
+      .muted   { fill: #9aa4af; }
+      .accB    { fill: #6cb0ff; }
+      .accHub  { fill: #e3b341; }
+      .accA    { fill: #56d364; }
+      .pillc   { fill: #d2a8ff; }
+      .notec   { fill: #ff7b72; }
+      .cardB   { fill: #11233f; }
+      .cardB2  { fill: #173961; }
+      .cardHub { fill: #2e2606; }
+      .cardA   { fill: #0f2e1c; }
+      .cardN   { fill: #161b22; }
+      .conn    { stroke: #8b949e; }
+      .connFill{ fill: #8b949e; }
+      .divider { stroke: #30363d; }
+    }
+  </style>
+
+  <!-- opaque canvas so the diagram is legible on any page background -->
+  <rect x="0" y="0" width="1200" height="940" class="bg"/>
+
+  <!-- title -->
+  <text x="40" y="40" class="title ink">KVBM Remote Search — leader-driven, out-of-band KV pull</text>
+  <text x="40" y="62" class="sub muted">One cold-cache request on instance B. B asks the hub indexer who holds the prompt's blocks (A), pulls them over the P2P transfer plane, then prefills + decodes. Markers in purple are <tspan class="pill pillc">kvbm_audit</tspan> events.</text>
+
+  <!-- lane headers -->
+  <rect x="95"  y="86" width="270" height="40" rx="8" class="cardB"   stroke="#1f6feb" stroke-width="1.5"/>
+  <text x="230" y="111" class="lane accB" text-anchor="middle">Instance B  (puller / leader)</text>
+
+  <rect x="455" y="86" width="270" height="40" rx="8" class="cardHub" stroke="#b58100" stroke-width="1.5"/>
+  <text x="590" y="111" class="lane accHub" text-anchor="middle">Hub  (indexer + p2p)</text>
+
+  <rect x="835" y="86" width="270" height="40" rx="8" class="cardA"   stroke="#1a7f37" stroke-width="1.5"/>
+  <text x="970" y="111" class="lane accA" text-anchor="middle">Instance A  (holder)</text>
+
+  <!-- lifelines -->
+  <line x1="230" y1="126" x2="230" y2="876" stroke="#1f6feb" stroke-width="1.4" stroke-dasharray="3 4" opacity="0.8"/>
+  <line x1="590" y1="126" x2="590" y2="876" stroke="#b58100" stroke-width="1.4" stroke-dasharray="3 4" opacity="0.8"/>
+  <line x1="970" y1="126" x2="970" y2="876" stroke="#1a7f37" stroke-width="1.4" stroke-dasharray="3 4" opacity="0.8"/>
+
+  <!-- STALL bracket -->
+  <line x1="58" y1="168" x2="58" y2="606" stroke-width="2" class="conn notec" stroke="#cf222e"/>
+  <line x1="58" y1="168" x2="68" y2="168" stroke-width="2" class="conn" stroke="#cf222e"/>
+  <line x1="58" y1="606" x2="68" y2="606" stroke-width="2" class="conn" stroke="#cf222e"/>
+  <text x="52" y="360" class="note notec" text-anchor="middle" transform="rotate(-90 52 388)">request STALLS — vLLM re-polls GNMT (~20x gnmt_pending) until the pull resolves</text>
+
+  <!-- 1. GNMT cold (B) -->
+  <rect x="120" y="150" width="220" height="46" rx="7" class="cardB" stroke="#1f6feb"/>
+  <text x="130" y="170" class="stepb ink">1. get_num_new_matched_tokens</text>
+  <text x="130" y="188" class="step ink">cold: local G2 miss -&gt; returns (None,false)</text>
+  <text x="345" y="172" class="pill pillc">gnmt_pending</text>
+  <text x="345" y="190" class="ref muted">mod.rs:811 / search.rs:225</text>
+
+  <!-- 2. B -> Hub find_blocks -->
+  <line x1="230" y1="226" x2="585" y2="226" class="conn" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="408" y="219" class="arrlbl ink" text-anchor="middle">2. find_blocks(missing hashes)</text>
+  <text x="408" y="241" class="ref muted" text-anchor="middle">discovery.discover() · remote_search.rs:107</text>
+
+  <!-- 3. Hub indexer box -->
+  <rect x="468" y="256" width="250" height="44" rx="7" class="cardHub" stroke="#b58100"/>
+  <text x="478" y="276" class="stepb ink">3. KV indexer lookup</text>
+  <text x="478" y="293" class="step ink">deepest hit, holders = [A]</text>
+
+  <!-- 4. Hub -> B candidates -->
+  <line x1="585" y1="330" x2="234" y2="330" class="conn" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="408" y="323" class="arrlbl ink" text-anchor="middle">4. candidate A  (driver filters self id)</text>
+  <text x="408" y="345" class="ref muted" text-anchor="middle">remote_search.rs:132 (skip self)</text>
+
+  <!-- 5. B -> A open_session -->
+  <line x1="230" y1="392" x2="965" y2="392" class="conn" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="600" y="385" class="arrlbl ink" text-anchor="middle">5. open_session(prefix)  — LeaderControlClient over velo</text>
+  <text x="600" y="407" class="ref muted" text-anchor="middle">transfer.rs:364 open_transfer_session</text>
+
+  <!-- A holder box -->
+  <rect x="860" y="416" width="240" height="44" rx="7" class="cardA" stroke="#1a7f37"/>
+  <text x="870" y="436" class="stepb ink">A pins its G2 prefix</text>
+  <text x="870" y="453" class="pill pillc">transfer_session_opened</text>
+
+  <!-- 6. B -> A pull_from_session -->
+  <line x1="230" y1="492" x2="965" y2="492" class="conn" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text x="600" y="485" class="arrlbl ink" text-anchor="middle">6. pull_from_session  (attach)</text>
+  <text x="345" y="478" class="pill pillc">transfer_pull_started</text>
+
+  <!-- data A -> B RDMA -->
+  <line x1="965" y1="540" x2="234" y2="540" stroke="#1a7f37" stroke-width="2.4" marker-end="url(#arrowData)"/>
+  <text x="600" y="533" class="arrlbl accA" text-anchor="middle">RDMA: 3 blocks copied into B's local G2, then registered</text>
+  <text x="600" y="556" class="ref accA" text-anchor="middle">transfer.rs:512 pull_from_session</text>
+  <text x="345" y="528" class="pill pillc">transfer_pull_completed</text>
+
+  <!-- 7. B -> A close_session -->
+  <line x1="230" y1="592" x2="965" y2="592" class="conn" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="600" y="585" class="arrlbl ink" text-anchor="middle">7. close_session  (best-effort)</text>
+
+  <!-- 8. re-match (B) -->
+  <rect x="120" y="624" width="240" height="46" rx="7" class="cardB" stroke="#1f6feb"/>
+  <text x="130" y="644" class="stepb ink">8. re-match local G2 (now warm)</text>
+  <text x="130" y="662" class="step ink">GNMT re-poll returns (Some(48), true)</text>
+  <text x="365" y="646" class="pill pillc">gnmt_matched</text>
+  <text x="365" y="664" class="ref muted">mod.rs:879</text>
+
+  <!-- 9. onboard (B) -->
+  <rect x="120" y="686" width="240" height="46" rx="7" class="cardB" stroke="#1f6feb"/>
+  <text x="130" y="706" class="stepb ink">9. onboard  G2 -&gt; G1 (GPU)</text>
+  <text x="130" y="724" class="step ink">matched KV now resident on device</text>
+  <text x="365" y="708" class="pill pillc">onboard_complete</text>
+  <text x="365" y="726" class="ref muted">onboard.rs:385</text>
+
+  <!-- 10. prefill+decode (B) -->
+  <rect x="120" y="748" width="240" height="46" rx="7" class="cardB2" stroke="#1f6feb" stroke-width="1.6"/>
+  <text x="130" y="768" class="stepb ink">10. prefill uncached tail + decode</text>
+  <text x="130" y="786" class="step ink">request runs and returns generation</text>
+  <text x="365" y="770" class="pill pillc">request_finished</text>
+  <text x="365" y="788" class="ref muted">finish.rs:29</text>
+
+  <!-- warm-skip callout -->
+  <rect x="835" y="700" width="320" height="96" rx="8" class="cardN" stroke="#8b949e" stroke-dasharray="4 3"/>
+  <text x="850" y="722" class="stepb accA">Warm request to A skips all of this</text>
+  <text x="850" y="742" class="step ink">A already holds every block: the local match</text>
+  <text x="850" y="759" class="step ink">covers the full prefix (local_covers_all) -&gt; engine</text>
+  <text x="850" y="776" class="step ink">returns Ready. No driver, no discovery, no self-pull.</text>
+  <text x="850" y="792" class="ref muted">instance.rs:2264 (find_matches_with_options)</text>
+
+  <!-- footer / invariants -->
+  <line x1="40" y1="828" x2="1160" y2="828" class="divider"/>
+  <text x="40" y="852" class="sub muted"><tspan class="ink" font-weight="700">Engine owns the state</tspan>; the connector only injects the discovery seam. The session is engine-registered, so cancelling a request</text>
+  <text x="40" y="870" class="sub muted">(release_session, instance.rs:1241) tears down an in-flight pull. Remote search requires the hub to offer BOTH indexer (discovery) and p2p (pull):</text>
+  <text x="40" y="888" class="sub muted">validated at startup — hub_handshake.rs:71. Threshold: remote_search.min_remote_tokens (None = any remote match) — remote_search.rs:54.</text>
+  <text x="40" y="912" class="sub muted"><tspan class="ink" font-weight="700">Config switch:</tspan> kv_connector_extra_config.leader.remote_search.enabled = true, with leader.hub.features = ["indexer","p2p"].</text>
+</svg>

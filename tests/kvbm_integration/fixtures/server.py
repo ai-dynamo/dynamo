@@ -4,8 +4,6 @@
 """Layer B: vLLM server bring-up.
 
 Decomposed out of `test_determinism_agg.py`'s previous inline `LLMServerManager`.
-The v1/v2 seam lives in `build_kv_transfer_config`; phase 2 only invokes the
-v1 branch from tests, v2 ships inert pending phase 4 (see ACTIVE_PLAN.md).
 
 External-attach mode: when `KVBM_EXTERNAL_BASE_URL` is set, the `kvbm_server`
 fixture skips spawning vllm and binds to the running server. Used by
@@ -33,7 +31,7 @@ from tests.utils.test_output import resolve_test_output_path
 
 from ..common import ServerType
 
-KvbmVersion = Literal["v1", "v2"]
+KvbmVersion = Literal["v2"]
 
 
 # ---------------------------------------------------------------------------
@@ -64,11 +62,14 @@ class KvbmModelConfig:
 
 
 # ---------------------------------------------------------------------------
-# kv-transfer-config builder (the v1/v2 seam)
+# kv-transfer-config builder
 # ---------------------------------------------------------------------------
 
 
 _VALID_ONBOARD_MODES = ("intra", "inter")
+
+
+_VALID_BLOCK_LAYOUTS = ("operational", "universal")
 
 
 def build_kv_transfer_config(
@@ -76,39 +77,44 @@ def build_kv_transfer_config(
     model_config: KvbmModelConfig,
     onboard_mode: str = "intra",
     cpu_blocks: Optional[int] = None,
+    block_layout: Optional[str] = None,
+    prefer_fc: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Build the vLLM ``--kv-transfer-config`` payload for the chosen KVBM version.
 
-    Both v1 and v2 use the canonical ``kvbm.v{N}.vllm.connector`` façades
-    introduced in phase 4 (1↔2 char path mirror).
+    `onboard_mode` controls `leader.onboard.mode` — `"intra"` matches the
+    sandbox script default; `"inter"` is the alternative.
 
-    v2 (agg) deliberately omits the ``leader.nova`` discovery block —
-    `lib/kvbm-config/src/messenger.rs:43` defaults `discovery: None` and
-    `build_messenger()` short-circuits when absent, so single-process agg
-    mode needs no external discovery service.
+    `cpu_blocks` sets ``cache.host.num_blocks`` on the leader config. When
+    ``None``, the ``cache.host`` block is omitted; the leader will then fail to
+    start unless a disk tier is configured through some other channel. Callers
+    are expected to pass ``spec.cpu_blocks`` from ``KvbmServerSpec``.
 
-    `onboard_mode` controls `leader.onboard.mode` for v2 — `"intra"` matches
-    the sandbox script default; `"inter"` is the alternative validated in
-    phase 4. v1 ignores the flag.
+    `block_layout` (optional) pins the G2 block layout — ``"operational"``
+    keeps G2 inheriting G1's NHD/HND; ``"universal"`` pins G2 to
+    ``KvBlockLayout::Universal`` regardless of G1 (G1↔G2 transfers dispatch
+    the fused permute kernel). Injected under
+    ``kv_connector_extra_config.default.block_layout``. ``None`` leaves
+    KVBM's default (``Operational``).
 
-    `cpu_blocks` (v2 only) sets ``cache.host.num_blocks`` on the v2 leader
-    config — exact parity with v1's ``DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS``
-    path. When ``None``, the ``cache.host`` block is omitted entirely; the v2
-    leader will then fail to start (matches v1's sanity_check) unless a disk
-    tier is configured through some other channel. Callers are expected to
-    pass ``spec.cpu_blocks`` from ``KvbmServerSpec``.
+    `prefer_fc` (optional) pins the G1 registration path — ``True`` forces
+    FullyContiguous cross-layer registration, ``False`` forces per-layer
+    LayerSeparate registration, ``None`` lets
+    ``connector.prefer_cross_layer_blocks`` auto-detect from the backend.
+    Injected under ``kv_connector_extra_config.default.prefer_fully_contiguous_blocks``.
+    This is the only override channel that survives vLLM's EngineCore
+    subprocess spawn (env vars are stripped).
     """
-    if kvbm_version == "v1":
-        return {
-            "kv_connector": "DynamoConnector",
-            "kv_role": "kv_both",
-            "kv_connector_module_path": "kvbm.v1.vllm.connector",
-        }
     if kvbm_version == "v2":
         if onboard_mode not in _VALID_ONBOARD_MODES:
             raise ValueError(
                 f"unknown onboard_mode: {onboard_mode!r} "
                 f"(expected one of {_VALID_ONBOARD_MODES})"
+            )
+        if block_layout is not None and block_layout not in _VALID_BLOCK_LAYOUTS:
+            raise ValueError(
+                f"unknown block_layout: {block_layout!r} "
+                f"(expected one of {_VALID_BLOCK_LAYOUTS})"
             )
         leader: Dict[str, Any] = {
             "tokio": {"worker_threads": 2},
@@ -116,19 +122,27 @@ def build_kv_transfer_config(
         }
         if cpu_blocks is not None:
             leader["cache"] = {"host": {"num_blocks": int(cpu_blocks)}}
+        default: Dict[str, Any] = {}
+        if block_layout is not None:
+            default["block_layout"] = block_layout
+        if prefer_fc is not None:
+            default["prefer_fully_contiguous_blocks"] = bool(prefer_fc)
+        extra: Dict[str, Any] = {
+            "leader": leader,
+            "worker": {
+                "nixl": {"backends": {"UCX": {}, "POSIX": {}}},
+                "tokio": {"worker_threads": 2},
+            },
+        }
+        if default:
+            extra["default"] = default
         return {
             "kv_connector": "DynamoConnector",
             "kv_role": "kv_both",
             "kv_connector_module_path": "kvbm.v2.vllm.connector",
-            "kv_connector_extra_config": {
-                "leader": leader,
-                "worker": {
-                    "nixl": {"backends": {"UCX": {}, "POSIX": {}}},
-                    "tokio": {"worker_threads": 2},
-                },
-            },
+            "kv_connector_extra_config": extra,
         }
-    raise ValueError(f"unknown kvbm_version: {kvbm_version!r} (expected 'v1' or 'v2')")
+    raise ValueError(f"unknown kvbm_version: {kvbm_version!r} (expected 'v2')")
 
 
 # ---------------------------------------------------------------------------
@@ -146,19 +160,32 @@ class KvbmServerSpec:
     gpu_blocks: Optional[int] = None
     port: Optional[int] = None
     server_type: str = ServerType.vllm
-    # v2 only: leader onboard mode. v1 ignores this field.
-    # Phase 5 TODO: decide whether to enumerate intra+inter per model in
-    # the spec list, or gate one behind a KVBM_ONBOARD_MODE env var like
-    # KVBM_ENABLE_MLA from phase 3.
     onboard_mode: str = "intra"
+    # G2 block layout — "operational" inherits G1's NHD/HND, "universal"
+    # pins G2 to KvBlockLayout::Universal. None = leave KVBM's default.
+    block_layout: Optional[str] = None
+    # Force the G1 registration path. True = FullyContiguous (single
+    # cross-layer allocation), False = LayerSeparate (one tensor per layer),
+    # None = let connector.prefer_cross_layer_blocks auto-detect from the
+    # backend. Required for tests that pin the FC vs LW dimension explicitly.
+    prefer_fc: Optional[bool] = None
 
     @property
     def id(self) -> str:
-        """Pytest parametrize id."""
+        """Pytest parametrize id.
+
+        Encodes only the dimensions that vary across the parametrize axis,
+        in a stable order so test ids are diff-friendly.
+        """
         base = f"{self.kvbm_version}-{self.model_config.short_name}"
+        parts = []
         if self.kvbm_version == "v2":
-            return f"{base}-{self.onboard_mode}"
-        return base
+            parts.append(self.onboard_mode)
+        if self.block_layout is not None:
+            parts.append(f"g2{self.block_layout[:3]}")  # g2op | g2uni
+        if self.prefer_fc is not None:
+            parts.append("g1fc" if self.prefer_fc else "g1lw")
+        return "-".join([base, *parts]) if parts else base
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +281,8 @@ class KvbmServerManager:
             self.model_config,
             onboard_mode=self.spec.onboard_mode,
             cpu_blocks=self.spec.cpu_blocks,
+            block_layout=self.spec.block_layout,
+            prefer_fc=self.spec.prefer_fc,
         )
 
         self.server_cmd = [
@@ -285,51 +314,10 @@ class KvbmServerManager:
             )
 
     def _set_up_trtllm_config(self) -> None:
-        if self.kvbm_version != "v1":
-            raise ValueError(
-                f"trtllm path only supports kvbm v1; got {self.kvbm_version!r}"
-            )
-        config_path = os.environ.get(
-            "KVBM_TRTLLM_LLMAPI_CONFIG_PATH", "/tmp/kvbm_llm_api_config.yaml"
+        raise RuntimeError(
+            "KVBM TensorRT-LLM integration has been removed (kvbm.trtllm_integration was deleted). "
+            "Use server_type=ServerType.vllm with kvbm_version='v2'."
         )
-        llm_api_config: Dict[str, Any] = {}
-        # explicitly disable CUDA graph since Connector API doesn't support CUDA graph yet in TRTLLM
-        llm_api_config["cuda_graph_config"] = None
-        llm_api_config["kv_cache_config"] = {
-            "enable_partial_reuse": False,
-            # Set a small GPU fraction so we can evict/reset the on-device kv cache faster
-            "free_gpu_memory_fraction": 0.10,
-        }
-        llm_api_config["kv_connector_config"] = {
-            "connector_module": "kvbm.trtllm_integration.connector",
-            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
-            "connector_worker_class": "DynamoKVBMConnectorWorker",
-        }
-
-        if self.gpu_cache_blocks is not None:
-            del llm_api_config["kv_cache_config"]["free_gpu_memory_fraction"]
-            # TRTLLM defaults 32 tokens per block
-            llm_api_config["kv_cache_config"]["max_tokens"] = (
-                int(self.gpu_cache_blocks) * 32
-            )
-
-        self.server_cmd = [
-            "trtllm-serve",
-            self.model_config.model_id,
-            "--host",
-            "localhost",
-            "--port",
-            str(self.port),
-            "--backend",
-            "pytorch",
-            "--extra_llm_api_options",
-            config_path,
-        ]
-
-        import yaml
-
-        with open(config_path, "w") as f:
-            yaml.dump(llm_api_config, f, default_flow_style=False, sort_keys=False)
 
     def _tee_output(self, pipe: Any, log_file: TextIO, prefix: str) -> None:
         """Read from pipe and write to both log file and stdout (tee)."""
@@ -481,7 +469,7 @@ class _ExternalServer:
     metrics_port: int
     model_config: KvbmModelConfig
     server_type: str = ServerType.vllm
-    kvbm_version: KvbmVersion = "v1"
+    kvbm_version: KvbmVersion = "v2"
     cpu_cache_blocks: Optional[int] = None
     gpu_cache_blocks: Optional[int] = None
 
@@ -555,7 +543,7 @@ def kvbm_server(request, kvbm_server_spec, kvbm_deps):
         yield handle
         return
 
-    # Spawn mode — kvbm_deps already brought up NATS+etcd for v1 (or no-op for v2).
+    # Spawn mode — kvbm_deps already brought up NATS+etcd (no-op for v2).
     del kvbm_deps  # only used to enforce ordering; runtime_services env vars are set
     logger = logging.getLogger("pytest")
     logger.setLevel(logging.INFO)

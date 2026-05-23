@@ -1,0 +1,246 @@
+<!doctype html>
+<!--
+  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KVBM Hub</title>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="style.css">
+  <!-- app.js MUST load before alpine.min.js: Alpine's CDN bundle calls
+       Alpine.start() the moment its script executes, which fires
+       `alpine:init` synchronously. Our `addEventListener("alpine:init", …)`
+       must already be in place by then. Both are defer so they still run
+       after parse, before DOMContentLoaded, in document order. -->
+  <script defer src="app.js"></script>
+  <script defer src="vendor/alpine.min.js"></script>
+</head>
+<body>
+  <div id="app" x-data="hubApp" x-init="init()">
+
+    <!-- ---------- Sidebar: instances list ---------- -->
+    <aside class="sidebar">
+      <header>
+        <h1>KVBM Hub</h1>
+        <span class="sub" x-text="instances.length + ' instance' + (instances.length === 1 ? '' : 's')"></span>
+      </header>
+
+      <template x-if="instances.length === 0">
+        <p class="empty">No instances registered.</p>
+      </template>
+
+      <ul class="instance-list">
+        <template x-for="inst in instances" :key="inst.instance_id">
+          <li :class="{ selected: selectedId === inst.instance_id }"
+              @click="select(inst.instance_id)">
+            <span class="id mono" x-text="shortId(inst.instance_id)"></span>
+            <span class="meta">
+              <span class="role-chip" x-show="inst.role" x-text="inst.role"></span>
+            </span>
+          </li>
+        </template>
+      </ul>
+    </aside>
+
+    <!-- ---------- Main: per-instance detail panels ---------- -->
+    <main class="main">
+      <template x-if="!selected">
+        <p class="empty">Select an instance to inspect.</p>
+      </template>
+
+      <template x-if="selected">
+        <div>
+          <!-- Header -->
+          <section class="panel">
+            <h2 x-text="'Instance ' + shortId(selected.instance_id)"></h2>
+            <p class="mono" style="color: var(--fg-muted);"
+               x-text="selected.host ? (selected.host.hostname + ' · pid ' + selected.host.pid) : ''"></p>
+          </section>
+
+          <!-- Modules -->
+          <section class="panel">
+            <h3>Modules</h3>
+            <div class="module-chips">
+              <template x-for="m of ['core', 'transfer', 'dev', 'test', 'metrics']" :key="m">
+                <span class="chip"
+                      :class="{ on: modules.includes(m) }"
+                      x-text="m"></span>
+              </template>
+            </div>
+          </section>
+
+          <!-- Topology -->
+          <section class="panel">
+            <h3>Topology</h3>
+
+            <template x-if="describePending">
+              <div class="pending">
+                <div class="msg">
+                  <strong>Awaiting leader push…</strong>
+                  <div class="hint" x-text="describePendingHint"></div>
+                </div>
+                <button class="primary" @click="forceDescribe()">Force refresh</button>
+              </div>
+            </template>
+
+            <template x-if="describe">
+              <div>
+                <div class="topo-summary">
+                  <div class="stat">
+                    <div class="label">tp / pp</div>
+                    <div class="value" x-text="describe.parallelism ?
+                      (describe.parallelism.tp_size + ' / ' + describe.parallelism.pp_size) : '—'"></div>
+                  </div>
+                  <div class="stat">
+                    <div class="label">block size</div>
+                    <div class="value" x-text="describe.block_size ?? '—'"></div>
+                  </div>
+                  <div class="stat">
+                    <div class="label">workers</div>
+                    <div class="value" x-text="describe.workers.length"></div>
+                  </div>
+                  <template x-for="tier in describe.tier_capacity" :key="tier.tier">
+                    <div class="stat">
+                      <div class="label">
+                        <span class="tier-tag" :class="'tier-' + tier.tier" x-text="tier.tier"></span>
+                        capacity
+                      </div>
+                      <div class="value"
+                           x-text="fmtBytes(tier.total_bytes) + ' (' + tier.num_blocks + ' blk)'"></div>
+                    </div>
+                  </template>
+                </div>
+
+                <table class="topo">
+                  <thead>
+                    <tr>
+                      <th>worker</th>
+                      <th>rank</th>
+                      <th>tier</th>
+                      <th>location</th>
+                      <th>shape</th>
+                      <th>layout</th>
+                      <th>blocks</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in topologyRows()" :key="row.key">
+                      <tr>
+                        <td class="mono" x-text="row.worker"></td>
+                        <td class="mono" x-text="row.rank"></td>
+                        <td><span class="tier-tag" :class="'tier-' + row.tier" x-text="row.tier"></span></td>
+                        <td class="mono" x-text="row.location"></td>
+                        <td class="mono" x-text="row.shape"></td>
+                        <td class="mono" x-text="row.layout"></td>
+                        <td class="mono" x-text="row.blocks"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+
+                <p style="margin-top: 8px; color: var(--fg-subtle); font-size: 11px;">
+                  source: <span x-text="describeSource"></span>
+                  · received <span x-text="describeAgeSecs"></span>s ago
+                  · <a href="#" @click.prevent="forceDescribe()">force refresh</a>
+                </p>
+              </div>
+            </template>
+          </section>
+
+          <!-- Metrics -->
+          <section class="panel" x-show="modules.includes('metrics')">
+            <h3>
+              Metrics
+              <span class="mono" style="color: var(--fg-subtle); font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: 8px;"
+                    x-text="metricsAgeLabel()"></span>
+            </h3>
+
+            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+              <button @click="refreshMetrics()">Refresh</button>
+              <label style="display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: 12px;">
+                <input type="checkbox" x-model="metricsAutoRefresh" @change="onMetricsAutoToggle()">
+                auto-refresh (5s)
+              </label>
+              <span class="mono" x-show="metricsError"
+                    style="color: var(--warn); font-size: 12px;"
+                    x-text="metricsError"></span>
+            </div>
+
+            <template x-if="metrics">
+              <div>
+                <div class="topo-summary">
+                  <div class="stat">
+                    <div class="label">sessions inflight</div>
+                    <div class="value" x-text="metrics.sessions_inflight"></div>
+                  </div>
+                </div>
+
+                <template x-if="metrics.pools && metrics.pools.length > 0">
+                  <table class="topo">
+                    <thead>
+                      <tr>
+                        <th>pool</th>
+                        <th>mutable</th>
+                        <th>immutable</th>
+                        <th>pinned</th>
+                        <th>reset</th>
+                        <th>inactive</th>
+                        <th>available</th>
+                        <th>total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="p in metrics.pools" :key="p.pool">
+                        <tr>
+                          <td><span class="tier-tag" :class="'tier-' + p.pool.toLowerCase()" x-text="p.pool"></span></td>
+                          <td class="mono" x-text="p.mutable"></td>
+                          <td class="mono" x-text="p.immutable"></td>
+                          <td class="mono derived" x-text="p.mutable + p.immutable"></td>
+                          <td class="mono" x-text="p.reset"></td>
+                          <td class="mono" x-text="p.inactive"></td>
+                          <td class="mono derived" x-text="p.reset + p.inactive"></td>
+                          <td class="mono derived" x-text="p.mutable + p.immutable + p.reset + p.inactive"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </template>
+                <template x-if="!metrics.pools || metrics.pools.length === 0">
+                  <p class="mono" style="color: var(--fg-subtle); font-size: 12px;">
+                    no pool gauges reported — does this leader have G2 configured?
+                  </p>
+                </template>
+              </div>
+            </template>
+            <template x-if="!metrics && !metricsError">
+              <p class="mono" style="color: var(--fg-subtle); font-size: 12px;">
+                press <em>Refresh</em> to pull a snapshot.
+              </p>
+            </template>
+          </section>
+
+          <!-- Config blob -->
+          <section class="panel" x-show="describe && describe.config">
+            <h3>Config</h3>
+            <div class="config-tree" x-html="renderConfigTree(describe?.config)"></div>
+          </section>
+
+          <!-- Actions -->
+          <section class="panel" x-show="modules.includes('dev') || modules.includes('test')">
+            <h3>Actions</h3>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+              <div x-show="modules.includes('dev')">
+                <button @click="devReset()">dev.reset (all tiers)</button>
+                <span class="mono" style="color: var(--fg-subtle); margin-left: 8px;" x-text="actionResults.dev_reset || ''"></span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </template>
+    </main>
+  </div>
+</body>
+</html>

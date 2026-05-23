@@ -22,7 +22,17 @@ use std::ffi::c_void;
 use cudarc::runtime::sys::{cudaError_t, cudaStream_t};
 
 /// Numeric tags passed across the FFI boundary to select the CUDA template.
-#[cfg(feature = "permute_kernels")]
+///
+/// `FP8` is a 1-byte forward-looking marker. The kernel C++ side has no
+/// FP8 template specialization today; the planner's kernel catalog
+/// returns `None` for FP8, so the launcher is never called with this
+/// value. The C++ enum's `default` arm would return
+/// `cudaErrorInvalidValue` if it ever were. The marker exists so
+/// `derive_tensor_dtype_from_width` can produce a stable mapping for
+/// 1-byte layouts (FP8 E4M3 / E5M2) and projection code can route
+/// pre-transform paths through the catalog cleanly even on FP8
+/// configs; transform dispatch on FP8 stays rejected at the catalog
+/// until kernel work lands.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TensorDataType {
@@ -30,10 +40,10 @@ pub enum TensorDataType {
     BF16 = 1,
     F32 = 2,
     F64 = 3,
+    FP8 = 4,
 }
 
 /// Identifies how each `[nt, nh, hd]` chunk is laid out in device memory.
-#[cfg(feature = "permute_kernels")]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockLayout {
@@ -41,7 +51,6 @@ pub enum BlockLayout {
     HND = 1,
 }
 
-#[cfg(feature = "permute_kernels")]
 #[allow(dead_code)]
 unsafe extern "C" {
     fn kvbm_kernels_launch_universal_from_block(
@@ -53,6 +62,8 @@ unsafe extern "C" {
         no: usize,
         nt: usize,
         hd: usize,
+        nl_full: usize,
+        nl_offset: usize,
         dtype: i32,
         layout: i32,
         stream: cudaStream_t,
@@ -67,8 +78,24 @@ unsafe extern "C" {
         no: usize,
         nt: usize,
         hd: usize,
+        nl_full: usize,
+        nl_offset: usize,
         dtype: i32,
         layout: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    fn kvbm_kernels_launch_nhd_hnd_transpose(
+        src_ptrs: *const *const c_void,
+        dst_ptrs: *const *mut c_void,
+        num_blocks: usize,
+        nl: usize,
+        no: usize,
+        nt: usize,
+        nh: usize,
+        hd: usize,
+        dtype: i32,
+        src_layout: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
 }
@@ -175,10 +202,13 @@ pub unsafe fn memcpy_batch(
 ///
 /// * `universal_ptrs` – device-accessible pointer to `num_blocks` universal bases.
 /// * `block_ptrs` – device-accessible pointer to a flattened `[num_blocks][nl*no]`
-///   table of chunk pointers.
-/// * `nh, nl, no, nt, hd` – logical dimensions of each universal tensor.
+///   table of chunk pointers (for the slice; `nl == range.len()`).
+/// * `nh, nl, no, nt, hd` – logical dimensions of the slice being transferred.
+/// * `nl_full` – universal-side full layer count (per-head stride).
+///   For full-extent calls pass `nl_full == nl`.
+/// * `nl_offset` – starting layer index within each universal block.
+///   For full-extent calls pass `0`.
 /// * `stream` – CUDA stream used for the launch.
-#[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn universal_from_block(
     universal_ptrs: *const *mut c_void,
@@ -189,6 +219,8 @@ pub unsafe fn universal_from_block(
     no: usize,
     nt: usize,
     hd: usize,
+    nl_full: usize,
+    nl_offset: usize,
     dtype: TensorDataType,
     layout: BlockLayout,
     stream: cudaStream_t,
@@ -203,6 +235,8 @@ pub unsafe fn universal_from_block(
             no,
             nt,
             hd,
+            nl_full,
+            nl_offset,
             dtype as i32,
             layout as i32,
             stream,
@@ -210,8 +244,48 @@ pub unsafe fn universal_from_block(
     }
 }
 
+/// Permute `num_blocks` operational block stacks between NHD and HND.
+///
+/// Both `src_ptrs` and `dst_ptrs` are device-accessible pointer tables
+/// shaped as `[num_blocks][nl * no]` (one chunk pointer per `(layer,
+/// outer)` slot). `src_layout` selects the source side's inner ordering
+/// (the destination is the opposite layout); `hd` is the contiguous
+/// innermost axis on both sides.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn nhd_hnd_transpose(
+    src_ptrs: *const *const c_void,
+    dst_ptrs: *const *mut c_void,
+    num_blocks: usize,
+    nl: usize,
+    no: usize,
+    nt: usize,
+    nh: usize,
+    hd: usize,
+    dtype: TensorDataType,
+    src_layout: BlockLayout,
+    stream: cudaStream_t,
+) -> cudaError_t {
+    unsafe {
+        kvbm_kernels_launch_nhd_hnd_transpose(
+            src_ptrs,
+            dst_ptrs,
+            num_blocks,
+            nl,
+            no,
+            nt,
+            nh,
+            hd,
+            dtype as i32,
+            src_layout as i32,
+            stream,
+        )
+    }
+}
+
 /// Copy `num_blocks` universal tensors back into their block stacks.
-#[cfg(feature = "permute_kernels")]
+///
+/// `nl_full` / `nl_offset` carry layer-subrange semantics — see
+/// [`universal_from_block`] for the contract.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn block_from_universal(
     universal_ptrs: *const *const c_void,
@@ -222,6 +296,8 @@ pub unsafe fn block_from_universal(
     no: usize,
     nt: usize,
     hd: usize,
+    nl_full: usize,
+    nl_offset: usize,
     dtype: TensorDataType,
     layout: BlockLayout,
     stream: cudaStream_t,
@@ -236,6 +312,8 @@ pub unsafe fn block_from_universal(
             no,
             nt,
             hd,
+            nl_full,
+            nl_offset,
             dtype as i32,
             layout as i32,
             stream,
@@ -281,14 +359,8 @@ pub unsafe fn vectorized_copy(
 
 // Tests are gated to only run when:
 // 1. testing-cuda feature is enabled
-// 2. permute_kernels feature is enabled (tests use universal kernels)
-// 3. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
-#[cfg(all(
-    test,
-    feature = "testing-cuda",
-    feature = "permute_kernels",
-    not(stub_kernels)
-))]
+// 2. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
+#[cfg(all(test, feature = "testing-cuda", not(stub_kernels)))]
 mod tests {
     use super::*;
     use cudarc::driver::result::memset_d8_async;
@@ -386,6 +458,8 @@ mod tests {
                     no,
                     nt,
                     hd,
+                    nl,
+                    0,
                     dtype,
                     layout,
                     stream_raw,
@@ -466,6 +540,8 @@ mod tests {
                     no,
                     nt,
                     hd,
+                    nl,
+                    0,
                     dtype,
                     layout,
                     stream_raw,

@@ -1,0 +1,1438 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Prefill-side end-to-end test for the CD wrapper, against the new
+//! symmetric `Session` API (MockSession + MockSessionFactory).
+//!
+//! Mocks: `MockInnerLeaderShim`, `MockP2pBlockTransport` (for the
+//! G2→G1 onboard only), `MockP2pWorkerHook`, `MockSessionFactory`.
+//! No velo, no real RDMA.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use kvbm_connector::G2;
+use kvbm_connector::common::Request;
+use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillStatus;
+use kvbm_connector::connector::leader::disagg::testing::{
+    MockInnerLeaderShim, MockP2pBlockTransport, MockP2pWorkerHook, MockSlot, TEST_BLOCK_SIZE,
+    wait_until,
+};
+use kvbm_connector::connector::leader::disagg::{ConditionalDisaggCoordinator, CoordinatorParts};
+use kvbm_connector::connector::leader::disagg::{ConnectorLeaderApi, PrefillDisaggLeader};
+use kvbm_engine::p2p::session::{CommittedBlock, MockSession, MockSessionFactory};
+use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
+use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
+use kvbm_logical::blocks::ImmutableBlock;
+use kvbm_logical::manager::BlockManager;
+use kvbm_protocols::disagg::{
+    DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
+};
+
+const TOTAL_BLOCKS: usize = 4;
+const BLOCK_SIZE: usize = TEST_BLOCK_SIZE;
+const NUM_EXTERNAL: usize = TOTAL_BLOCKS * BLOCK_SIZE;
+
+fn make_request() -> Request {
+    Request::builder()
+        .request_id("req-1".to_string())
+        .tokens(dynamo_tokens::Tokens::from(Vec::<u32>::new()))
+        .build(None)
+        .expect("build request")
+}
+
+fn build_g2_manager(capacity: usize) -> Arc<BlockManager<G2>> {
+    let registry = TestRegistryBuilder::new().build();
+    Arc::new(
+        TestManagerBuilder::<G2>::new()
+            .block_count(capacity)
+            .block_size(BLOCK_SIZE)
+            .registry(registry)
+            .build(),
+    )
+}
+
+fn synthetic_decode_endpoint() -> SessionEndpoint {
+    SessionEndpoint {
+        kind: "mock_decode".to_string(),
+        payload: serde_json::json!({"decode_endpoint": "test"}),
+    }
+}
+
+fn cd_transfer_params(
+    session_id: SessionId,
+    initiator_instance_id: kvbm_connector::InstanceId,
+    expected_hashes: Vec<kvbm_logical::SequenceHash>,
+) -> TransferParams {
+    TransferParams::remote_prefill(RemotePrefillParams {
+        protocol_version: DISAGG_PROTOCOL_VERSION,
+        session_id,
+        initiator_instance_id,
+        decode_endpoint: Some(synthetic_decode_endpoint()),
+        sequence_hashes: expected_hashes,
+        num_computed_tokens: 0,
+    })
+}
+
+struct TestHarness {
+    wrapper: Arc<PrefillDisaggLeader>,
+    coordinator: Arc<ConditionalDisaggCoordinator>,
+    inner: Arc<MockInnerLeaderShim>,
+    transport: Arc<MockP2pBlockTransport>,
+    workers: Arc<MockP2pWorkerHook>,
+    factory: Arc<MockSessionFactory>,
+    all_hashes: Vec<kvbm_logical::SequenceHash>,
+    g1_block_ids: Vec<usize>,
+    decode_g2_block_ids: Vec<usize>,
+    output_blocks: Vec<ImmutableBlock<G2>>,
+    decode_instance_id: kvbm_connector::InstanceId,
+}
+
+fn build_harness(with_transfer_params: bool) -> TestHarness {
+    build_harness_with_watchdog(with_transfer_params, Duration::from_secs(60))
+}
+
+fn build_harness_with_watchdog(with_transfer_params: bool, watchdog: Duration) -> TestHarness {
+    let g2_manager = build_g2_manager(64);
+
+    let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
+    let all_hashes = generate_sequence_hashes(&token_sequence);
+    let token_blocks: Vec<_> = token_sequence.blocks().to_vec();
+    assert_eq!(all_hashes.len(), TOTAL_BLOCKS);
+
+    let output_seq = create_token_sequence(2, BLOCK_SIZE, 9000);
+    let output_token_blocks: Vec<_> = output_seq.blocks().to_vec();
+    let output_mutables = g2_manager
+        .allocate_blocks(2)
+        .expect("allocate output mutables");
+    let output_completes: Vec<_> = output_mutables
+        .into_iter()
+        .zip(output_token_blocks.iter())
+        .map(|(m, tb)| m.complete(tb).expect("complete output"))
+        .collect();
+    let output_blocks = g2_manager.register_blocks(output_completes);
+    assert_eq!(output_blocks.len(), 2);
+
+    let inner = MockInnerLeaderShim::new(BLOCK_SIZE, g2_manager.clone());
+
+    let g1_block_ids: Vec<usize> = (1000..1000 + TOTAL_BLOCKS).collect();
+    let decode_g2_block_ids: Vec<usize> = (5000..5000 + TOTAL_BLOCKS).collect();
+
+    let session_id = uuid::Uuid::new_v4();
+    let decode_instance_id: kvbm_connector::InstanceId = uuid::Uuid::new_v4().into();
+    let transfer_params = if with_transfer_params {
+        Some(cd_transfer_params(
+            session_id,
+            decode_instance_id,
+            all_hashes.clone(),
+        ))
+    } else {
+        None
+    };
+
+    let slot = MockSlot {
+        block_size: BLOCK_SIZE,
+        total_blocks: TOTAL_BLOCKS,
+        computed_blocks: 0,
+        local_match_blocks: 0,
+        all_hashes: all_hashes.clone(),
+        token_blocks,
+        local_match_g2: parking_lot::Mutex::new(Some(Vec::new())),
+        assigned_block_ids: parking_lot::Mutex::new(None),
+        gnmt_result: (Some(7 * BLOCK_SIZE), false),
+        usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
+        transfer_params,
+        ..MockSlot::default()
+    };
+    inner.install_slot("req-1", slot);
+
+    let transport = MockP2pBlockTransport::new();
+    let workers = MockP2pWorkerHook::new();
+    let factory = MockSessionFactory::new();
+
+    let coordinator = ConditionalDisaggCoordinator::new_with_watchdog(
+        CoordinatorParts {
+            inner: inner.clone(),
+            transport: transport.clone(),
+            worker_hook: workers.clone(),
+            session_factory: factory.clone(),
+            peer_resolver: Arc::new(
+                kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
+            ),
+            runtime: tokio::runtime::Handle::current(),
+        },
+        watchdog,
+    );
+
+    let wrapper =
+        PrefillDisaggLeader::from_parts(inner.clone(), coordinator.clone(), workers.clone());
+
+    TestHarness {
+        wrapper,
+        coordinator,
+        inner,
+        transport,
+        workers,
+        factory,
+        all_hashes,
+        g1_block_ids,
+        decode_g2_block_ids,
+        output_blocks,
+        decode_instance_id,
+    }
+}
+
+/// Build a `Vec<CommittedBlock>` carrying decode's local-match
+/// hashes mapped to scripted peer block_ids.
+fn committed_blocks(
+    decode_g2_block_ids: &[usize],
+    expected_hashes: &[kvbm_logical::SequenceHash],
+) -> Vec<CommittedBlock> {
+    expected_hashes
+        .iter()
+        .zip(decode_g2_block_ids.iter())
+        .map(|(hash, id)| CommittedBlock {
+            hash: *hash,
+            peer_block_id: *id,
+        })
+        .collect()
+}
+
+/// Drive the standard prefill setup: wait for attach, inject
+/// commits + availability, resolve pull. Returns the
+/// MockSession.
+async fn drive_setup(h: &TestHarness) -> Arc<MockSession> {
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    // Verify attach passed peer_instance_id correctly.
+    let calls = h.factory.attach_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1, h.decode_instance_id);
+
+    // Inject the peer's commits, then the available blocks.
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+    session.inject_peer_available(committed_blocks(&h.decode_g2_block_ids, &h.all_hashes));
+    session.inject_peer_drained();
+
+    // Coordinator calls session.pull(...) once it's drained the
+    // commit + availability streams. Resolve it.
+    session.wait_pull_count(1).await;
+    let pull = session.pull_calls()[0].clone();
+    assert_eq!(pull.0.len(), TOTAL_BLOCKS);
+    session.resolve_pull(0, Ok(()));
+
+    session
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_happy_path() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(count, Some(NUM_EXTERNAL));
+    assert!(async_flag);
+    assert_eq!(h.coordinator.active_count(), 1);
+
+    let session = drive_setup(&h).await;
+
+    // Wait for register-then-Registered.
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA arrives (post-register). Wrapper calls inner USAA, then
+    // coordinator.on_usaa kicks the G2→G1 onboard via transport.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    // CD-bound requests bypass inner.update_state_after_alloc:
+    // the coordinator's RequestState owns the onboarding flow, so
+    // the prefill leader skips inner to avoid start_onboarding's
+    // PreparingToOnboard precondition. usaa_passthrough_calls
+    // must therefore be empty for CD-tracked requests.
+    let slot = h.inner.slot("req-1").unwrap();
+    {
+        let calls = slot.usaa_passthrough_calls.lock();
+        assert_eq!(calls.len(), 0, "CD-bound USAA must NOT delegate to inner");
+    }
+
+    // G2→G1 onboard fires.
+    h.transport.wait_onboard_count(1).await;
+    let onboard = h.transport.onboard_calls()[0].clone();
+    assert_eq!(onboard.dst_g1_block_ids, h.g1_block_ids);
+    assert_eq!(onboard.src_g2_block_ids.len(), TOTAL_BLOCKS);
+    h.transport.resolve_onboard(0, Ok(()));
+
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::OnboardingComplete))
+        .await;
+
+    // Forward-pass output: commit + make_available via the
+    // production-shaped helper.
+    h.coordinator
+        .commit_output_blocks("req-1", h.output_blocks.clone())?;
+
+    // The MockSession records commit + make_available calls.
+    wait_until(|| !session.commit_calls().is_empty()).await;
+    let commits = session.commit_calls();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].len(), 2);
+    let avails = session.make_available_calls();
+    assert_eq!(avails.len(), 1);
+    assert_eq!(avails[0].len(), 2);
+
+    // request_finished: prefill calls session.finalize()
+    // (cooperative — terminators + Frame::Finished). Session
+    // stays alive until decode also calls .finalize() at which
+    // point both sides reach the rendezvous and trigger velo
+    // wire finalize independently.
+    let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| session.finished_reason().is_some()).await;
+    assert!(
+        session.closed_reason().is_none(),
+        "prefill must NOT call session.close() in cooperative path"
+    );
+    // Simulate decode also signalling finalize: in MockSession's
+    // paired mode this would deliver Frame::Finished; here we
+    // inject directly via the test scaffolding.
+    session.inject_peer_finished();
+    wait_until(|| h.coordinator.active_count() == 0).await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_usaa_before_pull_completes() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(count, Some(NUM_EXTERNAL));
+    assert!(async_flag);
+
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    // Inject commits + availability — coordinator will call
+    // session.pull() but we DON'T resolve it yet.
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+    session.inject_peer_available(committed_blocks(&h.decode_g2_block_ids, &h.all_hashes));
+
+    session.wait_pull_count(1).await;
+    assert!(matches!(
+        h.coordinator.status_for("req-1"),
+        Some(PrefillStatus::Pulling)
+    ));
+
+    // USAA arrives early. Coordinator should stash G1 ids.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    assert_eq!(h.transport.onboard_calls().len(), 0);
+
+    // Resolve the pull. Setup task picks up stashed G1 + kicks onboard.
+    session.resolve_pull(0, Ok(()));
+
+    h.transport.wait_onboard_count(1).await;
+    let onboard = h.transport.onboard_calls()[0].clone();
+    assert_eq!(onboard.dst_g1_block_ids, h.g1_block_ids);
+    h.transport.resolve_onboard(0, Ok(()));
+
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::OnboardingComplete))
+        .await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_multi_chunk_publish() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    let session = drive_setup(&h).await;
+
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    h.transport.wait_onboard_count(1).await;
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+
+    // Two output chunks: each commit_output_blocks call commits +
+    // make_available.
+    h.coordinator
+        .commit_output_blocks("req-1", vec![h.output_blocks[0].clone()])?;
+    h.coordinator
+        .commit_output_blocks("req-1", vec![h.output_blocks[1].clone()])?;
+
+    wait_until(|| session.commit_calls().len() == 2).await;
+    let commits = session.commit_calls();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0].len(), 1);
+    assert_eq!(commits[1].len(), 1);
+    assert_ne!(commits[0][0], commits[1][0]);
+
+    let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| session.finished_reason().is_some()).await;
+    session.inject_peer_finished();
+    wait_until(|| h.coordinator.active_count() == 0).await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_non_cd_request_passes_through() -> Result<()> {
+    let h = build_harness(false);
+
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(count, Some(7 * BLOCK_SIZE));
+    assert!(!async_flag);
+
+    assert_eq!(h.coordinator.active_count(), 0);
+    assert_eq!(h.coordinator.status_for("req-1"), None);
+    assert!(h.factory.last_attached().is_none());
+
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), 0)?;
+    let slot = h.inner.slot("req-1").unwrap();
+    {
+        let calls = slot.usaa_passthrough_calls.lock();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, 0);
+    }
+
+    let _ = h.wrapper.request_finished("req-1");
+    assert_eq!(h.coordinator.active_count(), 0);
+
+    Ok(())
+}
+
+/// Build a CD-bound harness where decode supplied **no** sequence
+/// hashes for prefill to onboard from G2. `inner_gnmt` controls the
+/// passthrough tuple the inner shim returns; the wrapper must surface
+/// it verbatim instead of forging `(Some(0), true)`.
+fn build_harness_cd_no_g2_hits(inner_gnmt: (Option<usize>, bool)) -> TestHarness {
+    let g2_manager = build_g2_manager(64);
+    let token_sequence = create_token_sequence(TOTAL_BLOCKS, BLOCK_SIZE, 100);
+    let all_hashes = generate_sequence_hashes(&token_sequence);
+    let token_blocks: Vec<_> = token_sequence.blocks().to_vec();
+
+    let inner = MockInnerLeaderShim::new(BLOCK_SIZE, g2_manager.clone());
+    let g1_block_ids: Vec<usize> = (1000..1000 + TOTAL_BLOCKS).collect();
+    let decode_g2_block_ids: Vec<usize> = (5000..5000 + TOTAL_BLOCKS).collect();
+
+    let session_id = uuid::Uuid::new_v4();
+    let decode_instance_id: kvbm_connector::InstanceId = uuid::Uuid::new_v4().into();
+    // CD-bound but with **empty** sequence_hashes — mirrors the
+    // hub dispatcher payload when decode has no local-match cache to
+    // forward (the common golden-path case).
+    let transfer_params = Some(cd_transfer_params(
+        session_id,
+        decode_instance_id,
+        Vec::new(),
+    ));
+
+    let slot = MockSlot {
+        block_size: BLOCK_SIZE,
+        total_blocks: TOTAL_BLOCKS,
+        computed_blocks: 0,
+        local_match_blocks: 0,
+        all_hashes: all_hashes.clone(),
+        token_blocks,
+        local_match_g2: parking_lot::Mutex::new(Some(Vec::new())),
+        assigned_block_ids: parking_lot::Mutex::new(None),
+        gnmt_result: inner_gnmt,
+        usaa_passthrough_calls: parking_lot::Mutex::new(Vec::new()),
+        transfer_params,
+        ..MockSlot::default()
+    };
+    inner.install_slot("req-1", slot);
+
+    let transport = MockP2pBlockTransport::new();
+    let workers = MockP2pWorkerHook::new();
+    let factory = MockSessionFactory::new();
+    let coordinator = ConditionalDisaggCoordinator::new(CoordinatorParts {
+        inner: inner.clone(),
+        transport: transport.clone(),
+        worker_hook: workers.clone(),
+        session_factory: factory.clone(),
+        peer_resolver: Arc::new(
+            kvbm_connector::connector::leader::p2p::peer_resolver::NoopPeerResolver,
+        ),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    let wrapper =
+        PrefillDisaggLeader::from_parts(inner.clone(), coordinator.clone(), workers.clone());
+
+    TestHarness {
+        wrapper,
+        coordinator,
+        inner,
+        transport,
+        workers,
+        factory,
+        all_hashes,
+        g1_block_ids,
+        decode_g2_block_ids,
+        output_blocks: Vec::new(),
+        decode_instance_id,
+    }
+}
+
+/// Regression: CD-bound prefill request with `sequence_hashes=[]` (no
+/// G2 cache hits to onboard) must NOT return `(Some(0), true)`.
+///
+/// vLLM's scheduler asserts `num_external_computed_tokens > 0` whenever
+/// `load_kv_async` is true (`vllm/v1/core/sched/scheduler.py`, search
+/// for `num_external_computed_tokens > 0` under `if load_kv_async:`).
+/// This invariant is also encoded locally in
+/// [`crate::connector::leader::slot::Slot::finalize_match_check`] —
+/// `(Some(matched_tokens), matched_tokens > 0)`.
+///
+/// History: shipping the smoke surfaced this as `EngineCore` panicking
+/// on the prefill side mid-request. The wrapper was unconditionally
+/// returning `(Some(n), true)` from `ensure_started` even when n=0,
+/// violating both the local invariant and vLLM's contract.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_no_g2_hits_passes_through_inner_gnmt() -> Result<()> {
+    // Inner returns the typical "fresh request, no local match" tuple.
+    let inner_gnmt = (Some(0), false);
+    let h = build_harness_cd_no_g2_hits(inner_gnmt);
+    h.wrapper.create_slot(make_request())?;
+
+    let result = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(
+        result, inner_gnmt,
+        "with empty sequence_hashes the wrapper must passthrough to inner — \
+         (Some(0), true) violates vLLM's load_kv_async invariant",
+    );
+
+    // Inner shim must have been consulted (the passthrough call).
+    // Coordinator's CD setup still ran inside ensure_started so the
+    // worker observer can publish blocks during the upcoming forward
+    // pass — but with no G2 hits there is no async onboard and the
+    // gnmt return is purely the inner's verdict.
+
+    Ok(())
+}
+
+/// Bug fix (review round 4 #P1): prefill GNMT must honor vLLM's
+/// `num_computed_tokens` argument.
+///
+/// vLLM contract: gnmt returns ONLY the external tokens BEYOND the
+/// local prefix (`num_computed_tokens`). Decode forwarded TOTAL_BLOCKS
+/// (4) hashes covering positions [0, 4*BS). If vLLM tells prefill it
+/// already has the first BS tokens locally (e.g., from chunked
+/// prefill continuation or a prefix-cache hit), the connector must
+/// only ask vLLM to externally load the remaining 3 blocks. Returning
+/// the full 4*BS would force `num_computed_tokens + external_tokens >
+/// num_total_tokens` and trigger vLLM's scheduler assert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_honors_num_computed_tokens() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    // 1 block of vLLM-side local prefix on prefill.
+    let prefill_local_prefix_tokens = BLOCK_SIZE;
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", prefill_local_prefix_tokens)?;
+
+    let expected_external = (TOTAL_BLOCKS - 1) * BLOCK_SIZE;
+    assert_eq!(
+        count,
+        Some(expected_external),
+        "external_tokens must drop by num_computed_tokens prefix"
+    );
+    assert!(async_flag);
+
+    // Design (round 5): the wrapper still pulls ALL decoded hashes
+    // into G2 (so retries with a different `num_computed_tokens` can
+    // re-derive the external count without re-slicing in-flight
+    // pulls). The external SUFFIX is selected at USAA time — see
+    // `cd_prefill_usaa_uses_external_suffix_g1_with_local_prefix`.
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+    session.inject_peer_available(committed_blocks(&h.decode_g2_block_ids, &h.all_hashes));
+    session.inject_peer_drained();
+
+    session.wait_pull_count(1).await;
+    let pull = session.pull_calls()[0].clone();
+    assert_eq!(
+        pull.0.len(),
+        TOTAL_BLOCKS,
+        "pull always covers all decoded hashes; suffix-selection happens at USAA"
+    );
+    Ok(())
+}
+
+/// Bug fix (review round 5 #P1#1): USAA must onboard the external
+/// SUFFIX of `block_ids`, not the prefix.
+///
+/// vLLM lays USAA's `block_ids` out as `[local_computed_prefix |
+/// external]`. With a 1-block local prefix, taking
+/// `block_ids[..external_blocks]` would copy remote KV into vLLM's
+/// already-computed prefix block AND miss the last external block.
+/// The fix takes the suffix and slices `registered_g2` accordingly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_usaa_uses_external_suffix_g1_with_local_prefix() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    // 1 block of vLLM local prefix → external = 3 blocks.
+    let prefill_local_prefix_tokens = BLOCK_SIZE;
+    let (count, _) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", prefill_local_prefix_tokens)?;
+    assert_eq!(count, Some((TOTAL_BLOCKS - 1) * BLOCK_SIZE));
+
+    // Drive the pull (full TOTAL_BLOCKS hashes go into G2).
+    let session = drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // vLLM allocates TOTAL_BLOCKS slot blocks, layout is
+    // [local_prefix_g1 | external_g1...]; passes the full set to
+    // USAA along with `num_external_tokens = 3 * BS` (count the
+    // wrapper just returned).
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (TOTAL_BLOCKS - 1) * BLOCK_SIZE,
+    )?;
+
+    // The G2→G1 onboard must operate on the EXTERNAL SUFFIX of
+    // both block_ids and registered_g2 — so the local-prefix block
+    // (`g1_block_ids[0]`) is left alone, and the trailing 3 G1
+    // ids receive the trailing 3 G2 blocks.
+    h.transport.wait_onboard_count(1).await;
+    let onboard = h.transport.onboard_calls()[0].clone();
+    assert_eq!(
+        onboard.dst_g1_block_ids,
+        h.g1_block_ids[1..].to_vec(),
+        "onboard must target the EXTERNAL SUFFIX of g1_block_ids \
+         (not the prefix; not all of them)"
+    );
+    assert_eq!(
+        onboard.src_g2_block_ids.len(),
+        TOTAL_BLOCKS - 1,
+        "onboard must source exactly external_blocks ({}) registered G2 blocks",
+        TOTAL_BLOCKS - 1
+    );
+
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+
+    // Drop session to silence unused-var warning.
+    let _ = session;
+    Ok(())
+}
+
+// =========================================================================
+// num_computed_tokens retry matrix (review round 5 #P1#2 + followup)
+// =========================================================================
+//
+// vLLM allows gnmt to be called multiple times for the same request
+// without an intervening USAA (e.g., allocation fails after gnmt;
+// scheduler retries with a different `num_computed_tokens`). The
+// connector must report `total_position_end_tokens - new_P` on every
+// call, not the cached first-call value.
+
+/// Retry shape A: P=0 → P=BS (chunked-prefill continuation, prefix-cache
+/// hit appearing on second scheduling tick).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_increases_num_computed_tokens() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(r1, (Some(TOTAL_BLOCKS * BLOCK_SIZE), true));
+
+    let r2 = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+    assert_eq!(
+        r2,
+        (Some((TOTAL_BLOCKS - 1) * BLOCK_SIZE), true),
+        "retry with P=BLOCK_SIZE must drop external by one block"
+    );
+
+    Ok(())
+}
+
+/// Retry shape B: P=BS → P=0 (rare: scheduler resets the request's
+/// computed-token attribution between retries).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_decreases_num_computed_tokens() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+    assert_eq!(r1, (Some((TOTAL_BLOCKS - 1) * BLOCK_SIZE), true));
+
+    let r2 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(
+        r2,
+        (Some(TOTAL_BLOCKS * BLOCK_SIZE), true),
+        "retry with smaller P must grow external_tokens back"
+    );
+
+    Ok(())
+}
+
+/// Retry shape C: P=0 → P=full coverage. External should drop to 0;
+/// the wrapper's zero-passthrough path should trigger.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_full_prefix_returns_zero() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(r1, (Some(TOTAL_BLOCKS * BLOCK_SIZE), true));
+
+    // Retry with P covering everything decode offered.
+    let r2 = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", TOTAL_BLOCKS * BLOCK_SIZE)?;
+    // Wrapper returns whatever inner.gnmt returns when external = 0
+    // (zero-passthrough). For this harness, inner returns
+    // `gnmt_result = (Some(7*BS), false)` — see build_harness. The
+    // critical assertion: external is NOT > 0 / async is NOT true.
+    let (count, async_flag) = r2;
+    assert!(
+        !(matches!(count, Some(c) if c > 0) && async_flag),
+        "retry with P at total coverage must NOT return a non-zero \
+         async-load promise (got {:?})",
+        r2
+    );
+
+    Ok(())
+}
+
+/// Retry shape D: same P twice (no change). Pure idempotency baseline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_unchanged_p_returns_same() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+    let r2 = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+    assert_eq!(r1, r2, "same P must yield identical tuples");
+
+    Ok(())
+}
+
+/// Retry shape E: USAA after a P-change retry uses the UPDATED count.
+/// First gnmt P=0 returns external=4*BS; retry P=BS returns 3*BS;
+/// USAA arrives with `num_external_tokens = 3*BS` (matching the
+/// SECOND, more recent return). The wrapper's bits.num_external_tokens
+/// must equal the second value, not stale 4*BS.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_retry_then_usaa_uses_updated_count() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", BLOCK_SIZE)?;
+
+    let session = drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA passes external_tokens matching the SECOND gnmt call.
+    h.wrapper.update_state_after_alloc(
+        "req-1",
+        h.g1_block_ids.clone(),
+        (TOTAL_BLOCKS - 1) * BLOCK_SIZE,
+    )?;
+
+    h.transport.wait_onboard_count(1).await;
+    let onboard = h.transport.onboard_calls()[0].clone();
+    assert_eq!(
+        onboard.dst_g1_block_ids.len(),
+        TOTAL_BLOCKS - 1,
+        "onboard size must match the retry's external count"
+    );
+    assert_eq!(
+        onboard.dst_g1_block_ids,
+        h.g1_block_ids[1..].to_vec(),
+        "onboard must use the external SUFFIX of g1_block_ids"
+    );
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+    let _ = session;
+    Ok(())
+}
+
+/// Bug fix (review round 2 #P1#2): prefill GNMT must be idempotent.
+///
+/// vLLM may call gnmt twice without an intervening USAA. Production
+/// slot state rejects a second `install_cd_onboarding_payload`. The
+/// fix moves payload install INSIDE `ensure_started`, which already
+/// short-circuits idempotently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_gnmt_called_twice_payload_install_once() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let r1 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let r2 = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(r1, r2, "idempotent gnmt must return identical tuples");
+
+    // Payload install is exactly once. The slot mock records each
+    // install in `installed_cd_payloads`.
+    let slot = h.inner.slot("req-1").unwrap();
+    let installs = slot.installed_cd_payloads.lock().clone();
+    assert_eq!(
+        installs.len(),
+        1,
+        "install_cd_onboarding_payload must run exactly once across two gnmt calls (got {:?})",
+        installs
+    );
+
+    Ok(())
+}
+
+/// Bug fix (review round 2 #P1#3): payload install must precede the
+/// async-setup spawn. A fast `run_setup` failure must not race ahead
+/// of payload installation, leaving the wrapper to install a payload
+/// against already-cleaned-up state.
+///
+/// The fix moves `install_payload` into `ensure_started`, called
+/// synchronously after state insert and before `runtime.spawn`. This
+/// test verifies the install completes during gnmt return (not after
+/// any spawn could fire cleanup).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_setup_failure_payload_installed_before_spawn() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    // gnmt: synchronous from the test's POV. By the time it returns,
+    // the slot payload must already be installed — no race window
+    // for run_setup to win.
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let slot = h.inner.slot("req-1").unwrap();
+    let installs = slot.installed_cd_payloads.lock().clone();
+    assert_eq!(
+        installs.len(),
+        1,
+        "payload must be installed by the time gnmt returns (not after run_setup spawn)"
+    );
+
+    Ok(())
+}
+
+/// Bug fix (review round 2 #P2): prefill pull path must mirror
+/// decode's non-contiguous-aware split. Drive a sparse availability
+/// shape and verify the request completes (rather than bailing on
+/// "non-contiguous chunk").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_sparse_availability_succeeds() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+
+    // First Available: positions [0, 2] — skipping position 1.
+    // Splits into runs [0] and [2]. Each is one pull.
+    session.inject_peer_available(vec![
+        CommittedBlock {
+            hash: h.all_hashes[0],
+            peer_block_id: h.decode_g2_block_ids[0],
+        },
+        CommittedBlock {
+            hash: h.all_hashes[2],
+            peer_block_id: h.decode_g2_block_ids[2],
+        },
+    ]);
+
+    session.wait_pull_count(1).await;
+    session.resolve_pull(0, Ok(()));
+    session.wait_pull_count(2).await;
+    session.resolve_pull(1, Ok(()));
+
+    // Second Available: positions [1, 3] — also non-contiguous.
+    session.inject_peer_available(vec![
+        CommittedBlock {
+            hash: h.all_hashes[1],
+            peer_block_id: h.decode_g2_block_ids[1],
+        },
+        CommittedBlock {
+            hash: h.all_hashes[3],
+            peer_block_id: h.decode_g2_block_ids[3],
+        },
+    ]);
+    session.inject_peer_drained();
+
+    session.wait_pull_count(3).await;
+    session.resolve_pull(2, Ok(()));
+    session.wait_pull_count(4).await;
+    session.resolve_pull(3, Ok(()));
+
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    h.transport.wait_onboard_count(1).await;
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+
+    Ok(())
+}
+
+/// Bug fix (review round 2 #P2): prefill `session.pull` length
+/// validation. Exercises the real length-check path (Ok with short
+/// result), not just the cleanup chain. `resolve_pull_short` returns
+/// fewer mutables than requested; the helper's `filled.len() !=
+/// chunk_size` guard must bail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_session_pull_length_mismatch_errors_clean() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    wait_until(|| h.factory.last_attached().is_some()).await;
+    let session = h.factory.last_attached().expect("session");
+
+    session.inject_peer_commit(h.all_hashes.clone());
+    session.inject_peer_finish_commits();
+    session.inject_peer_available(committed_blocks(&h.decode_g2_block_ids, &h.all_hashes));
+    session.inject_peer_drained();
+
+    // Real short-OK: pull asked for TOTAL_BLOCKS, gets TOTAL_BLOCKS-1.
+    session.wait_pull_count(1).await;
+    session.resolve_pull_short(0, TOTAL_BLOCKS - 1);
+
+    // Drive USAA so we have G1 destinations to fail. Pre-USAA stash
+    // (review round 3 #P0) replays at USAA with the external slice.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").unwrap();
+    assert!(
+        !failed.block_ids.is_empty(),
+        "external G1 slice must be marked failed"
+    );
+    Ok(())
+}
+
+/// Bug fix (review round 3 #P0): prefill pre-USAA failures must NOT
+/// emit `mark_failed_onboarding(rid, [])`. Stash the failure and
+/// replay at USAA time with the external G1 slice (excluding any
+/// computed prefix vLLM passed in).
+///
+/// Before the fix, prefill's `cleanup_failed_request` always emitted
+/// `mark_failed_onboarding(rid, g1_ids)` even when `g1_ids` was empty
+/// (pre-USAA), and removed coordinator state. vLLM treats empty
+/// `failed_block_ids` as success; subsequent USAA hit the `coord_owns_usaa
+/// = false` path → routed nonzero `num_external_tokens` to the inner
+/// connector, which had no Expected-state slot → panic via
+/// `find_session`.
+///
+/// After the fix, prefill mirrors decode: stash on `PrefillBits.
+/// pending_failure`, keep state alive, replay at `on_usaa` with the
+/// external G1 slice and tear down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_pre_usaa_failure_stashes_until_usaa() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(h.coordinator.active_count(), 1);
+
+    // Simulate a setup-time failure directly via cleanup_failed_request
+    // (the same path run_setup takes on Err). Pre-USAA: state exists
+    // but no g1_block_ids stashed yet.
+    h.coordinator
+        .cleanup_failed_request("req-1", "induced pre-USAA failure".to_string())
+        .await;
+
+    assert!(
+        h.workers.failed_for("req-1").is_none(),
+        "pre-USAA cleanup must NOT emit mark_failed_onboarding"
+    );
+    assert_eq!(
+        h.coordinator.active_count(),
+        1,
+        "pre-USAA cleanup must NOT release coordinator state — on_usaa needs it"
+    );
+
+    // Drive USAA — the replay path emits mark_failed_onboarding with
+    // the external G1 slice and tears down.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+    let failed = h.workers.failed_for("req-1").unwrap();
+    let mut got = failed.block_ids.clone();
+    got.sort();
+    // For this harness, all g1_block_ids are external (no computed
+    // prefix on the prefill side in this test config). Assert the
+    // full set is reported.
+    let mut want: Vec<_> = h.g1_block_ids.clone();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "USAA replay must emit external G1 slice (here: full block_ids)"
+    );
+
+    Ok(())
+}
+
+/// Bug fix (R-B Slice 7-B post-review #5): zero-hash CD prefill must
+/// not collide with an inner-connector cache hit at USAA.
+///
+/// Scenario: decode forwarded no local-match hashes (empty
+/// `sequence_hashes`), so prefill's `ensure_started` returns 0 and the
+/// wrapper falls through to `inner.gnmt`, which can return
+/// `(Some(M>0), true)` — vLLM moves the request into
+/// `WAITING_FOR_REMOTE_KVS` for the INNER connector's async load and
+/// later calls USAA with `M` external tokens.
+///
+/// Before the fix, `update_state_after_alloc` checked
+/// `coordinator.has_active_request(request_id)` (true because
+/// `ensure_started` installed observer-tracking state) and routed USAA
+/// to the coordinator, which expects `bits.num_external_tokens == 0`.
+/// `coordinator.on_usaa(M)` errored with a `num_external_tokens`
+/// mismatch and the request hung.
+///
+/// After the fix, the wrapper checks `coordinator.prefill_owns_usaa`
+/// (true only when `bits.num_external_tokens > 0`). For zero-hash
+/// requests this returns false, so USAA flows through `inner` and the
+/// inner's cache-hit `num_external_tokens` is honored without
+/// colliding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_zero_hash_with_inner_cache_hit_takes_inner_usaa() -> Result<()> {
+    // Inner returns a 2-block CD-async-load tuple even though the CD
+    // wrapper said "no G2 hits" — emulates a non-CD connector layered
+    // beneath that has its own cache hit.
+    let inner_external_tokens = 2 * BLOCK_SIZE;
+    let inner_gnmt = (Some(inner_external_tokens), true);
+    let h = build_harness_cd_no_g2_hits(inner_gnmt);
+    h.wrapper.create_slot(make_request())?;
+
+    let result = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(result, inner_gnmt);
+
+    // CD state IS tracked (for observer-side output flow); but
+    // `prefill_owns_usaa` must be false because bits.num_external_tokens == 0.
+    assert!(h.coordinator.has_active_request("req-1"));
+
+    // USAA with the inner's nonzero count must flow through `inner`,
+    // NOT through `coordinator.on_usaa` (which would bail with
+    // "num_external_tokens mismatch (got M, expected 0)").
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), inner_external_tokens)?;
+
+    // Inner shim recorded the passthrough USAA with the correct count.
+    let slot = h.inner.slot("req-1").unwrap();
+    let calls = slot.usaa_passthrough_calls.lock();
+    assert_eq!(calls.len(), 1, "inner USAA must be called exactly once");
+    assert_eq!(
+        calls[0].1, inner_external_tokens,
+        "inner USAA must receive the inner-cache-hit's num_external_tokens, \
+         not the coordinator's expected zero"
+    );
+    Ok(())
+}
+
+/// Pin the `(Some(n>0), true)` half of the same invariant — the
+/// existing `cd_prefill_happy_path` already covers this implicitly
+/// (NUM_EXTERNAL > 0), but make the rule explicit alongside the n=0
+/// regression so the contract is visible in one place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_with_g2_hits_returns_async_load() -> Result<()> {
+    let h = build_harness(true);
+    h.wrapper.create_slot(make_request())?;
+
+    let (count, async_flag) = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let n = count.expect("matched-tokens count must be Some when CD onboards");
+    assert!(n > 0, "n>0 required when async_load=true");
+    assert!(async_flag, "async_load=true required when n>0 onboards");
+
+    Ok(())
+}
+
+/// Regression for #24: dropping the prefill `CdOnboardingPayload`
+/// (which simulates `process_finished_onboarding` taking the slot's
+/// `OnboardingState` after async-load completes) must NOT close the
+/// session. The prefill side still needs to forward-pass + offload
+/// + publish net-new G2 blocks to decode via `commit_output_blocks`,
+/// which calls `session.commit` / `session.make_available`. If the
+/// Drop closes the session, those publishes hit a closed channel
+/// and decode's `run_remote_pipeline` hangs forever.
+///
+/// History: in the two-request smoke, R2's prefill side completed
+/// async-load → process_finished_onboarding fired → payload Drop
+/// called `coordinator.on_request_finished` → session closed at
+/// T+7ms. Offload G1→G2 of the 1 net-new block landed at T+18ms,
+/// observer.observe → commit_output_blocks → commit on a closed
+/// session = silent failure. Decode hung at curl-90s timeout.
+/// Fix: payload Drop is now an audit-only no-op; session lifecycle
+/// is owned by `PrefillDisaggLeader::request_finished`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_payload_drop_does_not_close_session() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    let session = drive_setup(&h).await;
+
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    h.transport.wait_onboard_count(1).await;
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+
+    // Simulate `process_finished_onboarding` taking the cd_payload
+    // off the slot. In production this fires immediately after
+    // async-load (G2→G1) completes; the payload's Drop runs.
+    let slot = h.inner.slot("req-1").unwrap();
+    let payload = slot.installed_cd_payload.lock().take();
+    assert!(payload.is_some(), "expected cd_payload to be installed");
+    drop(payload);
+
+    // Session must still be open AND coordinator state must still
+    // be tracked — the offload-pipeline observer + publish-back to
+    // decode happen AFTER this drop in production.
+    assert!(
+        session.closed_reason().is_none(),
+        "Drop must not close the session — publish-back hasn't happened yet"
+    );
+    assert_eq!(
+        h.coordinator.active_count(),
+        1,
+        "coordinator state must persist past async-load drop"
+    );
+
+    // The post-drop publish-back path: simulate the offload
+    // observer calling commit_output_blocks. This must succeed.
+    h.coordinator
+        .commit_output_blocks("req-1", h.output_blocks.clone())?;
+    wait_until(|| !session.commit_calls().is_empty()).await;
+    let commits = session.commit_calls();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].len(), 2);
+
+    // vLLM's `request_finished` triggers cooperative finalize
+    // (terminators + Frame::Finished). Decode is then simulated
+    // signalling its own finalize via inject_peer_finished; the
+    // rendezvous fires and the watcher evicts RequestState.
+    let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| session.finished_reason().is_some()).await;
+    assert!(
+        session.closed_reason().is_none(),
+        "prefill on_request_finished must NOT call session.close()"
+    );
+    session.inject_peer_finished();
+    wait_until(|| h.coordinator.active_count() == 0).await;
+
+    Ok(())
+}
+
+/// Stage 1 verification: lifecycle watcher's watchdog evicts
+/// RequestState if no peer Detach arrives. Belt-and-suspenders
+/// against velo heartbeat misconfiguration.
+///
+/// Uses an injected short watchdog (200ms) via
+/// [`ConditionalDisaggCoordinator::new_with_watchdog`]; production is
+/// 60s and is preserved by [`ConditionalDisaggCoordinator::new`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_lifecycle_watchdog_evicts_state() -> Result<()> {
+    let h = build_harness_with_watchdog(true, Duration::from_millis(200));
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    let session = drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    h.transport.wait_onboard_count(1).await;
+    h.transport.resolve_onboard(0, Ok(()));
+    wait_until(|| h.workers.completed_contains("req-1")).await;
+    let _ = h.wrapper.request_finished("req-1");
+    wait_until(|| session.finished_reason().is_some()).await;
+    // Do NOT inject Detach — let the watchdog fire.  At 200ms it
+    // is well under the 60s ignored ceiling but enough to prove
+    // the watchdog path runs without timing flakes.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_until(|| h.coordinator.active_count() == 0),
+    )
+    .await
+    .expect("watchdog should evict within 5s when set to 200ms");
+    Ok(())
+}
+
+/// Slice A — post-USAA failure surfaces the FULL G1 window to vLLM.
+///
+/// vLLM allocates G1 destinations for the entire prefill window
+/// (local_match + remote-computed); when prefill fails mid-pipeline
+/// after USAA has stashed those ids, every slot must be marked
+/// failed so the scheduler aborts the whole request rather than
+/// proceeding with partially-loaded blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_cleanup_post_usaa_surfaces_full_g1_window() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    drive_setup(&h).await;
+    wait_until(|| h.coordinator.status_for("req-1") == Some(PrefillStatus::Registered)).await;
+
+    // USAA stashes the full G1 window in RequestState.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+
+    // Don't resolve onboard — induce a mid-flight failure path.
+    h.coordinator
+        .cleanup_failed_request("req-1", "induced post-USAA failure".to_string())
+        .await;
+
+    // mark_failed_onboarding fired with the FULL window so vLLM
+    // aborts every allocated slot.
+    let failed = h
+        .workers
+        .failed_for("req-1")
+        .expect("mark_failed_onboarding must fire");
+    assert_eq!(failed.request_id, "req-1");
+    assert_eq!(
+        failed.block_ids, h.g1_block_ids,
+        "must surface the full G1 window vLLM allocated, not the local-match prefix"
+    );
+
+    // State entry evicted from DashMap.  Observer residual cleanup
+    // is gated on dropping the LAST Arc<RequestState> — the
+    // pending kick_onboard task still holds one in this scenario,
+    // which is realistic (cleanup races mid-flight tasks).  Residual
+    // drops once the task drains; covered by the
+    // `observer_handle_drop_evicts_pending_entry` unit test.
+    assert_eq!(h.coordinator.active_count(), 0);
+
+    Ok(())
+}
+
+/// Bug fix (review round 3 #P0): pre-USAA failure must STASH and not
+/// emit `mark_failed_onboarding(rid, [])`. State stays alive so the
+/// stash can be replayed at USAA. Replaces the old behavior (which
+/// emitted empty block_ids that vLLM treats as success).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_cleanup_pre_usaa_stashes_no_emit() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+    assert_eq!(h.coordinator.active_count(), 1);
+
+    h.coordinator
+        .cleanup_failed_request("req-1", "induced pre-USAA failure".to_string())
+        .await;
+
+    assert!(
+        h.workers.failed_for("req-1").is_none(),
+        "pre-USAA cleanup must NOT emit mark_failed_onboarding (vLLM treats \
+         empty failed_block_ids as success)"
+    );
+    assert_eq!(
+        h.coordinator.active_count(),
+        1,
+        "pre-USAA cleanup must keep coordinator state alive for USAA replay"
+    );
+
+    Ok(())
+}
+
+/// Slice A — cleanup is idempotent against state-already-evicted.
+/// Multiple failure-detection paths (run_setup Err, lifecycle
+/// escalation, deadline timer) may converge on the same request;
+/// only the first call's pending_failure stash sticks (and at most
+/// one mark_failed_onboarding fires when USAA later replays).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cd_prefill_cleanup_is_idempotent() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    // Two pre-USAA cleanups land — both stash, no emit. Then USAA
+    // arrives and replays exactly once.
+    h.coordinator
+        .cleanup_failed_request("req-1", "first call".to_string())
+        .await;
+    h.coordinator
+        .cleanup_failed_request("req-1", "second call".to_string())
+        .await;
+    assert!(
+        h.workers.failed_for("req-1").is_none(),
+        "pre-USAA cleanup must not emit"
+    );
+    assert_eq!(h.coordinator.active_count(), 1);
+
+    // USAA replays the stashed failure — exactly one
+    // mark_failed_onboarding call.
+    h.wrapper
+        .update_state_after_alloc("req-1", h.g1_block_ids.clone(), NUM_EXTERNAL)?;
+    wait_until(|| h.workers.failed_for("req-1").is_some()).await;
+
+    let failed_calls: Vec<_> = h
+        .workers
+        .failed()
+        .into_iter()
+        .filter(|c| c.request_id == "req-1")
+        .collect();
+    assert_eq!(
+        failed_calls.len(),
+        1,
+        "USAA replay must fire mark_failed_onboarding exactly once"
+    );
+
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Reproducer tests for commit 2696546 — observer fires BEFORE session attach.
+//
+// `run_setup` is spawned by `ensure_started` and `factory.attach(...).await`
+// is asynchronous. The G1→G2 register observer can fire `commit_output_blocks`
+// while `state.session` is still `None` (cold-cache R1 on asymmetric topologies
+// where vLLM's forward-pass + offload lift wins the race against velo's
+// attach). Pre-fix, those blocks were dropped on the floor and decode's
+// `decode_commits_closed_short seen=0` watchdog eventually timed out the
+// request. Post-fix, they are buffered in `PrefillBits::pending_output_commits`
+// and drained inside `run_setup` immediately after attach.
+//
+// These tests use `flavor = "current_thread"` to deterministically observe
+// `state.session == None` between `get_num_new_matched_tokens` returning
+// (which only `spawn`s `run_setup`, doesn't poll it) and the first `.await`
+// in the test body. On `current_thread` the spawned task cannot run until
+// the test yields, so the precondition is race-free.
+// ----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn cd_prefill_observer_fires_before_attach_buffered_and_drained() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    // INVARIANT: run_setup is queued on the current_thread runtime but has
+    // not been polled yet — no `.await` has happened on this task. So
+    // `state.session` is guaranteed `None`. Fire the observer callback
+    // synchronously into the coordinator.
+    //
+    // Pre-fix this returned Err("session not attached for req-1") and the
+    // blocks were silently dropped; post-fix it buffers them.
+    h.coordinator
+        .commit_output_blocks("req-1", h.output_blocks.clone())?;
+
+    let expected_hashes: Vec<kvbm_logical::SequenceHash> =
+        h.output_blocks.iter().map(|b| b.sequence_hash()).collect();
+
+    // Hand off — yields control to the runtime so the spawned run_setup
+    // can attach and drain the buffer before driving the peer-side
+    // commit/availability streams.
+    let session = drive_setup(&h).await;
+
+    wait_until(|| !session.commit_calls().is_empty()).await;
+
+    let commits = session.commit_calls();
+    assert_eq!(
+        commits.len(),
+        1,
+        "buffered drain must invoke session.commit exactly once"
+    );
+    assert_eq!(
+        commits[0], expected_hashes,
+        "drained commit hashes must match the buffered output blocks"
+    );
+
+    let avails = session.make_available_calls();
+    assert_eq!(
+        avails.len(),
+        1,
+        "buffered drain must invoke make_available once"
+    );
+    assert_eq!(
+        avails[0], expected_hashes,
+        "drained availability hashes must match the buffered output blocks"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cd_prefill_multiple_observer_commits_before_attach_accumulate() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    // Split the two output blocks across two pre-attach observer fires.
+    // Asserts the `extend()` accumulation semantics in
+    // `pending_output_commits` — both batches must land at the session
+    // after attach, in order.
+    let batch1: Vec<ImmutableBlock<G2>> = h.output_blocks[..1].to_vec();
+    let batch2: Vec<ImmutableBlock<G2>> = h.output_blocks[1..].to_vec();
+    assert_eq!(batch1.len(), 1);
+    assert_eq!(batch2.len(), 1);
+
+    h.coordinator
+        .commit_output_blocks("req-1", batch1.clone())?;
+    h.coordinator
+        .commit_output_blocks("req-1", batch2.clone())?;
+
+    let expected_hashes: Vec<kvbm_logical::SequenceHash> = batch1
+        .iter()
+        .chain(batch2.iter())
+        .map(|b| b.sequence_hash())
+        .collect();
+
+    let session = drive_setup(&h).await;
+
+    wait_until(|| !session.commit_calls().is_empty()).await;
+
+    let commits = session.commit_calls();
+    assert_eq!(
+        commits.len(),
+        1,
+        "drain must batch both buffered calls into a single session.commit"
+    );
+    assert_eq!(
+        commits[0], expected_hashes,
+        "drained hashes must preserve buffer insertion order"
+    );
+
+    let avails = session.make_available_calls();
+    assert_eq!(avails.len(), 1);
+    assert_eq!(avails[0], expected_hashes);
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn _ensure_used(h: &TestHarness) {
+    let _ = (
+        &h.inner,
+        &h.transport,
+        &h.workers,
+        &h.factory,
+        &h.all_hashes,
+        &h.g1_block_ids,
+        &h.decode_g2_block_ids,
+        &h.output_blocks,
+        Duration::from_secs(0),
+    );
+}

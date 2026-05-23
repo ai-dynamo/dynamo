@@ -11,7 +11,7 @@ Physical layout and transfer management for KV cache block storage.
 Abstractions for how KV cache blocks are organized in memory.
 
 - **`Layout` trait** — Core abstraction mapping `(block_id, layer_id, outer_id)` to a `MemoryRegion`. Implementations include fully contiguous (single allocation) and layer-separate (one allocation per layer) variants.
-- **`KvBlockLayout`** — Describes dimension ordering within a block. Five named formats (`UniversalTP`, `UniversalPP`, `OperationalHND`, `OperationalNHD`, `Custom`) plus `Unknown`. Provides `requires_transform()`, `is_operational()`, and `is_universal()` for kernel selection.
+- **`KvBlockLayout`** — Describes dimension ordering within a block. Four named formats (`Universal`, `OperationalHND`, `OperationalNHD`, `Custom`) plus `Unknown`. Provides `requires_transform()`, `is_operational()`, and `is_universal()` for kernel selection.
 - **`PhysicalLayout`** — Wraps a `Layout` with its physical storage location (`StorageKind`) and NIXL registration metadata (`NixlMetadata`). Constructed via a type-state builder: Config &rarr; Layout type &rarr; Memory allocation &rarr; `build()`.
 - **`LayoutConfig`** — Block dimensions: `num_blocks`, `num_layers`, `outer_dim`, `page_size`, `inner_dim`, `dtype_width_bytes`, optional `num_heads`.
 - **`KvBlocks`** — Groups block IDs with a shared `PhysicalLayout` and optional `KvBlockLayout` override for cross-format transfers.

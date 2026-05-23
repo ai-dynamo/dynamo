@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-engine"
-version = "1.2.0"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -13,9 +13,15 @@ description = "Distributed coordination primitives for KVBM"
 [dependencies]
 kvbm-common = { workspace = true }
 kvbm-config = { workspace = true }
+kvbm-consolidator = { workspace = true }
 kvbm-logical = { workspace = true }
 kvbm-observability = { workspace = true }
 kvbm-physical = { workspace = true }
+# `client` enables LeaderControlClient, used by the remote-search driver to
+# open/close transfer sessions on remote holders.
+kvbm-protocols = { workspace = true, features = ["client"] }
+kvbm-runtime = { workspace = true }
+prometheus = { workspace = true }
 velo = { workspace = true }
 
 # Workspace deps
@@ -28,8 +34,10 @@ parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
@@ -57,8 +65,17 @@ libc = { version = "0.2", optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 nvtx = { version = "1.3", optional = true }
 
+[dev-dependencies]
+# Control-plane tests exercise the public velo client.
+kvbm-protocols = { workspace = true, features = ["client"] }
+
+# Consolidator integration tests subscribe to the egress ZMQ PUB socket.
+kvbm-consolidator = { workspace = true }
+tmq = { workspace = true }
+portpicker = "0.1"
+
 [features]
-default = ["s3"]
+default = ["s3", "testing"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:chrono"]
 collectives = ["nccl"]
 nccl = []
@@ -67,7 +84,15 @@ nats = ["dep:async-nats", "dep:flume"]
 testing = ["kvbm-logical/testing", "kvbm-physical/testing"]
 testing-s3 = ["s3", "testing"]
 nvtx = ["kvbm-config/nvtx", "dep:nvtx"]
-bench = ["dep:clap", "dep:figment", "dep:libc", "dep:tracing-subscriber", "dep:chrono", "testing"]
+bench = [
+    "dep:clap",
+    "dep:figment",
+    "dep:libc",
+    "dep:tracing-subscriber",
+    "dep:chrono",
+    "testing",
+]
+static-kernels = ["kvbm-physical/static-kernels"]
 
 [[bin]]
 name = "bench_engine"

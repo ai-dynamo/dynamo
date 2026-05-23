@@ -6,11 +6,7 @@
 //! Mirrors the Python tests in `lib/bindings/kvbm/tests/test_tensor_kernels.py`
 //! using ndarray for reference permutations and cudarc for GPU memory management.
 
-#![cfg(all(
-    feature = "testing-cuda",
-    feature = "permute_kernels",
-    not(stub_kernels)
-))]
+#![cfg(all(feature = "testing-cuda", not(stub_kernels)))]
 
 use std::ffi::c_void;
 use std::fmt::Debug;
@@ -23,7 +19,9 @@ use cudarc::driver::{
 };
 use cudarc::runtime::sys as cuda_runtime;
 use half::{bf16, f16};
-use kvbm_kernels::{BlockLayout, TensorDataType, block_from_universal, universal_from_block};
+use kvbm_kernels::{
+    BlockLayout, TensorDataType, block_from_universal, nhd_hnd_transpose, universal_from_block,
+};
 use ndarray::{Array5, s};
 use rand::Rng;
 
@@ -289,6 +287,8 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) -> Result<
                 no,
                 nt,
                 hd,
+                nl,
+                0,
                 T::DTYPE,
                 layout,
                 stream_raw,
@@ -322,6 +322,8 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) -> Result<
                 no,
                 nt,
                 hd,
+                nl,
+                0,
                 T::DTYPE,
                 layout,
                 stream_raw,
@@ -360,6 +362,451 @@ block_universal_test!(block_universal_roundtrip_hnd_f32, f32, BlockLayout::HND);
 block_universal_test!(block_universal_roundtrip_hnd_f64, f64, BlockLayout::HND);
 
 // ---------------------------------------------------------------------------
+// NHD ↔ HND transpose
+// ---------------------------------------------------------------------------
+//
+// Each test starts from independent ground truth (`make_blocks` of a random
+// universal tensor) and verifies the kernel output against the *opposite*
+// layout's ground truth — not against the kernel's own inverse pass. A pure
+// round-trip would silently pass a symmetric bug shared between forward and
+// inverse paths (the kernel is one FFI symbol with two template
+// specializations, so a wrong inner-offset formula applied consistently in
+// both directions would compose to identity).
+
+/// Run the transpose kernel from `src_layout` chunks to the opposite layout
+/// and verify the result equals the ground-truth chunks for that layout.
+fn nhd_hnd_transpose_inner<T: TestDtype>(src_layout: BlockLayout) -> Result<(), DriverError> {
+    let (stream, stream_raw) = match cuda_setup() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let nh = 3usize;
+    let nl = 2usize;
+    let no = 2usize;
+    let nt = 4usize;
+    let hd = 5usize;
+    let nb = 3usize;
+    let chunk_volume = nh * nt * hd;
+
+    let mut rng = rand::rng();
+    let universals: Vec<Array5<T>> = (0..nb)
+        .map(|_| {
+            Array5::from_shape_fn((nh, nl, no, nt, hd), |_| {
+                T::from_f64(rng.random::<f64>() * 2.0 - 1.0)
+            })
+        })
+        .collect();
+
+    let dst_layout = match src_layout {
+        BlockLayout::NHD => BlockLayout::HND,
+        BlockLayout::HND => BlockLayout::NHD,
+    };
+    let src_blocks: Vec<Vec<Vec<T>>> = universals
+        .iter()
+        .map(|u| make_blocks(u, src_layout))
+        .collect();
+    let dst_blocks_expected: Vec<Vec<Vec<T>>> = universals
+        .iter()
+        .map(|u| make_blocks(u, dst_layout))
+        .collect();
+
+    let (_src_slices, src_ptrs) = upload_blocks(&stream, &src_blocks)?;
+    let (dst_slices, dst_ptrs) = alloc_buffers::<T>(&stream, nb * nl * no, chunk_volume)?;
+
+    {
+        let (sp, _g1) = src_ptrs.device_ptr(&stream);
+        let (dp, _g2) = dst_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            nhd_hnd_transpose(
+                sp as usize as *const *const c_void,
+                dp as usize as *const *mut c_void,
+                nb,
+                nl,
+                no,
+                nt,
+                nh,
+                hd,
+                T::DTYPE,
+                src_layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    // `alloc_buffers` returns a flat `Vec<CudaSlice>` of length `nb * nl * no`,
+    // packed in `[block][nl_idx * no + no_idx]` order — matching the chunk
+    // layout produced by `make_blocks`.
+    for (block_idx, expected_block) in dst_blocks_expected.iter().enumerate() {
+        for (chunk_idx, expected_chunk) in expected_block.iter().enumerate() {
+            let slice = &dst_slices[block_idx * (nl * no) + chunk_idx];
+            let host = stream.clone_dtoh(slice)?;
+            assert_close::<T>(
+                &host,
+                expected_chunk,
+                &format!(
+                    "transpose {:?}->{:?} block {} chunk {}",
+                    src_layout, dst_layout, block_idx, chunk_idx
+                ),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+macro_rules! nhd_hnd_test {
+    ($name:ident, $ty:ty, $src_layout:expr) => {
+        #[test]
+        fn $name() -> Result<(), DriverError> {
+            nhd_hnd_transpose_inner::<$ty>($src_layout)
+        }
+    };
+}
+
+nhd_hnd_test!(nhd_hnd_transpose_nhd_to_hnd_f16, f16, BlockLayout::NHD);
+nhd_hnd_test!(nhd_hnd_transpose_nhd_to_hnd_bf16, bf16, BlockLayout::NHD);
+nhd_hnd_test!(nhd_hnd_transpose_nhd_to_hnd_f32, f32, BlockLayout::NHD);
+nhd_hnd_test!(nhd_hnd_transpose_nhd_to_hnd_f64, f64, BlockLayout::NHD);
+nhd_hnd_test!(nhd_hnd_transpose_hnd_to_nhd_f16, f16, BlockLayout::HND);
+nhd_hnd_test!(nhd_hnd_transpose_hnd_to_nhd_bf16, bf16, BlockLayout::HND);
+nhd_hnd_test!(nhd_hnd_transpose_hnd_to_nhd_f32, f32, BlockLayout::HND);
+nhd_hnd_test!(nhd_hnd_transpose_hnd_to_nhd_f64, f64, BlockLayout::HND);
+
+// ---------------------------------------------------------------------------
+// Layer-subrange (nl_full / nl_offset) coverage
+// ---------------------------------------------------------------------------
+//
+// Per-layer forward+reverse: for each layer L in 0..nl, run
+// universal_from_block on a single-layer slice of the block stack (so the
+// op-side block table is just `nb * 1 * no` chunk pointers) with
+// `nl_full = nl` and `nl_offset = L`. The full universal buffer must
+// reproduce the layered scatter exactly, i.e. equal a single full-extent
+// call. The "stride bug" the kernel previously had (using `nl_subset` as
+// the per-head stride) would scribble heads into each other's slots when
+// `nl_subset != nl_full`; per-layer + full-extent equivalence is the
+// strongest cheap check.
+
+fn layer_subrange_inner<T: TestDtype>(layout: BlockLayout) -> Result<(), DriverError> {
+    let (stream, stream_raw) = match cuda_setup() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let nh = 3usize;
+    let nl = 4usize;
+    let no = 2usize;
+    let nt = 5usize;
+    let hd = 4usize;
+    let nb = 2usize;
+    let universal_volume = nh * nl * no * nt * hd;
+
+    let mut rng = rand::rng();
+    let universals: Vec<Array5<T>> = (0..nb)
+        .map(|_| {
+            Array5::from_shape_fn((nh, nl, no, nt, hd), |_| {
+                T::from_f64(rng.random::<f64>() * 2.0 - 1.0)
+            })
+        })
+        .collect();
+
+    let ref_blocks: Vec<Vec<Vec<T>>> = universals.iter().map(|u| make_blocks(u, layout)).collect();
+
+    // --- Whole-block reference: one full-extent forward call ---
+    let (_full_block_slices, full_block_ptrs) = upload_blocks(&stream, &ref_blocks)?;
+    let (ref_universal_slices, ref_universal_ptrs) =
+        alloc_buffers::<T>(&stream, nb, universal_volume)?;
+    {
+        let (bp, _g1) = full_block_ptrs.device_ptr(&stream);
+        let (up, _g2) = ref_universal_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            universal_from_block(
+                up as usize as *const *mut c_void,
+                bp as usize as *const *const c_void,
+                nb,
+                nh,
+                nl,
+                no,
+                nt,
+                hd,
+                nl,
+                0,
+                T::DTYPE,
+                layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    // --- Per-layer forward: nl separate calls into a fresh universal ---
+    let (per_layer_universal_slices, per_layer_universal_ptrs) =
+        alloc_buffers::<T>(&stream, nb, universal_volume)?;
+
+    for l in 0..nl {
+        // Build a slice-of-block table containing only the (layer=l, outer=*)
+        // chunks per block. Layout in the device pointer table: per block,
+        // [outer 0..no] for the single layer.
+        let mut sliced: Vec<Vec<Vec<T>>> = Vec::with_capacity(nb);
+        for batch in &ref_blocks {
+            let mut layer_chunks: Vec<Vec<T>> = Vec::with_capacity(no);
+            for o in 0..no {
+                layer_chunks.push(batch[l * no + o].clone());
+            }
+            sliced.push(layer_chunks);
+        }
+        let (_sliced_owner, sliced_ptrs) = upload_blocks(&stream, &sliced)?;
+
+        let (bp, _g1) = sliced_ptrs.device_ptr(&stream);
+        let (up, _g2) = per_layer_universal_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            universal_from_block(
+                up as usize as *const *mut c_void,
+                bp as usize as *const *const c_void,
+                nb,
+                nh,
+                /* nl = */ 1,
+                no,
+                nt,
+                hd,
+                /* nl_full = */ nl,
+                /* nl_offset = */ l,
+                T::DTYPE,
+                layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    // The per-layer scatter must reproduce the whole-block reference. Any
+    // stride-math regression (e.g. per-head stride driven by nl_subset
+    // instead of nl_full) manifests as head-interleave corruption here.
+    for (block_idx, (per_layer, reference)) in per_layer_universal_slices
+        .iter()
+        .zip(ref_universal_slices.iter())
+        .enumerate()
+    {
+        let actual = stream.clone_dtoh(per_layer)?;
+        let expected = stream.clone_dtoh(reference)?;
+        assert_close::<T>(
+            &actual,
+            &expected,
+            &format!("per-layer universal block {block_idx} ({layout:?})"),
+        );
+    }
+
+    // --- Per-layer reverse: scatter then gather one layer at a time ---
+    // Poison-fill a fresh block table; gather from the per-layer universal
+    // (which we just proved equals the reference) layer-by-layer and
+    // require each layer's chunks match the original ref_blocks slice.
+    let chunk_volume = nh * nt * hd;
+    let (reverse_block_slices, _reverse_block_ptrs) =
+        alloc_buffers::<T>(&stream, nb * nl * no, chunk_volume)?;
+    // Build the per-block pointer table layout block_from_universal expects:
+    // flat `[nb][nl*no]`. We'll re-emit this per layer for the slice.
+    for l in 0..nl {
+        // Construct a slice block table holding only this layer's destination
+        // chunks for each block.
+        let mut sliced_ptr_values: Vec<usize> = Vec::with_capacity(nb * no);
+        for batch_idx in 0..nb {
+            for o in 0..no {
+                let global_idx = batch_idx * (nl * no) + l * no + o;
+                let slice = &reverse_block_slices[global_idx];
+                let (ptr, _g) = slice.device_ptr(&stream);
+                sliced_ptr_values.push(ptr as usize);
+            }
+        }
+        let sliced_ptrs = stream.clone_htod(sliced_ptr_values.as_slice())?;
+
+        let (bp, _g1) = sliced_ptrs.device_ptr(&stream);
+        let (up, _g2) = per_layer_universal_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            block_from_universal(
+                up as usize as *const *const c_void,
+                bp as usize as *const *mut c_void,
+                nb,
+                nh,
+                /* nl = */ 1,
+                no,
+                nt,
+                hd,
+                /* nl_full = */ nl,
+                /* nl_offset = */ l,
+                T::DTYPE,
+                layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    for (batch_idx, ref_batch) in ref_blocks.iter().enumerate().take(nb) {
+        for l in 0..nl {
+            for o in 0..no {
+                let global_idx = batch_idx * (nl * no) + l * no + o;
+                let host = stream.clone_dtoh(&reverse_block_slices[global_idx])?;
+                let expected = &ref_batch[l * no + o];
+                assert_close::<T>(
+                    &host,
+                    expected,
+                    &format!("per-layer reverse block {batch_idx} layer {l} outer {o}"),
+                );
+            }
+        }
+    }
+
+    // Touch reverse_block_slices to keep allocations alive through the
+    // synchronize+readback above (Vec is moved/iterated, not dropped).
+    let _ = reverse_block_slices.len();
+
+    Ok(())
+}
+
+macro_rules! layer_subrange_test {
+    ($name:ident, $ty:ty, $layout:expr) => {
+        #[test]
+        fn $name() -> Result<(), DriverError> {
+            layer_subrange_inner::<$ty>($layout)
+        }
+    };
+}
+
+layer_subrange_test!(layer_subrange_nhd_f16, f16, BlockLayout::NHD);
+layer_subrange_test!(layer_subrange_nhd_f32, f32, BlockLayout::NHD);
+layer_subrange_test!(layer_subrange_hnd_f16, f16, BlockLayout::HND);
+layer_subrange_test!(layer_subrange_hnd_f32, f32, BlockLayout::HND);
+
+/// Multi-layer slice (`nl_subset > 1`): split `nl=4` into a `0..2` head
+/// slice and a `2..4` tail slice, run two calls, and assert the result
+/// matches a whole-block call. Catches regressions where `nl_subset`
+/// happens to equal `nl_full` (the per-layer test's degenerate case)
+/// or where `nl_offset` is mis-multiplied against `nl_subset` instead
+/// of left as an absolute index.
+fn layer_subrange_split_inner<T: TestDtype>(layout: BlockLayout) -> Result<(), DriverError> {
+    let (stream, stream_raw) = match cuda_setup() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let nh = 3usize;
+    let nl = 4usize;
+    let no = 2usize;
+    let nt = 5usize;
+    let hd = 4usize;
+    let nb = 2usize;
+    let universal_volume = nh * nl * no * nt * hd;
+
+    let mut rng = rand::rng();
+    let universals: Vec<Array5<T>> = (0..nb)
+        .map(|_| {
+            Array5::from_shape_fn((nh, nl, no, nt, hd), |_| {
+                T::from_f64(rng.random::<f64>() * 2.0 - 1.0)
+            })
+        })
+        .collect();
+    let ref_blocks: Vec<Vec<Vec<T>>> = universals.iter().map(|u| make_blocks(u, layout)).collect();
+
+    // Reference: whole-block forward.
+    let (_full_block_slices, full_block_ptrs) = upload_blocks(&stream, &ref_blocks)?;
+    let (ref_universal_slices, ref_universal_ptrs) =
+        alloc_buffers::<T>(&stream, nb, universal_volume)?;
+    {
+        let (bp, _g1) = full_block_ptrs.device_ptr(&stream);
+        let (up, _g2) = ref_universal_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            universal_from_block(
+                up as usize as *const *mut c_void,
+                bp as usize as *const *const c_void,
+                nb,
+                nh,
+                nl,
+                no,
+                nt,
+                hd,
+                nl,
+                0,
+                T::DTYPE,
+                layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    // Split scatter: two calls covering `0..2` and `2..4`.
+    let (split_universal_slices, split_universal_ptrs) =
+        alloc_buffers::<T>(&stream, nb, universal_volume)?;
+    for &(start, len) in &[(0usize, 2usize), (2usize, 2usize)] {
+        let mut sliced: Vec<Vec<Vec<T>>> = Vec::with_capacity(nb);
+        for batch in &ref_blocks {
+            let mut chunks: Vec<Vec<T>> = Vec::with_capacity(len * no);
+            for l in start..start + len {
+                for o in 0..no {
+                    chunks.push(batch[l * no + o].clone());
+                }
+            }
+            sliced.push(chunks);
+        }
+        let (_owner, sliced_ptrs) = upload_blocks(&stream, &sliced)?;
+        let (bp, _g1) = sliced_ptrs.device_ptr(&stream);
+        let (up, _g2) = split_universal_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            universal_from_block(
+                up as usize as *const *mut c_void,
+                bp as usize as *const *const c_void,
+                nb,
+                nh,
+                len,
+                no,
+                nt,
+                hd,
+                nl,
+                start,
+                T::DTYPE,
+                layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    for (block_idx, (split, reference)) in split_universal_slices
+        .iter()
+        .zip(ref_universal_slices.iter())
+        .enumerate()
+    {
+        let actual = stream.clone_dtoh(split)?;
+        let expected = stream.clone_dtoh(reference)?;
+        assert_close::<T>(
+            &actual,
+            &expected,
+            &format!("split-slice universal block {block_idx} ({layout:?})"),
+        );
+    }
+    Ok(())
+}
+
+macro_rules! layer_subrange_split_test {
+    ($name:ident, $ty:ty, $layout:expr) => {
+        #[test]
+        fn $name() -> Result<(), DriverError> {
+            layer_subrange_split_inner::<$ty>($layout)
+        }
+    };
+}
+
+layer_subrange_split_test!(layer_subrange_split_nhd_f32, f32, BlockLayout::NHD);
+layer_subrange_split_test!(layer_subrange_split_hnd_f32, f32, BlockLayout::HND);
+
+// ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
 
@@ -385,6 +832,8 @@ fn empty_batch_noop() -> Result<(), DriverError> {
             1,
             1,
             1,
+            1,
+            0,
             TensorDataType::F32,
             BlockLayout::NHD,
             stream_raw,
@@ -395,6 +844,26 @@ fn empty_batch_noop() -> Result<(), DriverError> {
     // block_from_universal
     let status = unsafe {
         block_from_universal(
+            null_const,
+            null_mut,
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            TensorDataType::F32,
+            BlockLayout::NHD,
+            stream_raw,
+        )
+    };
+    assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+
+    // nhd_hnd_transpose
+    let status = unsafe {
+        nhd_hnd_transpose(
             null_const,
             null_mut,
             0,

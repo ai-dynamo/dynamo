@@ -186,9 +186,24 @@ pub async fn spawn(
                     let seq = seq_counter.fetch_add(1, Ordering::Relaxed);
                     let seq_be_bytes: [u8; 8] = seq.to_be_bytes();
 
+                    let num_store = batch.1.iter().filter(|e| matches!(e, Event::BlockStored { .. })).count();
+                    let num_remove = batch.1.iter().filter(|e| matches!(e, Event::BlockRemoved { .. })).count();
+                    let num_clear = batch.1.iter().filter(|e| matches!(e, Event::AllBlocksCleared {})).count();
+                    let num_events = batch.1.len();
+
                     let frames = vec![vec![], seq_be_bytes.to_vec(), buf];
                     if let Err(e) = zmq_util::send_multipart(&socket, frames).await {
                         tracing::warn!("Failed to publish batch: {e}");
+                    } else {
+                        tracing::info!(
+                            target: "kvbm_consolidator_audit",
+                            event = "egress",
+                            seq,
+                            num_events,
+                            num_store,
+                            num_remove,
+                            num_clear,
+                        );
                     }
                 }
             }

@@ -471,7 +471,7 @@ nats-server -js &
 etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
 
 # 4. Compile code
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 cd lib/bindings/python && maturin develop --uv && cd -
 
 # 5. Sanity check (optional but recommended)

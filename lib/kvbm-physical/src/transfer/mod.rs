@@ -37,14 +37,20 @@
 //! future.await?;
 //! ```
 
+pub(crate) mod benchmark;
 pub(crate) mod capabilities;
 pub(crate) mod checksum;
 pub mod context;
 pub(crate) mod executor;
 pub(crate) mod fill;
+pub(crate) mod graph_cache;
+pub(crate) mod kernel_catalog;
+pub(crate) mod lower;
 pub(crate) mod notifications;
 pub(crate) mod options;
+pub(crate) mod plan;
 pub(crate) mod preferences;
+pub mod prepared;
 pub(crate) mod strategy;
 pub(crate) mod validation;
 
@@ -60,6 +66,11 @@ pub use context::{TransferCompleteNotification, TransferConfig};
 pub use dynamo_memory::nixl::NixlAgent;
 pub use fill::{FillPattern, fill_blocks, fill_layers};
 pub use options::{TransferOptions, TransferOptionsBuilder};
+// AB-1d: TransferSelection is the input shape for sliced cross-leader
+// transfers. Exposed for the cross-parallelism dispatcher (AB-2) which
+// builds selections from intersected LayoutViews, and for the worker
+// handler (AB-3) which feeds them into TransferManager.
+pub use plan::TransferSelection;
 
 // TransferContext - managed by TransferManager
 #[doc(hidden)]
@@ -111,6 +122,14 @@ impl BounceBuffer {
 impl BounceBufferInternal {
     pub fn from_layout(layout: PhysicalLayout, block_ids: Vec<BlockId>) -> Self {
         Self { layout, block_ids }
+    }
+
+    pub(crate) fn layout(&self) -> &PhysicalLayout {
+        &self.layout
+    }
+
+    pub(crate) fn block_ids(&self) -> &[BlockId] {
+        &self.block_ids
     }
 }
 

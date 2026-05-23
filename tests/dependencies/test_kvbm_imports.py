@@ -40,17 +40,15 @@ def _check_kvbm_wheel_exists():
 
 
 def _check_kvbm_imports():
-    """Helper to verify KVBM package and core classes can be imported."""
+    """Helper to verify KVBM package and v2 runtime can be imported."""
     try:
         import kvbm
-        from kvbm import BlockManager, KvbmLeader, KvbmWorker
 
         assert kvbm is not None, "kvbm module is None"
-        assert BlockManager is not None, "BlockManager class not available"
-        assert KvbmLeader is not None, "KvbmLeader class not available"
-        assert KvbmWorker is not None, "KvbmWorker class not available"
+        assert kvbm._V2_AVAILABLE, "kvbm v2 is not available"
+        assert kvbm.v2 is not None, "kvbm.v2 module is None"
     except ImportError as e:
-        pytest.fail(f"Failed to import KVBM package or core classes: {e}")
+        pytest.fail(f"Failed to import KVBM package: {e}")
 
 
 # Base tests (no framework markers) - run in main job with --framework none --enable-kvbm

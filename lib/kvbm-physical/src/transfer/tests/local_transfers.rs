@@ -8,6 +8,9 @@
 //! - Different layout types (Fully Contiguous, Layer-wise)
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
+#[cfg(feature = "testing-nixl-gds")]
+use super::gate::nixl_serial;
+use super::gate::{gpu_serial, nixl_only_serial, storage_serial};
 use super::*;
 use crate::transfer::executor::TransferOptionsInternal;
 use crate::transfer::executor::execute_transfer;
@@ -20,12 +23,12 @@ use rstest::rstest;
 // ============================================================================
 
 #[derive(Clone)]
-enum LayoutType {
+pub(super) enum LayoutType {
     FC,
     LW,
 }
 
-fn build_layout(
+pub(super) fn build_layout(
     agent: NixlAgent,
     layout_type: LayoutType,
     storage_kind: StorageKind,
@@ -58,7 +61,7 @@ fn is_unsupported_transfer(src_kind: StorageKind, dst_kind: StorageKind) -> bool
 }
 
 /// Probe whether a NIXL backend is available by attempting to add it to a temporary agent.
-fn is_nixl_backend_available(backend: &str) -> bool {
+pub(super) fn is_nixl_backend_available(backend: &str) -> bool {
     let mut agent = match NixlAgent::new("__backend_probe__") {
         Ok(a) => a,
         Err(_) => return false,
@@ -66,7 +69,7 @@ fn is_nixl_backend_available(backend: &str) -> bool {
     agent.add_backend(backend).is_ok()
 }
 
-fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> {
+pub(super) fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> {
     let mut agent = NixlAgent::new("agent")?;
     let mut added_backends = Vec::new();
 
@@ -125,6 +128,8 @@ async fn test_p2p(
     )]
     dst_kind: StorageKind,
 ) -> Result<()> {
+    skip_if_stubs_and_device!(src_kind, dst_kind);
+
     // Skip unsupported Device ↔ System transfers (must use Pinned for CUDA)
     if is_unsupported_transfer(src_kind, dst_kind) {
         eprintln!(
@@ -139,6 +144,8 @@ async fn test_p2p(
         eprintln!("Skipping Device ↔ Disk test - GDS_MT backend unavailable");
         return Ok(());
     }
+
+    storage_serial!(src_kind, dst_kind);
 
     use crate::transfer::{BounceBufferInternal, executor::TransferOptionsInternal};
 
@@ -183,6 +190,8 @@ async fn test_roundtrip(
     #[values(StorageKind::System, StorageKind::Pinned, StorageKind::Device(0))]
     dst_kind: StorageKind,
 ) -> Result<()> {
+    skip_if_stubs_and_device!(src_kind, inter_kind, dst_kind);
+
     // Skip unsupported Device ↔ System transfers (must use Pinned for CUDA)
     if is_unsupported_transfer(src_kind, inter_kind)
         || is_unsupported_transfer(inter_kind, dst_kind)
@@ -193,6 +202,8 @@ async fn test_roundtrip(
         );
         return Ok(());
     }
+
+    storage_serial!(src_kind, inter_kind, dst_kind);
 
     use crate::transfer::executor::TransferOptionsInternal;
 
@@ -257,6 +268,8 @@ async fn test_gds(
         return Ok(());
     }
 
+    nixl_serial!();
+
     let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
 
     let src = build_layout(agent.clone(), src_layout, src_kind, 4);
@@ -291,6 +304,9 @@ async fn test_gds(
 #[case(16384)]
 #[tokio::test]
 async fn test_large_block_counts(#[case] block_count: usize) {
+    skip_if_stubs!();
+    gpu_serial!();
+
     let agent = create_test_agent(&format!("test_large_block_counts_{}", block_count));
 
     let src = create_fc_layout(agent.clone(), StorageKind::Pinned, block_count);
@@ -310,6 +326,247 @@ async fn test_large_block_counts(#[case] block_count: usize) {
     )
     .unwrap();
     notification.await.unwrap();
+}
+
+/// Token budget per side for page-size sweeps. With `k = (BUDGET/page_size).max(2)`
+/// the per-side byte count is exactly `BUDGET * inner_dim * dtype_width * num_layers
+/// * outer_dim` for every page_size up to the budget, then doubles once at
+///   page_size=256 (k floors at 2). Picking 256 keeps the sweep apples-to-apples
+///   across all but the largest page_size.
+const PAGE_SWEEP_TOKEN_BUDGET: usize = 256;
+
+/// Sweep `page_size` (tokens per block) across the production range so layout
+/// indexing and chunk-sized transfers are exercised at every realistic size.
+///
+/// Per-iter bytes stay constant from page_size=16 through 128 (k goes
+/// 16, 8, 4, 2), then double at page_size=256 where k floors at 2. Layout holds
+/// `2*k` blocks; src=[0..k], dst=[k..2k] (non-overlapping).
+///
+/// Storage matrix is intentionally tight (3 pairs × 2×2 layouts × 5 sizes = 60 cases):
+/// disk/GDS aren't included because those backends test transport plumbing,
+/// not page-size math, and are already covered at page_size=16 by the broader
+/// `test_p2p` / `test_gds` matrices.
+///
+/// Also asserts the transfer-path selector picks whole-block exactly when both
+/// layouts are FC, so a regression that flips the selector silently would fail here
+/// rather than degrade to a slower-but-correct path.
+#[rstest]
+#[case::sys_to_pin(StorageKind::System, StorageKind::Pinned)]
+#[case::pin_to_dev(StorageKind::Pinned, StorageKind::Device(0))]
+#[case::dev_to_pin(StorageKind::Device(0), StorageKind::Pinned)]
+#[tokio::test]
+async fn test_page_size_sweep(
+    #[case] src_kind: StorageKind,
+    #[case] dst_kind: StorageKind,
+    #[values(LayoutKind::FC, LayoutKind::LW)] src_layout: LayoutKind,
+    #[values(LayoutKind::FC, LayoutKind::LW)] dst_layout: LayoutKind,
+    #[values(16, 32, 64, 128, 256)] page_size: usize,
+) -> Result<()> {
+    skip_if_stubs_and_device!(src_kind, dst_kind);
+    storage_serial!(src_kind, dst_kind);
+    assert!(
+        page_size.is_power_of_two(),
+        "page_size must be a power of 2"
+    );
+
+    let k = (PAGE_SWEEP_TOKEN_BUDGET / page_size).max(2);
+    let num_blocks = 2 * k;
+    let src_block_ids: Vec<BlockId> = (0..k as BlockId).collect();
+    let dst_block_ids: Vec<BlockId> = (k as BlockId..2 * k as BlockId).collect();
+
+    let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
+
+    let src = create_layout_with_page_size(
+        agent.clone(),
+        LayoutSpec::new(src_layout, src_kind),
+        num_blocks,
+        page_size,
+    );
+    let dst = create_layout_with_page_size(
+        agent.clone(),
+        LayoutSpec::new(dst_layout, dst_kind),
+        num_blocks,
+        page_size,
+    );
+
+    let expected_whole_block = matches!((src_layout, dst_layout), (LayoutKind::FC, LayoutKind::FC));
+    assert_eq!(
+        can_use_whole_block_transfer(&src, &dst, None),
+        expected_whole_block,
+        "whole-block path mismatch for {:?}->{:?} at page_size={}",
+        src_layout,
+        dst_layout,
+        page_size,
+    );
+
+    let checksums = fill_and_checksum(&src, &src_block_ids, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None).unwrap();
+
+    let notification = execute_transfer(
+        &src,
+        &dst,
+        &src_block_ids,
+        &dst_block_ids,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position(&checksums, &src_block_ids, &dst, &dst_block_ids)?;
+
+    Ok(())
+}
+
+/// Partial-layer variant of `test_page_size_sweep`: forces the per-layer
+/// vectorized chunking path and verifies indexing across the production
+/// page_size range.
+///
+/// Partial-layer transfers can never use the whole-block memcpy path, so this
+/// exclusively exercises the path where chunk size is `page_size * inner_dim *
+/// dtype_width_bytes` — exactly the indexing math that depends on `page_size`.
+///
+/// Storage matrix is constrained to host-accessible sources because `fill_layers`
+/// only supports System/Pinned. Destinations may be Device (D2H checksum is
+/// supported via cudaMemcpy in `compute_layer_checksums`).
+#[rstest]
+#[case::sys_to_pin(StorageKind::System, StorageKind::Pinned)]
+#[case::pin_to_pin(StorageKind::Pinned, StorageKind::Pinned)]
+#[case::pin_to_dev(StorageKind::Pinned, StorageKind::Device(0))]
+#[tokio::test]
+async fn test_page_size_sweep_partial_layer(
+    #[case] src_kind: StorageKind,
+    #[case] dst_kind: StorageKind,
+    #[values(LayoutKind::FC, LayoutKind::LW)] src_layout: LayoutKind,
+    #[values(LayoutKind::FC, LayoutKind::LW)] dst_layout: LayoutKind,
+    #[values(16, 32, 64, 128, 256)] page_size: usize,
+) -> Result<()> {
+    skip_if_stubs_and_device!(src_kind, dst_kind);
+    storage_serial!(src_kind, dst_kind);
+    assert!(
+        page_size.is_power_of_two(),
+        "page_size must be a power of 2"
+    );
+
+    let k = (PAGE_SWEEP_TOKEN_BUDGET / page_size).max(2);
+    let num_blocks = 2 * k;
+    let src_block_ids: Vec<BlockId> = (0..k as BlockId).collect();
+    let dst_block_ids: Vec<BlockId> = (k as BlockId..2 * k as BlockId).collect();
+
+    let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
+
+    let src = create_layout_with_page_size(
+        agent.clone(),
+        LayoutSpec::new(src_layout, src_kind),
+        num_blocks,
+        page_size,
+    );
+    let dst = create_layout_with_page_size(
+        agent.clone(),
+        LayoutSpec::new(dst_layout, dst_kind),
+        num_blocks,
+        page_size,
+    );
+
+    let layer_range = 0..1;
+    assert!(
+        !can_use_whole_block_transfer(&src, &dst, Some(&layer_range)),
+        "partial-layer transfer must never use whole-block path",
+    );
+
+    let mode = TransferMode::FirstLayerOnly;
+    let checksums =
+        fill_and_checksum_with_mode(&src, &src_block_ids, FillPattern::Sequential, mode)?;
+    let ctx = create_transfer_context(agent, None)?;
+
+    let options = TransferOptionsInternal::builder()
+        .layer_range(layer_range)
+        .build()?;
+    let notification = execute_transfer(
+        &src,
+        &dst,
+        &src_block_ids,
+        &dst_block_ids,
+        options,
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position_with_mode(&checksums, &src_block_ids, &dst, &dst_block_ids, mode)?;
+
+    Ok(())
+}
+
+/// Disk variant of `test_page_size_sweep`: drives Pinned↔Disk transfers through
+/// the NIXL POSIX backend at every production page_size.
+///
+/// Strategy selection routes pinned↔disk through `TransferStrategy::NixlRead/Write`,
+/// so this is the only sweep that actually exercises NIXL transport (the other
+/// sweeps land in `Memcpy` / `CudaAsync*`). The chunk sizes submitted to NIXL
+/// scale with `page_size * inner_dim * dtype_width`, which is exactly the
+/// indexing math we want to verify across the production range.
+///
+/// Skips cleanly if the NIXL POSIX backend isn't installed.
+#[rstest]
+#[case::pin_to_disk(StorageKind::Pinned, StorageKind::Disk(0))]
+#[case::disk_to_pin(StorageKind::Disk(0), StorageKind::Pinned)]
+#[tokio::test]
+async fn test_page_size_sweep_disk_posix(
+    #[case] src_kind: StorageKind,
+    #[case] dst_kind: StorageKind,
+    #[values(LayoutKind::FC, LayoutKind::LW)] src_layout: LayoutKind,
+    #[values(LayoutKind::FC, LayoutKind::LW)] dst_layout: LayoutKind,
+    #[values(16, 32, 64, 128, 256)] page_size: usize,
+) -> Result<()> {
+    assert!(
+        page_size.is_power_of_two(),
+        "page_size must be a power of 2"
+    );
+
+    if !is_nixl_backend_available("POSIX") {
+        eprintln!("Skipping disk POSIX sweep - POSIX backend unavailable");
+        return Ok(());
+    }
+
+    // Pinned ↔ Disk via NIXL POSIX — touches NIXL but not CUDA Device,
+    // so use the NIXL-only gate to avoid blocking unrelated GPU tests.
+    nixl_only_serial!();
+
+    let k = (PAGE_SWEEP_TOKEN_BUDGET / page_size).max(2);
+    let num_blocks = 2 * k;
+    let src_block_ids: Vec<BlockId> = (0..k as BlockId).collect();
+    let dst_block_ids: Vec<BlockId> = (k as BlockId..2 * k as BlockId).collect();
+
+    let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
+
+    let src = create_layout_with_page_size(
+        agent.clone(),
+        LayoutSpec::new(src_layout, src_kind),
+        num_blocks,
+        page_size,
+    );
+    let dst = create_layout_with_page_size(
+        agent.clone(),
+        LayoutSpec::new(dst_layout, dst_kind),
+        num_blocks,
+        page_size,
+    );
+
+    let checksums = fill_and_checksum(&src, &src_block_ids, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None)?;
+
+    let notification = execute_transfer(
+        &src,
+        &dst,
+        &src_block_ids,
+        &dst_block_ids,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position(&checksums, &src_block_ids, &dst, &dst_block_ids)?;
+
+    Ok(())
 }
 
 // ============================================================================
@@ -465,6 +722,9 @@ async fn test_bounce_with_guards_impl(
     mode: TransferMode,
     name_suffix: &str,
 ) -> Result<()> {
+    skip_if_stubs_and_device!(host_storage, bounce_storage);
+    storage_serial!(host_storage, bounce_storage);
+
     let num_blocks = 6;
     let test_name = format!(
         "bounce_{}_{:?}_{:?}_{}_{}",
@@ -707,6 +967,38 @@ fn test_validate_layout_compatibility_fc_lw_same_block_layout() {
     // Both have Unknown/Unknown-derived KvBlockLayout - should be compatible
     // (Unknown→Unknown returns false for requires_transform)
     assert!(validate_layout_compatibility(&src, &dst).is_ok());
+}
+
+/// Regression: G1 layer-separate (OperationalNHD) ↔ G2/G3 fully-contiguous
+/// (OperationalNHD) must pass validate_layout_compatibility. Before
+/// `with_block_layout` was threaded into the G2/G3 builders in
+/// `pending.rs`, G2/G3 defaulted to `Unknown`, and
+/// `requires_transform(OperationalNHD, Unknown) = true` rejected every
+/// G1↔G2 / G1↔G3 transfer at the validator. This test pins the fix.
+#[test]
+fn test_validate_layout_compatibility_lw_to_fc_operational_nhd() {
+    use kvbm_common::KvBlockLayout;
+    let agent = create_test_agent("test_compat_lw_to_fc_op_nhd");
+    let config = standard_config(4);
+
+    let src = PhysicalLayout::builder(agent.clone())
+        .with_config(config.clone())
+        .layer_separate(BlockDimension::BlockIsFirstDim)
+        .with_block_layout(KvBlockLayout::OperationalNHD)
+        .allocate_system()
+        .build()
+        .unwrap();
+    let dst = PhysicalLayout::builder(agent)
+        .with_config(config)
+        .fully_contiguous()
+        .with_block_layout(KvBlockLayout::OperationalNHD)
+        .allocate_system()
+        .build()
+        .unwrap();
+
+    assert!(validate_layout_compatibility(&src, &dst).is_ok());
+    // Symmetric direction (FC→LW) must also pass.
+    assert!(validate_layout_compatibility(&dst, &src).is_ok());
 }
 
 #[test]
@@ -1023,6 +1315,9 @@ async fn test_cuda_fc_lw_roundtrip_uses_vectorized(
     #[case] host_kind: LayoutKind,
     #[case] device_kind: LayoutKind,
 ) -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+
     let agent = build_agent_for_kinds(&[StorageKind::Pinned, StorageKind::Device(0)])?;
 
     let host = create_layout(

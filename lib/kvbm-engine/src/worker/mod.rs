@@ -145,6 +145,65 @@ pub trait WorkerTransfers: Send + Sync {
         dst_block_ids: Arc<[BlockId]>,
         options: kvbm_physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification>;
+
+    /// Rank-aware variant of [`Self::execute_remote_onboard_for_instance`]
+    /// — pulls from a specific remote rank under a peer leader (AB-1c).
+    ///
+    /// Workers that maintain a rank-aware remote-handle map should override
+    /// this to look up `(instance_id, remote_rank, remote_logical_type)`.
+    /// The default impl bails because the legacy single-handle-per-instance
+    /// path cannot disambiguate ranks. This method is the building block the
+    /// AB-2/AB-3 cross-parallelism dispatcher will call when targeting an
+    /// asymmetric-TP peer rank by rank.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_remote_onboard_for_instance_rank(
+        &self,
+        instance_id: InstanceId,
+        remote_rank: usize,
+        remote_logical_type: LogicalLayoutHandle,
+        src_block_ids: Vec<BlockId>,
+        dst: LogicalLayoutHandle,
+        dst_block_ids: Arc<[BlockId]>,
+        options: kvbm_physical::transfer::TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        // Default impl: not implemented. Workers that don't track per-rank
+        // remote handles must error out rather than mis-route by ignoring
+        // the rank.
+        let _ = (
+            instance_id,
+            remote_rank,
+            remote_logical_type,
+            src_block_ids,
+            dst,
+            dst_block_ids,
+            options,
+        );
+        anyhow::bail!(
+            "execute_remote_onboard_for_instance_rank: rank-aware dispatch not implemented \
+             for this Worker impl (instance={instance_id}, remote_rank={remote_rank})"
+        )
+    }
+
+    /// AB-3: execute a [`crate::leader::dispatch::WorkerPullPlan`] — a
+    /// multi-shard pull resolved by the peer leader's
+    /// cross-parallelism planner.
+    ///
+    /// The plan carries one or more [`crate::leader::dispatch::PullShard`]s,
+    /// each addressing a specific remote rank under
+    /// `plan.remote_instance` with coordinate-space slices on both the
+    /// local destination and remote source sides. Workers that own a
+    /// rank-aware remote-handle map and a sliced-transfer entry point
+    /// override this; the default impl bails because the legacy
+    /// transfer path cannot honour `axis_slices`.
+    fn execute_remote_pull_plan(
+        &self,
+        plan: crate::leader::dispatch::WorkerPullPlan,
+    ) -> Result<TransferCompleteNotification> {
+        let _ = plan;
+        anyhow::bail!(
+            "execute_remote_pull_plan: multi-shard pull dispatch not implemented for this Worker impl"
+        )
+    }
 }
 
 pub trait Worker: WorkerTransfers + ObjectBlockOps + Send + Sync {

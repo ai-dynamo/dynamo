@@ -1,0 +1,366 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Bidirectional CD session — symmetric trait both decode and
+//! prefill program against.
+//!
+//! Each side advertises *intent* (committed hashes) and
+//! *capability* (available blocks, in G2, pinned, ready to
+//! pull). Strict invariant: `available ⊆ committed`. Both
+//! sets are monotonic-add only within a session lifetime.
+//!
+//! The wire is one bidirectional `Frame` stream. The session
+//! implementation demuxes incoming frames into separate
+//! single-consumer mpsc channels — one per
+//! trait-surface stream. Callers see independent
+//! [`Session::commits`] / [`Session::availability`] /
+//! [`Session::lifecycle`] streams; the implementation handles
+//! the demux.
+//!
+//! See `/home/ryan/.claude/plans/cd-session-refactor.md` §1
+//! for the full design.
+
+use std::pin::Pin;
+use std::sync::Arc;
+
+use anyhow::Result;
+use futures::Stream;
+use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+
+use kvbm_logical::blocks::{ImmutableBlock, MutableBlock};
+
+use super::SessionEndpoint;
+use crate::{BlockId, G2, InstanceId, SequenceHash};
+
+/// Session correlation id. Re-export of the existing alias so
+/// callers can use either path.
+pub type SessionId = uuid::Uuid;
+
+// ============================================================================
+// Stream payload types
+// ============================================================================
+
+/// Block currently advertised as available on the peer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedBlock {
+    pub hash: SequenceHash,
+    pub peer_block_id: BlockId,
+}
+
+/// Delta on the peer's committed-set stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitDelta {
+    /// Hashes added to peer's committed set.
+    Added(Vec<SequenceHash>),
+    /// Peer signaled committed set is final. Stream ends
+    /// after this item.
+    Closed,
+}
+
+/// Delta on the peer's availability stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AvailabilityDelta {
+    /// Blocks newly available on peer (pulled-ready).
+    Available(Vec<CommittedBlock>),
+    /// Peer's available set will receive no more additions.
+    /// Stream ends after this item.
+    Drained,
+}
+
+/// Lifecycle event for an active session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleEvent {
+    /// Peer attached. Carries peer's identity for any future
+    /// non-session-scoped operations (e.g. metrics).
+    Attached { peer_instance_id: InstanceId },
+    /// Peer detached cleanly.
+    Detached { reason: Option<String> },
+    /// Session entered a terminal failed state.
+    Failed { reason: String },
+}
+
+pub type CommitStream = Pin<Box<dyn Stream<Item = CommitDelta> + Send + 'static>>;
+pub type AvailabilityStream = Pin<Box<dyn Stream<Item = AvailabilityDelta> + Send + 'static>>;
+pub type LifecycleStream = Pin<Box<dyn Stream<Item = LifecycleEvent> + Send + 'static>>;
+
+// ============================================================================
+// On-wire frames (single bidirectional `Frame` stream)
+// ============================================================================
+
+/// One frame on the bidirectional session wire. The session
+/// implementation demuxes by variant into the per-stream
+/// mpsc channels and the pull-correlation table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Frame {
+    /// Puller→holder. Sent immediately after attach so the
+    /// holder learns the peer's identity and (optionally) an
+    /// endpoint to attach back on.
+    Attach {
+        instance_id: InstanceId,
+        endpoint: SessionEndpoint,
+    },
+    /// Holder→puller. Adds hashes to peer's committed set.
+    Commit { hashes: Vec<SequenceHash> },
+    /// Holder→puller. Terminator for the commit stream.
+    CommitsClosed,
+    /// Holder→puller. Adds blocks to peer's available set
+    /// (each block's hash must already be in committed).
+    Available { blocks: Vec<CommittedBlock> },
+    /// Holder→puller. Terminator for the availability stream.
+    Drained,
+    /// Puller→holder. Request the holder authorize a pull
+    /// of these hashes.
+    Pull {
+        pull_id: u64,
+        hashes: Vec<SequenceHash>,
+    },
+    /// Holder→puller. Authorize the puller's RDMA read for
+    /// the matching `pull_id`. After PullAck arrives the
+    /// holder drops its pins on those hashes.
+    PullComplete { pull_id: u64 },
+    /// Puller→holder. The puller's RDMA read settled.
+    PullAck { pull_id: u64 },
+    /// Either side. Declare "I have nothing more to publish or
+    /// initiate." Sent by [`Session::finalize`]. Idempotent.
+    /// When both sides have sent `Finished`, each side
+    /// independently calls velo `StreamSender::finalize` and
+    /// the peer's monitor surfaces `LifecycleEvent::Detached`
+    /// via the velo `Finalized` sentinel.
+    Finished,
+    /// Either side. Reserved for future explicit-detach use
+    /// cases. Cooperative shutdown goes through
+    /// [`Frame::Finished`]; abort goes through
+    /// [`Session::close`] which calls velo's wire-level
+    /// finalize directly without sending a protocol frame.
+    Detach,
+    /// Either side. Terminal error.
+    Error { message: String },
+}
+
+// ============================================================================
+// Session trait
+// ============================================================================
+
+/// Bidirectional CD session.
+///
+/// Each side holds an instance and programs against the same
+/// trait. The implementation tracks the peer's two monotonic
+/// state vectors (committed, available) as local read-models
+/// replicated via `Frame`s on the wire.
+pub trait Session: Send + Sync {
+    /// Stable correlation id.
+    fn session_id(&self) -> SessionId;
+
+    /// Endpoint the peer uses to attach to us. `None` on the
+    /// puller side once we've already attached to a peer.
+    fn endpoint(&self) -> Option<SessionEndpoint>;
+
+    // --------------------------------------------------------
+    // Holder-side: things we publish to the peer.
+    // --------------------------------------------------------
+
+    /// Declare hashes we will provide. Monotonic-add. Sent to
+    /// the peer as a `Commit` frame; peer sees a
+    /// `CommitDelta::Added`.
+    fn commit(&self, hashes: Vec<SequenceHash>) -> Result<()>;
+
+    /// Mark the commit set complete. No more commits will
+    /// follow; peer sees `CommitDelta::Closed`.
+    fn finish_commits(&self) -> Result<()>;
+
+    /// Mark previously-committed hashes as actually available
+    /// for pull. Each block's hash must already be in the
+    /// local committed set (validated). Pin held until the
+    /// puller's `pull` for that hash completes (PullAck), then
+    /// dropped automatically.
+    fn make_available(&self, blocks: Vec<ImmutableBlock<G2>>) -> Result<()>;
+
+    /// Mark the availability set complete. No more
+    /// `make_available` calls will follow; peer sees
+    /// `AvailabilityDelta::Drained`.
+    fn finish_availability(&self) -> Result<()>;
+
+    // --------------------------------------------------------
+    // Puller-side: things we read from the peer.
+    // --------------------------------------------------------
+
+    /// Stream of commit deltas from the peer. Subscribe-once.
+    /// Replays prior commits as a single `Added` then yields
+    /// live deltas, ending in `Closed`.
+    fn commits(&self) -> CommitStream;
+
+    /// Stream of availability deltas from the peer.
+    /// Subscribe-once. Same replay-then-live pattern, ending
+    /// in `Drained`.
+    fn availability(&self) -> AvailabilityStream;
+
+    /// Snapshot of the peer's currently-committed set. Pure
+    /// local read.
+    fn peer_committed(&self) -> Vec<SequenceHash>;
+
+    /// Snapshot of the peer's currently-available blocks.
+    /// Pure local read.
+    fn peer_available(&self) -> Vec<CommittedBlock>;
+
+    /// Pull `hashes` from the peer into `dst`. Each hash must
+    /// be in `peer_available` at call time (validated).
+    /// `hashes.len() == dst.len()`. Data lands in zipped
+    /// order; future resolves on transfer completion.
+    fn pull(
+        &self,
+        hashes: Vec<SequenceHash>,
+        dst: Vec<MutableBlock<G2>>,
+    ) -> BoxFuture<'static, Result<Vec<MutableBlock<G2>>>>;
+
+    // --------------------------------------------------------
+    // Either side.
+    // --------------------------------------------------------
+
+    /// Lifecycle events stream. Subscribe-once.
+    /// Commit/availability changes go through their dedicated
+    /// streams; this one carries Attached/Detached/Failed.
+    fn lifecycle(&self) -> LifecycleStream;
+
+    /// Declare this side is finished — symmetric cooperative shutdown.
+    ///
+    /// Semantics: "I have published everything I'm going to
+    /// publish AND I will not initiate any more pulls." Idempotent.
+    /// Sends `CommitsClosed` + `Drained` terminators (if not
+    /// already sent) and a `Finished` signal frame to the peer.
+    /// Does NOT detach the wire and does NOT call velo's
+    /// `StreamSender::finalize` — the caller may still be
+    /// obligated to respond to peer-initiated `Pull` frames with
+    /// `PullComplete`.
+    ///
+    /// When BOTH sides have called `finalize`, each side
+    /// independently triggers velo's `StreamSender::finalize`.
+    /// The peer's monitor sees the velo `Finalized` sentinel
+    /// and emits `LifecycleEvent::Detached`; the holder of the
+    /// `Arc<Session>` is responsible for dropping it on that
+    /// signal (typically via a lifecycle watcher).
+    ///
+    /// Failure modes:
+    /// - Peer dies without calling `finalize`: velo heartbeat
+    ///   surfaces `LifecycleEvent::Detached` independently.
+    /// - Peer never calls `finalize`: this side's local
+    ///   resources stay reserved until the caller's watchdog
+    ///   evicts them (recommended in production).
+    fn finalize(&self, reason: Option<String>);
+
+    /// Abort: forcibly tear down the wire from this side.
+    ///
+    /// Implies `finish_commits` + `finish_availability`, then
+    /// calls velo's `StreamSender::finalize` directly (sending
+    /// the `Finalized` sentinel on the wire). Does NOT send a
+    /// protocol-level Detach frame — velo's wire-level
+    /// finalize signals teardown to the peer's monitor, which
+    /// emits `LifecycleEvent::Detached`. Use only for
+    /// fatal-error / aborted-request scenarios; cooperative
+    /// shutdown goes through [`Self::finalize`].
+    fn close(&self, reason: Option<String>);
+}
+
+// ============================================================================
+// SessionFactory trait
+// ============================================================================
+
+/// Factory for sessions. Owns the runtime + RDMA / mock
+/// injection points. Production wraps `velo::Velo` +
+/// `InstanceLeader`; tests inject in-memory mocks.
+pub trait SessionFactory: Send + Sync {
+    /// Open a holder-side session. The returned endpoint is
+    /// shared with the peer (e.g. via the hub queue) so they
+    /// can attach.
+    fn open(&self, session_id: SessionId) -> Result<Arc<dyn Session>>;
+
+    /// Attach to a peer that opened a session. Returned
+    /// session is already bound and ready for `commits()` /
+    /// `availability()` / `pull(...)`.
+    ///
+    /// `peer_instance_id` is required up-front because the
+    /// puller side never receives the holder's identity over
+    /// the session wire (only the puller sends `Attach`). The
+    /// caller learns it out-of-band — typically from the
+    /// `initiator_instance_id` field of the request that
+    /// carried `peer_endpoint`.
+    fn attach(
+        &self,
+        session_id: SessionId,
+        peer_instance_id: InstanceId,
+        peer_endpoint: SessionEndpoint,
+    ) -> BoxFuture<'static, Result<Arc<dyn Session>>>;
+
+    /// Live session count: incremented on `open` / `attach`,
+    /// decremented when the session's inner state drops. A
+    /// non-zero value after all known requests should have
+    /// completed indicates a leak — typically a held `Arc`
+    /// somewhere that the lifecycle watchers didn't release.
+    fn active_session_count(&self) -> usize;
+}
+
+// ============================================================================
+// Stage-0 skeleton — todo!() bodies.
+//
+// Stage 1 splits this into:
+//   - `velo.rs` — production `VeloSession` + `VeloSessionFactory`
+//   - `testing.rs` (feature `testing`) — `MockSession` + factory
+// ============================================================================
+
+// ============================================================================
+// Peer resolution hook
+// ============================================================================
+
+/// Resolves a remote velo peer by `InstanceId` and registers it on the
+/// local `velo::Velo` so the streaming-transport registry is populated
+/// before `attach_anchor` is called.
+///
+/// Velo 0.4 carries two parallel peer registries: one on the messenger
+/// transport (populated eagerly at startup via discovery) and one on
+/// each streaming transport (populated lazily by `velo.register_peer`
+/// when the WorkerAddress carries the streaming key). The CD session
+/// wire goes over streaming; `attach_anchor` and `Frame::Attach`
+/// reception both consult the streaming registry. Without this hook,
+/// cross-instance disagg fails with
+/// `transport bind failed: TCP streaming: peer X not registered`.
+///
+/// Production wires `kvbm_connector::leader::disagg::HubPeerResolver`
+/// (signature-identical) into the `VeloSessionFactory` so both the
+/// puller-side `attach` and the holder-side `Frame::Attach` handler
+/// resolve the remote peer before opening outbound streams.
+pub trait PeerResolver: Send + Sync {
+    fn resolve_and_register(&self, instance_id: InstanceId) -> BoxFuture<'_, Result<()>>;
+}
+
+pub mod manager;
+pub use manager::{DEFAULT_SESSION_WATCHDOG, SessionManager};
+
+pub mod velo;
+pub use velo::{SESSION_STREAM_SCHEMA, VeloSession, VeloSessionFactory};
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+#[cfg(any(test, feature = "testing"))]
+pub use testing::{MockSession, MockSessionFactory};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_round_trip_msgpack() {
+        let frame = Frame::Pull {
+            pull_id: 42,
+            hashes: vec![],
+        };
+        let encoded = rmp_serde::to_vec(&frame).unwrap();
+        let decoded: Frame = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn commit_delta_variants_are_distinct() {
+        assert_ne!(CommitDelta::Added(vec![]), CommitDelta::Closed,);
+    }
+}

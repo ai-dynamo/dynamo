@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-kernels"
-version = "1.2.0"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -25,12 +25,6 @@ static-kernels = []
 # Enable CUDA tests - only works when real CUDA kernels are built (not stubs)
 # Tests are gated with #[cfg(all(test, feature = "testing-cuda", not(stub_kernels)))]
 testing-cuda = []
-
-# Enable operational_copy, universal_from_block, block_from_universal kernels.
-# These kernels perform data layout permutation and are only needed for
-# non-standard transfer paths. The default vectorized_copy kernel handles
-# most FC↔LW transfers efficiently without permutation.
-permute_kernels = []
 
 # Enable kvbench example (pulls in clap for CLI)
 kvbench = ["dep:clap"]

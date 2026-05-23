@@ -108,6 +108,10 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
+    # KVBM's PdConnector wraps DynamoConnector with NixlConnector. The Dynamo
+    # frontend/decode handoff still uses the NIXL child connector's pull-based
+    # kv_transfer_params.
+    "PdConnector": NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
 }
 

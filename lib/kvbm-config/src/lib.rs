@@ -24,25 +24,34 @@
 //!   path.
 
 mod cache;
+mod control;
 mod debug;
+mod disagg;
 mod discovery;
 mod events;
+mod hub;
 mod messenger;
 mod metrics;
 mod nixl;
 mod object;
 mod offload;
 mod onboard;
+pub mod overrides;
 mod rayon;
+mod remote_search;
 mod tokio;
 mod v1_compat;
 
 pub use cache::{CacheConfig, DiskCacheConfig, HostCacheConfig, ParallelismMode};
+pub use control::ControlConfig;
 pub use debug::DebugConfig;
+pub use disagg::{DisaggConfig, DisaggregationRole};
 pub use discovery::{
     DiscoveryConfig, EtcdDiscoveryConfig, FilesystemDiscoveryConfig, P2pDiscoveryConfig,
 };
 pub use events::{BatchingConfig as EventsBatchingConfig, EventPolicyConfig, EventsConfig};
+pub use hub::LeaderHubConfig;
+pub use kvbm_common::BlockLayoutMode;
 pub use messenger::{MessengerBackendConfig, MessengerConfig};
 pub use metrics::MetricsConfig;
 pub use nixl::NixlConfig;
@@ -52,6 +61,7 @@ pub use offload::{
 };
 pub use onboard::{OnboardConfig, OnboardMode};
 pub use rayon::RayonConfig;
+pub use remote_search::RemoteSearch;
 pub use tokio::TokioConfig;
 pub use v1_compat::V1EnvCompat;
 
@@ -132,6 +142,57 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub debug: DebugConfig,
+
+    /// Connector→hub configuration. The sole way the connector reaches a
+    /// `kvbm-hub`. `None` = no hub features (normal hub-less connector work);
+    /// the hub is currently required for `indexer`, `p2p`, and
+    /// `disagg`.
+    #[validate(nested)]
+    #[serde(default)]
+    pub hub: Option<LeaderHubConfig>,
+
+    /// Maximum sequence length (tokens). Sourced from vLLM's `max_model_len`
+    /// by the connector binding and reported to the hub for KV-index
+    /// must-match validation. `None` when not supplied.
+    #[serde(default)]
+    pub max_seq_len: Option<usize>,
+
+    /// Disaggregation configuration (P/D role). `None` = not a disagg
+    /// participant. The hub URL is no longer here — it comes from
+    /// [`hub`](Self::hub); this block only carries the per-instance role and
+    /// admission budget.
+    #[validate(nested)]
+    #[serde(default)]
+    pub disagg: Option<DisaggConfig>,
+
+    /// Remote-search configuration. `None` = disabled. When `Some`, the leader
+    /// captures a hub `IndexerLookupClient` at startup — which requires the hub
+    /// to be enabled AND offering the `indexer` feature, else startup fails
+    /// with an invalid-configuration error.
+    #[validate(nested)]
+    #[serde(default)]
+    pub remote_search: Option<RemoteSearch>,
+
+    /// Leader control-plane module configuration. `core` + `transfer` are
+    /// always on; `dev` / `test` are opt-in and both default to `false`.
+    #[validate(nested)]
+    #[serde(default)]
+    pub control: ControlConfig,
+
+    /// Block-layout compatibility mode applied at cross-leader metadata
+    /// import (conditional disagg, future leader-to-leader exchange).
+    ///
+    /// - `operational` (default): per-worker `(KvBlockLayout, LayoutConfig)`
+    ///   must match exactly on import. Strict / bit-for-bit.
+    /// - `universal`: canonical aggregate tensor must match; per-worker
+    ///   permutation and shard extents may differ. Requires every local
+    ///   worker's `KvBlockLayout` to be labeled (not `Unknown`) at
+    ///   registration.
+    ///
+    /// See [`BlockLayoutMode`] docs for full semantics. Env override:
+    /// `KVBM_BLOCK_LAYOUT={operational|universal}`.
+    #[serde(default)]
+    pub block_layout: BlockLayoutMode,
 }
 
 impl KvbmConfig {
@@ -229,6 +290,13 @@ impl KvbmConfig {
             )
             // Onboard config: KVBM_ONBOARD_MODE
             .merge(Env::prefixed("KVBM_ONBOARD_MODE").map(|_| "onboard.mode".into()))
+            // Control config: KVBM_CONTROL_ENABLED, KVBM_CONTROL_BIND_ADDR, KVBM_CONTROL_PORT
+            .merge(
+                Env::prefixed("KVBM_CONTROL_")
+                    .map(|k| format!("control.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Block-layout compat mode: KVBM_BLOCK_LAYOUT=operational|universal
+            .merge(Env::prefixed("KVBM_BLOCK_LAYOUT").map(|_| "block_layout".into()))
     }
 
     /// Load configuration from default figment (env and files).
@@ -721,6 +789,145 @@ mod tests {
     }
 
     #[test]
+    fn test_disagg_json_deserializes_via_leader_profile() {
+        // User prompt example: disagg block nested in leader profile.
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH"], || {
+            let json = r#"{
+                "leader": {
+                    "hub": { "url": "http://127.0.0.1:1337", "features": ["disagg"] },
+                    "disagg": { "role": "prefill" }
+                },
+                "worker": {}
+            }"#;
+
+            let leader_cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+            let disagg = leader_cfg.disagg.expect("leader should have disagg config");
+            assert_eq!(disagg.role, DisaggregationRole::Prefill);
+            let hub = leader_cfg.hub.expect("leader should have hub config");
+            assert_eq!(hub.url, "http://127.0.0.1:1337");
+            assert_eq!(hub.features, vec!["disagg"]);
+
+            // Worker profile should not pick up the leader-only disagg block.
+            let worker_cfg = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+            assert!(
+                worker_cfg.disagg.is_none(),
+                "worker should not inherit leader's disagg block"
+            );
+        });
+    }
+
+    #[test]
+    fn test_disagg_role_decode_via_leader_profile() {
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH"], || {
+            let json = r#"{
+                "leader": {
+                    "disagg": { "role": "decode" }
+                }
+            }"#;
+            let cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+            let disagg = cfg.disagg.expect("disagg present");
+            assert_eq!(disagg.role, DisaggregationRole::Decode);
+        });
+    }
+
+    #[test]
+    fn test_control_default_is_disabled() {
+        temp_env::with_vars_unset(
+            vec![
+                "KVBM_CONFIG_PATH",
+                "KVBM_CONTROL_DEV",
+                "KVBM_CONTROL_METRICS",
+            ],
+            || {
+                let cfg = KvbmConfig::from_env().unwrap();
+                assert!(!cfg.control.dev);
+                assert!(!cfg.control.metrics);
+            },
+        );
+    }
+
+    #[test]
+    fn test_control_env_vars_apply() {
+        temp_env::with_vars(
+            vec![
+                ("KVBM_CONTROL_DEV", Some("true")),
+                ("KVBM_CONTROL_METRICS", Some("true")),
+            ],
+            || {
+                let cfg = KvbmConfig::from_env().unwrap();
+                assert!(cfg.control.dev);
+                assert!(cfg.control.metrics);
+            },
+        );
+    }
+
+    #[test]
+    fn block_layout_defaults_to_operational() {
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH", "KVBM_BLOCK_LAYOUT"], || {
+            let cfg = KvbmConfig::from_env().unwrap();
+            assert_eq!(cfg.block_layout, BlockLayoutMode::Operational);
+        });
+    }
+
+    #[test]
+    fn block_layout_env_universal_parses() {
+        temp_env::with_vars(vec![("KVBM_BLOCK_LAYOUT", Some("universal"))], || {
+            let cfg = KvbmConfig::from_env().unwrap();
+            assert_eq!(cfg.block_layout, BlockLayoutMode::Universal);
+        });
+    }
+
+    #[test]
+    fn block_layout_env_operational_parses() {
+        temp_env::with_vars(vec![("KVBM_BLOCK_LAYOUT", Some("operational"))], || {
+            let cfg = KvbmConfig::from_env().unwrap();
+            assert_eq!(cfg.block_layout, BlockLayoutMode::Operational);
+        });
+    }
+
+    #[test]
+    fn block_layout_json_universal_parses() {
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH", "KVBM_BLOCK_LAYOUT"], || {
+            let json = r#"{"block_layout": "universal"}"#;
+            let cfg = KvbmConfig::from_figment_with_json(json).unwrap();
+            assert_eq!(cfg.block_layout, BlockLayoutMode::Universal);
+        });
+    }
+
+    #[test]
+    fn test_control_via_json_leader_profile() {
+        temp_env::with_vars_unset(
+            vec![
+                "KVBM_CONFIG_PATH",
+                "KVBM_CONTROL_DEV",
+                "KVBM_CONTROL_METRICS",
+            ],
+            || {
+                let json = r#"{
+                    "leader": {
+                        "control": { "dev": true }
+                    }
+                }"#;
+                let cfg = KvbmConfig::from_figment_with_json_for_leader(json).unwrap();
+                assert!(cfg.control.dev);
+                assert!(!cfg.control.metrics);
+                // Worker profile gets the default (all-disabled) since `control`
+                // was declared only under `leader`.
+                let wcfg = KvbmConfig::from_figment_with_json_for_worker(json).unwrap();
+                assert!(!wcfg.control.dev);
+            },
+        );
+    }
+
+    #[test]
+    fn test_disagg_absent_means_none() {
+        temp_env::with_vars_unset(vec!["KVBM_CONFIG_PATH"], || {
+            let cfg = KvbmConfig::from_figment_with_json_for_leader("{}").unwrap();
+            assert!(cfg.disagg.is_none());
+        });
+    }
+
+    #[test]
     fn test_flat_json_applies_to_both_roles() {
         // Top-level keys that are real KvbmConfig fields (not "leader" /
         // "worker" / "default") should be treated as flat config and apply
@@ -859,13 +1066,14 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_enable_disk_adds_posix() {
+    fn test_auto_enable_disk_only_bypass_mode_adds_gds_mt_and_ucx() {
+        // Disk-only (no host) triggers bypass_host_cache() == true, which forces
+        // GDS_MT even when use_gds=false, and requires UCX for VRAM segment metadata.
         let config = config_with_cache(None, Some(10.0), false);
         let nixl = config.nixl.expect("nixl auto-created");
-        assert!(nixl.has_backend("POSIX"));
-        assert!(!nixl.has_backend("GDS_MT"));
-        // host wasn't enabled, so UCX shouldn't be added
-        assert!(!nixl.has_backend("UCX"));
+        assert!(nixl.has_backend("GDS_MT"));
+        assert!(!nixl.has_backend("POSIX"));
+        assert!(nixl.has_backend("UCX"));
     }
 
     #[test]

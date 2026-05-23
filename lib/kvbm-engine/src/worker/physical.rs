@@ -94,18 +94,30 @@ pub struct PhysicalWorker {
     #[builder(default, setter(strip_option))]
     g3_handle: Option<LayoutHandle>,
 
-    /// Remote handle mappings for peer-to-peer transfers.
+    /// Remote handle mappings for peer-to-peer transfers (legacy, no rank).
     /// Key: (InstanceId, LogicalLayoutHandle) → remote LayoutHandle
     ///
-    /// Populated by `connect_remote` when this worker imports metadata from
-    /// a peer instance. Used by `execute_remote_onboard_for_instance` to
-    /// resolve logical handles to physical handles for RDMA transfers.
+    /// Populated by `connect_remote` for every peer regardless of whether
+    /// a [`ParallelismDescriptor`] was stamped. Used by the legacy
+    /// `execute_remote_onboard_for_instance` path (one-remote-per-instance,
+    /// suitable for symmetric same-rank dispatch).
     ///
-    /// Note: This is per-instance mapping (no rank), suitable for single-worker
-    /// scenarios. For multi-worker asymmetric TP, use CoordinatedWorker's
-    /// rank-aware remote_handles instead.
+    /// For cross-leader asymmetric TP, see `remote_handles_rank` below.
     #[builder(default = "RwLock::new(HashMap::new())")]
     remote_handles: RwLock<HashMap<(InstanceId, LogicalLayoutHandle), LayoutHandle>>,
+
+    /// Rank-aware remote handle mappings for cross-parallelism dispatch (AB-1c).
+    /// Key: (InstanceId, REMOTE rank, LogicalLayoutHandle) → remote LayoutHandle
+    ///
+    /// Populated by `connect_remote` whenever the inbound metadata carries
+    /// a stamped [`ParallelismDescriptor`] — the descriptor's `rank` field
+    /// is the source of truth. Looked up by
+    /// `execute_remote_onboard_for_instance_rank` (AB-1c) so the worker can
+    /// target a specific remote rank under asymmetric TP. Coexists with
+    /// `remote_handles` so the legacy per-instance path stays available
+    /// for callers that haven't yet adopted rank-aware dispatch.
+    #[builder(default = "RwLock::new(HashMap::new())")]
+    remote_handles_rank: RwLock<HashMap<(InstanceId, usize, LogicalLayoutHandle), LayoutHandle>>,
 
     // =========================================================================
     // Object Storage State
@@ -321,11 +333,14 @@ impl PhysicalWorker {
             );
         }
 
-        // Pack with worker address and NIXL metadata
+        // Pack with worker address and NIXL metadata.
+        // AB-1a: ParallelismDescriptor populated by the leader at the
+        // export RPC site (where tp_size is known). Worker-local export
+        // leaves it `None`.
         let worker_address = self.manager.worker_address();
         let nixl_metadata = self.manager.get_nixl_metadata()?;
 
-        SerializedLayout::pack(worker_address, nixl_metadata, descriptors)
+        SerializedLayout::pack(worker_address, nixl_metadata, descriptors, None)
     }
 
     /// Import serialized layout metadata into the transfer manager.
@@ -397,7 +412,12 @@ impl PhysicalWorker {
         // Acquire a dedicated stream for all layer transfers
         let stream = self.manager.context().acquire_h2d_stream();
 
-        tracing::debug!(
+        // info!-level so smokes can assert on the trigger without enabling
+        // kvbm-engine debug. The G2 block layout is verified separately
+        // via the hub describe endpoint pre-bringup (see
+        // .claude/skills/disagg-bringup/verify-block-layout.sh), so we
+        // don't duplicate it here.
+        tracing::info!(
             num_layers,
             num_blocks = src_block_ids.len(),
             "Starting layer-wise onboard from G2 to G1"
@@ -423,7 +443,11 @@ impl PhysicalWorker {
             event.record(stream.as_ref())?;
         }
 
-        tracing::debug!(num_layers, "Layer-wise onboard complete - events recorded");
+        tracing::info!(
+            num_layers,
+            num_blocks = src_block_ids.len(),
+            "Layer-wise onboard complete - events recorded"
+        );
 
         if let Some(observability) = self.manager.context().observability() {
             observability
@@ -666,7 +690,9 @@ impl WorkerTransfers for PhysicalWorker {
         // Unpack to extract logical type info
         let unpacked = meta.unpack()?;
 
-        // Store mappings
+        // Store mappings in the legacy per-instance map (one entry per
+        // (instance, tier) — wins-last under repeated imports for the
+        // same instance).
         {
             let mut handles = self.remote_handles.write().unwrap();
             for descriptor in &unpacked.layouts {
@@ -674,11 +700,26 @@ impl WorkerTransfers for PhysicalWorker {
             }
         }
 
-        // Import so NIXL knows about the remote (repack to pass ownership)
+        // Also populate the rank-aware map when the inbound metadata
+        // carries a stamped ParallelismDescriptor. This is what
+        // execute_remote_onboard_for_instance_rank (AB-1c) reads.
+        if let Some(parallelism) = unpacked.parallelism.as_ref() {
+            let mut by_rank = self.remote_handles_rank.write().unwrap();
+            for descriptor in &unpacked.layouts {
+                by_rank.insert(
+                    (instance_id, parallelism.rank, descriptor.logical_type),
+                    descriptor.handle,
+                );
+            }
+        }
+
+        // Import so NIXL knows about the remote (repack to pass ownership).
+        // Preserve the inbound parallelism descriptor across the repack.
         let repacked = SerializedLayout::pack(
             unpacked.worker_address,
             unpacked.nixl_metadata,
             unpacked.layouts,
+            unpacked.parallelism,
         )?;
         self.manager.import_metadata(repacked)?;
 
@@ -720,6 +761,162 @@ impl WorkerTransfers for PhysicalWorker {
             dst,
             dst_block_ids,
             self.annotate_options(options, Self::local_route(remote_logical_type, dst)),
+        )
+    }
+
+    fn execute_remote_onboard_for_instance_rank(
+        &self,
+        instance_id: InstanceId,
+        remote_rank: usize,
+        remote_logical_type: LogicalLayoutHandle,
+        src_block_ids: Vec<BlockId>,
+        dst: LogicalLayoutHandle,
+        dst_block_ids: Arc<[BlockId]>,
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        let handles = self.remote_handles_rank.read().unwrap();
+        let remote_handle = handles
+            .get(&(instance_id, remote_rank, remote_logical_type))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "execute_remote_onboard_for_instance_rank: no remote {:?} handle for \
+                     (instance={}, rank={}); peer must have stamped a ParallelismDescriptor \
+                     and connect_remote must have completed",
+                    remote_logical_type,
+                    instance_id,
+                    remote_rank,
+                )
+            })?;
+
+        let descriptor = RemoteDescriptor::Layout {
+            handle: *remote_handle,
+            block_ids: src_block_ids,
+        };
+
+        self.execute_remote_onboard(
+            descriptor,
+            dst,
+            dst_block_ids,
+            self.annotate_options(options, Self::local_route(remote_logical_type, dst)),
+        )
+    }
+
+    fn execute_remote_pull_plan(
+        &self,
+        plan: crate::leader::dispatch::WorkerPullPlan,
+    ) -> Result<TransferCompleteNotification> {
+        use kvbm_physical::transfer::TransferSelection;
+
+        if plan.shards.is_empty() {
+            anyhow::bail!("execute_remote_pull_plan: plan has no shards");
+        }
+        if plan.src_block_ids.len() != plan.dst_block_ids.len() {
+            anyhow::bail!(
+                "execute_remote_pull_plan: src/dst block id counts disagree ({} vs {})",
+                plan.src_block_ids.len(),
+                plan.dst_block_ids.len(),
+            );
+        }
+
+        // Resolve the local destination handle. G4 isn't a valid pull
+        // target — the cross-parallelism path is for RDMA-backed tiers.
+        let local_handle = match plan.dst_layout {
+            LogicalLayoutHandle::G1 => self.g1_handle(),
+            LogicalLayoutHandle::G2 => self.g2_handle(),
+            LogicalLayoutHandle::G3 => self.g3_handle(),
+            LogicalLayoutHandle::G4 => {
+                anyhow::bail!("execute_remote_pull_plan: G4 cannot be a dst for RDMA pulls");
+            }
+        }
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "execute_remote_pull_plan: no local handle registered for {:?}",
+                plan.dst_layout
+            )
+        })?;
+
+        let local_physical = self.manager.get_physical_layout(local_handle).ok_or_else(|| {
+            anyhow::anyhow!(
+                "execute_remote_pull_plan: local handle {local_handle:?} not in manager registry"
+            )
+        })?;
+        let local_view = local_physical.layout().layout_view()?;
+
+        // Block-pair list is shared across every shard in this plan.
+        let block_pairs: Vec<(usize, usize)> = plan
+            .src_block_ids
+            .iter()
+            .copied()
+            .zip(plan.dst_block_ids.iter().copied())
+            .collect();
+
+        // Project WirePullOptions onto TransferOptions. The wire subset
+        // intentionally omits bounce_buffer / cuda_stream / kv_layout
+        // overrides / use_planner / layer_range; execute_transfer_selection
+        // forces use_planner=true internally, and layer_range is the PP
+        // story.
+        let mut options = TransferOptions::default();
+        options.nixl_write_notification = plan.options.nixl_write_notification;
+        options.metric_route = plan.options.metric_route;
+        // Attach a default transfer route when none was supplied so the
+        // emitted metrics stay consistent with the legacy onboard path.
+        let options = self.annotate_options(
+            options,
+            Self::local_route(plan.source_layout, plan.dst_layout),
+        );
+
+        let mut notifications = Vec::with_capacity(plan.shards.len());
+        for shard in &plan.shards {
+            let remote_handle = {
+                let handles = self.remote_handles_rank.read().unwrap();
+                handles
+                    .get(&(plan.remote_instance, shard.remote_rank, plan.source_layout))
+                    .copied()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "execute_remote_pull_plan: no remote {:?} handle for \
+                             (instance={}, rank={}); peer must have stamped a \
+                             ParallelismDescriptor and connect_remote must have completed",
+                            plan.source_layout,
+                            plan.remote_instance,
+                            shard.remote_rank,
+                        )
+                    })?
+            };
+
+            let remote_physical = self
+                .manager
+                .get_physical_layout(remote_handle)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "execute_remote_pull_plan: remote handle {remote_handle:?} not in manager registry"
+                    )
+                })?;
+            let remote_view = remote_physical.layout().layout_view()?;
+
+            let axis_slices = crate::leader::dispatch::build_axis_intersections(
+                shard,
+                |d| local_view.local_layout().size_of(d),
+                |d| remote_view.local_layout().size_of(d),
+            )?;
+
+            let selection = TransferSelection {
+                block_pairs: block_pairs.clone(),
+                axis_slices,
+            };
+
+            notifications.push(self.manager.execute_transfer_selection(
+                remote_handle,
+                local_handle,
+                selection,
+                options.clone(),
+            )?);
+        }
+
+        TransferCompleteNotification::aggregate(
+            notifications,
+            self.manager.context().event_system(),
+            self.manager.context().tokio(),
         )
     }
 }

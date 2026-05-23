@@ -20,37 +20,32 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["v1", "v2"]
-dynamo = ["dep:dynamo-runtime"]
-v1 = ["dynamo", "dep:dynamo-llm", "dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
-v2 = ["dep:kvbm-connector", "kvbm-connector/static-kernels"]
+default = ["v2"]
+v2 = [
+    "dep:kvbm-connector",
+    "kvbm-connector/static-kernels",
+    "dep:kvbm-common",
+]
 kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell"]
-nccl = ["v1", "dynamo-llm/nccl", "cudarc/nccl"]
 
 [dependencies]
-# v1 deps (optional)
-dynamo-llm = { path = "../../llm", optional = true }
-dynamo-runtime = { path = "../../runtime", optional = true }
-
 # v2 deps (optional)
+kvbm-common = { path = "../../kvbm-common", optional = true }
 kvbm-connector = { path = "../../kvbm-connector", optional = true }
 
 # kernels deps (optional)
 kvbm-kernels = { path = "../../kvbm-kernels", optional = true }
 
 anyhow = { version = "1" }
-derive-getters = "0.5"
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
-thiserror = { version = "2.0" }
-tokio = { version = "1.46.0", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { version = "0" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
 # "abi3-py310" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.10
-pyo3 = { version = "0.23.4", default-features = false, features = [
+pyo3 = { version = "0.28.3", default-features = false, features = [
   "macros",
   "experimental-async",
   "experimental-inspect",
@@ -59,16 +54,15 @@ pyo3 = { version = "0.23.4", default-features = false, features = [
   "abi3-py310",
 ] }
 
-pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [
-  "attributes",
-  "testing",
-  "tokio-runtime",
-  "unstable-streams",
-] }
+# pyo3-async-runtimes = { version = "0.23.0", default-features = false, features = [
+#   "attributes",
+#   "testing",
+#   "tokio-runtime",
+#   "unstable-streams",
+# ] }
 
 once_cell = { version = "1", optional = true }
-dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
-rstest = "0.25"
+rstest = "0.26"

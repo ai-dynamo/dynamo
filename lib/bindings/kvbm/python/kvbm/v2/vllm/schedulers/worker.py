@@ -29,203 +29,17 @@ from typing import TYPE_CHECKING, Optional
 import kvbm
 import torch
 from kvbm.v2.vllm import KvbmVllmConfig
+from kvbm.v2.vllm.dim_probe import (
+    KvBlockLayout,
+    KvDim,
+    build_dim_layout_from_tensor,
+    derive_block_layout,
+    select_fc_variant,
+)
+from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
-from vllm.model_executor.models.utils import extract_layer_index
-
-# ---------------------------------------------------------------------------
-# Per-layer KV axis discovery
-# ---------------------------------------------------------------------------
-#
-# Both registration paths need to identify named axes in the KV cache tensor:
-# - LW (`register_kv_caches`) needs `inner_dim` (the packed `heads*head_size`
-#   tail), which depends on where the backend places those axes.
-# - FC (`register_cross_layers_kv_cache`) needs to verify that the backend's
-#   stride-order permutation produces the byte layout
-#   `[num_blocks, num_layers, K/V, page_size, heads, head_size]` that
-#   `FullyContiguousLayout` assumes.
-#
-# Both can be served by probing `attn_backend.get_kv_cache_shape(...)` with
-# distinct marker values and reading back each axis's logical position.
-# FC additionally consults `get_kv_cache_stride_order(include_num_layers=True)`
-# to verify the physical permutation; LW just needs the positions.
-
-# Unique per-axis probe values. `block_size` must be a multiple of 16 (FA,
-# FlashInfer, Triton all enforce this in `get_kv_cache_shape`); the others
-# must be != 2 so the K/V dim (always literally 2) is unambiguous.
-_PROBE_BLOCKS = 1024
-_PROBE_PAGE_SIZE = 32
-_PROBE_KVHEADS = 7
-_PROBE_HEAD_SIZE = 64
-_KV_DIM_VALUE = 2  # K/V axis is always size 2 in standard attention
-
-
-@dataclass(frozen=True)
-class KvAxisMap:
-    """Logical positions of each named axis in a per-layer KV cache shape.
-
-    Indices are into the per-layer shape returned by
-    `attn_backend.get_kv_cache_shape(...)`. For cross-layer tensors (where
-    vLLM prepends a `num_layers` axis at logical position 0), every index
-    here should be shifted by +1 when comparing against a stride_order
-    that was obtained with `include_num_layers_dimension=True`.
-    """
-
-    blocks: int  # axis carrying num_blocks
-    kv: int  # K/V outer axis (always size 2 for standard attention)
-    page_size: int  # axis carrying block_size
-    heads: int  # axis carrying num_kv_heads
-    head_size: int  # axis carrying head_size
-
-
-def probe_per_layer_axes(attn_backend: type) -> KvAxisMap:
-    """Discover the logical position of each named axis in a backend's
-    per-layer KV cache shape.
-
-    Calls `attn_backend.get_kv_cache_shape(num_blocks=1024, block_size=32,
-    num_kv_heads=7, head_size=64)` and locates each marker. Used by both
-    the LW path (to compute `inner_dim` from the *actual* heads/head_size
-    positions, not a hardcoded `shape[3:]` assumption) and the FC path
-    (to validate the stride-order permutation).
-
-    Standard attention only — MLA's per-layer shape has no K/V axis and is
-    handled separately by callers.
-    """
-    per_layer_shape = tuple(
-        attn_backend.get_kv_cache_shape(
-            num_blocks=_PROBE_BLOCKS,
-            block_size=_PROBE_PAGE_SIZE,
-            num_kv_heads=_PROBE_KVHEADS,
-            head_size=_PROBE_HEAD_SIZE,
-        )
-    )
-
-    def _find(marker: int, name: str) -> int:
-        try:
-            return per_layer_shape.index(marker)
-        except ValueError as e:
-            raise RuntimeError(
-                f"KVBM cannot locate {name} (marker={marker}) in "
-                f"{attn_backend.__name__} per-layer shape {per_layer_shape}"
-            ) from e
-
-    return KvAxisMap(
-        blocks=_find(_PROBE_BLOCKS, "num_blocks"),
-        kv=_find(_KV_DIM_VALUE, "K/V"),
-        page_size=_find(_PROBE_PAGE_SIZE, "block_size"),
-        heads=_find(_PROBE_KVHEADS, "num_kv_heads"),
-        head_size=_find(_PROBE_HEAD_SIZE, "head_size"),
-    )
-
-
-@dataclass
-class KvTensorLayout:
-    """Semantic description of the KV cache tensor layout.
-
-    Python derives this from VllmConfig (which has the model architecture)
-    so that Rust does not need to guess from raw tensor shapes.
-
-    For both MLA and standard attention, dimensions are computed explicitly
-    from vLLM config and passed down to Rust. Tensor shape is only used for
-    sanity validation (e.g., block-axis presence / packed-tail checks).
-
-    Mirrors the v1 helper in
-    lib/bindings/kvbm/python/kvbm/vllm_integration/connector_worker.py.
-    """
-
-    outer_dim: Optional[int]
-    inner_dim: Optional[int]
-
-    @classmethod
-    def from_vllm_config(
-        cls,
-        vllm_config: "VllmConfig",
-        shape: "torch.Size",
-        num_device_blocks: int,
-        use_mla: bool = False,
-        attn_backend: Optional[type] = None,
-    ) -> "KvTensorLayout":
-        """Resolve `outer_dim` / `inner_dim` from vLLM config + tensor shape.
-
-        When `attn_backend` is supplied, `probe_per_layer_axes` is used to
-        locate the heads / head_size axes — robust against backends that
-        permute the per-layer tail. When it's omitted (the current LW call
-        site, since vLLM v1 doesn't carry the backend on the
-        `register_kv_caches` callback), we fall back to the documented
-        `shape[3:]` assumption that heads and head_size are the last two
-        axes; this is true for FA / FlashInfer / Triton today and is
-        validated by the config cross-check below.
-        """
-        if use_mla:
-            # MLA tensors are 3D: [num_blocks, page_size, head_size].
-            # No outer_dim axis — K and V are fused into a single latent.
-            return cls(outer_dim=1, inner_dim=int(shape[-1]))
-        # Standard attention:
-        # - outer_dim is K/V axis = 2
-        # - inner_dim is per-rank kv feature width
-        #
-        # vLLM API surfaces can differ by version/model family:
-        # `get_total_num_kv_heads()` may be global or already per-rank.
-        # Resolve this robustly by checking which config interpretation matches
-        # the observed packed tail in tensor shape.
-        total_kv_heads = int(vllm_config.model_config.get_total_num_kv_heads())
-        head_size = int(vllm_config.model_config.get_head_size())
-        tp_size = int(vllm_config.parallel_config.tensor_parallel_size)
-        if tp_size <= 0:
-            raise ValueError(f"Invalid tensor_parallel_size={tp_size}")
-        outer_dim = 2
-        if head_size <= 0 or total_kv_heads <= 0:
-            raise ValueError(
-                "Invalid standard attention inner_dim derived from config: "
-                f"total_num_kv_heads={total_kv_heads}, head_size={head_size}"
-            )
-
-        # Sanity checks against actual tensor shape so we fail loudly if vLLM
-        # changes layout semantics.
-        if len(shape) < 4:
-            raise ValueError(
-                "Standard attention KV tensor must have >=4 dims; "
-                f"got shape={tuple(shape)}"
-            )
-        if int(shape[0]) < num_device_blocks and int(shape[1]) < num_device_blocks:
-            raise ValueError(
-                "Cannot locate num_device_blocks in standard KV tensor shape; "
-                f"shape[:2]={tuple(shape[:2])}, num_device_blocks={num_device_blocks}"
-            )
-
-        # inner_dim from tensor shape: prefer probe-derived axis positions
-        # when the backend is available, otherwise use the shape[3:] tail.
-        if attn_backend is not None:
-            axes = probe_per_layer_axes(attn_backend)
-            inferred_inner_from_shape = int(shape[axes.heads]) * int(
-                shape[axes.head_size]
-            )
-        else:
-            inferred_inner_from_shape = int(math.prod(shape[3:]))
-
-        config_inner_candidates = [total_kv_heads * head_size]
-        if total_kv_heads % tp_size == 0:
-            config_inner_candidates.append((total_kv_heads // tp_size) * head_size)
-
-        matched_inner = None
-        for candidate in config_inner_candidates:
-            if candidate == inferred_inner_from_shape:
-                matched_inner = candidate
-                break
-
-        if matched_inner is None:
-            raise ValueError(
-                "KV layout mismatch between vLLM config and tensor shape: "
-                f"config_inner_candidates={config_inner_candidates}, "
-                f"shape_inner_dim={inferred_inner_from_shape}, "
-                f"shape={tuple(shape)}, total_num_kv_heads={total_kv_heads}, "
-                f"head_size={head_size}, tp_size={tp_size}"
-            )
-        inner_dim = matched_inner
-
-        return cls(outer_dim=outer_dim, inner_dim=inner_dim)
-
 
 # Import KvbmRuntime and ConnectorWorker from Rust bindings (requires v2 feature)
 if kvbm.v2.is_available():
@@ -323,6 +137,36 @@ class SchedulerConnectorWorker:
             worker_address=worker_addr,
         )
 
+        # Cache the deduplicated AttentionBackend classes for this model.
+        # Sentinel-probed in `register_kv_caches` to derive `KvDimLayout` /
+        # `KvBlockLayout`. Mirrors NIXL's pattern at
+        # `vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py:316`.
+        self._attn_backends = get_current_attn_backends(vllm_config)
+        if not self._attn_backends:
+            # `get_current_attn_backends` is supposed to fall back to
+            # `get_attn_backend(...)` when `static_forward_context` is empty
+            # (`utils.py:873-886`); an empty result here indicates an
+            # unexpected vLLM init order — fail loudly so register_kv_caches
+            # doesn't blow up later with a confusing IndexError.
+            raise RuntimeError(
+                "get_current_attn_backends(vllm_config) returned an empty "
+                "list — vLLM static_forward_context appears to be empty at "
+                "connector init time. File a bug."
+            )
+
+        # Build layer_name → tensor_index from `kv_cache_config.kv_cache_tensors`,
+        # not from `extract_layer_index(name)` over the kv_caches dict. The
+        # vLLM model runner registers tensors keyed by layer name; multiple
+        # logical layers may share one cache tensor (`shared_by`), and the
+        # tensor list we hand to Rust must be ordered by `kv_cache_tensors`
+        # index — so save_kv_layer / wait_for_layer_load lookups stay
+        # consistent with the per-tensor index. Built once here so cross-
+        # layer mode (M2) shares the same source of truth.
+        self.layer_name_to_index: dict[str, int] = {}
+        for i, kct in enumerate(kv_cache_config.kv_cache_tensors):
+            for name in kct.shared_by:
+                self.layer_name_to_index[name] = i
+
         # Will be set during register_kv_caches
         self._num_device_blocks: Optional[int] = None
         self._num_layers: int = 0
@@ -337,133 +181,131 @@ class SchedulerConnectorWorker:
         """
         Register KV caches with NIXL for RDMA transfers.
 
-        This registers the KV cache tensors with NIXL via the UCX backend,
-        enabling remote GPU-to-GPU transfers.
+        Drives the labelled-axis path: probe the per-layer
+        `AttentionBackend.get_kv_cache_shape(...)` with sentinel values to
+        learn each axis's role (`Block`, `Outer`, `Page`, `HeadCount`,
+        `HeadSize`/`Payload`), classify NHD vs HND from
+        `get_kv_cache_stride_order(False)`, validate every tensor's
+        `shape()` and `numel()` against the labelled sizes, then hand
+        labelled `(dims, sizes, block_layout)` to Rust. Replaces the
+        previous shape-inference codepath.
         """
         if not kv_caches:
             print("Warning: register_kv_caches called with empty kv_caches")
             return
 
-        print(
-            f"SchedulerConnectorWorker.register_kv_caches called with {len(kv_caches)} layers"
-        )
-
-        # Sort tensors by layer index to ensure correct ordering
-        ordered_kv_caches = sorted(
-            kv_caches.items(), key=lambda item: extract_layer_index(item[0])
-        )
-        self.ordered_kv_caches = ordered_kv_caches
-
-        # Create a mapping of layer name to layer index
-        self.layer_name_to_index = {
-            item[0]: i for i, item in enumerate(ordered_kv_caches)
-        }
-
-        # Extract tensors in order
-        tensors = [tensor for _, tensor in ordered_kv_caches]
-
-        # Get first tensor to extract common properties
-        first_tensor = tensors[0]
-        shape = first_tensor.shape
-
-        # Validate all tensors have same shape
-        if not all(t.shape == shape for t in tensors):
+        kct_list = self.vllm_kv_cache_config.kv_cache_tensors
+        groups = self.vllm_kv_cache_config.kv_cache_groups
+        if len(groups) != 1:
             raise NotImplementedError(
-                "Hybrid models with different KV cache shapes are not supported yet."
+                f"hybrid kv_cache_groups not supported (found {len(groups)} "
+                f"groups); KVBM v2 currently assumes a single uniform group"
+            )
+        if len(self._attn_backends) != 1:
+            raise NotImplementedError(
+                f"per-layer-divergent attn_backends not supported "
+                f"(found {len(self._attn_backends)}); KVBM v2 currently "
+                f"requires a single backend across all attention layers"
             )
 
-        # Extract parameters.
-        # Prefer vLLM config's GPU block count; fall back to tensor-derived only
-        # when config is unavailable (older bring-up edge cases).
-        use_mla = getattr(self.vllm_config.model_config, "use_mla", False)
+        backend = self._attn_backends[0]
+        use_mla = bool(getattr(self.vllm_config.model_config, "use_mla", False))
+        cache_dtype_str = self.vllm_config.cache_config.cache_dtype
+
+        # Tensor list ordered by `kv_cache_tensors` index — same source as
+        # `layer_name_to_index` (built in __init__). Multiple layer names
+        # may share the same physical tensor (`shared_by`); we register the
+        # tensor once, indexed by its kv_cache_tensors position.
+        tensors: list[torch.Tensor] = []
+        for kct in kct_list:
+            # Any name in shared_by points to the same underlying tensor.
+            tensors.append(kv_caches[kct.shared_by[0]])
+
+        # All tensors must share a shape — same restriction as before, but
+        # the error now points at the offending layer index.
+        first_shape = tuple(tensors[0].shape)
+        for i, t in enumerate(tensors[1:], start=1):
+            if tuple(t.shape) != first_shape:
+                raise NotImplementedError(
+                    f"hybrid models with per-layer-divergent shapes are not "
+                    f"supported yet (tensor {i} has shape {tuple(t.shape)}, "
+                    f"tensor 0 has shape {first_shape})"
+                )
+
+        # Probe the backend with sentinels and bind the labels to the
+        # ACTUAL tensor shape — not `kv_cache_spec.block_size` /
+        # `num_gpu_blocks` — so we sidestep vLLM's `kernel_block_size !=
+        # spec.block_size` case (`kv_connector_model_runner_mixin.py:235-238`).
+        dims, sizes = build_dim_layout_from_tensor(
+            backend,
+            tensor_shape=first_shape,
+            cache_dtype_str=cache_dtype_str,
+            use_mla=use_mla,
+        )
+        block_layout: KvBlockLayout = derive_block_layout(backend, dims)
+
+        # Per-layer fast-fail in Python so the error fires before crossing
+        # the FFI boundary. (The Rust side checks the same invariants.)
+        expected_numel = math.prod(sizes)
+        for layer_name, kct, tensor in zip(
+            (kct.shared_by[0] for kct in kct_list), kct_list, tensors
+        ):
+            if tuple(tensor.shape) != tuple(sizes):
+                raise RuntimeError(
+                    f"layer {layer_name}: tensor.shape {tuple(tensor.shape)} "
+                    f"!= probed-and-labelled sizes {tuple(sizes)}"
+                )
+            if tensor.numel() != expected_numel:
+                raise RuntimeError(
+                    f"layer {layer_name}: tensor.numel() {tensor.numel()} "
+                    f"!= product of labelled sizes {expected_numel}"
+                )
+
+        # Find the Block axis size — the authoritative `num_device_blocks`
+        # value. Cross-checked against `kv_cache_config` for visibility but
+        # the layout's value wins (matches the previous
+        # `tensor-derived value wins over config` behaviour).
+        block_idx = dims.index(KvDim.Block)
+        num_device_blocks = sizes[block_idx]
+
         config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
-        if config_gpu_blocks is None or config_gpu_blocks <= 0:
-            num_device_blocks = int(shape[0] if use_mla else max(shape[0], shape[1]))
+        if config_gpu_blocks is not None and num_device_blocks != config_gpu_blocks:
             print(
-                "Warning: cache_config.num_gpu_blocks unavailable; "
-                f"falling back to tensor-derived num_device_blocks={num_device_blocks}"
+                f"Warning: num_device_blocks from labelled tensor "
+                f"({num_device_blocks}) != config.num_gpu_blocks "
+                f"({config_gpu_blocks}). Using labelled value."
             )
-        else:
-            num_device_blocks = int(config_gpu_blocks)
 
-        # Derive explicit layout semantics from vLLM model config + tensor shape.
-        layout = KvTensorLayout.from_vllm_config(
-            self.vllm_config, shape, num_device_blocks, use_mla
-        )
-
-        page_size = self.vllm_config.cache_config.block_size
         dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
-        if num_device_blocks <= 0:
-            raise ValueError(f"Invalid num_device_blocks={num_device_blocks}")
-        if page_size <= 0:
-            raise ValueError(f"Invalid page_size={page_size}")
-        if dtype_width_bytes <= 0:
-            raise ValueError(f"Invalid dtype_width_bytes={dtype_width_bytes}")
 
-        if shape[0] < num_device_blocks and shape[1] < num_device_blocks:
-            raise ValueError(
-                "Cannot locate num_device_blocks in KV tensor shape; "
-                f"shape[:2]={tuple(shape[:2])}, num_gpu_blocks={num_device_blocks}"
-            )
-
-        # Strong startup contract:
-        # bytes_per_block from layout math must equal bytes_per_block implied by the
-        # concrete tensor storage. This catches subtle TP/layout drift early.
-        layer_total_bytes_from_shape = int(math.prod(shape)) * dtype_width_bytes
-        if layer_total_bytes_from_shape % num_device_blocks != 0:
-            raise ValueError(
-                "KV tensor total bytes is not divisible by num_device_blocks: "
-                f"shape={tuple(shape)}, dtype_width_bytes={dtype_width_bytes}, "
-                f"layer_total_bytes={layer_total_bytes_from_shape}, "
-                f"num_device_blocks={num_device_blocks}"
-            )
-        bytes_per_block_from_shape = layer_total_bytes_from_shape // num_device_blocks
-        bytes_per_block_from_layout = (
-            int(layout.outer_dim)
-            * page_size
-            * int(layout.inner_dim)
-            * dtype_width_bytes
-        )
-        if bytes_per_block_from_shape != bytes_per_block_from_layout:
-            raise ValueError(
-                "KV bytes_per_block mismatch between tensor shape and derived layout: "
-                f"shape={tuple(shape)}, "
-                f"bytes_per_block_from_shape={bytes_per_block_from_shape}, "
-                f"bytes_per_block_from_layout={bytes_per_block_from_layout}, "
-                f"outer_dim={layout.outer_dim}, inner_dim={layout.inner_dim}, "
-                f"page_size={page_size}, dtype_width_bytes={dtype_width_bytes}, "
-                f"num_device_blocks={num_device_blocks}"
-            )
-
-        # Phase 2A: Register KV caches with NIXL via Rust binding
-        # This caches tensor state for deferred NIXL registration
-        # The actual NIXL registration happens when the leader triggers
-        # initialization via bind_connector_metadata()
+        # Hand off to Rust. Strings (not pyclass enums) cross the FFI;
+        # `kvbm-py3` parses them via `parse_kv_dim` / `parse_kv_block_layout`.
         self.worker.register_kv_caches(
             tensors,
             num_device_blocks,
-            page_size,
             dtype_width_bytes,
-            outer_dim=layout.outer_dim,
-            inner_dim=layout.inner_dim,
+            [d.value for d in dims],
+            list(sizes),
+            block_layout.value,
         )
 
-        # Store device block count and last layer name for later use
         self._num_device_blocks = num_device_blocks
         self._num_layers = len(tensors)
+        # Last "layer name" = a representative name for the trailing tensor.
+        # save_kv_layer's "is this the last layer?" check on the Rust side
+        # already keys off layer index, so this is just for logging.
+        self._last_layer_name = kct_list[-1].shared_by[0] if kct_list else None
 
-        # Get the last layer name from the ordered list
-        self._last_layer_name = ordered_kv_caches[-1][0] if ordered_kv_caches else None
         print(
-            f"[DEBUG] register_kv_caches: _last_layer_name set to: {self._last_layer_name}"
+            f"[KVBM] KV caches registered (deferred mode): "
+            f"backend={backend.__name__}, "
+            f"cache_dtype_str={cache_dtype_str}, use_mla={use_mla}, "
+            f"dims={[d.value for d in dims]}, sizes={list(sizes)}, "
+            f"block_layout={block_layout.value}, "
+            f"num_device_blocks={num_device_blocks}, "
+            f"num_layers={self._num_layers}, "
+            f"dtype_bytes={dtype_width_bytes}"
         )
-
-        print("[KVBM] KV caches registered (deferred mode)")
-        print(f"  - Num device blocks: {num_device_blocks}")
-        print(f"  - Num layers: {len(tensors)}")
-        print(f"  - Page size: {page_size}")
-        print(f"  - Dtype width bytes: {dtype_width_bytes}")
-        print(f"  - Shape: {shape}")
         print("[KVBM] Waiting for leader to trigger initialization...")
 
     def register_cross_layers_kv_cache(
@@ -478,12 +320,16 @@ class SchedulerConnectorWorker:
         backend supports a uniform layout. The tensor is the single contiguous
         allocation produced by `allocate_uniform_kv_caches` — its logical
         shape is `[num_layers, ...]` permuted by the backend's stride order.
-        We require the physical byte layout to be
-        `[num_blocks, num_layers, outer_dim=2, page_size, num_kv_heads, head_size]`
-        (the last two collapse into `inner_dim` for KVBM). Both FlashAttention
-        NHD and FlashInfer/Triton NHD produce this physical layout despite
-        differing logical orderings; FP8 NHD variants that interleave the
-        heads dimension are rejected with a clear error.
+
+        Probes `attn_backend` with `dim_probe.probe_kv_dim_layout(...,
+        include_num_layers=True)` for per-axis labels and classifies
+        NHD/HND with `derive_block_layout(..., include_num_layers=True)`,
+        then hands labelled `(dims, sizes, block_layout)` to Rust. The
+        physical byte layout `[num_blocks, num_layers, K/V, page_size,
+        heads, head_size]` that `FullyContiguousLayout` assumes is
+        asserted defensively here (labels alone don't prove the physical
+        permutation is what FC expects); FP8 NHD variants that
+        interleave the heads dimension are rejected with a clear error.
         """
         print(
             f"[KVBM] register_cross_layers_kv_cache: shape={tuple(kv_cache.shape)}, "
@@ -492,62 +338,25 @@ class SchedulerConnectorWorker:
             flush=True,
         )
 
-        # FullyContiguousLayout requires the physical byte layout to be
-        # `[num_blocks, num_layers, K/V, page_size, num_kv_heads, head_size]`
-        # (the last two collapse into inner_dim). Backends order their
-        # per-layer logical shape differently — FA NHD returns
-        # `(2, num_blocks, block_size, h, d)` (K/V first) while FlashInfer
-        # and Triton NHD return `(num_blocks, 2, block_size, h, d)` (blocks
-        # first). After vLLM prepends a num_layers axis, the *logical*
-        # position of num_blocks/K/V therefore differs by backend, but the
-        # *physical* layout we need is the same. Use the shared probe to
-        # discover per-layer axis positions, shift by +1 for the prepended
-        # num_layers axis, then assert the stride-order permutation lands
-        # every axis where FullyContiguousLayout expects it.
-        try:
-            stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
+        # Hybrid-model guards. Mirror the per-layer path's
+        # `register_kv_caches` checks (raise NotImplementedError, not
+        # assert) so any failure has the same shape and message style
+        # regardless of which registration path vLLM picked. KVBM v2 does
+        # not support hybrid models in either path; this is the FC-side
+        # rejection.
+        groups = self.vllm_kv_cache_config.kv_cache_groups
+        if len(groups) != 1:
+            raise NotImplementedError(
+                f"hybrid kv_cache_groups not supported in cross-layer "
+                f"registration (found {len(groups)} groups); KVBM v2 "
+                f"currently assumes a single uniform group"
             )
-        except (AttributeError, NotImplementedError) as e:
-            raise RuntimeError(
-                f"KVBM cross-layer registration requires "
-                f"{attn_backend.__name__}.get_kv_cache_stride_order"
-                f"(include_num_layers_dimension=True); got {type(e).__name__}: {e}"
-            ) from e
-
-        axes = probe_per_layer_axes(attn_backend)
-
-        # vLLM prepends num_layers at logical position 0, so every per-layer
-        # axis position bumps by 1 in the cross-layer logical order.
-        num_blocks_log = axes.blocks + 1
-        kv_log = axes.kv + 1
-        block_size_log = axes.page_size + 1
-        heads_log = axes.heads + 1
-        head_size_log = axes.head_size + 1
-
-        def _physical_axis(logical: int) -> int:
-            return stride_order.index(logical)
-
-        expected = {
-            "num_blocks @ physical 0": _physical_axis(num_blocks_log) == 0,
-            "num_layers @ physical 1": _physical_axis(0) == 1,
-            "K/V        @ physical 2": _physical_axis(kv_log) == 2,
-            "block_size @ physical 3": _physical_axis(block_size_log) == 3,
-            "heads+head_size @ physical {4,5}": {
-                _physical_axis(heads_log),
-                _physical_axis(head_size_log),
-            }
-            == {4, 5},
-        }
-        if not all(expected.values()):
-            failed = [name for name, ok in expected.items() if not ok]
-            raise RuntimeError(
-                f"KVBM cross-layer registration requires physical byte order "
-                f"[num_blocks, num_layers, K/V, page_size, heads, head_size]; "
-                f"{attn_backend.__name__} stride_order={stride_order} over "
-                f"per-layer axes {axes} fails: {failed}. "
-                f"Use a NHD-compatible backend (FLASH_ATTN, FLASHINFER, "
-                f"TRITON_ATTN) or disable cross-layer support."
+        if len(self._attn_backends) != 1:
+            raise NotImplementedError(
+                f"per-layer-divergent attn_backends not supported in "
+                f"cross-layer registration (found {len(self._attn_backends)}); "
+                f"KVBM v2 currently requires a single backend across all "
+                f"attention layers"
             )
 
         if not kv_cache.is_contiguous() or kv_cache.storage_offset() != 0:
@@ -558,71 +367,111 @@ class SchedulerConnectorWorker:
             )
 
         shape = tuple(kv_cache.shape)
-        if len(shape) < 5:
+        use_mla = bool(getattr(self.vllm_config.model_config, "use_mla", False))
+        if use_mla:
             raise RuntimeError(
-                f"KVBM cross-layer tensor must have at least 5 dims "
-                f"(num_blocks, num_layers, outer, page_size, inner...); got shape={shape}"
+                "KVBM cross-layer (fully-contiguous) registration does not "
+                "support MLA backends — the FC layout assumes K/V outer "
+                "split (outer_dim=2)."
+            )
+        cache_dtype_str = self.vllm_config.cache_config.cache_dtype
+
+        # Probe with `include_num_layers=True` — returns labels in the
+        # PHYSICAL byte order that matches vLLM's contiguous FC tensor
+        # shape (the probe applies the cross-layer stride permutation
+        # internally). Sizes therefore pair index-for-index with
+        # `kv_cache.shape`.
+        dims, sizes = build_dim_layout_from_tensor(
+            attn_backend,
+            tensor_shape=shape,
+            cache_dtype_str=cache_dtype_str,
+            use_mla=False,
+            include_num_layers=True,
+        )
+
+        # Match the backend's physical cross-layer layout to one of
+        # `FullyContiguousLayout`'s supported orderings (OperationalNHD,
+        # OperationalHND, Universal). `None` means the backend's natural
+        # FC byte order doesn't match any variant we know how to build —
+        # the caller should have routed to the per-layer (LW) path via
+        # `prefer_cross_layer_blocks=False`.
+        block_layout: Optional[KvBlockLayout] = select_fc_variant(
+            attn_backend, cache_dtype_str=cache_dtype_str
+        )
+        if block_layout is None:
+            raise RuntimeError(
+                f"KVBM cross-layer registration: backend "
+                f"{attn_backend.__name__} cross-layer physical layout {dims} "
+                f"matches no supported FullyContiguousLayout variant "
+                f"(OperationalNHD, OperationalHND, Universal). "
+                f"Set KVBM_PREFER_FULLY_CONTIGUOUS_BLOCKS=false to use the "
+                f"per-layer (LW) path."
             )
 
-        num_blocks, num_layers, outer_dim, page_size = shape[:4]
-        inner_dim = math.prod(shape[4:])
-
-        # Cross-checks against vLLM config — catch a mismatch between the
-        # tensor we got and what vLLM thinks it allocated.
-        config_block_size = self.vllm_config.cache_config.block_size
-        if page_size != config_block_size:
+        # Defensive cross-check: the probe-derived NHD/HND classification
+        # should agree with the FC variant's NHD/HND character. A
+        # disagreement indicates a programming error in dim_probe.
+        derived = derive_block_layout(attn_backend, dims, include_num_layers=True)
+        if (
+            derived != KvBlockLayout.Unknown
+            and block_layout != KvBlockLayout.Universal
+            and derived != block_layout
+        ):
             raise RuntimeError(
-                f"KVBM cross-layer page_size mismatch: tensor has {page_size}, "
-                f"vllm_config.cache_config.block_size is {config_block_size}"
-            )
-        if outer_dim != 2:
-            raise RuntimeError(
-                f"KVBM cross-layer expects outer_dim=2 (K/V split); got {outer_dim}. "
-                f"MLA backends should not reach this path."
+                f"KVBM cross-layer: dim_probe internal mismatch — "
+                f"select_fc_variant returned {block_layout.value} but "
+                f"derive_block_layout returned {derived.value} for "
+                f"{attn_backend.__name__} dims={dims}. "
+                f"File a bug against kvbm.v2.vllm.dim_probe."
             )
 
+        # Block axis size from labels is authoritative; cross-check vLLM
+        # config for visibility.
+        block_idx = dims.index(KvDim.Block)
+        num_device_blocks = sizes[block_idx]
         config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
-        if num_blocks != config_gpu_blocks:
+        if config_gpu_blocks is not None and num_device_blocks != config_gpu_blocks:
             print(
-                f"[KVBM] Warning: cross-layer num_blocks from tensor ({num_blocks}) "
-                f"!= config.num_gpu_blocks ({config_gpu_blocks}); using tensor value."
+                f"[KVBM] Warning: cross-layer num_device_blocks from labelled tensor "
+                f"({num_device_blocks}) != config.num_gpu_blocks "
+                f"({config_gpu_blocks}); using labelled value."
             )
 
+        num_layers = sizes[dims.index(KvDim.Layer)]
         dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
 
         self.worker.register_cross_layers_kv_cache(
             kv_cache,
-            num_blocks,
-            num_layers,
-            outer_dim,
-            page_size,
-            inner_dim,
+            num_device_blocks,
             dtype_width_bytes,
+            [d.value for d in dims],
+            list(sizes),
+            block_layout.value,
         )
 
         # Downstream save_kv_layer / wait_for_layer_load identify the layer
         # by its name. With cross-layer we have no per-layer tensor dict to
         # extract the name order from, so we read it from the kv_cache_config.
-        # Single group is guaranteed by use_uniform_kv_cache.
-        groups = self.vllm_kv_cache_config.kv_cache_groups
-        assert (
-            len(groups) == 1
-        ), f"cross-layer registration expects exactly one KV cache group; got {len(groups)}"
+        # Group count was already validated above; just pull the layer names.
         layer_names = list(groups[0].layer_names)
-        assert (
-            len(layer_names) == num_layers
-        ), f"layer_names count ({len(layer_names)}) != num_layers ({num_layers})"
+        if len(layer_names) != num_layers:
+            raise RuntimeError(
+                f"cross-layer layer_names count ({len(layer_names)}) "
+                f"!= labelled num_layers ({num_layers})"
+            )
 
         self.layer_name_to_index = {name: i for i, name in enumerate(layer_names)}
-        self._num_device_blocks = num_blocks
+        self._num_device_blocks = num_device_blocks
         self._num_layers = num_layers
         self._last_layer_name = layer_names[-1] if layer_names else None
 
         print(
-            "[KVBM] Cross-layer KV cache registered (deferred mode):"
-            f" num_blocks={num_blocks} num_layers={num_layers}"
-            f" outer_dim={outer_dim} page_size={page_size} inner_dim={inner_dim}"
-            f" dtype_width_bytes={dtype_width_bytes}",
+            "[KVBM] Cross-layer KV cache registered (deferred mode): "
+            f"backend={attn_backend.__name__}, "
+            f"dims={[d.value for d in dims]}, sizes={list(sizes)}, "
+            f"block_layout={block_layout.value}, "
+            f"num_device_blocks={num_device_blocks}, num_layers={num_layers}, "
+            f"dtype_width_bytes={dtype_width_bytes}",
             flush=True,
         )
         print("[KVBM] Waiting for leader to trigger initialization...", flush=True)

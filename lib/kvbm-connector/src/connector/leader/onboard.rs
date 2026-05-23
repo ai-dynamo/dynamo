@@ -38,7 +38,7 @@ fn reset_slot_after_failed_onboarding(slot: &mut slot::RequestSlot) {
 /// effective_start` elements. Any excess beyond `final_end` in the hole-shard
 /// (the shard whose match count was < num_queried_blocks) comes pre-filtered
 /// because terminal shards have `matched_count` g2 blocks available.
-fn collect_g2_blocks_from_shards(
+pub(crate) fn collect_g2_blocks_from_shards(
     state: &mut slot::OnboardingState,
     block_size: usize,
 ) -> Result<Vec<ImmutableBlock<G2>>> {
@@ -184,6 +184,10 @@ impl ConnectorLeader {
 
         // Extract G2 blocks from every shard (with head mask + tail truncate)
         // and also capture the session IDs we now need to release.
+        //
+        // CD-only states have empty shards; intra-pass onboarding is not on the
+        // CD path so an empty shards list here is a programmer error caught by
+        // `collect_g2_blocks_from_shards`.
         let (g2_blocks, session_ids_to_release) = {
             let state = slot
                 .onboarding_state_mut()
@@ -243,6 +247,8 @@ impl ConnectorLeader {
         num_external_tokens: usize,
     ) -> Result<()> {
         let shared_slot = self.get_slot(request_id)?;
+
+        crate::audit!("onboard_start", request_id, num_external_tokens);
 
         // Extract a wait_for_completion future for every shard, then transition
         // to Onboarding.
@@ -371,6 +377,15 @@ impl ConnectorLeader {
                     .await
                     .expect("Failed to mark failed onboarding");
             }
+
+            // Onboarding (incl. any remote pull) is done and the blocks are in
+            // G1; the request can now be scheduled for the remaining prefill +
+            // decode. This is the "load → compute" boundary in the trace.
+            crate::audit!(
+                "onboard_complete",
+                request_id = %request_id,
+                ok = transfer_result.is_ok()
+            );
 
             // Regardless of error, mark the onboarding as complete.
             // An error here is a CRITICAL failure: one or more workers have

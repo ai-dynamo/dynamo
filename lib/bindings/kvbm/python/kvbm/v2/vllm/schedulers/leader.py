@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import kvbm
 from kvbm.v2.vllm import KvbmVllmConfig
+from kvbm.v2.vllm_integration.consolidator_config import get_consolidator_endpoints
 
 from ..sched_output import process_scheduler_output
 from .worker import VeloPeerMetadata
@@ -98,8 +99,20 @@ class SchedulerConnectorLeader:
         # JSON config has highest priority (overrides env vars and TOML files)
         self.runtime = KvbmRuntime.build_leader(self.kvbm_override_config)
 
+        # Resolve consolidator endpoints.  Returns None when consolidator is
+        # disabled (env opt-out or missing prefix-caching / KVBM connector).
+        # The Rust binding expects Optional[(Optional[str], str, str)]; we add
+        # "vllm" as the engine_source tag (this scheduler is always vLLM-backed).
+        raw_endpoints = get_consolidator_endpoints(vllm_config)
+        consolidator_endpoints = None
+        if raw_endpoints is not None:
+            vllm_zmq, output_bind, _output_connect = raw_endpoints
+            consolidator_endpoints = (vllm_zmq, output_bind, "vllm")
+
         # Create leader service for coordination (separate from runtime)
-        self.leader = ConnectorLeader(self.runtime, self.block_size)
+        self.leader = ConnectorLeader(
+            self.runtime, self.block_size, consolidator_endpoints
+        )
 
         self.enable_decode_offload = os.getenv("KVBM_DECODE_OFFLOAD", "false") == "true"
         print(

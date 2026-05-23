@@ -259,10 +259,13 @@ def test_connector_to_kv_transfer_json_multi():
     """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
     result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"]))
     assert result["kv_connector"] == "PdConnector"
+    assert result["kv_connector_module_path"] == "kvbm.v2.vllm.connector"
     nested = result["kv_connector_extra_config"]["connectors"]
     nested_names = [c["kv_connector"] for c in nested]
     assert "DynamoConnector" in nested_names
     assert "NixlConnector" in nested_names
+    dynamo = next(c for c in nested if c["kv_connector"] == "DynamoConnector")
+    assert dynamo["kv_connector_module_path"] == "kvbm.v2.vllm.connector"
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests

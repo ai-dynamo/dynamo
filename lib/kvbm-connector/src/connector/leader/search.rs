@@ -310,6 +310,10 @@ impl ConnectorLeader {
         // `reconcile_state` (called above) + `compute_outcome` (below).
         // Bypass-host G3-only Ready results are accounted for via
         // `shard_terminal_matched_count`, which uses `total_count()`.
+        //
+        // CD-only OnboardingState (shards empty) is naturally handled by
+        // `compute_outcome` — no shards means no match progress to report, and
+        // the wrapper drives the CD pipeline itself outside this path.
         let state = slot.onboarding_state().expect("state should exist");
         Ok(compute_outcome(state, block_size))
     }
@@ -325,7 +329,10 @@ impl ConnectorLeader {
                 slot::ActiveStateData::Onboarding(onboarding_state) => {
                     // Release every shard's session. For Ready variants this
                     // is a no-op; for AsyncSession variants this returns
-                    // server-side session state to the pool.
+                    // server-side session state to the pool. CD-only states
+                    // have empty shards — `release_all` is a no-op there and
+                    // `cd_payload`'s Drop runs when `onboarding_state` falls
+                    // out of scope.
                     if let Some(instance_leader) = self.instance_leader.get() {
                         onboarding_state.release_all(instance_leader);
                     } else {
@@ -441,7 +448,6 @@ mod reconcile_tests {
             status_rx,
             Arc::new(TokioMutex::new(Some(Vec::new()))),
             Arc::new(TokioMutex::new(MatchBreakdown::default())),
-            None,
         ))
     }
 
@@ -454,7 +460,6 @@ mod reconcile_tests {
             status_rx,
             Arc::new(TokioMutex::new(None)),
             Arc::new(TokioMutex::new(MatchBreakdown::default())),
-            None,
         );
         (FindMatchesResult::AsyncSession(session), status_tx)
     }

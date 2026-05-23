@@ -37,27 +37,6 @@ except ImportError:
     SchedulerOutput = _make_feature_stub("SchedulerOutput", "v2")
     Tensor = _make_feature_stub("Tensor", "v2")
     _V2_CORE_AVAILABLE = False
-
-# Rust scheduler symbols are exported separately because `pub mod scheduler`
-# is currently commented out in lib/bindings/kvbm/src/v2/mod.rs (TODO:
-# scheduler integration types not yet ported into the decomposed kvbm-*
-# crates). When that port lands these will become non-None automatically;
-# until then the absence is non-fatal — DynamoScheduler degrades to a vLLM
-# passthrough and KV transfer offload still routes through ConnectorLeader/
-# ConnectorWorker above.
-try:
-    from kvbm._core import v2 as _v2_for_scheduler  # noqa: F401
-
-    RustScheduler = _v2_for_scheduler.RustScheduler
-    SchedulerConfig = _v2_for_scheduler.SchedulerConfig
-    RequestStatus = _v2_for_scheduler.RequestStatus
-    _V2_SCHEDULER_AVAILABLE = True
-except (ImportError, AttributeError):
-    RustScheduler = None
-    SchedulerConfig = None
-    RequestStatus = None
-    _V2_SCHEDULER_AVAILABLE = False
-
 __all__ = [
     "is_available",
     "KvbmRuntime",
@@ -67,9 +46,5 @@ __all__ = [
     "KvbmRequest",
     "SchedulerOutput",
     "Tensor",
-    "RustScheduler",
-    "SchedulerConfig",
-    "RequestStatus",
     "_V2_CORE_AVAILABLE",
-    "_V2_SCHEDULER_AVAILABLE",
 ]

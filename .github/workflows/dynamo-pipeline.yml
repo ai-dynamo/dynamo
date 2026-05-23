@@ -120,7 +120,7 @@ jobs:
           mkdir -p "${CARGO_TARGET_DIR}"
           echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >> "$GITHUB_ENV"
 
-      - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
+      - name: Run Rust checks (media-ffmpeg + integration tests)
         working-directory: /workspace/lib/llm
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -131,10 +131,15 @@ jobs:
           eval $(/workspace/container/use-sccache.sh setup-env)
           rustup component add rustfmt clippy
           cargo fmt -- --check
-          cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          cargo clippy --features media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
+          cargo test --locked --all-targets --features=media-ffmpeg,testing-nixl,integration -- --nocapture
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
+          # kvbm-connector instance/e2e tests need NIXL/UCX + CUDA (gated behind
+          # `testing-nixl`, skipped by the CPU pre-merge job). Serial: each test
+          # stands up TCP messengers and NIXL agents.
+          cargo clippy -p kvbm-connector --features testing-nixl --no-deps --all-targets -- -D warnings
+          cargo test --locked -p kvbm-connector --features testing-nixl --all-targets -- --nocapture --test-threads=1
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
   mypy:

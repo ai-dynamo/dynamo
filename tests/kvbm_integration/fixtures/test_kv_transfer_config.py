@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for `build_kv_transfer_config`.
-
-Phase 4 updates:
-- Both versions now point at the canonical `kvbm.v{N}.vllm.connector`
-  façades (1↔2 char mirror; existing `vllm_integration` paths preserved
-  as backcompat).
-- v2 builder takes an `onboard_mode` parameter (`intra` / `inter`) and
-  injects `leader.onboard.mode` accordingly.
-"""
+"""Unit tests for `build_kv_transfer_config`."""
 
 import pytest
 
@@ -29,15 +21,6 @@ def model_config() -> KvbmModelConfig:
         block_size=16,
         attention_backend="FLASH_ATTN",
     )
-
-
-def test_v1_payload_uses_canonical_v1_facade(model_config: KvbmModelConfig) -> None:
-    cfg = build_kv_transfer_config("v1", model_config)
-    assert cfg == {
-        "kv_connector": "DynamoConnector",
-        "kv_role": "kv_both",
-        "kv_connector_module_path": "kvbm.v1.vllm.connector",
-    }
 
 
 @pytest.mark.parametrize("onboard_mode", ["intra", "inter"])
@@ -99,7 +82,7 @@ def test_v2_payload_has_required_worker_blocks(model_config: KvbmModelConfig) ->
 
 def test_unknown_version_raises(model_config: KvbmModelConfig) -> None:
     with pytest.raises(ValueError, match="unknown kvbm_version"):
-        build_kv_transfer_config("v3", model_config)  # type: ignore[arg-type]
+        build_kv_transfer_config("v1", model_config)  # type: ignore[arg-type]
 
 
 def test_unknown_onboard_mode_raises(model_config: KvbmModelConfig) -> None:

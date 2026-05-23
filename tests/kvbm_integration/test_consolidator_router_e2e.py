@@ -33,12 +33,10 @@ from .common import check_module_available
 HAS_VLLM = check_module_available("vllm")
 HAS_TRTLLM = check_module_available("tensorrt_llm")
 
-# Build list of available engines for parameterization
+# KVBM TRT-LLM integration has been removed; consolidator tests run vLLM only.
 AVAILABLE_ENGINES = []
 if HAS_VLLM:
     AVAILABLE_ENGINES.append("vllm")
-if HAS_TRTLLM:
-    AVAILABLE_ENGINES.append("trtllm")
 
 # Test markers
 pytestmark = [
@@ -66,7 +64,7 @@ def test_directory(request):
 
 
 def create_trtllm_config(test_directory: Path) -> Path:
-    """Create TensorRT-LLM config YAML file with KVBM connector configuration."""
+    """Create TensorRT-LLM config YAML file."""
     config_path = Path(os.path.join(test_directory, "trtllm_config.yaml"))
     config = {
         "backend": "pytorch",
@@ -76,11 +74,6 @@ def create_trtllm_config(test_directory: Path) -> Path:
             "free_gpu_memory_fraction": 0.01,
         },
         "max_seq_len": 4096,
-        "kv_connector_config": {
-            "connector_module": "kvbm.trtllm_integration.connector",
-            "connector_scheduler_class": "DynamoKVBMConnectorLeader",
-            "connector_worker_class": "DynamoKVBMConnectorWorker",
-        },
     }
     with open(config_path, "w") as f:
         yaml.dump(config, f)

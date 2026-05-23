@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "kvbm-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Build KVBM runtime primitives (velo transport/messenger, NIXL backend) from a kvbm-config"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+kvbm-config = { workspace = true }
+
+# Heavy runtime dependencies intentionally isolated to this crate so that
+# `kvbm-config` stays pure (no velo, no CUDA via dynamo-memory).
+velo = { workspace = true }
+dynamo-memory = { workspace = true }

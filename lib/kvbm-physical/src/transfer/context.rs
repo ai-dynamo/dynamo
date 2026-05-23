@@ -18,6 +18,11 @@ use kvbm_observability::SharedKvbmObservability;
 use velo::EventManager;
 
 use crate::manager::TransferManager;
+use crate::transfer::benchmark::{
+    BenchmarkCache, BenchmarkCandidate, BenchmarkKey, BenchmarkOutcome,
+};
+use crate::transfer::graph_cache::GraphCache;
+use crate::transfer::prepared::PreparedPlanCache;
 
 // Notifications module is declared in ../mod.rs
 // Re-export for convenience
@@ -64,6 +69,14 @@ pub struct TransferConfig {
     /// Shared observability registry and metrics.
     #[builder(default, setter(strip_option))]
     observability: Option<SharedKvbmObservability>,
+
+    /// Enable compact prepared-plan caching for manager-driven transfers.
+    #[builder(default = "true")]
+    prepared_plan_cache_enabled: bool,
+
+    /// Maximum entries in the remote prepared-plan LRU.
+    #[builder(default = "1024")]
+    prepared_plan_remote_capacity: usize,
 }
 
 impl TransferConfigBuilder {
@@ -163,6 +176,19 @@ impl TransferConfigBuilderWithAgent {
         self.builder = self.builder.cuda_device_id(cuda_device_id);
         self
     }
+
+    /// Override the prepared-plan cache enabled flag after the agent
+    /// has been wired. Forwarded to the underlying builder.
+    pub fn prepared_plan_cache_enabled(mut self, on: bool) -> Self {
+        self.builder = self.builder.prepared_plan_cache_enabled(on);
+        self
+    }
+
+    /// Override the remote-LRU capacity after the agent has been wired.
+    pub fn prepared_plan_remote_capacity(mut self, capacity: usize) -> Self {
+        self.builder = self.builder.prepared_plan_remote_capacity(capacity);
+        self
+    }
 }
 
 fn get_tokio_runtime() -> TokioRuntime {
@@ -222,6 +248,25 @@ pub struct TransferContext {
     #[allow(dead_code)]
     tx_nixl_events: mpsc::Sender<notifications::RegisterNixlNotification>,
     observability: Option<SharedKvbmObservability>,
+    /// PR-7.4.1: CUDA graph exec handle cache for replay-based transfers.
+    ///
+    /// Shared across clones of `TransferContext` so all executor calls on
+    /// the same context share the same cache. Drops with the last
+    /// `TransferContext` clone; each `ManagedExecHandle` entry calls
+    /// `cuGraphExecDestroy` on drop.
+    graph_cache: Arc<GraphCache>,
+
+    /// PR-7.5: Benchmark outcome cache for the scorer.
+    ///
+    /// Shared across clones of `TransferContext`. Populated by
+    /// `benchmark_pair` at startup when
+    /// `TransferCapabilities::startup_benchmark` is enabled; consulted by
+    /// `score_candidate` via `SelectionContext::benchmark_outcome`.
+    /// Drops with the last `TransferContext` clone.
+    benchmark_cache: Arc<BenchmarkCache>,
+
+    /// Compact prepared-plan cache for handle-keyed transfer templates.
+    prepared_plan_cache: Arc<PreparedPlanCache>,
 }
 
 impl TransferContext {
@@ -241,6 +286,8 @@ impl TransferContext {
             cuda_pool_reserve_size,
             cuda_pool_release_threshold,
             observability,
+            prepared_plan_cache_enabled,
+            prepared_plan_remote_capacity,
             // Fields already consumed by the builder path before this fn runs:
             nixl_agent_name: _,
             nixl_backend_config: _,
@@ -315,6 +362,12 @@ impl TransferContext {
             tx_cuda_event,
             tx_nixl_events,
             observability,
+            graph_cache: Arc::new(GraphCache::new()),
+            benchmark_cache: Arc::new(BenchmarkCache::new()),
+            prepared_plan_cache: Arc::new(PreparedPlanCache::new(
+                prepared_plan_cache_enabled,
+                prepared_plan_remote_capacity,
+            )),
         })
     }
 
@@ -396,6 +449,117 @@ impl TransferContext {
     /// Get the CUDA memory pool for kernel allocations.
     pub(crate) fn cuda_pool(&self) -> &Arc<CudaMemPool> {
         &self.cuda_pool
+    }
+
+    /// PR-7.4.1: Get the CUDA graph exec handle cache.
+    ///
+    /// Shared across all clones of this context. Used by
+    /// `dispatch_cuda_graph_replay_planner` to look up or insert
+    /// instantiated exec handles keyed by transfer shape.
+    pub(crate) fn graph_cache(&self) -> &Arc<GraphCache> {
+        &self.graph_cache
+    }
+
+    /// PR-7.5: Get the benchmark outcome cache.
+    ///
+    /// Used by callers of `score_candidate` (in `executor::planner`) to
+    /// populate `SelectionContext::benchmark_outcome` before selection.
+    /// Shared across all clones of this context.
+    pub(crate) fn benchmark_cache(&self) -> &Arc<BenchmarkCache> {
+        &self.benchmark_cache
+    }
+
+    /// Get the compact prepared-plan cache.
+    pub(crate) fn prepared_plan_cache(&self) -> &Arc<PreparedPlanCache> {
+        &self.prepared_plan_cache
+    }
+
+    /// Eagerly build and cache a prepared transfer plan for one direction
+    /// of a `(src, dst)` handle pair using the strategy that
+    /// [`crate::transfer::strategy::select_strategy`] would pick.
+    ///
+    /// No-op when the cache is disabled, when the layout pair is
+    /// same-shape direct (no plan needed — the planner projects
+    /// `AnnotatedLayout`s inline), or when the strategy is two-hop.
+    /// Sliced transfers (`axis_slices`) still populate the cache
+    /// lazily on first use.
+    pub(crate) fn prewarm_prepared_plan(
+        &self,
+        src_handle: crate::manager::LayoutHandle,
+        src_layout: &crate::transfer::PhysicalLayout,
+        dst_handle: crate::manager::LayoutHandle,
+        dst_layout: &crate::transfer::PhysicalLayout,
+    ) -> anyhow::Result<()> {
+        use crate::transfer::prepared::{PreparedPlanKey, PreparedTransferPlan};
+        use crate::transfer::strategy::{TransferPlan, select_strategy};
+        if !self.prepared_plan_cache.is_enabled() {
+            return Ok(());
+        }
+        let src_kv = src_layout.layout().block_layout();
+        let dst_kv = dst_layout.layout().block_layout();
+        if !src_kv.requires_transform(&dst_kv) {
+            // Same-layout direct copies don't use a prepared plan.
+            return Ok(());
+        }
+        let plan = select_strategy(src_layout, dst_layout, self)?;
+        let strategy = match plan {
+            TransferPlan::Direct(strategy) => strategy,
+            // Two-hop plans bypass the prepared-plan cache (per-call
+            // bounce layout). Nothing to prewarm.
+            TransferPlan::TwoHop { .. } => return Ok(()),
+        };
+        let key = PreparedPlanKey::new(src_handle, dst_handle, strategy, &[]);
+        self.prepared_plan_cache
+            .get_or_insert_with(self.worker_id(), key, || {
+                let invocation = crate::transfer::executor::planner::build_transform_invocation(
+                    src_layout, dst_layout,
+                )?;
+                PreparedTransferPlan::build_transform(invocation, src_layout, dst_layout)
+            })?;
+        Ok(())
+    }
+
+    /// PR-7.5.1: Benchmark a set of candidates for a given layout-pair key
+    /// and record the winner in the cache.
+    ///
+    /// This is an explicit-API benchmark (Path B): the caller decides when
+    /// to benchmark (e.g. at startup with known layout pairs) and provides
+    /// the key, pre-decoded candidates, and a CUDA stream to dispatch on.
+    ///
+    /// Supported variants: `DirectDma`, `TransformKernel`, and
+    /// `NixlDirectDma`. All routes measure end-to-end transfer time
+    /// including device/network completion.
+    ///
+    /// See [`BenchmarkCache::benchmark_pair`] for timing semantics and
+    /// error conditions.
+    #[allow(dead_code)]
+    pub(crate) fn benchmark_pair(
+        &self,
+        key: BenchmarkKey,
+        candidates: Vec<BenchmarkCandidate>,
+        stream: &Arc<CudaStream>,
+    ) -> anyhow::Result<BenchmarkOutcome> {
+        self.benchmark_cache.benchmark_pair(key, candidates, stream)
+    }
+
+    /// Clone the CUDA-event polling channel sender.
+    ///
+    /// Used by the planner-driven Staged executor (PR-6.2) to register
+    /// CUDA events from inside a `tokio::spawn`-ed chain task without
+    /// holding `&TransferContext` across an `.await`.
+    pub(crate) fn tx_cuda_event_clone(
+        &self,
+    ) -> mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>> {
+        self.tx_cuda_event.clone()
+    }
+
+    /// Clone the NIXL status polling channel sender. Used for the same
+    /// reason as [`Self::tx_cuda_event_clone`] — Staged-task NIXL
+    /// completion registration without `&TransferContext`.
+    pub(crate) fn tx_nixl_status_clone(
+        &self,
+    ) -> mpsc::Sender<RegisterPollingNotification<notifications::NixlStatusChecker>> {
+        self.tx_nixl_status.clone()
     }
 
     /// Register a NIXL transfer request for status polling completion.

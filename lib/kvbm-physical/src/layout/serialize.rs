@@ -241,7 +241,7 @@ mod tests {
     fn test_fully_contiguous_details_serialization() {
         let details = LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
             block_format: BlockFormat::Operational,
-            kv_block_layout: KvBlockLayout::UniversalTP,
+            kv_block_layout: KvBlockLayout::Universal,
         });
 
         let json = serde_json::to_string(&details).unwrap();
@@ -250,7 +250,7 @@ mod tests {
         match deserialized {
             LayoutTypeDetails::FullyContiguous(d) => {
                 assert_eq!(d.block_format, BlockFormat::Operational);
-                assert_eq!(d.kv_block_layout, KvBlockLayout::UniversalTP);
+                assert_eq!(d.kv_block_layout, KvBlockLayout::Universal);
             }
             _ => panic!("Expected FullyContiguous variant"),
         }

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Back-compat shim. Canonical module is kvbm.v1.vllm_integration.consolidator_config."""
+"""Back-compat shim. Canonical module is kvbm.v2.vllm_integration.consolidator_config."""
 
-from kvbm.v1.vllm_integration.consolidator_config import (  # noqa: F401
+from kvbm.v2.vllm_integration.consolidator_config import (  # noqa: F401
     get_consolidator_endpoints,
     get_consolidator_mode,
     is_truthy,

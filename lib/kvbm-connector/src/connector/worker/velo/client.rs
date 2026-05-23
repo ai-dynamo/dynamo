@@ -82,14 +82,18 @@ impl ConnectorWorkerClient {
         Ok(())
     }
 
-    /// Notify the remote worker that onboarding failed for specific blocks.
+    /// Notify the remote worker that onboarding failed for a request.
     ///
     /// This calls the `kvbm.connector.worker.failed_onboard` handler.
-    /// The worker will add the block_ids to its failed_onboarding set.
+    /// The worker adds the block_ids to its failed_onboarding set AND
+    /// pairs the request_id with its finished_onboarding set so vLLM's
+    /// `get_finished()` surfaces the request in the same forward pass
+    /// (per `vllm/v1/kv_connector/v1/base.py` connector contract).
     ///
     /// # Arguments
     /// * `request_id` - The request that failed onboarding
-    /// * `block_ids` - The block IDs that failed to load
+    /// * `block_ids` - The block IDs that failed to load (may be empty
+    ///   for pre-USAA failures; the request_id is still surfaced)
     pub async fn mark_failed_onboarding(
         &self,
         request_id: String,

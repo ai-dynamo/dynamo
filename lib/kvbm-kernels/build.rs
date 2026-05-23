@@ -60,9 +60,9 @@ fn main() {
     match build_mode {
         BuildMode::FromSource => {
             if use_static {
-                println!("cargo:warning=Building CUDA kernels from source (static linking)");
+                println!("Building CUDA kernels from source (static linking)");
             } else {
-                println!("cargo:warning=Building CUDA kernels from source (dynamic linking)");
+                println!("Building CUDA kernels from source (dynamic linking)");
             }
             build_cuda_library(&cu_files, &out_dir, use_static);
         }
@@ -125,7 +125,7 @@ fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, use_static: bool) {
         nvcc_cmd.arg(flag);
     }
 
-    println!("cargo:warning=Compiling tensor_kernels.cu to object file...");
+    println!("Compiling tensor_kernels.cu to object file...");
     let status = nvcc_cmd
         .status()
         .expect("Failed to execute nvcc for object file");
@@ -141,7 +141,7 @@ fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, use_static: bool) {
         let mut ar_cmd = Command::new("ar");
         ar_cmd.arg("crus").arg(&ar_path).arg(&obj_path);
 
-        println!("cargo:warning=Creating static archive libkvbm_kernels.a...");
+        println!("Creating static archive libkvbm_kernels.a...");
         let status = ar_cmd
             .status()
             .expect("Failed to execute ar for static archive");
@@ -173,7 +173,7 @@ fn build_cuda_library(cu_files: &[PathBuf], out_dir: &str, use_static: bool) {
             .arg(&obj_path)
             .arg("-lcudart");
 
-        println!("cargo:warning=Linking kvbm_kernels into shared library...");
+        println!("Linking kvbm_kernels into shared library...");
         let status = link_cmd
             .status()
             .expect("Failed to execute nvcc for linking");
@@ -217,7 +217,7 @@ fn build_stub_shared_library(manifest_dir: &str, out_dir: &str) {
         .arg("-o")
         .arg(&obj_path);
 
-    println!("cargo:warning=Compiling stubs.c...");
+    println!("Compiling stubs.c...");
     let status = gcc_compile
         .status()
         .expect("Failed to execute cc for stubs");
@@ -234,7 +234,7 @@ fn build_stub_shared_library(manifest_dir: &str, out_dir: &str) {
         .arg(&so_path)
         .arg(&obj_path);
 
-    println!("cargo:warning=Linking stub shared library...");
+    println!("Linking stub shared library...");
     let status = gcc_link.status().expect("Failed to link stub library");
 
     if !status.success() {
@@ -303,7 +303,7 @@ fn get_cuda_arch_flags() -> Vec<String> {
 
     if let Some((major, minor)) = cuda_version {
         println!(
-            "cargo:warning=Detected CUDA {}.{}, max supported compute: sm_{}",
+            "Detected CUDA {}.{}, max supported compute: sm_{}",
             major,
             minor,
             max_compute.unwrap()

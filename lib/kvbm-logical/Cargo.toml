@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-logical"
-version = "1.2.0"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -22,7 +22,6 @@ futures = { workspace = true }
 indexmap = { workspace = true }
 lru = "0.16"
 parking_lot = { workspace = true }
-prometheus = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

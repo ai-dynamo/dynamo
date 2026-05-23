@@ -6,6 +6,7 @@
 pub(super) mod cuda;
 mod memcpy;
 mod nixl;
+pub(crate) mod planner;
 
 use super::strategy::select_strategy;
 use super::strategy::{TransferPlan, TransferStrategy};
@@ -13,6 +14,7 @@ use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext};
 use crate::BlockId;
 use crate::layout::KvBlockLayout;
+use crate::manager::LayoutHandle;
 use crate::transfer::BounceBufferInternal;
 use crate::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
@@ -24,6 +26,9 @@ use tokio::sync::Mutex;
 
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
+
+// PR-7.5.1: expose the transform-kernel dispatcher for benchmark.rs timing.
+pub(crate) use planner::dispatch_transform_kernel;
 
 /// Transformation kernel types for converting between different block layouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,20 +67,16 @@ pub(crate) fn select_transform_kernel(
 
     match (src_layout, dst_layout) {
         // Operational to Universal
-        (KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalTP)
-        | (KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalPP)
-        | (KvBlockLayout::OperationalHND, KvBlockLayout::UniversalTP)
-        | (KvBlockLayout::OperationalHND, KvBlockLayout::UniversalPP) => {
-            TransformKernel::BlockToUniversal { src_layout }
-        }
+        (
+            KvBlockLayout::OperationalNHD | KvBlockLayout::OperationalHND,
+            KvBlockLayout::Universal,
+        ) => TransformKernel::BlockToUniversal { src_layout },
 
         // Universal to Operational
-        (KvBlockLayout::UniversalTP, KvBlockLayout::OperationalNHD)
-        | (KvBlockLayout::UniversalTP, KvBlockLayout::OperationalHND)
-        | (KvBlockLayout::UniversalPP, KvBlockLayout::OperationalNHD)
-        | (KvBlockLayout::UniversalPP, KvBlockLayout::OperationalHND) => {
-            TransformKernel::UniversalToBlock { dst_layout }
-        }
+        (
+            KvBlockLayout::Universal,
+            KvBlockLayout::OperationalNHD | KvBlockLayout::OperationalHND,
+        ) => TransformKernel::UniversalToBlock { dst_layout },
 
         // Operational NHD <-> HND transpose
         (KvBlockLayout::OperationalNHD, KvBlockLayout::OperationalHND)
@@ -85,13 +86,6 @@ pub(crate) fn select_transform_kernel(
 
         // Custom layouts need explicit handling
         (KvBlockLayout::Custom(_), _) | (_, KvBlockLayout::Custom(_)) => {
-            TransformKernel::Unsupported
-        }
-
-        // Universal to Universal (different variants)
-        (KvBlockLayout::UniversalTP, KvBlockLayout::UniversalPP)
-        | (KvBlockLayout::UniversalPP, KvBlockLayout::UniversalTP) => {
-            // TODO: Add direct universal-to-universal kernel
             TransformKernel::Unsupported
         }
 
@@ -135,6 +129,19 @@ pub(crate) struct TransferOptionsInternal {
     pub(crate) dst_kv_layout: Option<KvBlockLayout>,
     /// Logical route used for transfer metrics.
     pub(crate) metric_route: Option<KvbmTransferRoute>,
+    /// Route through the stride-aware planner instead of legacy
+    /// `select_strategy` + `execute_direct_transfer`. PR-5 wires this
+    /// for the CudaAsync (H2D / D2H / D2D) strategies; other paths
+    /// ignore the flag.
+    pub(crate) use_planner: bool,
+    /// AB-1d: per-axis coordinate-space restrictions for sliced
+    /// cross-leader transfers. Empty = full extent (legacy behaviour).
+    /// Non-empty requires `use_planner = true`; the planner threads
+    /// them into [`crate::transfer::plan::TransferSelection`].
+    pub(crate) axis_slices: Vec<kvbm_common::AxisIntersection>,
+    /// Registry handles for the physical layouts. Present for normal
+    /// manager-driven transfers and used as the prepared-plan cache key.
+    pub(crate) plan_handles: Option<(LayoutHandle, LayoutHandle)>,
 }
 
 impl TransferOptionsInternal {
@@ -152,6 +159,9 @@ pub(crate) struct TransferOptionsInternalBuilder {
     src_kv_layout: Option<KvBlockLayout>,
     dst_kv_layout: Option<KvBlockLayout>,
     metric_route: Option<KvbmTransferRoute>,
+    use_planner: bool,
+    axis_slices: Vec<kvbm_common::AxisIntersection>,
+    plan_handles: Option<(LayoutHandle, LayoutHandle)>,
 }
 
 impl TransferOptionsInternalBuilder {
@@ -210,7 +220,30 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    pub(crate) fn use_planner(mut self, on: bool) -> Self {
+        self.use_planner = on;
+        self
+    }
+
+    /// Per-axis coordinate-space restrictions for sliced transfers.
+    /// Forces `use_planner = true` when non-empty.
+    pub(crate) fn axis_slices(mut self, slices: Vec<kvbm_common::AxisIntersection>) -> Self {
+        if !slices.is_empty() {
+            self.use_planner = true;
+        }
+        self.axis_slices = slices;
+        self
+    }
+
+    pub(crate) fn handles(mut self, src: LayoutHandle, dst: LayoutHandle) -> Self {
+        self.plan_handles = Some((src, dst));
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
+        if !self.axis_slices.is_empty() && !self.use_planner {
+            anyhow::bail!("TransferOptionsInternal: axis_slices requires use_planner=true");
+        }
         Ok(TransferOptionsInternal {
             layer_range: self.layer_range,
             nixl_write_notification: self.nixl_write_notification,
@@ -219,6 +252,9 @@ impl TransferOptionsInternalBuilder {
             src_kv_layout: self.src_kv_layout,
             dst_kv_layout: self.dst_kv_layout,
             metric_route: self.metric_route,
+            use_planner: self.use_planner,
+            axis_slices: self.axis_slices,
+            plan_handles: self.plan_handles,
         })
     }
 }
@@ -246,6 +282,35 @@ pub(crate) fn execute_transfer(
     // Validate block IDs
     validate_block_transfer(src_block_ids, dst_block_ids, None, src, dst, None)?;
 
+    // c6: auto-promote to the planner path when the layout pair requires
+    // a kernel transform. The legacy `cuda::execute_cuda_transfer` path
+    // calls `validate_layout_compatibility`, which rejects any pair where
+    // `requires_transform = true`. The planner handles these via the
+    // kernel catalog (see `executor::planner::plan_and_lower` →
+    // `PlanOutcome::Transform` → `dispatch_transform_kernel`). c3 made
+    // G2 = `KvBlockLayout::Universal` in `BlockLayoutMode::Universal`
+    // while G1 stays operational, so the offload pipeline's default-
+    // options call path (`TransferOptions::default()` → `use_planner =
+    // false`) now needs this promotion.
+    //
+    // c6 phase 4b: `layer_range + requires_transform` is now supported.
+    // The kernel takes `nl_full` + `nl_offset` so per-layer scatter
+    // into a universal block writes the slice without head-interleave
+    // corruption (see `kvbm_kernels_block_to_universal_kernel`).
+    let mut options = options;
+    let needs_transform = src
+        .layout()
+        .block_layout()
+        .requires_transform(&dst.layout().block_layout());
+    if needs_transform && !options.use_planner {
+        tracing::debug!(
+            src = ?src.layout().block_layout(),
+            dst = ?dst.layout().block_layout(),
+            "executor: auto-promoting to use_planner=true for cross-layout transform"
+        );
+        options.use_planner = true;
+    }
+
     // Select transfer plan based on locations and capabilities
     let plan = select_strategy(src, dst, ctx)?;
 
@@ -259,23 +324,35 @@ pub(crate) fn execute_transfer(
             options.layer_range,
             strategy,
             options.cuda_stream,
+            options.use_planner,
+            options.bounce_buffer.as_ref(),
+            options.axis_slices,
+            options.plan_handles,
             ctx,
         ),
         TransferPlan::TwoHop {
             first,
             bounce_location,
             second,
-        } => execute_two_hop_transfer(TwoHopTransferParams {
-            src,
-            dst,
-            src_block_ids,
-            dst_block_ids,
-            first_strategy: first,
-            bounce_location,
-            second_strategy: second,
-            options,
-            ctx,
-        }),
+        } => {
+            if !options.axis_slices.is_empty() {
+                anyhow::bail!(
+                    "execute_transfer: axis_slices not supported on two-hop transfers \
+                     (cross-leader sliced transfers must take a direct planner path)"
+                );
+            }
+            execute_two_hop_transfer(TwoHopTransferParams {
+                src,
+                dst,
+                src_block_ids,
+                dst_block_ids,
+                first_strategy: first,
+                bounce_location,
+                second_strategy: second,
+                options,
+                ctx,
+            })
+        }
     }
 }
 
@@ -289,8 +366,22 @@ fn execute_direct_transfer(
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
     cuda_stream: Option<Arc<CudaStream>>,
+    use_planner: bool,
+    bounce_buffer: Option<&BounceBufferInternal>,
+    axis_slices: Vec<kvbm_common::AxisIntersection>,
+    plan_handles: Option<(LayoutHandle, LayoutHandle)>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
+    // axis_slices is only meaningful on planner paths; the legacy
+    // memcpy / cuda / nixl-builder paths don't honour it and would
+    // silently produce wrong data, so refuse early.
+    if !axis_slices.is_empty() && !use_planner {
+        anyhow::bail!(
+            "execute_direct_transfer: axis_slices requires use_planner=true \
+             (axis_slices contains {} entries)",
+            axis_slices.len()
+        );
+    }
     match strategy {
         TransferStrategy::Memcpy => {
             if cuda_stream.is_some() {
@@ -309,16 +400,56 @@ fn execute_direct_transfer(
         }
         TransferStrategy::CudaAsyncH2D
         | TransferStrategy::CudaAsyncD2H
-        | TransferStrategy::CudaAsyncD2D => Ok(cuda::execute_cuda_transfer(
-            src,
-            dst,
-            src_block_ids,
-            dst_block_ids,
-            layer_range,
-            strategy,
-            cuda_stream,
-            ctx,
-        )?),
+        | TransferStrategy::CudaAsyncD2D => {
+            if use_planner {
+                // PR-5: planner-driven path for CudaAsync H2D / D2H / D2D.
+                // Errors here are NOT silently fallen back to the
+                // legacy executor — the caller flipped the flag, so a
+                // failure is propagated as-is.
+                //
+                // c6 phase 4b: layer_range is honoured for the kernel-
+                // transform path (the universal/transpose kernels take
+                // `nl_full` + `nl_offset`). Same-layout direct copies
+                // still reject layer_range because plan_copy's Direct
+                // path doesn't slice on Layer — those stay on the
+                // legacy executor until plan_copy grows the support.
+                if layer_range.is_some()
+                    && !src
+                        .layout()
+                        .block_layout()
+                        .requires_transform(&dst.layout().block_layout())
+                {
+                    return Err(anyhow::anyhow!(
+                        "use_planner=true currently incompatible with layer_range for \
+                         same-layout direct copies; layer-restricted direct transfers stay \
+                         on the legacy executor (transform pairs now supported via the \
+                         kernel catalog)"
+                    ));
+                }
+                return planner::execute_planner_cuda_transfer(
+                    src,
+                    dst,
+                    src_block_ids,
+                    dst_block_ids,
+                    strategy,
+                    cuda_stream,
+                    layer_range,
+                    axis_slices,
+                    plan_handles,
+                    ctx,
+                );
+            }
+            Ok(cuda::execute_cuda_transfer(
+                src,
+                dst,
+                src_block_ids,
+                dst_block_ids,
+                layer_range,
+                strategy,
+                cuda_stream,
+                ctx,
+            )?)
+        }
         TransferStrategy::NixlRead
         | TransferStrategy::NixlWrite
         | TransferStrategy::NixlReadFlipped
@@ -328,6 +459,28 @@ fn execute_direct_transfer(
                     "cuda_stream option is not supported for NIXL strategies"
                 ));
             }
+            if use_planner {
+                // PR-5.6: planner-driven NIXL path. Errors propagate;
+                // no silent fallback to legacy (caller flipped the flag).
+                if layer_range.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "use_planner=true currently incompatible with layer_range; \
+                         layer-restricted NIXL transfers stay on the legacy executor"
+                    ));
+                }
+                return planner::execute_planner_nixl_transfer(
+                    src,
+                    dst,
+                    src_block_ids,
+                    dst_block_ids,
+                    strategy,
+                    bounce_buffer,
+                    axis_slices,
+                    plan_handles,
+                    ctx,
+                );
+            }
+            let _ = bounce_buffer;
             let mut builder = NixlTransferBuilder::new()
                 .src(src)
                 .dst(dst)
@@ -451,7 +604,11 @@ async fn execute_two_hop_transfer_chunk(
         bounce_ids_to_use,
         layer_range.clone(),
         first_strategy,
-        None, // Two-hop transfers don't support caller-provided streams
+        None,       // Two-hop transfers don't support caller-provided streams
+        false,      // Two-hop chunks stay on the legacy path for now
+        None,       // bounce_buffer only used by use_planner=true NIXL transforms
+        Vec::new(), // axis_slices: two-hop chunks never carry slices (rejected upstream)
+        None,       // two-hop chunks do not map to the original handle pair
         ctx,
     )?
     .await?;
@@ -463,7 +620,11 @@ async fn execute_two_hop_transfer_chunk(
         dst_block_ids,
         layer_range.clone(),
         second_strategy,
-        None, // Two-hop transfers don't support caller-provided streams
+        None,  // Two-hop transfers don't support caller-provided streams
+        false, // Two-hop chunks stay on the legacy path for now
+        None,
+        Vec::new(), // axis_slices: two-hop chunks never carry slices
+        None,       // two-hop chunks do not map to the original handle pair
         ctx,
     )?
     .await?;
@@ -592,7 +753,7 @@ mod tests {
             TransformKernel::None
         );
         assert_eq!(
-            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::UniversalTP),
+            select_transform_kernel(KvBlockLayout::Universal, KvBlockLayout::Universal),
             TransformKernel::None
         );
     }
@@ -601,13 +762,13 @@ mod tests {
     fn test_select_transform_kernel_block_to_universal() {
         // Operational to Universal
         assert!(matches!(
-            select_transform_kernel(KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalTP),
+            select_transform_kernel(KvBlockLayout::OperationalNHD, KvBlockLayout::Universal),
             TransformKernel::BlockToUniversal {
                 src_layout: KvBlockLayout::OperationalNHD
             }
         ));
         assert!(matches!(
-            select_transform_kernel(KvBlockLayout::OperationalHND, KvBlockLayout::UniversalTP),
+            select_transform_kernel(KvBlockLayout::OperationalHND, KvBlockLayout::Universal),
             TransformKernel::BlockToUniversal {
                 src_layout: KvBlockLayout::OperationalHND
             }
@@ -618,13 +779,13 @@ mod tests {
     fn test_select_transform_kernel_universal_to_block() {
         // Universal to Operational
         assert!(matches!(
-            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::OperationalNHD),
+            select_transform_kernel(KvBlockLayout::Universal, KvBlockLayout::OperationalNHD),
             TransformKernel::UniversalToBlock {
                 dst_layout: KvBlockLayout::OperationalNHD
             }
         ));
         assert!(matches!(
-            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::OperationalHND),
+            select_transform_kernel(KvBlockLayout::Universal, KvBlockLayout::OperationalHND),
             TransformKernel::UniversalToBlock {
                 dst_layout: KvBlockLayout::OperationalHND
             }

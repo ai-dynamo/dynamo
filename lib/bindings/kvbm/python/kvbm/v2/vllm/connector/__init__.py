@@ -18,14 +18,24 @@ Note: ``kvbm.v2.vllm.connector`` (singular) is intentionally distinct
 from the placeholder ``kvbm.v2.vllm.connectors`` (plural) sibling
 package.
 
-The mirror at ``kvbm.v1.vllm.connector`` differs by exactly one
-character (the version segment), per the phase-4 design contract.
 """
 
 _V2_EXPORTS = {
     "DynamoConnector": (
         "kvbm.v2.vllm.schedulers.connector",
         "DynamoConnector",
+    ),
+    "PdConnector": (
+        "kvbm.vllm_integration.connector.pd_connector",
+        "PdConnector",
+    ),
+    "PdConnectorMetadata": (
+        "kvbm.vllm_integration.connector.pd_connector",
+        "PdConnectorMetadata",
+    ),
+    "PdHandshakeMetadata": (
+        "kvbm.vllm_integration.connector.pd_connector",
+        "PdHandshakeMetadata",
     ),
 }
 

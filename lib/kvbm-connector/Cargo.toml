@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-connector"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description.workspace = true
 authors.workspace = true
@@ -17,9 +17,11 @@ keywords.workspace = true
 kvbm-common   = { workspace = true }
 kvbm-config   = { workspace = true }
 kvbm-engine   = { workspace = true }
+kvbm-hub      = { workspace = true }
 kvbm-logical  = { workspace = true }
 kvbm-observability = { workspace = true }
 kvbm-physical = { workspace = true }
+kvbm-protocols = { workspace = true }
 
 # Velo (git crates — mapped from dynamo_nova / dynamo_nova_backend)
 velo        = { workspace = true }
@@ -30,7 +32,6 @@ dynamo-tokens = { workspace = true }
 
 # External
 anyhow         = { workspace = true }
-axum           = { workspace = true }
 bytes          = { workspace = true }
 cudarc         = { workspace = true }
 dashmap        = { workspace = true }
@@ -46,6 +47,10 @@ tracing        = { workspace = true }
 uuid           = { workspace = true }
 oneshot        = { workspace = true }
 serde_json     = { workspace = true }
+url            = { workspace = true }
+# KV-index hub publisher (capability probe + ZMQ PUB egress)
+reqwest        = { workspace = true }
+tmq            = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
@@ -54,8 +59,10 @@ rstest = "0.23"
 proptest = "1.5.0"
 tempfile = { workspace = true }
 libc = { workspace = true }
+serial_test = "3"
 
 [features]
+default = ["testing"]
 static-kernels = ["kvbm-physical/static-kernels"]
 testing = [
     "kvbm-engine/testing",
@@ -63,6 +70,12 @@ testing = [
     "kvbm-physical/testing",
     "dep:figment",
 ]
+# Opt-in: gates tests that build a real TestConnectorInstance/Cluster, which
+# require a working NIXL/UCX runtime and CUDA device memory. Pure `#[cfg]` gate
+# (no deps) — the harness it uses comes from the default-on `testing` feature.
+# Non-default so the CPU pre-merge job (`cargo test --all-targets`) skips them;
+# run them in the GPU job via `cargo test -p kvbm-connector --features testing-nixl`.
+testing-nixl = []
 # Gates NCCL-accelerated intra-pass layer-wise onboard (G2→G1 via cudarc).
 nccl = ["kvbm-engine/nccl"]
 # Opt-in S3 object-storage integration tests against MinIO.

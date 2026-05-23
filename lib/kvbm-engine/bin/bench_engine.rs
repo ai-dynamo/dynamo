@@ -13,6 +13,16 @@
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
 //!     --devices 0 --page-sizes 32,64 --concurrency 1,2 --iterations 10 --skip-disk --skip-gds
 //!
+//! # Weak-scaled sweep across the production page_size range. Per-iter bytes
+//! # stay roughly constant so GB/s numbers are directly comparable across page_sizes.
+//! # Without --weak-scale, per-iter bytes scale 16× between page_size=16 and 256
+//! # so cross-size comparisons are skewed (small sizes are launch-overhead-bound).
+//! # NOTE: --weak-scale overrides --num-blocks per page_size to satisfy the
+//! # allocation invariant.
+//! cargo run -p kvbm-engine --features bench --bin bench_engine --release -- \
+//!     --devices 0 --page-sizes 16,32,64,128,256 --weak-scale --iterations 50 \
+//!     --skip-disk --skip-gds --isolated-only
+//!
 //! # With offload pipeline:
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
 //!     --devices 0 --page-sizes 64 --concurrency 1 --iterations 10 --skip-disk --skip-gds \
@@ -21,14 +31,48 @@
 //! # Multi-GPU:
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
 //!     --devices 0,1 --page-sizes 128 --concurrency 1,2,4 --iterations 50
+//!
+//! # Universal-TP perf impact — Qwen3-32B–style shape (TP=4 per-worker
+//! # view: num_kv_heads=2 / head_dim=128 / inner_dim=256 / 64 layers).
+//! # Run BOTH commands and diff bandwidth_gbs:
+//! #
+//! #   (a) Baseline — both sides operational NHD (no transform kernel
+//! #       on the wire, planner emits direct copy):
+//! cargo run -p kvbm-engine --features bench --release --bin bench_engine -- \
+//!     --devices 0 --page-sizes 16,32,64,128 --concurrency 1,2,4 \
+//!     --num-layers 64 --inner-dim 256 --num-heads 2 \
+//!     --g1-layout lw-nhd --g2-layout fc-nhd \
+//!     --iterations 100 --skip-disk --skip-gds --isolated-only \
+//!     --output /tmp/bench_qwen32b_baseline
+//! #
+//! #   (b) Universal-TP G2 — LW operational on G1, FC universal on G2.
+//! #       Pulls a transform kernel onto the hot path; the delta from
+//! #       (a) is the universal-format cost.
+//! cargo run -p kvbm-engine --features bench --release --bin bench_engine -- \
+//!     --devices 0 --page-sizes 16,32,64,128 --concurrency 1,2,4 \
+//!     --num-layers 64 --inner-dim 256 --num-heads 2 \
+//!     --g1-layout lw-nhd --g2-layout fc-universal \
+//!     --iterations 100 --skip-disk --skip-gds --isolated-only \
+//!     --output /tmp/bench_qwen32b_universal
+//! #
+//! # Filter JSONL by `g2_layout` field to align rows. The
+//! # `bandwidth_gbs` ratio at matching (page_size, concurrency,
+//! # test=g1_to_g2|g2_to_g1) shows the transform overhead.
 //! ```
+//!
+//! # Reading results
+//! - `bandwidth_gbs` = per-device steady-state throughput (bytes_per_iter / mean_us).
+//! - `bytes_per_iter` (printed as `iter=…MiB`) is the working set moved per measured
+//!   iteration. Under `--weak-scale`, this stays approximately constant across
+//!   page_sizes for a fixed concurrency — that's the property that makes the
+//!   sweep apples-to-apples.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
@@ -45,8 +89,136 @@ use kvbm_engine::{
 };
 use kvbm_logical::blocks::BlockRegistry;
 use kvbm_logical::manager::BlockManager;
-use kvbm_physical::layout::{LayoutConfig, PhysicalLayout};
+use kvbm_physical::layout::{
+    BlockDimension, KvBlockLayout, LayoutConfig, PhysicalLayout, TensorDataType,
+};
 use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
+
+/// Block layout selector for G1/G2 layouts in the bench.
+///
+/// Each variant pairs a memory shape (FC vs LW) with a [`KvBlockLayout`]
+/// tag. The tag controls whether the planner takes the direct-copy
+/// fast path (matching shapes + matching tags) or invokes a transform
+/// kernel (mismatching tags — e.g. operational → universal). LW +
+/// Universal is rejected at builder time, so the enum omits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
+enum BenchLayout {
+    /// Fully contiguous, `KvBlockLayout::Unknown` (legacy untagged path).
+    #[default]
+    Fc,
+    /// Layer-separate (block-first), `KvBlockLayout::Unknown`.
+    Lw,
+    /// Fully contiguous, `KvBlockLayout::OperationalNHD` (operational
+    /// shape with head as last dim — head-major within a token).
+    FcNhd,
+    /// Layer-separate (block-first), `KvBlockLayout::OperationalNHD`
+    /// (vLLM-style per-layer KV cache with operational tag).
+    LwNhd,
+    /// Fully contiguous, `KvBlockLayout::Universal` — head dimension
+    /// pivoted to the leading position within a block so cross-TP
+    /// pulls slice along head_count without reshuffling. Pair with
+    /// an operational source (e.g. `lw-nhd`) to measure the
+    /// transform-kernel cost.
+    FcUniversal,
+}
+
+impl BenchConfig {
+    /// Default `TransferOptions` for this run. Forces `use_planner =
+    /// true` whenever either side carries a `KvBlockLayout` tag,
+    /// because the transform-kernel path lives behind the planner —
+    /// `execute_direct_transfer` (the `use_planner = false` path)
+    /// silently does a byte copy that ignores the layout tag and
+    /// produces wrong bytes when src/dst tags disagree (e.g.
+    /// operational↔universal).
+    fn default_transfer_options(&self) -> TransferOptions {
+        let use_planner =
+            self.g1_layout.requires_num_heads() || self.g2_layout.requires_num_heads();
+        TransferOptions {
+            use_planner,
+            ..Default::default()
+        }
+    }
+
+    /// Path label for the JSONL result — `"planner"` when
+    /// `use_planner = true`, `"direct"` otherwise. Diffing
+    /// `bandwidth_gbs` by `transfer_path` makes the
+    /// planner-vs-direct overhead readable when an `Unknown` ↔
+    /// `Unknown` config is also benched.
+    fn transfer_path_label(&self) -> &'static str {
+        if self.default_transfer_options().use_planner {
+            "planner"
+        } else {
+            "direct"
+        }
+    }
+}
+
+impl BenchLayout {
+    /// `(is_layer_separate, optional block-layout tag)`.
+    fn shape_and_tag(self) -> (bool, Option<KvBlockLayout>) {
+        match self {
+            BenchLayout::Fc => (false, None),
+            BenchLayout::Lw => (true, None),
+            BenchLayout::FcNhd => (false, Some(KvBlockLayout::OperationalNHD)),
+            BenchLayout::LwNhd => (true, Some(KvBlockLayout::OperationalNHD)),
+            BenchLayout::FcUniversal => (false, Some(KvBlockLayout::Universal)),
+        }
+    }
+
+    /// `KvBlockLayout::OperationalNHD` / `Universal` both require
+    /// `LayoutConfig.num_heads` to be set so head_dim is derivable.
+    /// `Unknown` doesn't.
+    fn requires_num_heads(self) -> bool {
+        self.shape_and_tag().1.is_some()
+    }
+
+    /// Short label for `BenchResult.{g1,g2}_layout` JSON fields. Matches
+    /// the kebab-case CLI form.
+    fn label(self) -> &'static str {
+        match self {
+            BenchLayout::Fc => "fc",
+            BenchLayout::Lw => "lw",
+            BenchLayout::FcNhd => "fc-nhd",
+            BenchLayout::LwNhd => "lw-nhd",
+            BenchLayout::FcUniversal => "fc-universal",
+        }
+    }
+}
+
+/// Build a `PhysicalLayout` with the requested shape + block-layout
+/// tag + storage placement. `place` distinguishes G1 (device) from G2
+/// (pinned host) — G3 disk has its own inline builder path because
+/// disk paths feed through `allocate_disk(path)` rather than a
+/// device id.
+enum Placement {
+    Device { device_id: u32 },
+    Pinned { device_id: u32 },
+}
+
+fn build_physical_layout(
+    agent: NixlAgent,
+    layout_config: LayoutConfig,
+    kind: BenchLayout,
+    placement: Placement,
+) -> Result<PhysicalLayout> {
+    let (is_lw, block_tag) = kind.shape_and_tag();
+    let mut builder = PhysicalLayout::builder(agent).with_config(layout_config);
+    if let Some(tag) = block_tag {
+        builder = builder.with_block_layout(tag);
+    }
+    let builder = if is_lw {
+        builder.layer_separate(BlockDimension::BlockIsFirstDim)
+    } else {
+        builder.fully_contiguous()
+    };
+    let layout = match placement {
+        Placement::Device { device_id } => builder.allocate_device(device_id).build()?,
+        Placement::Pinned { device_id } => builder.allocate_pinned(Some(device_id)).build()?,
+    };
+    Ok(layout)
+}
 
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -61,7 +233,7 @@ struct Cli {
     devices: Vec<u32>,
 
     /// Tokens-per-block values to sweep
-    #[arg(long, value_delimiter = ',', default_values_t = vec![32, 64, 128, 256])]
+    #[arg(long, value_delimiter = ',', default_values_t = vec![16, 32, 64, 128, 256])]
     page_sizes: Vec<usize>,
 
     /// Concurrency levels to sweep
@@ -83,6 +255,18 @@ struct Cli {
     /// Inner dimension (hidden_dim / tp_size)
     #[arg(long, default_value_t = 4096)]
     inner_dim: usize,
+
+    /// Per-worker attention-head count. Required when any
+    /// `--g1-layout`/`--g2-layout` selects an operational (`*-nhd`) or
+    /// universal (`*-universal`) tag — `LayoutConfig.num_heads` must
+    /// be set for the planner to derive head_dim. Leave unset to keep
+    /// the legacy `KvBlockLayout::Unknown` path.
+    ///
+    /// For a Qwen3-32B–style shape (64 layers, num_kv_heads=8,
+    /// head_dim=128) at TP=4 use `--num-heads 2 --inner-dim 256
+    /// --num-layers 64`.
+    #[arg(long)]
+    num_heads: Option<usize>,
 
     /// Bounce buffer block counts to sweep (tail blocks of G2 used as bounce for staged G1↔G3)
     #[arg(long, value_delimiter = ',', default_values_t = vec![2, 4, 8])]
@@ -132,6 +316,28 @@ struct Cli {
     #[arg(long, short)]
     output: Option<PathBuf>,
 
+    /// Weak-scale work across the page_size sweep so per-iter bytes stay roughly
+    /// constant (effective_bpb = max(blocks_per_batch * 64 / page_size, 1)).
+    /// Without this, per-iter bytes scale linearly with page_size and GB/s numbers
+    /// across page_sizes are not directly comparable. When enabled, `--num-blocks`
+    /// is overridden per-page_size to satisfy the allocation invariant.
+    #[arg(long)]
+    weak_scale: bool,
+
+    /// Layout for G1 (GPU device memory). Default: fc.
+    /// Use `lw` to mirror vLLM-style layer-separate KV cache.
+    #[arg(long, value_enum, default_value_t = BenchLayout::Fc)]
+    g1_layout: BenchLayout,
+
+    /// Layout for G2 (pinned host memory). Default: fc.
+    #[arg(long, value_enum, default_value_t = BenchLayout::Fc)]
+    g2_layout: BenchLayout,
+
+    /// Enable the prepared-plan cache (default: on). Set to `false` to
+    /// measure the legacy per-call allocation path for comparison.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    prepared_cache: bool,
+
     /// Optional TOML config file (overridden by CLI args)
     #[arg(long)]
     config: Option<PathBuf>,
@@ -148,6 +354,8 @@ struct BenchConfig {
     num_blocks: usize,
     num_layers: usize,
     inner_dim: usize,
+    #[serde(default)]
+    num_heads: Option<usize>,
     bounce_blocks: Vec<usize>,
     warmup: usize,
     iterations: usize,
@@ -160,6 +368,18 @@ struct BenchConfig {
     offload_batch_sizes: Vec<usize>,
     offload_concurrency: Vec<usize>,
     output: Option<PathBuf>,
+    #[serde(default)]
+    weak_scale: bool,
+    #[serde(default)]
+    g1_layout: BenchLayout,
+    #[serde(default)]
+    g2_layout: BenchLayout,
+    #[serde(default = "default_prepared_cache")]
+    prepared_cache: bool,
+}
+
+fn default_prepared_cache() -> bool {
+    true
 }
 
 impl From<Cli> for BenchConfig {
@@ -172,6 +392,7 @@ impl From<Cli> for BenchConfig {
             num_blocks: cli.num_blocks,
             num_layers: cli.num_layers,
             inner_dim: cli.inner_dim,
+            num_heads: cli.num_heads,
             bounce_blocks: cli.bounce_blocks,
             warmup: cli.warmup,
             iterations: cli.iterations,
@@ -184,7 +405,39 @@ impl From<Cli> for BenchConfig {
             offload_batch_sizes: cli.offload_batch_sizes,
             offload_concurrency: cli.offload_concurrency,
             output: cli.output,
+            weak_scale: cli.weak_scale,
+            g1_layout: cli.g1_layout,
+            g2_layout: cli.g2_layout,
+            prepared_cache: cli.prepared_cache,
         }
+    }
+}
+
+/// Reference token budget for weak scaling. The "natural" per-iter work at
+/// `page_size = REFERENCE_PAGE_SIZE, blocks_per_batch = N` becomes:
+///   effective_bpb(page_size) = max(N * REFERENCE_PAGE_SIZE / page_size, 1)
+const REFERENCE_PAGE_SIZE: usize = 64;
+
+fn effective_bpb(base_bpb: usize, page_size: usize) -> usize {
+    (base_bpb * REFERENCE_PAGE_SIZE / page_size).max(1)
+}
+
+/// Resolve the per-page_size config when weak-scaling is enabled.
+/// Recomputes `blocks_per_batch` and `num_blocks` so the allocation invariant
+/// holds for every page_size in the sweep.
+fn resolve_for_page_size(base: &BenchConfig, page_size: usize) -> BenchConfig {
+    if !base.weak_scale {
+        return base.clone();
+    }
+    let bpb = effective_bpb(base.blocks_per_batch, page_size);
+    let max_conc = base.concurrency.iter().max().copied().unwrap_or(1);
+    let max_bounce = base.bounce_blocks.iter().max().copied().unwrap_or(0);
+    let multiplier = if base.isolated_only { 1 } else { 2 };
+    let num_blocks = max_conc * bpb * multiplier + max_bounce;
+    BenchConfig {
+        blocks_per_batch: bpb,
+        num_blocks,
+        ..base.clone()
     }
 }
 
@@ -245,6 +498,18 @@ struct BenchResult {
     concurrency: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     bounce_blocks: Option<usize>,
+    /// Block-layout label for G1 (`"fc"`, `"lw"`, `"fc-nhd"`,
+    /// `"lw-nhd"`, `"fc-universal"`). Filterable in JSONL to compare
+    /// transform-kernel cost across format pairings.
+    g1_layout: &'static str,
+    /// Block-layout label for G2. See `g1_layout`.
+    g2_layout: &'static str,
+    /// `"planner"` when `TransferOptions::use_planner = true`,
+    /// `"direct"` otherwise. The planner is forced on whenever a
+    /// tagged layout is selected — without it, the legacy
+    /// `execute_direct_transfer` path silently does a byte copy
+    /// that ignores the `KvBlockLayout` tag.
+    transfer_path: &'static str,
     bytes_per_iter: usize,
     iterations: usize,
     latency_us: LatencyStats,
@@ -279,6 +544,9 @@ fn make_result(
         blocks_per_batch: config.blocks_per_batch,
         concurrency,
         bounce_blocks,
+        g1_layout: config.g1_layout.label(),
+        g2_layout: config.g2_layout.label(),
+        transfer_path: config.transfer_path_label(),
         bytes_per_iter,
         iterations: config.iterations,
         latency_us: stats,
@@ -289,14 +557,19 @@ fn make_result(
 
 fn print_result_stderr(r: &BenchResult) {
     eprintln!(
-        "[GPU {}] {} | page={} conc={}{} | {:.1} GB/s (per-dev) {:.1} GB/s (agg) | p50={:.0}us p99={:.0}us",
+        "[GPU {}] {} | {}↔{} ({}) | page={} bpb={} conc={}{} | iter={:.1} MiB | {:.1} GB/s (per-dev) {:.1} GB/s (agg) | p50={:.0}us p99={:.0}us",
         r.device_id,
         r.test,
+        r.g1_layout,
+        r.g2_layout,
+        r.transfer_path,
         r.page_size,
+        r.blocks_per_batch,
         r.concurrency,
         r.bounce_blocks
             .map(|b| format!(" bounce={b}"))
             .unwrap_or_default(),
+        r.bytes_per_iter as f64 / (1024.0 * 1024.0),
         r.bandwidth_gbs,
         r.aggregate_bandwidth_gbs,
         r.latency_us.p50_us,
@@ -332,9 +605,13 @@ fn spawn_worker_thread(
     let num_blocks = config.num_blocks;
     let num_layers = config.num_layers;
     let inner_dim = config.inner_dim;
+    let num_heads = config.num_heads;
     let skip_disk = config.skip_disk;
     let skip_gds = config.skip_gds;
     let disk_path = config.disk_path.clone();
+    let g1_layout = config.g1_layout;
+    let g2_layout = config.g2_layout;
+    let prepared_cache = config.prepared_cache;
 
     let join_handle = std::thread::Builder::new()
         .name(format!("bench-gpu-{device_id}"))
@@ -346,13 +623,11 @@ fn spawn_worker_thread(
                     format_cpu_set(&cpus)
                 );
                 pin_thread_to_cpus(&cpus);
+            } else if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
+                eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
+                let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
             } else {
-                if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
-                    eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
-                    let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
-                } else {
-                    eprintln!("[GPU {device_id}] No NUMA pinning (node unknown)");
-                }
+                eprintln!("[GPU {device_id}] No NUMA pinning (node unknown)");
             }
 
             // Build tokio runtime on this NUMA-pinned thread
@@ -377,37 +652,56 @@ fn spawn_worker_thread(
                     eprintln!("[GPU {device_id}] GDS_MT backend unavailable");
                 }
 
-                // Create TransferManager
+                // Create TransferManager. The prepared-plan cache is
+                // enabled by default; `--prepared-cache=false` toggles
+                // it off to measure the legacy per-call allocation
+                // path for comparison.
                 let manager = TransferManager::builder()
                     .event_system(event_system)
                     .nixl_agent(agent.clone())
                     .cuda_device_id(device_id as usize)
+                    .prepared_plan_cache_enabled(prepared_cache)
                     .build()?;
 
-                // Build layout config
-                let layout_config = LayoutConfig::builder()
+                // Build layout config. num_heads is only set when at
+                // least one G1/G2 layout selected a tagged variant
+                // (OperationalNHD / Universal) — the legacy
+                // `Unknown` path leaves it None and the planner falls
+                // back to direct-copy without head-dim awareness.
+                let mut layout_config_builder = LayoutConfig::builder();
+                layout_config_builder
                     .num_blocks(num_blocks)
                     .num_layers(num_layers)
                     .outer_dim(2) // K + V
                     .page_size(page_size)
                     .inner_dim(inner_dim)
-                    .dtype_width_bytes(2) // fp16
-                    .build()?;
+                    .dtype_width_bytes(2); // fp16
+                if let Some(nh) = num_heads {
+                    layout_config_builder.num_heads(Some(nh));
+                }
+                // Permute-kernel catalog dispatches on the real
+                // `TensorDataType`, not byte width. The bench
+                // currently locks dtype_width_bytes=2 (fp16/bf16) —
+                // pick BF16 as the realistic KV-cache dtype.
+                layout_config_builder.dtype(Some(TensorDataType::BF16));
+                let layout_config = layout_config_builder.build()?;
 
                 // Allocate G1 (GPU device memory) — NUMA-local allocation
-                let g1 = PhysicalLayout::builder(agent.clone())
-                    .with_config(layout_config.clone())
-                    .fully_contiguous()
-                    .allocate_device(device_id)
-                    .build()?;
+                let g1 = build_physical_layout(
+                    agent.clone(),
+                    layout_config.clone(),
+                    g1_layout,
+                    Placement::Device { device_id },
+                )?;
                 let g1_handle = manager.register_layout(g1)?;
 
                 // Allocate G2 (pinned host memory) — NUMA-local allocation
-                let g2 = PhysicalLayout::builder(agent.clone())
-                    .with_config(layout_config.clone())
-                    .fully_contiguous()
-                    .allocate_pinned(Some(device_id))
-                    .build()?;
+                let g2 = build_physical_layout(
+                    agent.clone(),
+                    layout_config.clone(),
+                    g2_layout,
+                    Placement::Pinned { device_id },
+                )?;
                 let g2_handle = manager.register_layout(g2)?;
 
                 // Allocate G3 (disk) if enabled
@@ -844,14 +1138,14 @@ impl BenchInstance {
                     LogicalLayoutHandle::G2,
                     d2h_ids.clone(),
                     d2h_ids.clone(),
-                    TransferOptions::default(),
+                    self.config.default_transfer_options(),
                 )?;
                 let h2d_notif = parallel_worker.execute_local_transfer(
                     LogicalLayoutHandle::G2,
                     LogicalLayoutHandle::G1,
                     h2d_ids.clone(),
                     h2d_ids.clone(),
-                    TransferOptions::default(),
+                    self.config.default_transfer_options(),
                 )?;
                 d2h_notif.await?;
                 h2d_notif.await?;
@@ -869,14 +1163,14 @@ impl BenchInstance {
                     LogicalLayoutHandle::G2,
                     d2h_ids.clone(),
                     d2h_ids.clone(),
-                    TransferOptions::default(),
+                    self.config.default_transfer_options(),
                 )?;
                 let h2d_notif = parallel_worker.execute_local_transfer(
                     LogicalLayoutHandle::G2,
                     LogicalLayoutHandle::G1,
                     h2d_ids.clone(),
                     h2d_ids.clone(),
-                    TransferOptions::default(),
+                    self.config.default_transfer_options(),
                 )?;
 
                 d2h_notif.await?;
@@ -978,6 +1272,9 @@ impl BenchInstance {
                     blocks_per_batch: batch_size,
                     concurrency: conc,
                     bounce_blocks: None,
+                    g1_layout: self.config.g1_layout.label(),
+                    g2_layout: self.config.g2_layout.label(),
+                    transfer_path: self.config.transfer_path_label(),
                     bytes_per_iter,
                     iterations: self.config.iterations,
                     latency_us: stats,
@@ -1032,6 +1329,9 @@ impl BenchInstance {
                         blocks_per_batch: batch_size,
                         concurrency: conc,
                         bounce_blocks: None,
+                        g1_layout: self.config.g1_layout.label(),
+                        g2_layout: self.config.g2_layout.label(),
+                        transfer_path: self.config.transfer_path_label(),
                         bytes_per_iter,
                         iterations: self.config.iterations,
                         latency_us: stats,
@@ -1064,7 +1364,7 @@ impl BenchInstance {
             dst,
             src_block_ids,
             dst_block_ids,
-            TransferOptions::default(),
+            self.config.default_transfer_options(),
         )
         .await
     }
@@ -1168,22 +1468,37 @@ fn validate_config(config: &BenchConfig) -> Result<()> {
 
     // For bidir tests we need 2x the blocks (separate ranges for each direction)
     let multiplier = if config.isolated_only { 1 } else { 2 };
-    let transfer_blocks = max_conc * config.blocks_per_batch * multiplier;
 
-    // Bounce blocks come from the tail of G2, so they must not overlap with
-    // the transfer block range [0..transfer_blocks).
+    // When weak-scaling, num_blocks is recomputed per-page_size in main; the
+    // strict invariant is enforced there. Validate the worst case (smallest
+    // page_size in the sweep, which produces the largest effective_bpb).
+    let strict_bpb = if config.weak_scale {
+        let min_page_size = config
+            .page_sizes
+            .iter()
+            .min()
+            .copied()
+            .unwrap_or(REFERENCE_PAGE_SIZE);
+        effective_bpb(config.blocks_per_batch, min_page_size)
+    } else {
+        config.blocks_per_batch
+    };
+
+    let transfer_blocks = max_conc * strict_bpb * multiplier;
     let min_blocks = transfer_blocks + max_bounce;
 
-    ensure!(
-        config.num_blocks >= min_blocks,
-        "num_blocks ({}) must be >= max_concurrency ({}) * blocks_per_batch ({}) * {} + max_bounce ({}) = {}",
-        config.num_blocks,
-        max_conc,
-        config.blocks_per_batch,
-        multiplier,
-        max_bounce,
-        min_blocks,
-    );
+    if !config.weak_scale {
+        ensure!(
+            config.num_blocks >= min_blocks,
+            "num_blocks ({}) must be >= max_concurrency ({}) * blocks_per_batch ({}) * {} + max_bounce ({}) = {}",
+            config.num_blocks,
+            max_conc,
+            strict_bpb,
+            multiplier,
+            max_bounce,
+            min_blocks,
+        );
+    }
 
     ensure!(
         !config.devices.is_empty(),
@@ -1198,6 +1513,30 @@ fn validate_config(config: &BenchConfig) -> Result<()> {
         "must specify at least one concurrency level"
     );
     ensure!(config.iterations > 0, "iterations must be > 0");
+
+    // Tagged block layouts (operational NHD, Universal) require
+    // `LayoutConfig.num_heads` so the planner can derive head_dim and
+    // dispatch the right transform kernel. Refuse to start instead of
+    // letting the layout builder fail later with a less obvious error.
+    let needs_num_heads =
+        config.g1_layout.requires_num_heads() || config.g2_layout.requires_num_heads();
+    if needs_num_heads {
+        ensure!(
+            config.num_heads.is_some(),
+            "--num-heads is required when --g1-layout or --g2-layout selects a tagged variant \
+             (fc-nhd, lw-nhd, fc-universal). Got g1={:?}, g2={:?}.",
+            config.g1_layout,
+            config.g2_layout,
+        );
+        let nh = config.num_heads.unwrap();
+        ensure!(nh > 0, "--num-heads must be > 0");
+        ensure!(
+            config.inner_dim.is_multiple_of(nh),
+            "inner_dim ({}) must be divisible by num_heads ({}); head_dim = inner_dim / num_heads",
+            config.inner_dim,
+            nh,
+        );
+    }
 
     // Validate disk path if G3 tests enabled
     if let Some(ref path) = config.disk_path
@@ -1239,11 +1578,38 @@ fn main() -> Result<()> {
     eprintln!("  Devices: {:?}", config.devices);
     eprintln!("  Page sizes: {:?}", config.page_sizes);
     eprintln!("  Concurrency: {:?}", config.concurrency);
-    eprintln!("  Blocks per batch: {}", config.blocks_per_batch);
-    eprintln!("  Total blocks per pool: {}", config.num_blocks);
+    eprintln!(
+        "  Blocks per batch: {}{}",
+        config.blocks_per_batch,
+        if config.weak_scale {
+            " (weak-scaled per page_size)"
+        } else {
+            ""
+        }
+    );
+    eprintln!(
+        "  Total blocks per pool: {}{}",
+        config.num_blocks,
+        if config.weak_scale {
+            " (overridden per page_size)"
+        } else {
+            ""
+        }
+    );
     eprintln!(
         "  Layers: {}, Inner dim: {}",
         config.num_layers, config.inner_dim
+    );
+    eprintln!(
+        "  G1 layout: {} ({:?}), G2 layout: {} ({:?}), num_heads: {}",
+        config.g1_layout.label(),
+        config.g1_layout,
+        config.g2_layout.label(),
+        config.g2_layout,
+        config
+            .num_heads
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unset".to_string()),
     );
     eprintln!(
         "  Warmup: {}, Iterations: {}",
@@ -1270,6 +1636,14 @@ fn main() -> Result<()> {
         eprintln!("    Batch sizes: {:?}", config.offload_batch_sizes);
         eprintln!("    Concurrency: {:?}", config.offload_concurrency);
     }
+    eprintln!(
+        "  Prepared-plan cache: {}",
+        if config.prepared_cache {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     eprintln!();
 
     // Build a main-thread tokio runtime for the leader
@@ -1285,12 +1659,40 @@ fn main() -> Result<()> {
         // Page-size sweep: rebuild full worker stack per page_size
         // (mirrors production where model config determines page_size at startup)
         for &page_size in &config.page_sizes {
+            let resolved = resolve_for_page_size(&config, page_size);
+
             eprintln!("\n{}", "=".repeat(72));
-            eprintln!("Page size: {page_size}");
+            if resolved.weak_scale {
+                eprintln!(
+                    "Page size: {page_size}  (weak-scaled: blocks_per_batch={}, num_blocks={})",
+                    resolved.blocks_per_batch, resolved.num_blocks
+                );
+            } else {
+                eprintln!("Page size: {page_size}");
+            }
             eprintln!("{}", "=".repeat(72));
 
-            let instance = BenchInstance::new(config.clone(), page_size).await?;
+            let instance = BenchInstance::new(resolved, page_size).await?;
             let results = instance.run_benchmarks().await?;
+            // Report prepared-plan cache stats per-worker before
+            // shutdown — useful for empirical validation of the cache:
+            // post-warmup, `local_misses` should equal the number of
+            // unique handle pairs traversed and `approximate_bytes`
+            // should stay bounded across iterations.
+            for (i, handle) in instance.worker_handles.iter().enumerate() {
+                let stats = handle.worker.transfer_manager().prepared_plan_cache_stats();
+                eprintln!(
+                    "  [worker {i}] prepared-plan cache: entries={local}+{remote} \
+                     hits={lh}/{rh} misses={lm}/{rm} approx_bytes={b}",
+                    local = stats.local_entries,
+                    remote = stats.remote_entries,
+                    lh = stats.local_hits,
+                    rh = stats.remote_hits,
+                    lm = stats.local_misses,
+                    rm = stats.remote_misses,
+                    b = stats.approximate_bytes,
+                );
+            }
             all_results.extend(results);
             instance.shutdown();
         }

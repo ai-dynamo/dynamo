@@ -86,6 +86,18 @@ pub struct TransferOptions {
     /// so the physical executor can emit compatibility metrics on completion.
     #[builder(default, setter(strip_option))]
     pub metric_route: Option<KvbmTransferRoute>,
+
+    /// Route the transfer through the stride-aware planner
+    /// (`transfer::plan` → `transfer::lower` → `executor::planner`).
+    ///
+    /// Default `false` — the legacy `select_strategy` /
+    /// `execute_direct_transfer` path runs unchanged. When `true`, the
+    /// transfer goes through `plan_copy`, lowers `CopyPlan::Direct` to
+    /// `Candidate::DirectDma`, and executes via the planner-aware
+    /// CudaAsync path. `CopyPlan::Transform` is rejected (PR-6 wires
+    /// the kernel catalog).
+    #[builder(default)]
+    pub use_planner: bool,
 }
 
 impl TransferOptions {

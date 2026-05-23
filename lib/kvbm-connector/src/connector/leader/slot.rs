@@ -75,11 +75,34 @@ impl OnboardingShard {
 
 /// Data associated with onboarding operations (both PreparingToOnboard and Onboarding states).
 ///
+/// RAII cleanup hook for resources kicked off during a CD-remote
+/// onboarding. Lives inside [`OnboardingState::cd_payload`].
+///
+/// The wrapper installs an implementation when the request enters
+/// the CD-decode flow. Cleanup runs when this is dropped — which
+/// happens when the slot's `OnboardingState` is taken (`txn_take_onboarding`)
+/// during `update_connector_output(finished_recving)`, when the slot
+/// is reset on preemption, or when the slot is dropped on
+/// `request_finished` for untracked slots.
+///
+/// Implementations must be safe to drop from any thread (the slot is
+/// behind a `parking_lot::Mutex` today; future preemption paths may
+/// drop without holding it).
+pub trait CdOnboardingPayload: Send + Sync + std::fmt::Debug {}
+
 /// This struct holds all the state needed for finding and loading external KV cache blocks.
-/// It is a list of contiguous `OnboardingShard`s covering some block-index range of the
+///
+/// `shards` is a list of contiguous `OnboardingShard`s covering some block-index range of the
 /// logical sequence; shards are reconciled and added when `num_computed_tokens` or
 /// `total_tokens` changes between calls to `get_num_new_matched_tokens` (see
 /// `reconcile_and_process` in `search.rs`).
+///
+/// `shards` is **empty** for **CD-decode** requests — those have no local
+/// find/onboard work; the slot enters `Onboarding` purely so the canonical
+/// `update_connector_output` cleanup path applies. The `cd_payload` field
+/// carries the RAII cleanup hook for the CD pipeline. At least one of
+/// `shards` (non-empty) / `cd_payload` is set whenever the slot is in
+/// `PreparingToOnboard` / `Onboarding`.
 #[derive(Debug)]
 pub struct OnboardingState {
     /// The number of tokens that match tokens already in the G1 storage,
@@ -92,7 +115,13 @@ pub struct OnboardingState {
 
     /// Shards sorted by `start_block` ascending. Invariant: contiguous and
     /// non-overlapping, i.e. `shards[i+1].start_block == shards[i].end_block()`.
+    /// May be empty when the onboarding is purely CD-driven (no local match).
     pub shards: Vec<OnboardingShard>,
+
+    /// RAII cleanup hook for the CD-remote prefill pipeline. Dropped
+    /// when this `OnboardingState` is taken/dropped — that's the
+    /// canonical CD cleanup point.
+    pub cd_payload: Option<Box<dyn CdOnboardingPayload>>,
 }
 
 impl OnboardingState {
@@ -106,9 +135,26 @@ impl OnboardingState {
             num_computed_tokens,
             total_tokens_at_start,
             shards: vec![initial_shard],
+            cd_payload: None,
         };
         state.debug_assert_contiguous();
         state
+    }
+
+    /// Build a new state with no shards, carrying only a CD-remote payload.
+    ///
+    /// Used by the CD-decode cold-cache path where vLLM reports no local
+    /// match; the slot is promoted straight into `Onboarding` and the
+    /// CD wrapper drives the load (G2→G1 via worker_pull_chunk + RDMA
+    /// pull-back from the prefill peer) outside the canonical
+    /// `find_session.wait_for_completion` flow.
+    pub fn new_cd_only(cd_payload: Box<dyn CdOnboardingPayload>) -> Self {
+        Self {
+            num_computed_tokens: 0,
+            total_tokens_at_start: 0,
+            shards: Vec::new(),
+            cd_payload: Some(cd_payload),
+        }
     }
 
     /// Total number of blocks queried across all shards (for metrics).
@@ -205,13 +251,30 @@ pub fn shard_is_terminal(shard: &OnboardingShard) -> bool {
 ///
 /// Panics if called on a non-terminal shard; callers must gate on
 /// [`OnboardingState::all_shards_terminal`] first.
+///
+/// **Drain-idempotent**: both Ready and AsyncSession variants return the
+/// shard's matched count from a source captured at terminal-state time
+/// (Ready: `match_breakdown`, set at construction; AsyncSession:
+/// `OnboardingStatus::Complete.matched_blocks`, set by the staging path).
+/// This is required so [`OnboardingState::matched_span`] —
+/// and therefore [`super::ConnectorLeader::slot_match_split`] — returns
+/// the same value before and after `take_g2_blocks` / `take_g3_blocks`
+/// has been called on a shard. The CD wrapper relies on this: it reads
+/// `slot_match_split` (USAA-1 validation, line ~755 of decode_leader.rs)
+/// after `take_local_match_g2_blocks` has drained Ready vecs at the
+/// `commit_gnmt_remote` site. Reading `r.total_count()` (live Vec length)
+/// would shrink `matched_span.final_end` post-drain and shift
+/// `split.local_match_range()` / `split.remote_range()`.
 pub fn shard_terminal_matched_count(shard: &OnboardingShard) -> usize {
     match &shard.find_session {
-        // Ready results may carry G2 blocks, G3 blocks (host-bypass mode), or
-        // both; total_count covers all tiers so bypass-mode Ready hits aren't
-        // reported as zero. In non-bypass mode g3_count is 0 and total_count
-        // matches g2_count.
-        FindMatchesResult::Ready(r) => r.total_count(),
+        // Ready: sum the per-tier breakdown captured at construction. This
+        // covers bypass-mode hits (host_blocks + disk_blocks) and the
+        // non-bypass case (host_blocks only). Reading `r.total_count()`
+        // here would drop to 0 after `take_g2_blocks`/`take_g3_blocks`.
+        FindMatchesResult::Ready(r) => {
+            let b = r.match_breakdown();
+            b.host_blocks + b.disk_blocks + b.object_blocks
+        }
         FindMatchesResult::AsyncSession(s) => match s.status() {
             OnboardingStatus::Complete { matched_blocks } => matched_blocks,
             // Holding / Prepared are not currently produced on this path; treat the
@@ -468,6 +531,90 @@ impl SlotStateMachine {
         }
     }
 
+    /// Install or attach a CD-onboarding RAII payload on the slot.
+    ///
+    /// Three legal transitions, mirroring the inner gnmt's outcome:
+    ///
+    /// 1. `Inactive` → `Onboarding(OnboardingState::new_cd_only(payload))`
+    ///    — cold-cache CD: no local match was found, the wrapper
+    ///    promotes the slot directly into Onboarding so
+    ///    `process_finished_onboarding` cleanup applies. `shards` is
+    ///    empty in this path.
+    /// 2. `Onboarding(state)` with `state.cd_payload.is_none()` →
+    ///    same state, with `cd_payload` attached. The local-match
+    ///    onboarding is already running; CD just adds its cleanup.
+    /// 3. `PreparingToOnboard(state)` with `state.cd_payload.is_none()` →
+    ///    `Onboarding(state with cd_payload attached)` — CD
+    ///    ownership unifies into `Onboarding`. The CD wrapper
+    ///    drives the actual load (G2→G1 via worker_pull_chunk +
+    ///    RDMA pull-back from the prefill peer) outside the
+    ///    canonical `start_onboarding` / per-shard `wait_for_completion`
+    ///    path; the slot's transactional state must reflect that
+    ///    it is actively onboarding so
+    ///    `process_finished_onboarding`'s `txn_take_onboarding`
+    ///    cleanup applies. Carried-over shard sessions are released
+    ///    via `release_all` in that cleanup, identical to the canonical
+    ///    non-CD path.
+    ///
+    /// Any state with `cd_payload` already set returns
+    /// `MarkedForDeletion`-shaped `InvalidTransition` (we don't
+    /// install twice — the wrapper's `cd_request_state` already
+    /// guards via DashMap entry).
+    fn txn_install_or_attach_cd_payload(
+        &mut self,
+        cd_payload: Box<dyn CdOnboardingPayload>,
+    ) -> Result<(), StateTransitionError> {
+        if self.is_marked_for_deletion() {
+            return Err(StateTransitionError::MarkedForDeletion);
+        }
+        let current = std::mem::replace(&mut self.txn_state, TransactionState::Inactive);
+        match current {
+            TransactionState::Inactive => {
+                self.txn_state =
+                    TransactionState::Onboarding(OnboardingState::new_cd_only(cd_payload));
+                Ok(())
+            }
+            TransactionState::Onboarding(mut state) => {
+                if state.cd_payload.is_some() {
+                    self.txn_state = TransactionState::Onboarding(state);
+                    return Err(StateTransitionError::InvalidTransition {
+                        from: "Onboarding(cd_payload=Some)",
+                        to: "Onboarding(cd_payload attach)",
+                    });
+                }
+                state.cd_payload = Some(cd_payload);
+                self.txn_state = TransactionState::Onboarding(state);
+                Ok(())
+            }
+            TransactionState::PreparingToOnboard(mut state) => {
+                if state.cd_payload.is_some() {
+                    self.txn_state = TransactionState::PreparingToOnboard(state);
+                    return Err(StateTransitionError::InvalidTransition {
+                        from: "PreparingToOnboard(cd_payload=Some)",
+                        to: "Onboarding(cd_payload attach)",
+                    });
+                }
+                state.cd_payload = Some(cd_payload);
+                // Promote PreparingToOnboard → Onboarding. CD owns
+                // the load lifecycle from this point; the canonical
+                // `start_onboarding` / `find_session.wait_for_completion`
+                // path is bypassed for CD requests, so the slot
+                // would otherwise stay in PreparingToOnboard
+                // forever and `process_finished_onboarding`'s
+                // `txn_take_onboarding` would error.
+                self.txn_state = TransactionState::Onboarding(state);
+                Ok(())
+            }
+            other => {
+                self.txn_state = other;
+                Err(StateTransitionError::InvalidTransition {
+                    from: self.txn_state.name(),
+                    to: "Onboarding(cd_payload install)",
+                })
+            }
+        }
+    }
+
     /// Take the onboarding state out of `PreparingToOnboard`, transitioning to Inactive.
     ///
     /// Used by the cancel path: a request may be finished while we are still
@@ -475,6 +622,12 @@ impl SlotStateMachine {
     /// we need to extract the `OnboardingState` so the caller can drain the
     /// find sessions and release them — no worker callback will arrive,
     /// because the scheduler never committed the request.
+    ///
+    /// Composes correctly with the CD-decode path: when the returned
+    /// `OnboardingState` is dropped by the caller, any `cd_payload`
+    /// it carries (per HEAD's `OnboardingState` shape) runs its `Drop`
+    /// impl — the canonical RAII cleanup point this slot was designed
+    /// around (see slot.rs::OnboardingState doc).
     fn txn_take_preparing_to_onboard(&mut self) -> Result<OnboardingState, StateTransitionError> {
         let current = std::mem::replace(&mut self.txn_state, TransactionState::Inactive);
 
@@ -883,6 +1036,14 @@ impl RequestSlot {
         self.request.kv_transfer_params()
     }
 
+    /// Parse this slot's `kv_transfer_params` as disagg
+    /// transfer params. `Ok(None)` when no metadata / no params present.
+    pub fn transfer_params(
+        &self,
+    ) -> Result<Option<kvbm_protocols::disagg::TransferParams>, serde_json::Error> {
+        self.request.disagg_transfer_params()
+    }
+
     /// Get the current transaction state (read-only).
     pub fn txn_state(&self) -> &TransactionState {
         self.state.txn_state()
@@ -1084,6 +1245,20 @@ impl RequestSlot {
     /// Returns the `OnboardingState` containing the session ID and find session.
     pub fn txn_take_onboarding(&mut self) -> Result<OnboardingState, StateTransitionError> {
         self.state.txn_take_onboarding()
+    }
+
+    /// Install or attach a [`CdOnboardingPayload`] on the slot.
+    ///
+    /// See [`StateMachine::txn_install_or_attach_cd_payload`] for the
+    /// full transition table. This is the canonical entry point for
+    /// the decode-side CD wrapper to bring the slot's transaction
+    /// state machine in sync with the `(Some(N), true)` async-load
+    /// promise it makes to vLLM.
+    pub fn txn_install_or_attach_cd_payload(
+        &mut self,
+        cd_payload: Box<dyn CdOnboardingPayload>,
+    ) -> Result<(), StateTransitionError> {
+        self.state.txn_install_or_attach_cd_payload(cd_payload)
     }
 
     /// Take the onboarding state out of `PreparingToOnboard`, transitioning to Inactive.
@@ -2682,6 +2857,99 @@ mod tests {
             ));
         }
 
+        /// Mock CD onboarding payload for state-machine unit tests.
+        #[derive(Debug)]
+        struct MockCdPayload;
+        impl CdOnboardingPayload for MockCdPayload {}
+
+        /// Regression for #25: CD-decode-with-local-match path.
+        /// Inner gnmt finds matches → slot enters PreparingToOnboard
+        /// (find_session=Some). CD's commit_gnmt_remote attaches its
+        /// cd_payload via `txn_install_or_attach_cd_payload`. The
+        /// install MUST promote the slot to Onboarding so the canonical
+        /// `process_finished_onboarding` → `txn_take_onboarding`
+        /// cleanup applies. Otherwise the slot stays in
+        /// PreparingToOnboard forever and three cascading errors fire
+        /// at finished_recving / record_offload / request_finished.
+        #[test]
+        fn test_txn_install_cd_payload_promotes_preparing_to_onboarding() {
+            let mut slot = create_test_slot();
+            let (num_computed_tokens, find_session) = create_mock_onboarding_state();
+
+            // Inner gnmt path: matches found → PreparingToOnboard.
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
+                .unwrap();
+            assert!(matches!(
+                slot.txn_state(),
+                TransactionState::PreparingToOnboard(_)
+            ));
+
+            // CD attach: must transition PreparingToOnboard → Onboarding.
+            slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload))
+                .unwrap();
+
+            // Slot is now Onboarding with both shards and cd_payload set.
+            match slot.txn_state() {
+                TransactionState::Onboarding(state) => {
+                    assert!(!state.shards.is_empty(), "shards preserved across install");
+                    assert!(state.cd_payload.is_some(), "cd_payload installed");
+                    assert_eq!(state.num_computed_tokens, 100);
+                }
+                other => panic!(
+                    "expected Onboarding after CD install on PreparingToOnboard slot, got {:?}",
+                    other.name()
+                ),
+            }
+
+            // Canonical cleanup: take_onboarding must now succeed.
+            let onboarding = slot.txn_take_onboarding().unwrap();
+            assert!(!onboarding.shards.is_empty());
+            assert!(onboarding.cd_payload.is_some());
+            assert!(matches!(slot.txn_state(), TransactionState::Inactive));
+        }
+
+        /// CD-decode cold-cache path: no inner match. Inactive →
+        /// Onboarding(shards=empty, cd_payload=Some). Pinning the
+        /// existing arm 1 behavior so changes to arm 3 don't silently
+        /// affect cold-cache.
+        #[test]
+        fn test_txn_install_cd_payload_inactive_to_onboarding() {
+            let mut slot = create_test_slot();
+
+            slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload))
+                .unwrap();
+
+            match slot.txn_state() {
+                TransactionState::Onboarding(state) => {
+                    assert!(state.shards.is_empty());
+                    assert!(state.cd_payload.is_some());
+                }
+                other => panic!("expected Onboarding, got {:?}", other.name()),
+            }
+        }
+
+        /// Double-install on a slot that already has cd_payload must
+        /// fail; the wrapper's cd_request_state is the primary guard
+        /// but the slot enforces the invariant defensively.
+        #[test]
+        fn test_txn_install_cd_payload_twice_fails() {
+            let mut slot = create_test_slot();
+            let (num_computed_tokens, find_session) = create_mock_onboarding_state();
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
+                .unwrap();
+
+            // First install promotes PreparingToOnboard → Onboarding.
+            slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload))
+                .unwrap();
+
+            // Second install on Onboarding(cd_payload=Some) must fail.
+            let result = slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload));
+            assert!(matches!(
+                result.unwrap_err(),
+                StateTransitionError::InvalidTransition { .. }
+            ));
+        }
+
         #[test]
         fn test_txn_take_onboarding_from_onboarding_succeeds() {
             let mut slot = create_test_slot();
@@ -3511,6 +3779,100 @@ mod tests {
             assert_eq!(mappings.len(), 2);
             assert_eq!(mappings[0], (100, expected_hashes[0]));
             assert_eq!(mappings[1], (200, expected_hashes[1]));
+        }
+    }
+
+    /// Drain-idempotence of `shard_terminal_matched_count` / `matched_span`.
+    ///
+    /// The CD wrapper calls `slot_match_split` AFTER `take_local_match_g2_blocks`
+    /// has already drained Ready shards' G2 vecs (see `commit_gnmt_remote` →
+    /// `commit_usaa1` at decode_leader.rs ~502 and ~755). If
+    /// `shard_terminal_matched_count` reads from `ReadyResult::total_count()`
+    /// (live Vec length), the post-drain call shrinks `matched_span.final_end`,
+    /// `split.local_match_range()` / `split.remote_range()` shift, and the
+    /// G1 destination slicing in `commit_usaa1` corrupts.
+    ///
+    /// These tests pin the contract: the count comes from a source captured at
+    /// terminal-state time (Ready: `match_breakdown` set at construction),
+    /// not from the live `blocks.len()`. We simulate the post-drain state by
+    /// constructing a Ready shard with empty G2 / G3 Vecs but a non-zero
+    /// `MatchBreakdown` — the count must reflect the breakdown.
+    #[cfg(test)]
+    mod drain_idempotence_tests {
+        use super::*;
+        use kvbm_engine::leader::{MatchBreakdown, ReadyResult};
+
+        /// Ready shard with empty Vec (post-drain state) but breakdown=3 must
+        /// still report 3 matched blocks.
+        #[test]
+        fn shard_terminal_matched_count_reads_breakdown_not_vec() {
+            let breakdown = MatchBreakdown {
+                host_blocks: 3,
+                disk_blocks: 0,
+                object_blocks: 0,
+            };
+            // Empty blocks Vec — mirrors the state after `take_g2_blocks` ran.
+            let ready = ReadyResult::new(vec![], breakdown);
+            let shard = OnboardingShard {
+                start_block: 0,
+                num_queried_blocks: 3,
+                find_session: FindMatchesResult::Ready(ready),
+            };
+            assert_eq!(shard_terminal_matched_count(&shard), 3);
+        }
+
+        /// Same invariant for a bypass-host Ready shard with disk_blocks > 0.
+        #[test]
+        fn shard_terminal_matched_count_bypass_sums_host_plus_disk() {
+            let breakdown = MatchBreakdown {
+                host_blocks: 2,
+                disk_blocks: 4,
+                object_blocks: 0,
+            };
+            let ready = ReadyResult::new(vec![], breakdown);
+            let shard = OnboardingShard {
+                start_block: 0,
+                num_queried_blocks: 6,
+                find_session: FindMatchesResult::Ready(ready),
+            };
+            assert_eq!(shard_terminal_matched_count(&shard), 6);
+        }
+
+        /// End-to-end: `matched_span` (and therefore `slot_match_split`'s
+        /// `local_match_blocks`) is unchanged when a Ready shard's G2 Vec
+        /// has been drained.
+        #[test]
+        fn matched_span_unchanged_after_ready_drain() {
+            let block_size = 4;
+            let pre_breakdown = MatchBreakdown {
+                host_blocks: 5,
+                disk_blocks: 0,
+                object_blocks: 0,
+            };
+            let ready_pre = ReadyResult::new(vec![], pre_breakdown);
+            let mut state = OnboardingState::new(
+                0,
+                5 * block_size,
+                OnboardingShard {
+                    start_block: 0,
+                    num_queried_blocks: 5,
+                    find_session: FindMatchesResult::Ready(ready_pre),
+                },
+            );
+            let (start_pre, end_pre) = state.matched_span(block_size);
+
+            // Simulate drain (no-op for empty Vec, but exercises the path).
+            let _ = state.shards[0].find_session.take_g2_blocks();
+
+            let (start_post, end_post) = state.matched_span(block_size);
+            assert_eq!(
+                (start_pre, end_pre),
+                (start_post, end_post),
+                "matched_span must be drain-idempotent (was {:?}, became {:?})",
+                (start_pre, end_pre),
+                (start_post, end_post),
+            );
+            assert_eq!(end_pre - start_pre, 5);
         }
     }
 }

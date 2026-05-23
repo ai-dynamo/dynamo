@@ -29,6 +29,10 @@ impl ConnectorLeader {
     pub fn request_finished(&self, request_id: &str) -> FinishedStatus {
         tracing::debug!("evaluating finished status");
 
+        // End-of-request trace marker: prefill + decode are done by the time
+        // vLLM calls this. Bookends the per-request lane in the trace.
+        crate::audit!("request_finished", request_id);
+
         let Some(shared_slot) = self.slots.get(request_id).map(|slot| slot.clone()) else {
             return FinishedStatus::UntrackedRequest;
         };
@@ -59,6 +63,31 @@ impl ConnectorLeader {
                     // will log and return Pending) rather than panicking.
                     tracing::error!(
                         "Failed to take PreparingToOnboard state for request ID {}: {}",
+                        request_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Cancel path: request is finished while still in Onboarding.
+        // Mirrors the PreparingToOnboard branch above. Without this guard, the
+        // legacy `txn_take_offloading` call below errors with
+        // "Invalid transition from Onboarding to Inactive (via take_offloading)"
+        // and the request fails at finish time. Reuse the OnboardingState
+        // cleanup helper since both branches yield the same state type.
+        if matches!(slot.txn_state(), TransactionState::Onboarding(_)) {
+            match slot.txn_take_onboarding() {
+                Ok(onboarding_state) => {
+                    let _ = slot.slot_mark_finished();
+                    drop(slot);
+                    self.remove_slot(request_id);
+                    self.spawn_preparing_to_onboard_cleanup(request_id, onboarding_state);
+                    return FinishedStatus::Finished;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to take Onboarding state for request ID {}: {}",
                         request_id,
                         e
                     );
@@ -227,6 +256,11 @@ impl ConnectorLeader {
     }
 
     fn process_finished_onboarding(&self, request_id: &str) -> Result<()> {
+        crate::audit!(
+            "process_finished_onboarding_entry",
+            role = "both",
+            request_id
+        );
         let shared_slot = self
             .slots
             .get(request_id)
@@ -234,10 +268,63 @@ impl ConnectorLeader {
             .ok_or_else(|| anyhow!("Slot not found for request ID: {}", request_id))?;
 
         let mut slot = shared_slot.lock();
+        crate::audit!(
+            "process_finished_onboarding_observed_state",
+            role = "both",
+            request_id,
+            txn_state = slot.txn_state().name(),
+            has_onboarding_state = slot.has_onboarding_state()
+        );
+
+        // TODO(AI): I think you messed up here.  The state machine is clear
+        // on this point. If we marked the request as pending, it should have
+        // this onboarding state.  Any removal of it is correct and this is
+        // the only place it should be cleaned up.
+        //
+        // // The slot may be Inactive when the request finished via a
+        // // parallel path that doesn't use `Slot::OnboardingState` —
+        // // primarily CD-decode, where the Velo session lifecycle is
+        // // owned by the wrapper's `cd_request_state` and released in
+        // // `request_finished` via `coordinator.release()`. There's
+        // // nothing to clean up at the leader level for that case;
+        // // skip the `txn_take_onboarding` call so it doesn't surface
+        // // as an `Invalid transition from Inactive to Inactive` error.
+        // //
+        // // The `txn_take_onboarding` path below remains the canonical
+        // // cleanup for local G2/G3→G1 onboarding (the non-CD case).
+        // if !slot.has_onboarding_state() {
+        //     tracing::debug!(
+        //         request_id,
+        //         "finished_recving with no OnboardingState — \
+        //          leader-level cleanup not required (CD-decode or \
+        //          already-released slot)"
+        //     );
+        //     return Ok(());
+        // }
+
         let onboarding_state = slot.txn_take_onboarding()?;
+        let shard_session_ids: Vec<_> = onboarding_state
+            .shards
+            .iter()
+            .filter_map(|s| s.find_session.session_id())
+            .collect();
+        let had_cd_payload = onboarding_state.cd_payload.is_some();
+        crate::audit!(
+            "process_finished_onboarding_take",
+            role = "both",
+            request_id,
+            shard_session_ids = ?shard_session_ids,
+            had_cd_payload
+        );
         if let Some(instance_leader) = self.instance_leader.get() {
             onboarding_state.release_all(instance_leader);
         }
+        // Dropping `onboarding_state` runs the `cd_payload`'s `Drop`
+        // impl — the canonical CD cleanup (coordinator.release,
+        // session close, inflight_budget release,
+        // cd_request_state removal). Local-only onboarding has
+        // `cd_payload: None` and the drop is a no-op.
+        drop(onboarding_state);
         Ok(())
     }
 
@@ -386,6 +473,12 @@ async fn cleanup_preparing_to_onboard(
     instance_leader: InstanceLeader,
     request_id: String,
 ) {
+    // Shards may be empty when the state is purely CD-driven (no local match);
+    // the PreparingToOnboard cancel path is reachable only via the canonical
+    // non-CD flow today (the CD path promotes PreparingToOnboard → Onboarding
+    // on install), but the empty-shards branch is a correct no-op: drain_futures
+    // becomes empty and `cd_payload`'s Drop still fires when `onboarding_state`
+    // falls out of scope below.
     let shard_count = onboarding_state.shards.len();
     tracing::debug!(
         "starting PreparingToOnboard cleanup of {} shard(s) for request_id: {}",
@@ -421,7 +514,7 @@ async fn cleanup_preparing_to_onboard(
     futures::future::join_all(drain_futures).await;
 
     // Dropping `onboarding_state` here releases any `Ready`-variant blocks
-    // held by RAII.
+    // held by RAII (and any installed `cd_payload`'s Drop).
     drop(onboarding_state);
 
     tracing::debug!(
@@ -497,7 +590,6 @@ mod cleanup_tests {
             status_rx,
             Arc::new(TokioMutex::new(Some(Vec::new()))),
             Arc::new(TokioMutex::new(MatchBreakdown::default())),
-            None,
         ))
     }
 
@@ -512,7 +604,6 @@ mod cleanup_tests {
             status_rx,
             Arc::new(TokioMutex::new(None)),
             Arc::new(TokioMutex::new(MatchBreakdown::default())),
-            None,
         );
         (FindMatchesResult::AsyncSession(session), status_tx)
     }

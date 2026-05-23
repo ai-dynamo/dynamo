@@ -49,7 +49,7 @@ impl Tensor {
     /// Extracts device, data pointer, size, shape, stride, and element size
     /// from the Python tensor object.
     pub fn new(py_tensor: Py<PyAny>) -> anyhow::Result<Self> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let device = py_tensor.getattr(py, "device")?;
             let device_type = device.getattr(py, "type")?.extract::<String>(py)?;
 

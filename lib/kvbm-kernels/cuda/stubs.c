@@ -32,7 +32,7 @@ typedef void* cudaStream_t;
 cudaError_t
 kvbm_kernels_launch_universal_from_block(
     void* const* universal_ptrs, const void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
-    size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
+    size_t nt, size_t hd, size_t nl_full, size_t nl_offset, int dtype_value, int layout_value, cudaStream_t stream)
 {
   (void)universal_ptrs;
   (void)block_ptrs;
@@ -42,6 +42,8 @@ kvbm_kernels_launch_universal_from_block(
   (void)no;
   (void)nt;
   (void)hd;
+  (void)nl_full;
+  (void)nl_offset;
   (void)dtype_value;
   (void)layout_value;
   (void)stream;
@@ -52,7 +54,7 @@ kvbm_kernels_launch_universal_from_block(
 cudaError_t
 kvbm_kernels_launch_block_from_universal(
     const void* const* universal_ptrs, void* const* block_ptrs, size_t num_blocks, size_t nh, size_t nl, size_t no,
-    size_t nt, size_t hd, int dtype_value, int layout_value, cudaStream_t stream)
+    size_t nt, size_t hd, size_t nl_full, size_t nl_offset, int dtype_value, int layout_value, cudaStream_t stream)
 {
   (void)universal_ptrs;
   (void)block_ptrs;
@@ -62,10 +64,32 @@ kvbm_kernels_launch_block_from_universal(
   (void)no;
   (void)nt;
   (void)hd;
+  (void)nl_full;
+  (void)nl_offset;
   (void)dtype_value;
   (void)layout_value;
   (void)stream;
   STUB_ABORT("kvbm_kernels_launch_block_from_universal");
+  return 1;  // Unreachable
+}
+
+cudaError_t
+kvbm_kernels_launch_nhd_hnd_transpose(
+    const void* const* src_ptrs, void* const* dst_ptrs, size_t num_blocks, size_t nl, size_t no, size_t nt, size_t nh,
+    size_t hd, int dtype_value, int src_layout_value, cudaStream_t stream)
+{
+  (void)src_ptrs;
+  (void)dst_ptrs;
+  (void)num_blocks;
+  (void)nl;
+  (void)no;
+  (void)nt;
+  (void)nh;
+  (void)hd;
+  (void)dtype_value;
+  (void)src_layout_value;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_launch_nhd_hnd_transpose");
   return 1;  // Unreachable
 }
 
