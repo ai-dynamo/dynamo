@@ -146,10 +146,10 @@ impl McfPlacementSolver {
             let mut imp = cl.clone();
             // Also include any LoRA whose prior hosts overlap with changed workers
             for lora in loras {
-                if let Some(prev) = prev_assignment.get(&lora.name) {
-                    if prev.iter().any(|w| changed_w.contains(w)) {
-                        imp.insert(lora.name.clone());
-                    }
+                if let Some(prev) = prev_assignment.get(&lora.name)
+                    && prev.iter().any(|w| changed_w.contains(w))
+                {
+                    imp.insert(lora.name.clone());
                 }
             }
             imp

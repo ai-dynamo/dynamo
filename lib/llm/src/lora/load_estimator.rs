@@ -661,7 +661,7 @@ mod tests {
 
         // Decrementing a never-seen LoRA is a no-op (data entry doesn't exist).
         estimator.decrement_load("never-seen");
-        assert!(estimator.get_inflight_counts().get("never-seen").is_none());
+        assert!(!estimator.get_inflight_counts().contains_key("never-seen"));
 
         // Over-decrement an existing entry: pre-fix, this wrapped to usize::MAX.
         estimator.increment_load("lora-test");
@@ -672,7 +672,7 @@ mod tests {
         let inflight = estimator.get_inflight_counts();
         // active_count == 0 is filtered out of get_inflight_counts.
         assert!(
-            inflight.get("lora-test").is_none(),
+            !inflight.contains_key("lora-test"),
             "expected saturated zero (filtered out); got {:?}",
             inflight.get("lora-test")
         );
