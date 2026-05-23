@@ -29,7 +29,7 @@ Kubernetes frontend env equivalents:
 | Set KV cache block size | `DYN_KV_CACHE_BLOCK_SIZE=<size>` |
 | Tune KV overlap credit | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT=<float>` |
 | Scale prefill load | `DYN_ROUTER_PREFILL_LOAD_SCALE=<float>` |
-| Set queue policy | `DYN_ROUTER_QUEUE_POLICY=fcfs|wspt|lcfs` |
+| Set queue policy | `DYN_ROUTER_QUEUE_POLICY=fcfs\|wspt\|lcfs` |
 
 CLI equivalents:
 

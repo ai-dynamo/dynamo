@@ -15,7 +15,9 @@ from typing import Iterable
 
 FRAMEWORKS = {"vllm", "sglang", "trtllm", "tokenspeed"}
 PLACEHOLDER_RE = re.compile(r"(<[^>]+>|your-|change-me|changeme|my-tag|TODO)", re.I)
-GPU_RE = re.compile(r"nvidia\.com/gpu:\s*[\"']?(\d+)")
+# Recipes declare GPUs either as the DynamoGraphDeployment shorthand
+# (`limits.gpu: "4"`) or the standard Kubernetes `nvidia.com/gpu: 4`; match both.
+GPU_RE = re.compile(r"(?:nvidia\.com/gpu|(?<![\w./-])gpu):\s*[\"']?(\d+)")
 
 
 @dataclass
@@ -179,6 +181,24 @@ def metadata_names(path: Path) -> list[str]:
     return names
 
 
+def model_cache_dir_for(root: Path, recipe_dir: Path) -> Path | None:
+    """Locate the model-level model-cache dir that sits beside a recipe.
+
+    Recipes live at ``recipes/<model>/<framework>/<mode>`` while the
+    model-cache manifests live at the sibling ``recipes/<model>/model-cache``,
+    so validating only the recipe subtree would miss them.
+    """
+    recipes_dir = root / "recipes"
+    try:
+        rel = recipe_dir.relative_to(recipes_dir)
+    except ValueError:
+        return None
+    if not rel.parts:
+        return None
+    candidate = recipes_dir / rel.parts[0] / "model-cache"
+    return candidate if candidate.is_dir() else None
+
+
 def validate(root: Path, target: Path) -> dict[str, object]:
     target = target if target.is_absolute() else root / target
     if target.is_file():
@@ -190,6 +210,17 @@ def validate(root: Path, target: Path) -> dict[str, object]:
 
     if not files:
         raise SystemExit(f"No YAML files found under {target}")
+
+    # Pull in the sibling model-level model-cache manifests so storage-class
+    # and model-download blockers are not silently skipped.
+    if not any("model-cache" in path.parts for path in files):
+        mc_dir = model_cache_dir_for(root, recipe_dir)
+        if mc_dir:
+            files = (
+                files
+                + sorted(mc_dir.rglob("*.yaml"))
+                + sorted(mc_dir.rglob("*.yml"))
+            )
 
     deploy_files = [path for path in files if path.name == "deploy.yaml"]
     perf_files = [path for path in files if path.name == "perf.yaml"]

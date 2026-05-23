@@ -7,11 +7,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
-import time
+import tempfile
 from pathlib import Path
 from typing import Any
+
+# `kubectl describe` and pod logs can echo secret env values (HF tokens,
+# bearer tokens, passwords). Scrub them before anything is written to disk so
+# the bundle honors its no-secrets contract.
+_SECRET_KV_RE = re.compile(
+    r"(?i)([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|"
+    r"CREDENTIAL)[A-Z0-9_]*)(\s*[:=]\s*)(\S+)"
+)
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]+)")
+_HF_TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{8,}\b")
+
+
+def redact(text: str) -> str:
+    if not text:
+        return text
+    text = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    text = _BEARER_RE.sub(lambda m: f"{m.group(1)}<redacted>", text)
+    text = _HF_TOKEN_RE.sub("<redacted-hf-token>", text)
+    return text
 
 
 def run(cmd: list[str], timeout: int) -> dict[str, Any]:
@@ -46,10 +66,10 @@ def write_result(outdir: Path, name: str, result: dict[str, Any]) -> None:
         + str(result["returncode"])
         + "\n\n"
         + "STDOUT\n"
-        + str(result["stdout"])
+        + redact(str(result["stdout"]))
         + "\n\n"
         + "STDERR\n"
-        + str(result["stderr"])
+        + redact(str(result["stderr"]))
         + "\n",
         encoding="utf-8",
     )
@@ -104,13 +124,22 @@ def main() -> int:
     parser.add_argument(
         "--selector", help="Optional pod selector, for example app=my-app"
     )
-    parser.add_argument("--outdir", default=f"/tmp/dynamo-debug-{int(time.time())}")
+    parser.add_argument(
+        "--outdir",
+        default=None,
+        help="Output dir; defaults to a private mkdtemp dynamo-debug-* directory",
+    )
     parser.add_argument("--tail", type=int, default=200)
     parser.add_argument("--timeout", type=int, default=30)
     args = parser.parse_args()
 
-    outdir = Path(args.outdir).expanduser().resolve()
-    outdir.mkdir(parents=True, exist_ok=True)
+    if args.outdir:
+        outdir = Path(args.outdir).expanduser().resolve()
+        outdir.mkdir(parents=True, exist_ok=True)
+    else:
+        # mkdtemp gives an unpredictable name with 0700 perms, unlike a
+        # guessable /tmp/dynamo-debug-<timestamp> path on a shared host.
+        outdir = Path(tempfile.mkdtemp(prefix="dynamo-debug-")).resolve()
 
     commands: list[tuple[str, list[str]]] = [
         ("context", ["kubectl", "config", "current-context"]),

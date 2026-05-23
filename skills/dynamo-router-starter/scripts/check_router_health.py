@@ -10,6 +10,7 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -17,6 +18,11 @@ from typing import Any
 def request_json(
     method: str, url: str, payload: dict[str, Any] | None = None, timeout: float = 20
 ) -> tuple[int, Any]:
+    # Only talk to real HTTP(S) endpoints; urlopen otherwise happily opens
+    # file:// and other local schemes if a bad --base-url is passed.
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in ("http", "https"):
+        return 0, {"error": f"unsupported URL scheme: {scheme!r}"}
     data = None
     headers = {"Accept": "application/json"}
     if payload is not None:
@@ -24,9 +30,16 @@ def request_json(
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             raw = resp.read().decode("utf-8", errors="replace")
-            return resp.status, json.loads(raw) if raw else None
+            if not raw:
+                return resp.status, None
+            try:
+                return resp.status, json.loads(raw)
+            except json.JSONDecodeError:
+                # A 200 with a non-JSON body should surface as a structured
+                # failure, not crash the smoke test.
+                return resp.status, raw
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         try:
