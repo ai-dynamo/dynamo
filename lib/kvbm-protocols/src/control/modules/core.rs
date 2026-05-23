@@ -1,48 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `core` module protocol: remote-leader registration and instance describe.
+//! `core` module protocol: instance describe.
 
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
-use velo_ext::InstanceId;
 
 use super::super::ModuleId;
 use super::super::layout_compat::LayoutCompatPayload;
-
-// ---------------------------------------------------------------------------
-// register_leader
-// ---------------------------------------------------------------------------
-
-/// Velo handler name for the leader register-leader operation.
-///
-/// Kept at its original `kvbm.connector.leader.*` value for kvbm-hub proxy
-/// compatibility — see [`super::dev::RESET_HANDLER`].
-pub const REGISTER_LEADER_HANDLER: &str = "kvbm.connector.leader.register_leader";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterLeaderRequest {
-    pub instance_id: InstanceId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterLeaderResponse {
-    /// Outcome of the register call. Field name is `outcome` rather than
-    /// `status` because the enclosing `ControlReply<T>` already tags the
-    /// success/error split with a `"status"` field (`#[serde(tag = "status")]`).
-    /// Having two `status` JSON keys produces a duplicate-field decode
-    /// error in the hub's HTTP→velo proxy.
-    pub outcome: RegisterLeaderStatus,
-    pub remote_leaders: Vec<InstanceId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RegisterLeaderStatus {
-    Registered,
-    AlreadyRegistered,
-}
 
 // ---------------------------------------------------------------------------
 // describe_instance

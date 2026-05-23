@@ -29,6 +29,10 @@ impl ConnectorLeader {
     pub fn request_finished(&self, request_id: &str) -> FinishedStatus {
         tracing::debug!("evaluating finished status");
 
+        // End-of-request trace marker: prefill + decode are done by the time
+        // vLLM calls this. Bookends the per-request lane in the trace.
+        crate::audit!("request_finished", request_id);
+
         let Some(shared_slot) = self.slots.get(request_id).map(|slot| slot.clone()) else {
             return FinishedStatus::UntrackedRequest;
         };

@@ -69,7 +69,6 @@ async fn make_leader(events_manager: Arc<EventsManager>) -> Arc<InstanceLeader> 
             .registry(registry)
             .g2_manager(g2)
             .workers(vec![])
-            .remote_leaders(vec![])
             .build()
             .expect("build leader"),
     )

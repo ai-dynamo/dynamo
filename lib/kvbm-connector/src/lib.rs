@@ -36,13 +36,11 @@ pub use kvbm_engine::leader::EventSource;
 /// Leaders with no `leader.hub` return the builder unmodified — velo falls
 /// back to whatever static discovery the messenger config specifies (or none).
 ///
-/// This is the wiring the leader's `InstanceLeader::messenger`
-/// `discover_and_register_peer` flow needs. Without it, control-plane calls
-/// like `core/register_leader` fail with "No discovery backend configured"
-/// even though the hub knows every registered peer. The CD coordinator's
-/// internal `HubPeerResolver` uses the hub directly and is unaffected — but
-/// the public control-plane surface (which the P2P flow drives) goes
-/// through velo.
+/// This is the wiring the remote-search `HubPeerResolver` needs: it looks up
+/// `PeerInfo` via the hub and calls `velo.register_peer` before the p2p
+/// session's `attach_anchor`. Without a discovery backend that lookup fails
+/// with "No discovery backend configured" even though the hub knows every
+/// registered peer.
 ///
 /// Workers do not need this — cross-worker data transfer rides NIXL, not
 /// velo, so only leaders configure a velo peer registry.

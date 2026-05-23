@@ -92,11 +92,6 @@ pub mod paths {
     // so those routes only exist when the P2P feature is enabled on the hub.
     // -----------------------------------------------------------------------
 
-    /// `POST` register a remote leader by instance id (typed). Always-on.
-    /// Body: [`kvbm_protocols::control::RegisterLeaderRequest`].
-    pub const CONTROL_CORE_REGISTER_LEADER: &str =
-        "/v1/instances/{instance_id}/control/core/register_leader";
-
     /// `POST` pull a fresh [`InstanceDescription`] from the leader's velo
     /// handler. Always-on. Updates the hub's describe cache as a side effect
     /// — shares the same code path as `GET /describe?force=true`.

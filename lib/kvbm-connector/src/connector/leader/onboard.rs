@@ -248,6 +248,8 @@ impl ConnectorLeader {
     ) -> Result<()> {
         let shared_slot = self.get_slot(request_id)?;
 
+        crate::audit!("onboard_start", request_id, num_external_tokens);
+
         // Extract a wait_for_completion future for every shard, then transition
         // to Onboarding.
         let (staging_futs, onboard_blocks_ids) = {
@@ -375,6 +377,15 @@ impl ConnectorLeader {
                     .await
                     .expect("Failed to mark failed onboarding");
             }
+
+            // Onboarding (incl. any remote pull) is done and the blocks are in
+            // G1; the request can now be scheduled for the remaining prefill +
+            // decode. This is the "load → compute" boundary in the trace.
+            crate::audit!(
+                "onboard_complete",
+                request_id = %request_id,
+                ok = transfer_result.is_ok()
+            );
 
             // Regardless of error, mark the onboarding as complete.
             // An error here is a CRITICAL failure: one or more workers have

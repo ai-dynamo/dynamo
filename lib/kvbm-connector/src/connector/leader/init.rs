@@ -610,8 +610,8 @@ impl ConnectorLeader {
             // leader built with `control.metrics = true` would silently log
             // a warning at register time and the module would never appear.
             .observability(self.runtime.observability().clone());
-        // Plumb the full Velo handle when available — `core/register_leader`
-        // uses `velo.discover_and_register_peer` (both messenger + streaming
+        // Plumb the full Velo handle when available — the remote-search
+        // `PeerResolver` uses `velo.register_peer` (both messenger + streaming
         // registries). Without this the streaming registry stays empty and
         // `attach_anchor` fails with "TCP streaming: peer <id> not registered".
         if let Some(velo) = self.runtime.velo() {
@@ -664,6 +664,20 @@ impl ConnectorLeader {
             tracing::debug!("Creating object client for G4 search (no rank prefix)");
             let object_client = create_object_client(object_config, None).await?;
             leader_builder = leader_builder.object_client(object_client);
+        }
+
+        // Remote-search block-count threshold. The discovery handle itself is
+        // injected post-construction (below, after hub registration) since the
+        // indexer client only exists once the hub handshake completes.
+        if let Some(rs) = self
+            .runtime
+            .config()
+            .remote_search
+            .as_ref()
+            .filter(|r| r.enabled)
+        {
+            leader_builder =
+                leader_builder.min_remote_blocks(rs.min_remote_blocks(reference_config.page_size));
         }
 
         let leader = leader_builder.build()?;
@@ -944,11 +958,12 @@ impl ConnectorLeader {
         // hub's HTTP→velo proxy reaches it through the same handler-name
         // strings, so nothing on the hub side changes.
 
-        // Log the instance_id for distributed discovery
-        // Operators can use this ID with the /register_leader endpoint on other instances
+        // Log the instance_id for distributed discovery. Peers are resolved on
+        // demand at pull time (PeerResolver → hub lookup → velo.register_peer);
+        // no manual registration step is required.
         tracing::info!(
             instance_id = %self.runtime.messenger().instance_id(),
-            "KVBM leader instance started - use this ID for register_leader on remote instances"
+            "KVBM leader instance started"
         );
 
         // Register with kvbm-hub for conditional disaggregation when the hub
@@ -1162,15 +1177,37 @@ impl ConnectorLeader {
 
         // Capture the remote-search lookup client once a hub registration is
         // live. The availability check above guarantees that when
-        // `remote_search` is set the indexer is effective, so exactly one of
-        // the paths above registered with the hub.
-        if self.runtime.config().remote_search.is_some() {
+        // `remote_search` is enabled the indexer is effective, so exactly one
+        // of the paths above registered with the hub.
+        if self
+            .runtime
+            .config()
+            .remote_search
+            .as_ref()
+            .is_some_and(|r| r.enabled)
+        {
             let hub = self.registered_hub_client().ok_or_else(|| {
                 anyhow!("invalid configuration: remote_search enabled but no hub client registered")
             })?;
             let client = build_remote_search_client(&hub, self.runtime.messenger().clone())?;
-            self.set_remote_search_client(client)?;
-            tracing::info!("remote-search indexer lookup client captured");
+
+            // Inject the discovery seam into the engine leader so its
+            // `find_matches_with_options(search_remote)` drives the
+            // transfer-plane remote pull. Discovery needs a peer resolver to
+            // make holders velo-reachable before the control RPC / RDMA pull.
+            let velo = self
+                .runtime
+                .velo()
+                .context("remote_search requires a velo-enabled runtime (got bare Messenger)")?
+                .clone();
+            let peer_resolver =
+                super::p2p::peer_resolver::HubPeerResolver::new(Arc::clone(&hub), velo)
+                    as Arc<dyn super::p2p::peer_resolver::PeerResolver>;
+            let discovery: kvbm_engine::leader::RemoteDiscoveryHandle = Arc::new(
+                super::remote_search::HubRemoteDiscovery::new(client, peer_resolver),
+            );
+            leader.set_remote_discovery(discovery);
+            tracing::info!("remote-search discovery injected into leader");
         }
 
         Ok(())

@@ -42,7 +42,6 @@ pub use layout_compat::{LayoutCompatPayload, check_layout_compat};
 pub use modules::core::{
     DESCRIBE_INSTANCE_HANDLER, DescribeInstanceRequest, DisaggRole, HostInfo, InstanceDescription,
     LayerRange, LayoutConfigDescription, LayoutDescription, ParallelismDescription,
-    REGISTER_LEADER_HANDLER, RegisterLeaderRequest, RegisterLeaderResponse, RegisterLeaderStatus,
     StorageKindDescription, TierCapacity, TierKind, WorkerInfo,
 };
 pub use modules::dev::{RESET_HANDLER, ResetRequest, ResetResponse, Tier, TierError, plan_reset};
@@ -72,7 +71,7 @@ pub use modules::transfer::{
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ModuleId {
-    /// Always-on: `register_leader`.
+    /// Always-on: `describe_instance`.
     Core,
     /// Opt-in operator/debug tooling: `reset`. Safe in production.
     Dev,

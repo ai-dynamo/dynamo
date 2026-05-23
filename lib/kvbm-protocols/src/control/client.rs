@@ -21,8 +21,7 @@ use super::modules::transfer::TransferClient;
 use super::{
     ControlError, ControlReply, DESCRIBE_INSTANCE_HANDLER, DescribeInstanceRequest,
     InstanceDescription, LIST_MODULES_HANDLER, ListModulesRequest, ListModulesResponse, ModuleId,
-    REGISTER_LEADER_HANDLER, RESET_HANDLER, RegisterLeaderRequest, RegisterLeaderResponse,
-    ResetRequest, ResetResponse,
+    RESET_HANDLER, ResetRequest, ResetResponse,
 };
 
 /// A velo unary channel to one leader instance, shared by every sub-client.
@@ -84,7 +83,7 @@ impl LeaderControlClient {
         self.chan.instance_id
     }
 
-    /// Sub-client for the always-on `core` module (`register_leader`).
+    /// Sub-client for the always-on `core` module (`describe_instance`).
     pub fn core(&self) -> CoreClient {
         CoreClient {
             chan: self.chan.clone(),
@@ -159,14 +158,6 @@ pub struct CoreClient {
 }
 
 impl CoreClient {
-    /// Discover and register a remote leader by instance id.
-    pub async fn register_leader(
-        &self,
-        req: RegisterLeaderRequest,
-    ) -> Result<RegisterLeaderResponse, ControlError> {
-        self.chan.call(REGISTER_LEADER_HANDLER, &req).await
-    }
-
     /// Pull the leader's structured topology snapshot.
     ///
     /// **Fallback path.** In steady state the leader pushes

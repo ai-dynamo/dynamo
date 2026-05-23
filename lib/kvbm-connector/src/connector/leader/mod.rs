@@ -14,7 +14,7 @@ use kvbm_engine::leader::{EventSource, FindMatchesOptions, Leader, StagingMode};
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
 use kvbm_engine::worker::VeloWorkerClient;
-use kvbm_hub::{ConditionalDisaggClient, HubClient, IndexerLookupClient};
+use kvbm_hub::{ConditionalDisaggClient, HubClient};
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_observability::CacheStatsTracker;
 
@@ -96,10 +96,6 @@ pub struct ConnectorLeader {
     /// (RAII `DELETE` on drop). Populated only on the p2p-without-CD path; the
     /// CD path holds its registration via `disagg_client`.
     p2p_hub_client: OnceLock<Arc<HubClient>>,
-    /// Remote-search lookup client, captured in `initialize_async` when
-    /// `config.remote_search` is set and the hub's `indexer` feature is
-    /// effective. Consuming it in the match path is a follow-up task.
-    remote_search_client: OnceLock<Arc<IndexerLookupClient>>,
     /// CD-role dispatcher (`Arc<ConditionalDisaggLeader>`) installed by
     /// `initialize_async` when `config.disagg` is present. Bindings route
     /// `ConnectorLeaderApi` methods through this when set so role-specific
@@ -139,6 +135,9 @@ mod clients;
 
 // Implementation of search tools for the get_num_new_matched_tokens function.
 mod search;
+
+// Hub-indexer-backed `RemoteBlockDiscovery` impl injected into the engine leader.
+mod remote_search;
 
 // Implementation of onboarding tools for the update_state_after_alloc function.
 mod onboard;
@@ -187,7 +186,6 @@ impl ConnectorLeader {
             indexer_publisher: OnceLock::new(),
             indexer_hub_client: OnceLock::new(),
             p2p_hub_client: OnceLock::new(),
-            remote_search_client: OnceLock::new(),
             cd_api: OnceLock::new(),
         }
     }
@@ -237,21 +235,6 @@ impl ConnectorLeader {
     /// `disagg` and `initialize_async` has completed.
     pub fn disagg_client(&self) -> Option<&Arc<ConditionalDisaggClient>> {
         self.disagg_client.get()
-    }
-
-    /// Store the remote-search lookup client. Called once from
-    /// `initialize_async` when `config.remote_search` is set and the hub's
-    /// indexer feature is effective.
-    pub(crate) fn set_remote_search_client(&self, client: Arc<IndexerLookupClient>) -> Result<()> {
-        self.remote_search_client
-            .set(client)
-            .map_err(|_| anyhow!("remote_search_client already set"))
-    }
-
-    /// Remote-search lookup client, if `config.remote_search` was set against an
-    /// indexer-enabled hub and `initialize_async` has completed.
-    pub fn remote_search_client(&self) -> Option<&Arc<IndexerLookupClient>> {
-        self.remote_search_client.get()
     }
 
     /// Whichever [`HubClient`] this leader registered with, regardless of which
@@ -886,6 +869,21 @@ impl ConnectorLeader {
                     OnboardMode::Intra => false,
                     OnboardMode::Inter => uses_async,
                 };
+                // Request-scoped trace marker. `count == None` is the stall:
+                // a find (incl. an in-flight remote search) is still running, so
+                // vLLM re-polls. `Some(n)` resolves it to an external match.
+                match count {
+                    None => crate::audit!("gnmt_pending", request_id, num_computed_tokens),
+                    Some(n) => {
+                        crate::audit!(
+                            "gnmt_matched",
+                            request_id,
+                            num_computed_tokens,
+                            matched_tokens = n,
+                            async_load = actual_async
+                        )
+                    }
+                }
                 Ok((count, actual_async))
             }
             Err(e) => {
