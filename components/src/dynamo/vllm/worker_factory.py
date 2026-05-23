@@ -352,15 +352,14 @@ class WorkerFactory:
         handler.add_temp_dir(prometheus_temp_dir)
 
         # ModelExpress v2 receiver-side polling.
-        # The trainer publishes weights to the MX server with no trigger
-        # RPC, so each worker process watches the MX server itself and
-        # refits whenever a newer version appears. We start the poller
-        # on every TP rank via collective_rpc so each engine-core worker
-        # has its own background thread + per-rank MxV2RefitReceiver. The
-        # poller targets MxRefitWorkerExtension.start_mx_refit_poller,
-        # which the worker_extension_cls injection wires onto the Worker
-        # class at vLLM startup (see main.py:setup_vllm_engine).
-        if mx_refit_enabled:
+        # ModelExpress v2 receiver-side polling (LEGACY).
+        # New default: the trainer drives refit synchronously over HTTP via
+        # /engine/update_weights_via_mx on each worker — see the RL admin
+        # routes registration below + DynamoGeneration.update_weights_via_mx
+        # on the trainer side. The polling thread had a silent-stale-weights
+        # failure mode (DEBUGGING_POSTMORTEM §15). Re-enable for users who
+        # don't have a trainer driver by setting DYN_MX_REFIT_POLLER_ENABLED=1.
+        if mx_refit_enabled and os.environ.get("DYN_MX_REFIT_POLLER_ENABLED") == "1":
             mx_server_url = os.environ.get(
                 "MODEL_EXPRESS_URL", "modelexpress-server:8001"
             )
@@ -372,11 +371,19 @@ class WorkerFactory:
                         "poll_interval_s": 5.0,
                     },
                 )
-                logger.info("[mx-refit] receiver-side poller started on all ranks")
+                logger.info(
+                    "[mx-refit] receiver-side poller started on all ranks (LEGACY)"
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "[mx-refit] failed to start receiver-side poller: %s", exc
                 )
+        elif mx_refit_enabled:
+            logger.info(
+                "[mx-refit] synchronous-RPC mode: trainer drives refit via "
+                "/engine/update_weights_via_mx; poller disabled. Set "
+                "DYN_MX_REFIT_POLLER_ENABLED=1 to re-enable legacy polling."
+            )
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -797,6 +804,19 @@ class WorkerFactory:
 
             rl_routes["load_lora"] = load_lora
             rl_routes["unload_lora"] = unload_lora
+
+        # ModelExpress v2 mid-training weight refit (gated on DYN_MX_REFIT_ENABLED).
+        # Expose it as another /engine/<route> alongside biswapanda's RL admin
+        # routes so the trainer can drive a precise pause→refit→flush→resume
+        # cycle synchronously over HTTP (vs the polling-thread fallback).
+        if os.environ.get("DYN_MX_REFIT_ENABLED") == "1":
+
+            async def update_weights_via_mx(body: dict) -> dict:
+                return await first_endpoint_response(
+                    handler.update_weights_via_mx, body
+                )
+
+            rl_routes["update_weights_via_mx"] = update_weights_via_mx
 
         register_rl_routes(
             runtime,
