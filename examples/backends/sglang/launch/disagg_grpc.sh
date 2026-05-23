@@ -44,6 +44,7 @@ for role in prefill decode; do
         --port "$http_port" \
         --model-path "$MODEL" \
         --tp 1 \
+        --page-size 16 \
         --trust-remote-code \
         --skip-tokenizer-init \
         --disaggregation-mode "$role" \
