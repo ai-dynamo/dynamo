@@ -4,10 +4,12 @@
 family: deepseek_r1
 model_label: DeepSeek R1 / Nemotron
 mode: batch
+refs:
+  upstream: &upstream_ref 'inspired by vLLM DeepSeek R1 reasoning tests: https://github.com/vllm-project/vllm/blob/39910f2b25aacc09f5e7f166cdf0030b19f8b9e8/tests/reasoning/test_deepseekr1_reasoning_parser.py; local taxonomy: lib/parsers/REASONING_CASES.md'
 cases:
   REASONING.batch.1.b:
     description: Plain text stays in force-reasoning mode
-    ref: dynamo
+    ref: *upstream_ref
     model_text: plain answer
     expected:
       dynamo: &d_0
@@ -18,7 +20,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
   REASONING.batch.2.a:
     description: Force-reasoning parser with explicit think tags
-    ref: dynamo
+    ref: *upstream_ref
     model_text: <think>thinking</think>answer
     expected:
       dynamo: &d_1
@@ -29,32 +31,22 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
   REASONING.batch.3.a:
     description: Reasoning followed by downstream tool-call text
-    ref: dynamo
-    model_text: <think>choose tool</think><tool_call>{}
+    ref: *upstream_ref
+    model_text: <think>choose tool</think><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     expected:
       dynamo: &d_2
         reasoning_text: choose tool
-        normal_text: <tool_call>{}
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm: *d_2
       sglang:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
   REASONING.batch.3.b:
-    description: Open reasoning interrupted by downstream tool-call text
-    dynamo_leak: true
-    ref: dynamo
-    model_text: <think>choose tool<tool_call>{}
-    expected:
-      dynamo:
-        reasoning_text: choose tool<tool_call>{}
-        normal_text: ''
-      vllm:
-        reasoning_text: choose tool<tool_call>{}
-        normal_text: ''
-      sglang:
-        unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
+    description: Open reasoning interrupted by downstream tool-call text is not configured for DeepSeek R1-family parsing
+    ref: *upstream_ref
+    reason: Dynamo's DeepSeek R1-family reasoning parser has no downstream tool-call boundary while reasoning is open; closed-span handoff is covered by REASONING.batch.3.a.
   REASONING.batch.2.c:
     description: Reasoning followed by normal answer text
-    ref: dynamo
+    ref: *upstream_ref
     model_text: <think>compute</think>answer
     expected:
       dynamo: &d_3
@@ -68,7 +60,7 @@ cases:
     reason: Force-reasoning parser families start inside reasoning; marker-free prefix text is not a normal-text prefix.
   REASONING.batch.4:
     description: Dangling end marker exits force-reasoning mode
-    ref: dynamo
+    ref: *upstream_ref
     model_text: normal</think>answer
     expected:
       dynamo: &d_4
@@ -79,7 +71,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
   REASONING.batch.5:
     description: Missing end marker keeps the remaining text as reasoning
-    ref: dynamo
+    ref: *upstream_ref
     model_text: <think>partial
     expected:
       dynamo: &d_5
@@ -90,7 +82,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
   REASONING.batch.2.e:
     description: Empty reasoning block
-    ref: dynamo
+    ref: *upstream_ref
     model_text: <think></think>answer
     expected:
       dynamo: &d_6
@@ -101,7 +93,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
   REASONING.batch.2.f:
     description: Complex reasoning content with Unicode and newlines
-    ref: dynamo
+    ref: *upstream_ref
     model_text: |-
       <think>Line 1
       Unicode: café
@@ -118,7 +110,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
   REASONING.batch.1.a:
     description: Empty input
-    ref: dynamo
+    ref: *upstream_ref
     model_text: ''
     expected:
       dynamo: &d_8
@@ -129,7 +121,7 @@ cases:
         unavailable: SGLang expectation not captured for Dynamo parser family 'deepseek_r1'
   REASONING.batch.6.a:
     description: Multiple reasoning spans are concatenated by Dynamo
-    ref: dynamo
+    ref: *upstream_ref
     model_text: <think>first</think> middle <think>second</think> done
     expected:
       dynamo:

@@ -27,15 +27,12 @@ use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
 use dynamo_tokens::SequenceHash;
 use tokio::sync::oneshot;
 
-mod jetstream;
+mod recovery;
 pub mod remote;
-mod subscriber;
-mod worker_query;
 
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
-pub(crate) use subscriber::start_subscriber;
-pub(crate) use worker_query::start_worker_kv_query_endpoint;
+pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
 #[derive(Clone)]
 pub enum SideIndexer {

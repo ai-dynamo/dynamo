@@ -101,3 +101,12 @@ cases:
           </parameter>
           </function>
           </tool_call>
+        reason: >-
+          vLLM streaming parser checks for `<tool_call>` only in `delta_text`
+          (qwen3coder_tool_parser.py:402), not the accumulated `current_text`.
+          When the start token is split across chunk boundaries
+          (`<tool_cal` + `l>\n<fun`), the condition never fires and every
+          chunk falls through to the no-tool-call branch at
+          qwen3coder_tool_parser.py:422, which emits `delta_text` as content.
+          Result: the entire wire payload leaks into `normal_text` and no
+          tool calls are produced.

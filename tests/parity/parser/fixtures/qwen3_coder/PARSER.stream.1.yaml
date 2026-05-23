@@ -37,6 +37,13 @@ cases:
       vllm:
         calls: []
         normal_text: ''
+        reason: >-
+          vLLM streaming parser exits at qwen3coder_tool_parser.py:412 after
+          detecting `<tool_call>` in delta_text and never re-processes the
+          remainder of the same chunk; the trailing `finish_reason=tool_calls`
+          chunk has no `delta_token_ids`, so the EOS-flush branch
+          (qwen3coder_tool_parser.py:348-370) is skipped and no tool call is
+          emitted. Dynamo handles the single-chunk burst correctly.
   PARSER.stream.1.b:
     description: Complete tool call split across parser-significant boundaries
     ref: derived from PARSER.batch.1
