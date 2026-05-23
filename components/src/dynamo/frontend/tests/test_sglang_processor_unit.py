@@ -49,12 +49,13 @@ from dynamo.frontend.utils import (
     random_uuid,
 )
 
-# Needs sglang packages (gpu_1 container).  No need for parallel marker.
+# Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"

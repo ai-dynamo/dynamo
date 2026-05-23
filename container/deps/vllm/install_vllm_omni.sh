@@ -34,6 +34,18 @@ for raw_line in Path(sys.argv[1]).read_text().splitlines():
     print(f"{project_name}=={dist.version}")
 PY
 
-uv pip install --system \
-  --constraints "${PROTECTED_CONSTRAINTS}" \
-  "vllm-omni==${VLLM_OMNI_VERSION}"
+export VLLM_OMNI_TARGET_DEVICE
+
+# Use --system flag only for CUDA (system Python), omit for CPU/XPU (venv)
+if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
+  uv pip install --system \
+    --prerelease=allow \
+    --constraints "${PROTECTED_CONSTRAINTS}" \
+    "vllm-omni==${VLLM_OMNI_VERSION}"
+else
+  uv pip install \
+    --prerelease=allow \
+    --constraints "${PROTECTED_CONSTRAINTS}" \
+    "vllm-omni==${VLLM_OMNI_VERSION}"
+fi
+

@@ -25,6 +25,7 @@ use crate::{
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     types::{
+        RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
@@ -68,6 +69,13 @@ pub enum ModelManagerError {
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
 }
+
+/// Sentinel label value used in frontend Prometheus metrics for requests
+/// that target an unregistered model. Bounds label cardinality so arbitrary
+/// client-supplied model strings cannot create unbounded Prometheus series.
+/// The `_model` suffix makes accidental collision with a real model name
+/// implausible while keeping the value readable in Grafana dropdowns.
+pub const UNKNOWN_METRIC_MODEL: &str = "unknown_model";
 
 /// Central manager for model engines, routing, and configuration.
 ///
@@ -186,6 +194,29 @@ impl ModelManager {
         self.has_decode_model(model) || self.has_prefill_model(model)
     }
 
+    /// Check if any engine (chat, completions, embeddings, images, etc.) is
+    /// registered under this exact model name. Case-sensitive. Distinct from
+    /// [`has_model_any`](Self::has_model_any), which checks specifically for a
+    /// decode or prefill engine.
+    pub fn has_registered_model(&self, model: &str) -> bool {
+        self.models.contains_key(model)
+    }
+
+    /// Resolve the model name to use in frontend Prometheus metrics.
+    ///
+    /// Returns the user-supplied name if a model is registered under it
+    /// (preserving original casing), otherwise returns the bounded sentinel
+    /// [`UNKNOWN_METRIC_MODEL`]. Callers should use this resolved name
+    /// for every metric child created before engine lookup so unknown-model
+    /// requests do not pollute Prometheus label cardinality.
+    pub fn metric_model_for<'a>(&self, model: &'a str) -> &'a str {
+        if self.has_registered_model(model) {
+            model
+        } else {
+            UNKNOWN_METRIC_MODEL
+        }
+    }
+
     pub fn model_display_names(&self) -> HashSet<String> {
         self.models
             .iter()
@@ -246,6 +277,14 @@ impl ModelManager {
         self.models
             .iter()
             .filter(|entry| entry.value().has_videos_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    pub fn list_realtime_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_realtime_engine())
             .map(|entry| entry.key().clone())
             .collect()
     }
@@ -326,6 +365,16 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
+    }
+
+    pub fn get_realtime_engine(
+        &self,
+        model: &str,
+    ) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_realtime_engine()
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -515,6 +564,27 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_realtime_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: RealtimeBidirectionalEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_realtime_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_realtime_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.realtime_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -582,6 +652,13 @@ impl ModelManager {
 
     pub fn remove_videos_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_videos_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_realtime_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_realtime_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
@@ -1139,6 +1216,35 @@ mod tests {
     }
 
     #[test]
+    fn test_metric_model_for_resolves_to_sentinel_for_unknown() {
+        let mm = ModelManager::new();
+        mm.add_worker_set(
+            "Llama-3.1-8B-Instruct",
+            "ns1",
+            make_worker_set("ns1", "abc"),
+        );
+
+        // Registered models preserve their original casing.
+        assert_eq!(
+            mm.metric_model_for("Llama-3.1-8B-Instruct"),
+            "Llama-3.1-8B-Instruct"
+        );
+
+        // Case mismatches and unregistered strings collapse to the sentinel so
+        // arbitrary client-supplied values cannot create unbounded Prometheus
+        // series.
+        assert_eq!(
+            mm.metric_model_for("llama-3.1-8b-instruct"),
+            UNKNOWN_METRIC_MODEL
+        );
+        assert_eq!(
+            mm.metric_model_for("nonexistent-model-1"),
+            UNKNOWN_METRIC_MODEL
+        );
+        assert_eq!(mm.metric_model_for(""), UNKNOWN_METRIC_MODEL);
+    }
+
+    #[test]
     fn test_model_display_names_includes_prefill() {
         let mm = ModelManager::new();
         mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
@@ -1151,6 +1257,45 @@ mod tests {
     fn test_model_display_names_empty() {
         let mm = ModelManager::new();
         assert!(mm.model_display_names().is_empty());
+    }
+
+    #[test]
+    fn test_add_get_remove_realtime_model_round_trip() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+
+        mm.add_realtime_model("rt-echo", "0", engine.clone())
+            .unwrap();
+        assert!(mm.list_realtime_models().contains(&"rt-echo".to_string()));
+        assert!(mm.get_realtime_engine("rt-echo").is_ok());
+
+        mm.remove_realtime_model("rt-echo").unwrap();
+        assert!(!mm.list_realtime_models().contains(&"rt-echo".to_string()));
+        assert!(matches!(
+            mm.get_realtime_engine("rt-echo"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_add_realtime_model_duplicate() {
+        let mm = ModelManager::new();
+        let engine = std::sync::Arc::new(crate::engines::EchoBidirectionalEngine);
+        mm.add_realtime_model("rt-echo", "0", engine.clone())
+            .unwrap();
+        assert!(matches!(
+            mm.add_realtime_model("rt-echo", "0", engine),
+            Err(ModelManagerError::ModelAlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn test_get_realtime_engine_missing() {
+        let mm = ModelManager::new();
+        assert!(matches!(
+            mm.get_realtime_engine("does-not-exist"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
     }
 
     #[test]

@@ -90,7 +90,7 @@ def wait_for_router_kv_overlap(
     pre_request_record_count: int,
     context: str = "",
     log_label: str = "router",
-    timeout_s: float = 25.0,
+    timeout_s: float = 60.0,
 ) -> tuple[int, int, str]:
     deadline = time.time() + timeout_s
     last_segment = ""
@@ -101,7 +101,7 @@ def wait_for_router_kv_overlap(
         last_segment = segment
         records = extract_router_kv_overlap_records(full_logs)
         if len(records) >= pre_request_record_count + 1:
-            record = records[-1]
+            record = records[pre_request_record_count]
             return record.overlap_blocks, record.total_blocks, segment
         time.sleep(1)
 

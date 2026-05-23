@@ -40,17 +40,47 @@ cases:
         normal_text: Hello, how can I help you today?
       vllm: *id003
       sglang: *id003
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &id004
+      dynamo:
         calls: []
         normal_text: ''
-      vllm: *id004
-      sglang: *id004
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
+      sglang:
+        calls: []
+        normal_text: '   '
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: |-
@@ -75,14 +105,14 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
-  PARSER.batch.11:
-    description: Separator-character case — n/a for this family's syntax
+  PARSER.batch.30:
+    description: Separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets grammar-level call separators embedded inside argument string values. deepseek_v3 frames each call with begin/end tokens; its <｜tool▁sep｜> token separates the function name from the JSON argument block, not calls from each other or values inside the argument JSON. Generic escaped/string-value coverage remains in PARSER.batch.7.b.
-  PARSER.batch.12:
-    description: Multi-call separator-character case — n/a for this family's syntax
+      This case is not applicable to deepseek_v3 because <｜tool▁sep｜> separates the function name from JSON arguments, not calls from each other.
+  PARSER.batch.31:
+    description: Multi-call separator-character case not applicable
     reason: |-
-      PARSER.batch.11 targets grammar-level call separators embedded inside argument string values. deepseek_v3 frames each call with begin/end tokens; its <｜tool▁sep｜> token separates the function name from the JSON argument block, not calls from each other or values inside the argument JSON. Generic escaped/string-value coverage remains in PARSER.batch.7.b. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+      This case is not applicable to deepseek_v3 because <｜tool▁sep｜> separates the function name from JSON arguments, not calls from each other.
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
@@ -115,3 +145,7 @@ cases:
         calls: []
         normal_text: ''
         reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls not applicable
+    reason: |-
+      This case is not applicable to deepseek_v3 because there is no peer mixed known/unknown DeepSeek V3 parser case to align against.

@@ -18,7 +18,7 @@ cleanup() {
     echo "🧹 Cleaning up running processes..."
 
     # Stop docker services
-    docker compose -f ../../deploy/docker-compose.yml down 2>/dev/null || true
+    docker compose -f ../../dev/docker-compose.yml down 2>/dev/null || true
 
     # Wait a moment for cleanup
     sleep 2

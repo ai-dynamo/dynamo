@@ -468,6 +468,24 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 | `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | Status reflects the current observed state of this graph deployment. |  |  |
 
 
+#### DynamoGraphDeploymentExperimentalSpec
+
+
+
+DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+features. Component-level experimental features are represented separately
+on component specs.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kvTransferPolicy` _[KvTransferPolicy](#kvtransferpolicy)_ | KvTransferPolicy configures topology-aware routing for KV-cache<br />transfers between prefill and decode workers. |  | Optional: \{\} <br /> |
+
+
 #### DynamoGraphDeploymentRequest
 
 
@@ -649,6 +667,7 @@ _Appears in:_
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | TopologyConstraint is the deployment-level topology constraint.<br />When set, topologyProfile is required and names the ClusterTopology CR to use.<br />packDomain is optional here — it can be omitted when only services carry constraints.<br />Services without their own topologyConstraint inherit from this value. |  | Optional: \{\} <br /> |
+| `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | Experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between releases. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -928,6 +947,46 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `secretName` _string_ | SecretName is the name of a Kubernetes Secret containing the TLS certificate and key. |  |  |
+
+
+#### KvTransferEnforcement
+
+_Underlying type:_ _string_
+
+KvTransferEnforcement controls how the selected prefill worker's topology is
+applied to decode routing.
+
+_Validation:_
+- Enum: [required preferred]
+
+_Appears in:_
+- [KvTransferPolicy](#kvtransferpolicy)
+
+| Field | Description |
+| --- | --- |
+| `required` | KvTransferEnforcementRequired enforces same-domain decode worker<br />selection.<br /> |
+| `preferred` | KvTransferEnforcementPreferred biases decode worker selection toward the<br />same domain.<br /> |
+
+
+#### KvTransferPolicy
+
+
+
+KvTransferPolicy configures topology-aware routing for KV-cache transfers
+between prefill and decode workers. This graph-wide policy lives under
+`spec.experimental` while the API is incubating.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `labelKey` _string_ | LabelKey is a Kubernetes node label key (e.g.<br />"topology.kubernetes.io/zone") whose value identifies the topology<br />domain for each worker. The operator copies the node label onto worker<br />pods so the runtime can publish it as worker metadata. The label<br />should correspond to the topology level named in `domain`. |  | MaxLength: 317 <br />MinLength: 1 <br />Pattern: `^(([a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]\{0,61\}[A-Za-z0-9])?)$` <br />Optional: \{\} <br /> |
+| `domain` _[TopologyDomain](#topologydomain)_ | Domain is the logical name for the topology level to enforce<br />(e.g. "zone", "rack"). The router uses this to match workers that<br />share the same value for the label identified by `labelKey`. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+| `enforcement` _[KvTransferEnforcement](#kvtransferenforcement)_ | Enforcement controls how the selected prefill worker's topology is<br />applied to decode routing. "required" only allows decode workers in the<br />same topology domain as the selected prefill worker. "preferred" keeps<br />all decode workers eligible, but biases selection toward workers in the<br />same topology domain. Defaults to "required". | required | Enum: [required preferred] <br />Optional: \{\} <br /> |
+| `preferredWeight` _float_ | PreferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 
@@ -1336,8 +1395,10 @@ _Appears in:_
 _Underlying type:_ _string_
 
 TopologyDomain is a free-form topology level identifier.
-Domain names are defined by the cluster admin in the ClusterTopology CR.
 Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
+When used with a ClusterTopology CR, domain names are defined in the CR's
+hierarchy; when used with `spec.experimental.kvTransferPolicy.labelKey`
+alone, the value is a user-chosen logical name for the topology level.
 Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (lowercase alphanumeric,
 may contain hyphens but must not start or end with one).
 
@@ -1345,6 +1406,7 @@ _Validation:_
 - Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 
 _Appears in:_
+- [KvTransferPolicy](#kvtransferpolicy)
 - [SpecTopologyConstraint](#spectopologyconstraint)
 - [TopologyConstraint](#topologyconstraint)
 
@@ -1767,6 +1829,25 @@ _Appears in:_
 | `componentName` _string_ | componentName is the `componentName` of the entry within the target<br />DGD's `spec.components` list to scale. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
+#### DynamoGraphDeploymentExperimentalSpec
+
+
+
+DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+features whose API shape and behavior may change in breaking ways between
+v1beta1 releases. Component-level experimental features live under
+`spec.components[*].experimental`.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `kvTransferPolicy` _[KvTransferPolicy](#kvtransferpolicy)_ | kvTransferPolicy configures topology-aware routing for KV-cache<br />transfers between prefill and decode workers. |  | Optional: \{\} <br /> |
+
+
 #### v1beta1 DynamoGraphDeploymentRequest
 
 
@@ -1813,7 +1894,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br />Optional: \{\} <br /> |
-| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1". |  | Optional: \{\} <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job (planner image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1".<br />For Dynamo < 1.1.0, use dynamo-frontend. |  | Optional: \{\} <br /> |
 | `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  | Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  | Optional: \{\} <br /> |
@@ -1933,6 +2014,7 @@ _Appears in:_
 | `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | topologyConstraint is the deployment-level topology constraint. When<br />set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology<br />CR to use. `spec.topologyConstraint.packDomain` is optional at this<br />level and can be omitted when only components carry constraints.<br />Components without their own `topologyConstraint` inherit from this value. |  | Optional: \{\} <br /> |
+| `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -2137,6 +2219,46 @@ _Appears in:_
 | `rdma` _boolean_ | RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.<br />Semantics / usage:<br />  - This is capability metadata used for profiling, planning, and deployment decisions.<br />  - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,<br />    GPUDirect settings). It only expresses availability/intent.<br />  - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating<br />    RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery<br />    is unavailable, it may remain unset.<br />Impact of wrong / missing values:<br />  - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or<br />    deployments to assume RDMA is available; depending on the runtime transport selection and<br />    fallback behavior, this can lead to connection/setup failures or performance regressions.<br />  - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and<br />    fall back to non-RDMA transports, usually remaining functional but potentially slower.<br />  - If unset and undiscovered, consumers should treat RDMA availability as unknown and use<br />    conservative defaults / fallback transports. |  | Optional: \{\} <br /> |
 
 
+
+
+#### KvTransferEnforcement
+
+_Underlying type:_ _string_
+
+KvTransferEnforcement controls how the selected prefill worker's topology is
+applied to decode routing.
+
+_Validation:_
+- Enum: [required preferred]
+
+_Appears in:_
+- [KvTransferPolicy](#kvtransferpolicy)
+
+| Field | Description |
+| --- | --- |
+| `required` | KvTransferEnforcementRequired enforces same-domain decode worker<br />selection.<br /> |
+| `preferred` | KvTransferEnforcementPreferred biases decode worker selection toward the<br />same domain.<br /> |
+
+
+#### KvTransferPolicy
+
+
+
+KvTransferPolicy configures topology-aware routing for KV-cache transfers
+between prefill and decode workers. This is a graph-wide concern placed
+under `spec.experimental` while the API is incubating.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `labelKey` _string_ | labelKey is a Kubernetes node label key (e.g.<br />"topology.kubernetes.io/zone") whose value identifies the topology<br />domain for each worker. The operator copies the node label onto worker<br />pods so the runtime can publish it as worker metadata. The label<br />should correspond to the topology level named in `domain`. |  | MaxLength: 317 <br />MinLength: 1 <br />Pattern: `^(([a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]\{0,61\}[A-Za-z0-9])?)$` <br />Optional: \{\} <br /> |
+| `domain` _[TopologyDomain](#topologydomain)_ | domain is the logical name for the topology level to enforce<br />(e.g. "zone", "rack"). The router uses this to match workers that<br />share the same value for the label identified by `labelKey`. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+| `enforcement` _[KvTransferEnforcement](#kvtransferenforcement)_ | enforcement controls how the selected prefill worker's topology is<br />applied to decode routing. "required" only allows decode workers in the<br />same topology domain as the selected prefill worker. "preferred" keeps<br />all decode workers eligible, but biases selection toward workers in the<br />same topology domain. Defaults to "required". | required | Enum: [required preferred] <br />Optional: \{\} <br /> |
+| `preferredWeight` _float_ | preferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### MockerSpec
@@ -2528,13 +2650,16 @@ _Appears in:_
 _Underlying type:_ _string_
 
 TopologyDomain is a free-form topology level identifier.
-Domain names are defined by the cluster admin in the ClusterTopology CR.
 Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
+When used with a ClusterTopology CR, domain names are defined in the CR's
+hierarchy; when used with `spec.experimental.kvTransferPolicy.labelKey`
+alone, the value is a user-chosen logical name for the topology level.
 
 _Validation:_
 - Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 
 _Appears in:_
+- [KvTransferPolicy](#kvtransferpolicy)
 - [SpecTopologyConstraint](#spectopologyconstraint)
 - [TopologyConstraint](#topologyconstraint)
 

@@ -15,7 +15,7 @@ from dynamo.common.storage import get_fs
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import ModelInput, ModelType, fetch_model, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, fetch_model, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
@@ -91,6 +91,11 @@ async def init_omni(
         config.model,
         config.served_model_name,
         kv_cache_block_size=config.engine_args.block_size,
+        # Omni workers serve the full multi-stage pipeline behind one
+        # endpoint; there is no prefill/decode split visible to the
+        # frontend, so they register as Aggregated.
+        worker_type=WorkerType.Aggregated,
+        needs=[],
     )
 
     if dummy_tokenizer_paths:

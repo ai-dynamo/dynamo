@@ -1503,10 +1503,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "dynamo-config"
+name = "dynamo-data-gen"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
+ "dynamo-tokens",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1561,7 +1566,6 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-config",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -1647,6 +1651,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "indicatif 0.18.4",
@@ -1719,14 +1724,12 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
- "dynamo-config",
  "educe",
  "either",
  "etcd-client",
  "figment",
  "futures",
  "humantime",
- "hyper-util",
  "k8s-openapi",
  "kube",
  "libc",
@@ -1774,6 +1777,8 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "blake3",
+ "dashmap",
  "fastokens",
  "rayon",
  "rustc-hash 1.1.0",
@@ -3657,9 +3662,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
 dependencies = [
  "memo-map",
  "serde",
@@ -3667,9 +3672,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45092d80391870622fcf3bd82f5d2af18f99533ea60debb4bc9db0c76f0e809a"
+checksum = "99df5123c54391e2a228014c1dbbd85a3dab08a25e776c810526f2f47542b3de"
 dependencies = [
  "minijinja",
  "serde",
