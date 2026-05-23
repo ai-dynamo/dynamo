@@ -306,15 +306,15 @@ testCases.push(
   {
     file: 'lib/bindings/python/src/dynamo/_core.pyi',
     expect: {
-      core: false,
-      frontend: false,
+      core: true,
+      frontend: true,
       parser: true,
       parser_vllm: false,
       parser_sglang: false,
       rust: false,
       parser_rust: false,
     },
-    desc: 'python parser binding stub triggers parser only',
+    desc: '_core.pyi has shared runtime stubs beyond parser APIs — triggers core + frontend + parser so non-parser stub changes still get full validation',
   },
   {
     file: 'lib/bindings/python/tests/test_parsers.py',
