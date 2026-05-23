@@ -48,5 +48,5 @@
 <text class="arrow-label" x="640.0" y="312.0" text-anchor="middle">cuMemUnmap + cuMemRelease</text>
 <text class="arrow-meta" x="640.0" y="366.0" text-anchor="middle">~182 GiB &#8594; ~2.6 GiB on device</text>
 <text class="arrow-meta" x="640.0" y="384.0" text-anchor="middle" fill="#8c8c8c">~6 GiB on-disk checkpoint artifact</text>
-<text class="footer" x="40" y="595">Qwen3 0.6B BF16 &#183; NVIDIA B200, 192 GiB HBM &#183; vLLM gpu_memory_utilization=0.95</text>
+<text class="footer" x="40" y="595">vLLM Qwen3 0.6B BF16 &#183; NVIDIA B200 (192 GiB VRAM) &#183; gpu_memory_utilization=0.95</text>
 </svg>
