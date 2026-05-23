@@ -16,6 +16,8 @@ pub mod arena;
 pub mod nixl;
 #[cfg(target_os = "linux")]
 pub mod numa;
+#[cfg(target_os = "linux")]
+pub mod resources;
 
 /// Offset-based buffer views into underlying storage.
 pub mod offset;
@@ -44,6 +46,8 @@ pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
 #[cfg(target_os = "linux")]
 pub use numa::{NumaNode, is_numa_disabled, is_numa_enabled};
+#[cfg(target_os = "linux")]
+pub use resources::{GpuView, NumaNodeView, Resources, SliceSource, SlicingMode};
 pub use offset::OffsetBuffer;
 pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};

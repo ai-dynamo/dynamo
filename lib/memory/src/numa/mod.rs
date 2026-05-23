@@ -254,11 +254,12 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
     Ok(())
 }
 
-/// Get PCI bus address for a CUDA device via the CUDA driver API.
+/// Get the PCI bus address for a CUDA device via the CUDA driver API.
 ///
-/// Returns a normalized PCI address string like "0000:3b:00.0".
-/// The device_id here is a CUDA ordinal (affected by CUDA_VISIBLE_DEVICES).
-fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
+/// Returns a normalized PCI address string like `"0000:3b:00.0"` (lowercase hex,
+/// always trailing `.0`). The `device_id` is a CUDA ordinal, so the result is
+/// subject to `CUDA_VISIBLE_DEVICES` remapping.
+pub fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
     // SAFETY: We're calling CUDA driver API functions with valid device ordinals.
     // cuDeviceGet and get_attribute are safe as long as CUDA is initialized
     // (which CudaContext::new handles).
@@ -292,15 +293,25 @@ fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
     }
 }
 
-/// GPU info with PCI address and NUMA node, used for CPU set subdivision.
+/// GPU topology info: PCI address and (optional) NUMA node.
+///
+/// Returned by [`enumerate_all_gpus`] and [`enumerate_host_gpus_from_sysfs`].
+/// The PCI address is normalized to lowercase `"DDDD:BB:DD.0"` form.
+/// `numa_node` is `None` when sysfs reports `-1` (no affinity) or the entry
+/// cannot be read.
 #[derive(Debug, Clone)]
-struct GpuTopoInfo {
-    pci_address: String,
-    numa_node: Option<u32>,
+pub struct GpuInfo {
+    /// Normalized PCI bus address, e.g. `"0000:3b:00.0"`.
+    pub pci_address: String,
+    /// NUMA node ID from `/sys/bus/pci/devices/<pci>/numa_node`, or `None`
+    /// when the device has no affinity info.
+    pub numa_node: Option<u32>,
 }
 
-/// Enumerate all GPUs visible to CUDA with their PCI addresses and NUMA nodes.
-fn enumerate_cuda_gpus() -> Vec<GpuTopoInfo> {
+/// Enumerate GPUs visible to the CUDA driver in this process (subject to
+/// `CUDA_VISIBLE_DEVICES`). Used as a last-ditch fallback when neither
+/// sysfs nor NVML succeed.
+fn enumerate_cuda_gpus() -> Vec<GpuInfo> {
     let count = match cuda_device::get_count() {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -310,7 +321,7 @@ fn enumerate_cuda_gpus() -> Vec<GpuTopoInfo> {
         .filter_map(|i| {
             let pci = get_pci_bus_address_from_cuda(i)?;
             let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
-            Some(GpuTopoInfo {
+            Some(GpuInfo {
                 pci_address: pci,
                 numa_node: numa,
             })
@@ -318,22 +329,85 @@ fn enumerate_cuda_gpus() -> Vec<GpuTopoInfo> {
         .collect()
 }
 
-/// Enumerate all GPUs on the system, preferring NVML (sees all GPUs)
-/// over CUDA driver (only sees CUDA_VISIBLE_DEVICES).
-fn enumerate_all_gpus() -> Vec<GpuTopoInfo> {
-    // Try NVML first — it sees all GPUs regardless of CUDA_VISIBLE_DEVICES
+/// Enumerate all NVIDIA GPUs on the host by walking sysfs.
+///
+/// Scans `/sys/bus/pci/devices/*`, keeping entries whose `vendor == 0x10de`
+/// (NVIDIA) and whose `class` starts with `0x0300` (display / 3D / VGA
+/// controllers). Reads each device's `numa_node`. The result is sorted by
+/// PCI address for determinism.
+///
+/// This path is the source of truth for "what GPUs are on this host" because
+/// `/sys` is not network-namespaced and remains accurate inside containers
+/// even when NVML's view collapses to the container's allotment.
+/// Returns an empty `Vec` if `/sys/bus/pci/devices` cannot be read.
+pub fn enumerate_host_gpus_from_sysfs() -> Vec<GpuInfo> {
+    let root = std::path::Path::new("/sys/bus/pci/devices");
+    let entries = match fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut gpus: Vec<GpuInfo> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        let vendor = match fs::read_to_string(path.join("vendor")) {
+            Ok(s) => s.trim().to_lowercase(),
+            Err(_) => continue,
+        };
+        if vendor != "0x10de" {
+            continue;
+        }
+
+        let class = match fs::read_to_string(path.join("class")) {
+            Ok(s) => s.trim().to_lowercase(),
+            Err(_) => continue,
+        };
+        // 0x0300xx = display controller / VGA / 3D controller.
+        if !class.starts_with("0x0300") {
+            continue;
+        }
+
+        let numa = read_numa_node_from_sysfs(&name).map(|n| n.0);
+        gpus.push(GpuInfo {
+            pci_address: name.to_lowercase(),
+            numa_node: numa,
+        });
+    }
+
+    gpus.sort_by(|a, b| a.pci_address.cmp(&b.pci_address));
+    gpus
+}
+
+/// Enumerate every NVIDIA GPU on the host.
+///
+/// Prefers the sysfs walk (container-safe, sees host-wide topology), falls
+/// back to NVML (loses container-hidden GPUs), and finally to the CUDA
+/// driver (subject to `CUDA_VISIBLE_DEVICES`). Returns an empty `Vec` if all
+/// three paths fail.
+pub fn enumerate_all_gpus() -> Vec<GpuInfo> {
+    let sysfs_gpus = enumerate_host_gpus_from_sysfs();
+    if !sysfs_gpus.is_empty() {
+        tracing::debug!("sysfs enumerated {} GPUs", sysfs_gpus.len());
+        return sysfs_gpus;
+    }
+
     if let Some(nvml) = nvml::try_nvml() {
         let nvml_gpus = nvml.enumerate_gpus();
         if !nvml_gpus.is_empty() {
             tracing::debug!(
-                "NVML enumerated {} GPUs (ignoring CUDA_VISIBLE_DEVICES)",
+                "NVML enumerated {} GPUs (sysfs unavailable)",
                 nvml_gpus.len()
             );
             return nvml_gpus
                 .into_iter()
                 .map(|g| {
                     let numa = read_numa_node_from_sysfs(&g.pci_address).map(|n| n.0);
-                    GpuTopoInfo {
+                    GpuInfo {
                         pci_address: g.pci_address,
                         numa_node: numa,
                     }
@@ -342,44 +416,45 @@ fn enumerate_all_gpus() -> Vec<GpuTopoInfo> {
         }
     }
 
-    // Fallback: enumerate via CUDA driver (may miss hidden devices)
     tracing::debug!("Falling back to CUDA driver GPU enumeration");
     enumerate_cuda_gpus()
 }
 
-/// Cached CPU set results per CUDA device ordinal.
-static DEVICE_CPU_SETS: OnceLock<HashMap<u32, Option<Vec<usize>>>> = OnceLock::new();
+/// Cached map of PCI bus address → deterministic CPU slice.
+///
+/// Built once from the sysfs-derived host GPU list and the system NUMA
+/// topology. Populated lazily on first call to [`cpu_slices_by_pci`].
+static CPU_SLICES_BY_PCI: OnceLock<HashMap<String, Vec<usize>>> = OnceLock::new();
 
-/// Get a deterministic CPU subset for a CUDA device, subdivided among ALL GPUs
-/// sharing the same NUMA node (including those hidden by CUDA_VISIBLE_DEVICES).
+/// Return the global PCI-keyed map of per-GPU CPU slices.
 ///
-/// # Algorithm
-/// 1. Get PCI address + NUMA node for target device (CUDA driver API)
-/// 2. Enumerate ALL GPUs on the system:
-///    - Try NVML first (sees all GPUs, ignores CUDA_VISIBLE_DEVICES)
-///    - Fall back to CUDA driver API (only sees visible devices)
-/// 3. For each GPU, get its NUMA node via sysfs (PCI address → /sys/.../numa_node)
-/// 4. Group GPUs by NUMA node
-/// 5. Sort by PCI address within each group (deterministic)
-/// 6. Get full CPU set for the node via topology
-/// 7. Divide into N equal slices (N = GPUs on same node)
-/// 8. Return the slice for the target device's position
+/// Built from [`enumerate_all_gpus`] (sysfs-first) and the system NUMA
+/// topology. For each NUMA node with non-empty cpulist, all sibling GPUs on
+/// that node are sorted by PCI address and the node's CPUs are divided into
+/// equal slices — last slice absorbs the remainder. GPUs whose NUMA node is
+/// unknown, or whose node's cpulist is empty, are absent from the map.
 ///
-/// # Example
-/// System: 8 GPUs, 2 NUMA nodes, 4 GPUs per node.
-/// CUDA_VISIBLE_DEVICES=0,1 (only 2 visible).
-/// NVML sees all 8 → correctly subdivides into 4 slices per node.
-///
-/// Returns None if NUMA node can't be determined.
-pub fn get_device_cpu_set(device_id: u32) -> Option<Vec<usize>> {
-    DEVICE_CPU_SETS
-        .get_or_init(compute_all_device_cpu_sets)
-        .get(&device_id)
-        .cloned()
-        .flatten()
+/// Computed once and cached for the process lifetime.
+pub fn cpu_slices_by_pci() -> &'static HashMap<String, Vec<usize>> {
+    CPU_SLICES_BY_PCI.get_or_init(compute_cpu_slices_by_pci)
 }
 
-fn compute_all_device_cpu_sets() -> HashMap<u32, Option<Vec<usize>>> {
+/// Get a deterministic CPU subset for a CUDA device.
+///
+/// Convenience wrapper over [`cpu_slices_by_pci`]: resolves the CUDA ordinal
+/// to a PCI address and looks up that PCI's slice. Returns `None` when the
+/// device's NUMA node cannot be determined (e.g. single-socket box with no
+/// affinity info) or when the slicing map is empty (no NUMA topology).
+///
+/// Slices are deterministic across runs and across containers: changing
+/// `CUDA_VISIBLE_DEVICES` does not change a given PCI device's slice,
+/// because the slicing is computed against the *host* GPU list (sysfs).
+pub fn get_device_cpu_set(device_id: u32) -> Option<Vec<usize>> {
+    let pci = get_pci_bus_address_from_cuda(device_id)?;
+    cpu_slices_by_pci().get(&pci).cloned()
+}
+
+fn compute_cpu_slices_by_pci() -> HashMap<String, Vec<usize>> {
     let topology = match topology::get_numa_topology() {
         Ok(t) => t,
         Err(e) => {
@@ -388,25 +463,11 @@ fn compute_all_device_cpu_sets() -> HashMap<u32, Option<Vec<usize>>> {
         }
     };
 
-    // Get the target device's PCI address and NUMA node
-    let cuda_count = cuda_device::get_count().unwrap_or(0);
-    if cuda_count == 0 {
+    let all_gpus = enumerate_all_gpus();
+    if all_gpus.is_empty() {
         return HashMap::new();
     }
 
-    // Build info for each visible CUDA device
-    let mut cuda_devices: Vec<(u32, String, Option<u32>)> = Vec::new();
-    for i in 0..cuda_count as u32 {
-        if let Some(pci) = get_pci_bus_address_from_cuda(i) {
-            let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
-            cuda_devices.push((i, pci, numa));
-        }
-    }
-
-    // Enumerate ALL GPUs on the system (NVML preferred)
-    let all_gpus = enumerate_all_gpus();
-
-    // Group all GPUs by NUMA node
     let mut node_groups: HashMap<u32, Vec<String>> = HashMap::new();
     for gpu in &all_gpus {
         if let Some(node) = gpu.numa_node {
@@ -416,43 +477,36 @@ fn compute_all_device_cpu_sets() -> HashMap<u32, Option<Vec<usize>>> {
                 .push(gpu.pci_address.clone());
         }
     }
-
-    // Sort each group by PCI address for deterministic ordering
     for group in node_groups.values_mut() {
         group.sort();
     }
 
-    // For each CUDA device, find its position in its NUMA group and subdivide
     let mut results = HashMap::new();
-    for (device_id, pci_addr, numa_node) in &cuda_devices {
-        let cpu_set = numa_node.and_then(|node| {
-            let group = node_groups.get(&node)?;
-            let position = group.iter().position(|addr| addr == pci_addr)?;
-            let all_cpus = topology.cpus_for_node(node)?;
+    for (node, group) in &node_groups {
+        let all_cpus = match topology.cpus_for_node(*node) {
+            Some(cpus) if !cpus.is_empty() => cpus,
+            _ => continue,
+        };
 
-            if all_cpus.is_empty() || group.is_empty() {
-                return None;
+        let n = group.len();
+        let chunk_size = all_cpus.len() / n;
+        if chunk_size == 0 {
+            // More GPUs than CPUs on this node — every GPU gets all of them.
+            for pci in group {
+                results.insert(pci.clone(), all_cpus.to_vec());
             }
+            continue;
+        }
 
-            // Divide CPUs into N equal slices
-            let n = group.len();
-            let chunk_size = all_cpus.len() / n;
-            if chunk_size == 0 {
-                // More GPUs than CPUs on this node — give all CPUs to everyone
-                return Some(all_cpus.to_vec());
-            }
-
+        for (position, pci) in group.iter().enumerate() {
             let start = position * chunk_size;
             let end = if position == n - 1 {
-                all_cpus.len() // last slice gets remainder
+                all_cpus.len()
             } else {
                 start + chunk_size
             };
-
-            Some(all_cpus[start..end].to_vec())
-        });
-
-        results.insert(*device_id, cpu_set);
+            results.insert(pci.clone(), all_cpus[start..end].to_vec());
+        }
     }
 
     results

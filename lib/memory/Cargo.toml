@@ -39,6 +39,10 @@ offset-allocator = "0.2"
 name = "validate_numa_placement"
 path = "bin/validate_numa_placement.rs"
 
+[[bin]]
+name = "inspect_resources"
+path = "bin/inspect_resources.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = "3"
