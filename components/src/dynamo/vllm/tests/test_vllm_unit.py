@@ -384,6 +384,7 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         served_model_name="Qwen/Qwen3-0.6B",
         model="Qwen/Qwen3-0.6B",
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
+        component="backend",
     )
     worker_config = object()
 
@@ -426,6 +427,8 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     engine = llm_engine.VllmLLMEngine(
         SimpleNamespace(),
         CommonDisaggregationMode.AGGREGATED,
+        served_model_name="test-model",
+        component="backend",
         enable_rl=True,
     )
     engine.engine_client = SimpleNamespace(generate=fake_generate)
