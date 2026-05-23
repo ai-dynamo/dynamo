@@ -663,9 +663,9 @@ vllm_configs = {
                 expected_response=["Generated 1 embeddings with dimension 128"],
             ),
             # encoding_format=base64. The Python handler base64-encodes the
-            # vector and the Rust frontend deserializes it as a string
-            # (DIS-2099). The validator decodes back to floats so the
-            # dimension assertion stays uniform across both shapes.
+            # vector and the Rust frontend deserializes it as a string.
+            # The validator decodes back to floats so the dimension
+            # assertion stays uniform across both shapes.
             EmbeddingPayload(
                 body={
                     "input": ["Hello, world!"],

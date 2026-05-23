@@ -612,8 +612,8 @@ sglang_configs = {
                 expected_response=["Generated 1 embeddings with dimension 128"],
                 extra_body={"dimensions": 128},
             ),
-            # Test ``encoding_format=base64`` end-to-end (DIS-2099). The
-            # Python handler base64-encodes the f32 byte buffer; the Rust
+            # Test ``encoding_format=base64`` end-to-end. The Python
+            # handler base64-encodes the f32 byte buffer; the Rust
             # frontend deserializes it as a string; the validator decodes
             # it back and asserts the f32 count matches ``dimensions``.
             embedding_payload(

@@ -20,6 +20,7 @@ from dynamo.vllm.handlers import _encode_floats_to_base64
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]

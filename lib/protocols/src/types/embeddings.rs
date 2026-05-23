@@ -16,15 +16,20 @@
 //! (where each per-input embedding is a base64-encoded little-endian
 //! f32 byte string). We own the narrowest subtree -- [`Embedding`] and
 //! [`CreateEmbeddingResponse`] -- so the wire-level value can be either a
-//! JSON array of floats or a JSON string. Everything else (request,
-//! [`EmbeddingInput`], [`EmbeddingUsage`], [`EncodingFormat`]) is still
-//! re-exported from upstream.
+//! JSON array of floats or a JSON string.
+//!
+//! Everything else (request, [`EmbeddingInput`], [`EmbeddingUsage`],
+//! [`EncodingFormat`], the builder types, the base64-specific upstream
+//! types like `Base64Embedding`) is re-exported via the glob below;
+//! the local [`Embedding`] and [`CreateEmbeddingResponse`] shadow their
+//! upstream namesakes. This preserves the previous full re-export
+//! surface for downstream crates that may have been importing those
+//! other symbols.
 
 use serde::{Deserialize, Serialize};
 
-pub use async_openai::types::embeddings::{
-    CreateEmbeddingRequest, EmbeddingInput, EmbeddingUsage, EncodingFormat,
-};
+#[allow(unused_imports)]
+pub use async_openai::types::embeddings::*;
 
 /// Per-input embedding payload.
 ///
@@ -77,7 +82,7 @@ pub struct Embedding {
 ///
 /// Mirrors `async_openai::types::embeddings::CreateEmbeddingResponse`
 /// except the `data` field carries the Dynamo-owned [`Embedding`].
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CreateEmbeddingResponse {
     pub object: String,
     pub model: String,

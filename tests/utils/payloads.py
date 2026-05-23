@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import re
+import struct
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -917,9 +918,6 @@ class EmbeddingPayload(BasePayload):
           is decoded here so the dimension count in the summary string
           stays comparable across both shapes.
         """
-        import base64
-        import struct
-
         response.raise_for_status()
         result = response.json()
         assert "object" in result, "Missing 'object' in response"
