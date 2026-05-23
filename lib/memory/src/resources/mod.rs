@@ -136,9 +136,86 @@ pub struct Resources {
     /// `/proc/self/status` `Cpus_allowed_list`. Diagnostic only — not folded
     /// into [`GpuView::cpu_slice`].
     pub process_allowed_cpus: Vec<usize>,
+    /// Process launch context: cgroup version, cgroup-imposed cpuset and
+    /// memory/CPU limits, and a container hint. Diagnostic only.
+    pub cgroup: CgroupInfo,
     /// The slicing mode that produced this snapshot.
     pub mode: SlicingMode,
 }
+
+/// Which cgroup hierarchy the current process is under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CgroupVersion {
+    /// Legacy cgroup v1 (per-controller mounts under `/sys/fs/cgroup/<ctrl>`).
+    V1,
+    /// Unified cgroup v2 (single hierarchy under `/sys/fs/cgroup`).
+    V2,
+    /// Could not determine — neither v1 controller dirs nor the v2 marker
+    /// file were found.
+    #[default]
+    Unknown,
+}
+
+impl std::fmt::Display for CgroupVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::V1 => f.write_str("v1"),
+            Self::V2 => f.write_str("v2"),
+            Self::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
+/// CPU bandwidth limit imposed by the cgroup (`cpu.max` in v2 or
+/// `cpu.cfs_{quota,period}_us` in v1).
+#[derive(Debug, Clone, Copy)]
+pub struct CgroupCpuMax {
+    /// Quota in microseconds per period. `None` means unlimited (`"max"`
+    /// in v2, `-1` in v1).
+    pub quota_us: Option<u64>,
+    /// Period length in microseconds (typically 100000 = 100 ms).
+    pub period_us: u64,
+}
+
+impl CgroupCpuMax {
+    /// Effective CPU-core equivalent, e.g. `quota=200000 period=100000`
+    /// returns `Some(2.0)`. `None` if quota is unlimited.
+    pub fn cores(&self) -> Option<f64> {
+        let q = self.quota_us?;
+        if self.period_us == 0 {
+            return None;
+        }
+        Some(q as f64 / self.period_us as f64)
+    }
+}
+
+/// cgroup-derived diagnostic info for the current process.
+#[derive(Debug, Clone, Default)]
+pub struct CgroupInfo {
+    /// Detected hierarchy version.
+    pub version: CgroupVersion,
+    /// Cgroup path within the hierarchy (e.g. `/` for the root, or
+    /// `/docker/<id>` in many container runtimes). Parsed from
+    /// `/proc/self/cgroup`. `None` if the file could not be read.
+    pub path: Option<String>,
+    /// `cpuset.cpus` (configured) for this cgroup, parsed as CPU IDs.
+    pub cpuset_cpus: Option<Vec<usize>>,
+    /// `cpuset.cpus.effective` (after intersecting with ancestor and online
+    /// CPUs) for this cgroup. v2 only; v1 callers see `None`.
+    pub cpuset_cpus_effective: Option<Vec<usize>>,
+    /// `cpuset.mems` — which NUMA memory nodes the cgroup is restricted to.
+    pub cpuset_mems: Option<Vec<usize>>,
+    /// CPU bandwidth limit. `None` if `cpu.max` / `cpu.cfs_*` could not be read.
+    pub cpu_max: Option<CgroupCpuMax>,
+    /// `memory.max` (v2) or `memory.limit_in_bytes` (v1). `None` means
+    /// unlimited (`"max"` or sentinel). `Some(0)` would be a kernel-imposed
+    /// disable; we treat any unparseable value as `None`.
+    pub memory_max: Option<u64>,
+    /// Short string describing why we think the process is in a container,
+    /// or `None` if no signal was found. Heuristic only.
+    pub container_hint: Option<String>,
+}
+
 
 impl Resources {
     /// Discover the host resources using [`SlicingMode::AssumeAllBusy`].
@@ -169,6 +246,7 @@ impl Resources {
 
         let process_allowed_cpus = read_process_allowed_cpus();
         let host_cpus_fallback = available_parallelism_range();
+        let cgroup = read_cgroup_info();
 
         compute_resources_from_inputs(
             topology,
@@ -177,6 +255,7 @@ impl Resources {
             numa_enabled,
             host_cpus_fallback,
             process_allowed_cpus,
+            cgroup,
             mode,
         )
     }
@@ -199,6 +278,7 @@ impl Resources {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_resources_from_inputs(
     topology: Option<&'static NumaTopology>,
     all_gpus: Vec<GpuInfo>,
@@ -206,6 +286,7 @@ fn compute_resources_from_inputs(
     numa_enabled: bool,
     host_cpus_fallback: Vec<usize>,
     process_allowed_cpus: Vec<usize>,
+    cgroup: CgroupInfo,
     mode: SlicingMode,
 ) -> Resources {
     let visible_pcis: HashSet<&String> = cuda_ordinals_by_pci.keys().collect();
@@ -286,6 +367,7 @@ fn compute_resources_from_inputs(
                 numa_enabled,
                 host_cpus,
                 process_allowed_cpus,
+                cgroup,
                 mode,
             };
         }
@@ -423,6 +505,7 @@ fn compute_resources_from_inputs(
         numa_enabled,
         host_cpus,
         process_allowed_cpus,
+        cgroup,
         mode,
     }
 }
@@ -453,6 +536,188 @@ fn slice_evenly(cpus: &[usize], pcis: &[String]) -> HashMap<String, Vec<usize>> 
         out.insert((*pci).clone(), cpus[start..end].to_vec());
     }
     out
+}
+
+fn read_cgroup_info() -> CgroupInfo {
+    let version = detect_cgroup_version();
+    let path = read_self_cgroup_path(version);
+    let container_hint = detect_container_hint();
+
+    let (cpuset_cpus, cpuset_cpus_effective, cpuset_mems, cpu_max, memory_max) = match version {
+        CgroupVersion::V2 => {
+            let rel = path.as_deref().unwrap_or("");
+            (
+                read_cgroup_v2(rel, "cpuset.cpus").and_then(|s| parse_cpulist(&s).ok()),
+                read_cgroup_v2(rel, "cpuset.cpus.effective").and_then(|s| parse_cpulist(&s).ok()),
+                read_cgroup_v2(rel, "cpuset.mems").and_then(|s| parse_cpulist(&s).ok()),
+                read_cgroup_v2(rel, "cpu.max").and_then(|s| parse_cgroup_v2_cpu_max(&s)),
+                read_cgroup_v2(rel, "memory.max").and_then(|s| parse_cgroup_v2_memory_max(&s)),
+            )
+        }
+        CgroupVersion::V1 => {
+            let rel = path.as_deref().unwrap_or("");
+            let quota = read_cgroup_v1(rel, "cpu", "cpu.cfs_quota_us")
+                .and_then(|s| s.trim().parse::<i64>().ok());
+            let period = read_cgroup_v1(rel, "cpu", "cpu.cfs_period_us")
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            let cpu_max = match (quota, period) {
+                (Some(q), Some(p)) => Some(CgroupCpuMax {
+                    quota_us: if q < 0 { None } else { Some(q as u64) },
+                    period_us: p,
+                }),
+                _ => None,
+            };
+            (
+                read_cgroup_v1(rel, "cpuset", "cpuset.cpus").and_then(|s| parse_cpulist(&s).ok()),
+                None,
+                read_cgroup_v1(rel, "cpuset", "cpuset.mems").and_then(|s| parse_cpulist(&s).ok()),
+                cpu_max,
+                read_cgroup_v1(rel, "memory", "memory.limit_in_bytes")
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .and_then(|v| {
+                        // The v1 sentinel for "no limit" is a huge value. Treat
+                        // anything >= 1 EiB as unlimited.
+                        if v >= (1u64 << 60) { None } else { Some(v) }
+                    }),
+            )
+        }
+        CgroupVersion::Unknown => (None, None, None, None, None),
+    };
+
+    CgroupInfo {
+        version,
+        path,
+        cpuset_cpus,
+        cpuset_cpus_effective,
+        cpuset_mems,
+        cpu_max,
+        memory_max,
+        container_hint,
+    }
+}
+
+fn detect_cgroup_version() -> CgroupVersion {
+    if std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
+        CgroupVersion::V2
+    } else if std::path::Path::new("/sys/fs/cgroup/cpuset").is_dir()
+        || std::path::Path::new("/sys/fs/cgroup/cpu").is_dir()
+    {
+        CgroupVersion::V1
+    } else {
+        CgroupVersion::Unknown
+    }
+}
+
+fn read_self_cgroup_path(version: CgroupVersion) -> Option<String> {
+    let content = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    match version {
+        CgroupVersion::V2 => {
+            // v2 format: "0::/path"
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("0::") {
+                    return Some(rest.to_string());
+                }
+            }
+            None
+        }
+        CgroupVersion::V1 => {
+            // v1: pick the cpuset path if present, otherwise any cpu line.
+            let mut fallback: Option<String> = None;
+            for line in content.lines() {
+                let parts: Vec<&str> = line.splitn(3, ':').collect();
+                if parts.len() != 3 {
+                    continue;
+                }
+                let controllers = parts[1];
+                let path = parts[2].to_string();
+                if controllers.split(',').any(|c| c == "cpuset") {
+                    return Some(path);
+                }
+                if controllers.split(',').any(|c| c == "cpu") {
+                    fallback = Some(path);
+                }
+            }
+            fallback
+        }
+        CgroupVersion::Unknown => None,
+    }
+}
+
+fn read_cgroup_v2(rel_path: &str, filename: &str) -> Option<String> {
+    let candidates = [
+        // Namespaced containers: /sys/fs/cgroup is rooted at the container's
+        // cgroup, so root-level filenames are the relevant ones.
+        format!("/sys/fs/cgroup/{}", filename),
+        // Otherwise, descend the path from /proc/self/cgroup.
+        format!(
+            "/sys/fs/cgroup{}/{}",
+            rel_path.trim_end_matches('/'),
+            filename
+        ),
+    ];
+    for path in &candidates {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn read_cgroup_v1(rel_path: &str, controller: &str, filename: &str) -> Option<String> {
+    let candidates = [
+        format!(
+            "/sys/fs/cgroup/{}{}/{}",
+            controller,
+            rel_path.trim_end_matches('/'),
+            filename
+        ),
+        format!("/sys/fs/cgroup/{}/{}", controller, filename),
+    ];
+    for path in &candidates {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn parse_cgroup_v2_cpu_max(s: &str) -> Option<CgroupCpuMax> {
+    // Format: "<quota|max> <period>"
+    let mut it = s.split_whitespace();
+    let q = it.next()?;
+    let p = it.next()?;
+    let period_us: u64 = p.parse().ok()?;
+    let quota_us = if q == "max" {
+        None
+    } else {
+        Some(q.parse::<u64>().ok()?)
+    };
+    Some(CgroupCpuMax {
+        quota_us,
+        period_us,
+    })
+}
+
+fn parse_cgroup_v2_memory_max(s: &str) -> Option<u64> {
+    let t = s.trim();
+    if t == "max" {
+        return None;
+    }
+    t.parse::<u64>().ok()
+}
+
+fn detect_container_hint() -> Option<String> {
+    if std::path::Path::new("/.dockerenv").exists() {
+        return Some("/.dockerenv present".to_string());
+    }
+    if let Ok(s) = std::fs::read_to_string("/proc/1/cgroup") {
+        for marker in &["/docker/", "/kubepods", "/containerd", "/lxc/", "/podman/"] {
+            if s.contains(marker) {
+                return Some(format!("PID 1 cgroup matches '{}'", marker.trim_matches('/')));
+            }
+        }
+    }
+    None
 }
 
 fn read_process_allowed_cpus() -> Vec<usize> {
@@ -495,6 +760,49 @@ impl std::fmt::Display for Resources {
             compact_range(&self.process_allowed_cpus)
         )?;
         writeln!(f, "Slicing mode:           {}", self.mode)?;
+
+        writeln!(f)?;
+        writeln!(f, "Process launch context")?;
+        writeln!(f, "  cgroup version:       {}", self.cgroup.version)?;
+        if let Some(p) = &self.cgroup.path {
+            writeln!(f, "  cgroup path:          {}", p)?;
+        }
+        if let Some(c) = &self.cgroup.cpuset_cpus {
+            writeln!(f, "  cpuset.cpus:          [{}]", compact_range(c))?;
+        }
+        if let Some(c) = &self.cgroup.cpuset_cpus_effective {
+            writeln!(f, "  cpuset.cpus.effective: [{}]", compact_range(c))?;
+        }
+        if let Some(m) = &self.cgroup.cpuset_mems {
+            writeln!(f, "  cpuset.mems:          [{}]", compact_range(m))?;
+        }
+        if let Some(c) = &self.cgroup.cpu_max {
+            match c.quota_us {
+                Some(q) => writeln!(
+                    f,
+                    "  cpu.max:              {} / {} us (= {:.2} cores)",
+                    q,
+                    c.period_us,
+                    c.cores().unwrap_or(0.0)
+                )?,
+                None => writeln!(f, "  cpu.max:              max ({} us period)", c.period_us)?,
+            }
+        }
+        match self.cgroup.memory_max {
+            Some(m) => writeln!(
+                f,
+                "  memory.max:           {} bytes (= {})",
+                m,
+                format_bytes(m)
+            )?,
+            None if self.cgroup.version != CgroupVersion::Unknown => {
+                writeln!(f, "  memory.max:           max (unlimited)")?
+            }
+            None => {}
+        }
+        if let Some(hint) = &self.cgroup.container_hint {
+            writeln!(f, "  container hint:       {}", hint)?;
+        }
 
         for node in &self.nodes {
             writeln!(f)?;
@@ -556,6 +864,25 @@ fn format_slice_source(s: SliceSource) -> String {
     }
 }
 
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    const TIB: f64 = GIB * 1024.0;
+    let b = bytes as f64;
+    if b >= TIB {
+        format!("{:.1} TiB", b / TIB)
+    } else if b >= GIB {
+        format!("{:.1} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 fn compact_range(cpus: &[usize]) -> String {
     if cpus.is_empty() {
         return String::new();
@@ -606,6 +933,7 @@ mod tests {
             true,
             vec![0, 1, 2, 3],
             vec![0, 1, 2, 3],
+            CgroupInfo::default(),
             SlicingMode::AssumeAllBusy,
         );
         assert_eq!(r.gpus.len(), 2);
@@ -625,6 +953,7 @@ mod tests {
             true,
             Vec::new(),
             Vec::new(),
+            CgroupInfo::default(),
             SlicingMode::AssumeAllBusy,
         );
         assert_eq!(r.gpus[0].slice_source, SliceSource::NoTopology);
@@ -687,6 +1016,30 @@ mod tests {
         assert_eq!(compact_range(&[0, 1, 2, 3]), "0-3");
         assert_eq!(compact_range(&[0, 1, 2, 8, 9, 10]), "0-2,8-10");
         assert_eq!(compact_range(&[2, 0, 1, 4]), "0-2,4");
+    }
+
+    #[test]
+    fn parse_v2_cpu_max_handles_max_and_numbers() {
+        assert!(parse_cgroup_v2_cpu_max("max 100000").unwrap().quota_us.is_none());
+        let q = parse_cgroup_v2_cpu_max("200000 100000").unwrap();
+        assert_eq!(q.quota_us, Some(200000));
+        assert_eq!(q.period_us, 100000);
+        assert!((q.cores().unwrap() - 2.0).abs() < f64::EPSILON);
+        assert!(parse_cgroup_v2_cpu_max("garbage").is_none());
+    }
+
+    #[test]
+    fn parse_v2_memory_max_handles_max_and_numbers() {
+        assert!(parse_cgroup_v2_memory_max("max").is_none());
+        assert_eq!(parse_cgroup_v2_memory_max("17179869184"), Some(17179869184));
+        assert!(parse_cgroup_v2_memory_max("nope").is_none());
+    }
+
+    #[test]
+    fn format_bytes_human_readable() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(2048), "2.0 KiB");
+        assert_eq!(format_bytes(8 * 1024 * 1024 * 1024), "8.0 GiB");
     }
 
     #[test]

@@ -254,11 +254,53 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
     Ok(())
 }
 
+/// Detect the hex-character width the kernel uses for PCI domain components
+/// in sysfs directory names (typically 4 on x86, 8 on platforms with 32-bit
+/// PCI domains such as Grace / GB200). Falls back to 4 if `/sys/bus/pci/devices`
+/// cannot be enumerated.
+fn sysfs_pci_domain_width() -> usize {
+    static WIDTH: OnceLock<usize> = OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        if let Ok(entries) = fs::read_dir("/sys/bus/pci/devices") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(colon) = name.find(':') {
+                    return colon;
+                }
+            }
+        }
+        4
+    })
+}
+
+/// Re-emit a PCI address string with the domain padded to the sysfs-native
+/// width on the running kernel, so addresses from different sources (CUDA's
+/// 4-char, NVML's 8-char, sysfs's native) all join correctly. Returns `None`
+/// if `s` is not a parseable `DDDD...:BB:DD.F` address.
+fn normalize_pci_address(s: &str) -> Option<String> {
+    let s = s.to_lowercase();
+    let parts: Vec<&str> = s.splitn(3, ':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let domain = u32::from_str_radix(parts[0], 16).ok()?;
+    let w = sysfs_pci_domain_width();
+    let domain_hex = if w >= 8 {
+        format!("{:08x}", domain)
+    } else {
+        format!("{:04x}", domain)
+    };
+    Some(format!("{}:{}", domain_hex, parts[1..].join(":")))
+}
+
 /// Get the PCI bus address for a CUDA device via the CUDA driver API.
 ///
-/// Returns a normalized PCI address string like `"0000:3b:00.0"` (lowercase hex,
-/// always trailing `.0`). The `device_id` is a CUDA ordinal, so the result is
-/// subject to `CUDA_VISIBLE_DEVICES` remapping.
+/// Returns a lowercase PCI address whose domain width matches sysfs on the
+/// running kernel (4 hex chars on x86, 8 on Grace / GB200), so the returned
+/// string is directly usable as a key in [`enumerate_host_gpus_from_sysfs`]'s
+/// output and as a `/sys/bus/pci/devices/<pci>/...` path component. The
+/// `device_id` is a CUDA ordinal, so the result is subject to
+/// `CUDA_VISIBLE_DEVICES` remapping.
 pub fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
     // SAFETY: We're calling CUDA driver API functions with valid device ordinals.
     // cuDeviceGet and get_attribute are safe as long as CUDA is initialized
@@ -289,7 +331,13 @@ pub fn get_pci_bus_address_from_cuda(device_id: u32) -> Option<String> {
         )
         .ok()?;
 
-        Some(format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device))
+        let w = sysfs_pci_domain_width();
+        let domain_hex = if w >= 8 {
+            format!("{:08x}", domain)
+        } else {
+            format!("{:04x}", domain)
+        };
+        Some(format!("{}:{:02x}:{:02x}.0", domain_hex, bus, device))
     }
 }
 
@@ -373,8 +421,9 @@ pub fn enumerate_host_gpus_from_sysfs() -> Vec<GpuInfo> {
         }
 
         let numa = read_numa_node_from_sysfs(&name).map(|n| n.0);
+        let normalized = normalize_pci_address(&name).unwrap_or_else(|| name.to_lowercase());
         gpus.push(GpuInfo {
-            pci_address: name.to_lowercase(),
+            pci_address: normalized,
             numa_node: numa,
         });
     }
@@ -406,9 +455,11 @@ pub fn enumerate_all_gpus() -> Vec<GpuInfo> {
             return nvml_gpus
                 .into_iter()
                 .map(|g| {
-                    let numa = read_numa_node_from_sysfs(&g.pci_address).map(|n| n.0);
+                    let pci = normalize_pci_address(&g.pci_address)
+                        .unwrap_or_else(|| g.pci_address.to_lowercase());
+                    let numa = read_numa_node_from_sysfs(&pci).map(|n| n.0);
                     GpuInfo {
-                        pci_address: g.pci_address,
+                        pci_address: pci,
                         numa_node: numa,
                     }
                 })
