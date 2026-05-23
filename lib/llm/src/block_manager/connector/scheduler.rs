@@ -9,6 +9,9 @@ use super::*;
 
 use tokio::sync::mpsc;
 
+use dynamo_runtime::utils::tasks::tracker::{LogOnlyPolicy, TaskTracker, UnlimitedScheduler};
+use std::sync::Arc;
+
 pub const DISCONNECTED_WARNING: &str =
     "runtime error: connections between components were lost; likely tearing down";
 
@@ -315,6 +318,7 @@ pub struct Scheduler {
     iteration: u64,
     layers_complete: u32,
     iteration_complete: bool,
+    task_tracker: Arc<TaskTracker>,
 }
 
 impl Scheduler {
@@ -325,6 +329,8 @@ impl Scheduler {
         let (transfer_tx, transfer_rx) = mpsc::channel(128);
         let worker_client = WorkerSchedulerClient::new(scheduler_tx, cancel_token);
         let transfer_client = TransferSchedulerClient::new(transfer_tx);
+        let task_tracker =
+            Arc::new(TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap());
         (
             Scheduler {
                 slots: HashMap::new(),
@@ -336,6 +342,7 @@ impl Scheduler {
                 iteration: 0,
                 layers_complete: 0,
                 iteration_complete: true,
+                task_tracker,
             },
             worker_client,
             transfer_client,
@@ -605,7 +612,8 @@ impl Scheduler {
             .unwrap()
             .completed
             .clone();
-        tokio::spawn(xfer_req.execute(SchedulingDecision::Execute, completed));
+        self.task_tracker
+            .spawn(xfer_req.execute(SchedulingDecision::Execute, completed));
     }
 
     /// Translate the [`TransferScheduleRequest`] into a local [`ScheduledTaskController`]

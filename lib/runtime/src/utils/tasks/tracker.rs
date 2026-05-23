@@ -394,6 +394,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker as TokioTaskTracker;
 use tracing::{Instrument, debug, error, warn};
@@ -769,14 +770,6 @@ pub enum SchedulingPolicy {
     /// Semaphore-based concurrency limiting
     Semaphore(usize),
     // TODO: Future scheduling policies to implement
-    //
-    // /// Token bucket rate limiting with burst capacity
-    // /// Implementation: Use tokio::time::interval for refill, AtomicU64 for tokens.
-    // /// acquire() decrements tokens, schedule() waits for refill if empty.
-    // /// Burst allows temporary spikes above steady rate.
-    // /// struct: { rate: f64, burst: usize, tokens: AtomicU64, last_refill: Mutex<Instant> }
-    // /// Example: TokenBucket { rate: 10.0, burst: 5 } = 10 tasks/sec, burst up to 5
-    // TokenBucket { rate: f64, burst: usize },
     //
     // /// Weighted fair scheduling across multiple priority classes
     // /// Implementation: Maintain separate VecDeque for each priority class.
@@ -2885,6 +2878,7 @@ impl TaskTrackerInner {
 // Blanket implementation for all schedulers
 impl ArcPolicy for UnlimitedScheduler {}
 impl ArcPolicy for SemaphoreScheduler {}
+impl ArcPolicy for TokenBucketScheduler {}
 
 // Blanket implementation for all error policies
 impl ArcPolicy for LogOnlyPolicy {}
@@ -3051,6 +3045,164 @@ impl TaskScheduler for SemaphoreScheduler {
 
         debug!("Acquired semaphore permit");
         SchedulingResult::Execute(Box::new(SemaphoreGuard { _permit: permit }))
+    }
+}
+
+/// Resource guard for token bucket scheduling
+///
+/// The token is consumed before task execution starts, so this guard only marks
+/// that the scheduling decision has completed.
+#[derive(Debug)]
+pub struct TokenBucketGuard;
+
+impl ResourceGuard for TokenBucketGuard {
+    // Tokens are consumed at acquisition time and are not returned on drop.
+}
+
+#[derive(Debug)]
+struct TokenBucketState {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+/// Token bucket task scheduler with burst capacity
+///
+/// Limits the rate at which tasks start. Up to `burst` tasks can start
+/// immediately, and then the bucket refills at `rate` tokens per second.
+///
+/// ## Cancellation Behavior
+///
+/// - Respects cancellation tokens before and while waiting for the next token
+/// - Once a token is consumed (via ResourceGuard), always awaits task completion
+/// - Tokens are not returned when tasks complete; this is a start-rate limiter,
+///   not a concurrency limiter
+///
+/// # Example
+/// ```rust
+/// # use dynamo_runtime::utils::tasks::tracker::TokenBucketScheduler;
+/// // Allow a burst of 5 tasks, then 10 task starts per second.
+/// let scheduler = TokenBucketScheduler::new(10.0, 5)?;
+/// # anyhow::Ok(())
+/// ```
+#[derive(Debug)]
+pub struct TokenBucketScheduler {
+    rate: f64,
+    burst: usize,
+    // std::sync::Mutex is intentional — the lock is never held across an
+    // await point, so a std mutex is sufficient and more efficient.
+    state: Mutex<TokenBucketState>,
+}
+
+impl TokenBucketScheduler {
+    /// Create a new token bucket scheduler.
+    ///
+    /// # Arguments
+    /// * `rate` - Token refill rate in tasks per second
+    /// * `burst` - Maximum number of tokens that can accumulate
+    pub fn new(rate: f64, burst: usize) -> anyhow::Result<Self> {
+        if !rate.is_finite() || rate <= 0.0 {
+            anyhow::bail!("Token bucket rate must be finite and greater than 0");
+        }
+
+        if burst == 0 {
+            anyhow::bail!("Token bucket burst must be greater than 0");
+        }
+
+        Ok(Self {
+            rate,
+            burst,
+            state: Mutex::new(TokenBucketState {
+                tokens: burst as f64,
+                last_refill: Instant::now(),
+            }),
+        })
+    }
+
+    /// Create a new token bucket scheduler returning Arc.
+    pub fn with_rate(rate: f64, burst: usize) -> anyhow::Result<Arc<Self>> {
+        Ok(Arc::new(Self::new(rate, burst)?))
+    }
+
+    /// Get the configured refill rate in tasks per second.
+    pub fn rate(&self) -> f64 {
+        self.rate
+    }
+
+    /// Get the configured burst capacity.
+    pub fn burst(&self) -> usize {
+        self.burst
+    }
+
+    /// Get the current number of whole tokens available.
+    pub fn available_tokens(&self) -> usize {
+        let mut state = self
+            .state
+            .lock()
+            .expect("token bucket scheduler state mutex poisoned");
+        self.refill_locked(&mut state);
+        state.tokens.floor() as usize
+    }
+
+    fn refill_locked(&self, state: &mut TokenBucketState) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+
+        if elapsed > 0.0 {
+            state.tokens = (state.tokens + elapsed * self.rate).min(self.burst as f64);
+            state.last_refill = now;
+        }
+    }
+}
+
+#[async_trait]
+impl TaskScheduler for TokenBucketScheduler {
+    /// Waiters compete opportunistically for newly refilled tokens.
+    /// Strict FIFO fairness is not guaranteed.
+    async fn acquire_execution_slot(
+        &self,
+        cancel_token: CancellationToken,
+    ) -> SchedulingResult<Box<dyn ResourceGuard>> {
+        debug!(
+            rate = self.rate,
+            burst = self.burst,
+            "Acquiring token bucket execution slot"
+        );
+
+        loop {
+            if cancel_token.is_cancelled() {
+                debug!("Task cancelled before acquiring token bucket slot");
+                return SchedulingResult::Cancelled;
+            }
+
+            let wait_duration = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("token bucket scheduler state mutex poisoned");
+                self.refill_locked(&mut state);
+
+                if state.tokens >= 1.0 {
+                    state.tokens -= 1.0;
+                    debug!(
+                        tokens_remaining = state.tokens,
+                        "Acquired token bucket slot"
+                    );
+                    return SchedulingResult::Execute(Box::new(TokenBucketGuard));
+                }
+
+                let missing_tokens = (1.0 - state.tokens).max(0.0);
+                let wait_secs = (missing_tokens / self.rate).min(f64::MAX / 2.0);
+                Duration::from_secs_f64(wait_secs)
+            };
+
+            tokio::select! {
+                _ = tokio::time::sleep(wait_duration) => {}
+                _ = cancel_token.cancelled() => {
+                    debug!("Task cancelled while waiting for token bucket slot");
+                    return SchedulingResult::Cancelled;
+                }
+            }
+        }
     }
 }
 
@@ -3607,6 +3759,101 @@ mod tests {
         // Verify all tasks completed successfully
         assert_eq!(tracker.metrics().success(), 5);
         assert_eq!(tracker.metrics().failed(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_token_bucket_rate_limits_after_burst() {
+        let scheduler = TokenBucketScheduler::new(2.0, 2).unwrap();
+        let cancel_token = CancellationToken::new();
+
+        assert_eq!(scheduler.available_tokens(), 2);
+
+        let result = scheduler.acquire_execution_slot(cancel_token.clone()).await;
+        assert!(matches!(result, SchedulingResult::Execute(_)));
+
+        let result = scheduler.acquire_execution_slot(cancel_token.clone()).await;
+        assert!(matches!(result, SchedulingResult::Execute(_)));
+        assert_eq!(scheduler.available_tokens(), 0);
+
+        tokio::time::advance(Duration::from_millis(499)).await;
+        assert_eq!(scheduler.available_tokens(), 0);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(scheduler.available_tokens(), 1);
+
+        let result = scheduler.acquire_execution_slot(cancel_token).await;
+        assert!(matches!(result, SchedulingResult::Execute(_)));
+        assert_eq!(scheduler.available_tokens(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_token_bucket_cancels_while_waiting() {
+        let scheduler = Arc::new(TokenBucketScheduler::new(1.0, 1).unwrap());
+        let cancel_token = CancellationToken::new();
+
+        let result = scheduler.acquire_execution_slot(cancel_token.clone()).await;
+        assert!(matches!(result, SchedulingResult::Execute(_)));
+
+        let scheduler_clone = scheduler.clone();
+        let cancel_token_clone = cancel_token.clone();
+        let wait_handle = tokio::spawn(async move {
+            scheduler_clone
+                .acquire_execution_slot(cancel_token_clone)
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        cancel_token.cancel();
+
+        let result = wait_handle.await.unwrap();
+        assert!(matches!(result, SchedulingResult::Cancelled));
+    }
+
+    #[test]
+    fn test_token_bucket_rejects_invalid_configuration() {
+        assert!(TokenBucketScheduler::new(0.0, 1).is_err());
+        assert!(TokenBucketScheduler::new(-1.0, 1).is_err());
+        assert!(TokenBucketScheduler::new(f64::INFINITY, 1).is_err());
+        assert!(TokenBucketScheduler::new(1.0, 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_task_tracker_with_token_bucket_rate_limits_task_starts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // 2 tasks/sec, burst of 1 — after burst is consumed, starts are rate-limited
+        let scheduler = Arc::new(TokenBucketScheduler::new(2.0, 1).unwrap());
+        let tracker = TaskTracker::new(scheduler, LogOnlyPolicy::new()).unwrap();
+
+        let start_count = Arc::new(AtomicU32::new(0));
+
+        // Spawn 3 tasks — first starts immediately (burst), rest must wait for refill
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let count = start_count.clone();
+            let handle = tracker.spawn(async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            });
+            handles.push(handle);
+        }
+
+        // Immediately after spawning, only 1 should have started (burst=1)
+        tokio::task::yield_now().await;
+        assert_eq!(start_count.load(Ordering::Relaxed), 1);
+
+        // After 500ms (rate=2/sec → 1 token per 500ms), second task starts
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(start_count.load(Ordering::Relaxed), 2);
+
+        // After another 500ms, third task starts
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(start_count.load(Ordering::Relaxed), 3);
+
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
     }
 
     #[rstest]
