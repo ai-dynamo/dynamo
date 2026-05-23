@@ -562,12 +562,15 @@ impl Worker {
         // — discovery unregister, grace period, drain, cleanup — finishes.
         let _orchestrator_registration = endpoint.drt().register_graceful_task();
 
-        let serve_fut = endpoint
+        let mut builder = endpoint
             .endpoint_builder()
             .handler(ingress)
             .metrics_labels(metrics_labels)
-            .graceful_shutdown(true)
-            .start();
+            .graceful_shutdown(true);
+        if let Some(payload) = engine_config.health_check_payload.clone() {
+            builder = builder.health_check_payload(payload);
+        }
+        let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
         tokio::select! {

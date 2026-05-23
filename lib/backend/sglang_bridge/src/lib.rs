@@ -5,7 +5,6 @@
 
 mod args;
 mod engine;
-mod health;
 mod proto;
 mod sampling;
 mod server_info;

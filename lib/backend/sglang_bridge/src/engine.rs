@@ -16,12 +16,10 @@ use dynamo_backend_common::{
 use futures::stream::BoxStream;
 use rand::Rng;
 use tokio::sync::OnceCell;
-use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::args::Args;
-use crate::health;
 use crate::proto::v1::{
     AbortRequest, DisaggregatedParams, GenerateRequest, GetModelInfoRequest, GetServerInfoRequest,
     HealthCheckRequest, sglang_service_client::SglangServiceClient,
@@ -45,7 +43,6 @@ pub struct SglangBridge {
     disaggregation_mode: OnceCell<DisaggregationMode>,
     bootstrap: OnceCell<(String, u16)>,
     client: OnceCell<SglangServiceClient<Channel>>,
-    health_check_task: OnceCell<JoinHandle<()>>,
 }
 
 impl SglangBridge {
@@ -61,7 +58,6 @@ impl SglangBridge {
             disaggregation_mode: OnceCell::new(),
             bootstrap: OnceCell::new(),
             client: OnceCell::new(),
-            health_check_task: OnceCell::new(),
         };
         // disaggregation_mode is discovered by `start()` from SGLang and
         // returned on EngineConfig; Worker reads the engine's override.
@@ -147,11 +143,8 @@ impl LLMEngine for SglangBridge {
         }
 
         self.client
-            .set(client.clone())
+            .set(client)
             .map_err(|_| backend_error("client already set"))?;
-        self.health_check_task
-            .set(tokio::spawn(health::run_loop(client)))
-            .map_err(|_| backend_error("start called twice"))?;
 
         let total_kv_blocks = match (info.max_total_num_tokens, info.page_size) {
             (Some(t), Some(p)) if p > 0 => Some(t.div_ceil(p as u64)),
@@ -188,6 +181,7 @@ impl LLMEngine for SglangBridge {
             data_parallel_size: info.dp_size,
             bootstrap_host,
             bootstrap_port,
+            health_check_payload: Some(build_health_check_payload()),
             ..Default::default()
         })
     }
@@ -214,9 +208,6 @@ impl LLMEngine for SglangBridge {
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
-        if let Some(task) = self.health_check_task.get() {
-            task.abort();
-        }
         Ok(())
     }
 }
@@ -374,6 +365,24 @@ impl SglangBridge {
             .ok_or_else(|| backend_error("generate called before start"))
             .cloned()
     }
+}
+
+/// Canary `PreprocessedRequest` shape sent by the runtime's health-check
+/// manager (when `DYN_HEALTH_CHECK_ENABLED=true`) through the normal
+/// `generate()` path. Mirrors `components/src/dynamo/sglang/health_check.py`'s
+/// `SglangHealthCheckPayload`: one input token (BOS fallback), one output
+/// token, greedy, no EOS shortcut. We don't query SGLang for the real BOS
+/// token id — SGLang's scheduler accepts any valid token for a 1-step
+/// generate, and token `1` is the BOS for every Qwen/Llama/DeepSeek family
+/// we care about.
+fn build_health_check_payload() -> serde_json::Value {
+    serde_json::json!({
+        "token_ids": [1],
+        "stop_conditions": {"max_tokens": 1, "ignore_eos": false},
+        "sampling_options": {"temperature": 0.0, "top_p": 1.0, "top_k": -1},
+        "eos_token_ids": [],
+        "annotations": [],
+    })
 }
 
 fn invalid_arg(msg: impl Into<String>) -> DynamoError {

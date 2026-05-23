@@ -163,6 +163,15 @@ pub struct EngineConfig {
     pub bootstrap_port: Option<u16>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
+    /// Canary payload sent to this endpoint by the runtime's health-check
+    /// manager when `DYN_HEALTH_CHECK_ENABLED=true`. `Worker` forwards it
+    /// verbatim to `endpoint_builder.health_check_payload(...)`. `None`
+    /// (the default) opts the engine out of canary probing; the runtime's
+    /// health-check manager skips this endpoint. Engines that do supply
+    /// one mirror the shape the canary expects to see at `generate()`
+    /// — see `components/src/dynamo/sglang/health_check.py` for the
+    /// reference shape.
+    pub health_check_payload: Option<serde_json::Value>,
 }
 
 /// Inference engine trait.
