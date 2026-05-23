@@ -290,8 +290,17 @@ impl SglangBridge {
         }))
     }
 
-    /// Yields one bootstrap chunk synchronously; the RPC drains in the
-    /// background since SGLang prefill blocks until decode pulls KV.
+    /// Mirrors `components/src/dynamo/sglang/request_handlers/llm/prefill_handler.py`:
+    /// open the Generate RPC once, yield ONE non-terminal bootstrap chunk
+    /// synchronously, then drain the gRPC stream in-band (inside the same
+    /// async_stream) until SGLang signals `finished` — only then close the
+    /// outer stream with a terminal Stop chunk.
+    ///
+    /// The drain must stay in-band (no `tokio::spawn`) because closing the
+    /// outer stream early — i.e. before sglang acknowledges prefill done —
+    /// makes the frontend treat the stream as incomplete and retry the
+    /// prefill on the same worker, which then collides with the still-active
+    /// gRPC request (sglang rejects "Duplicate active gRPC request id").
     async fn generate_prefill(
         &self,
         request: PreprocessedRequest,
@@ -331,32 +340,51 @@ impl SglangBridge {
             ..Default::default()
         };
 
-        tokio::spawn(async move {
+        Ok(Box::pin(async_stream::stream! {
+            // Open the gRPC stream BEFORE yielding bootstrap so a failed RPC
+            // surfaces as an error chunk on the outer stream rather than a
+            // closed stream after the frontend has already extracted the
+            // bootstrap triple.
             let mut stream = match client.generate(grpc_req).await {
                 Ok(r) => r.into_inner(),
                 Err(e) => {
-                    tracing::warn!(request_id = ctx.id(), error = %e, "prefill Generate failed");
+                    yield Ok(LLMEngineOutput::error(format!("prefill Generate RPC: {e}")));
                     return;
                 }
             };
+            yield Ok(bootstrap_chunk);
+
+            // Drain the stream until SGLang signals `finished`. SGLang prefill
+            // blocks until decode pulls KV, so this is what holds the outer
+            // stream open.
             loop {
                 tokio::select! {
                     biased;
-                    _ = ctx.stopped() => return,
+                    _ = ctx.stopped() => {
+                        yield Ok(LLMEngineOutput::cancelled());
+                        return;
+                    }
                     maybe_chunk = stream.next() => match maybe_chunk {
-                        Some(Ok(r)) if r.finished => return,
-                        Some(Ok(_)) => continue,
-                        Some(Err(s)) => {
-                            tracing::warn!(request_id = ctx.id(), status = %s, "prefill stream error");
+                        Some(Ok(r)) if r.finished => {
+                            yield Ok(LLMEngineOutput::stop());
                             return;
                         }
-                        None => return,
+                        // Non-terminal chunks from prefill carry no tokens we
+                        // need to forward (the bootstrap triple was already
+                        // emitted); discard them.
+                        Some(Ok(_)) => continue,
+                        Some(Err(s)) => {
+                            yield Ok(LLMEngineOutput::error(format!("prefill stream error: {s}")));
+                            return;
+                        }
+                        None => {
+                            yield Ok(LLMEngineOutput::error("prefill stream closed without terminal".to_string()));
+                            return;
+                        }
                     },
                 }
             }
-        });
-
-        Ok(Box::pin(async_stream::stream! { yield Ok(bootstrap_chunk); }))
+        }))
     }
 
     fn client_or_err(&self) -> Result<SglangServiceClient<Channel>, DynamoError> {
