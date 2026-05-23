@@ -43,7 +43,6 @@ cd deploy/inference-gateway
 export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
 ./scripts/install_gaie_crd_kgateway.sh
 ```
-**Note**: The manifest at `config/manifests/gateway/agentgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
 
 #### f. Verify the Gateway is running
 
@@ -320,6 +319,117 @@ spec:
 ```
 
 If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually for each EPP service. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
+
+**Inference-gateway Istio sidecar exclusion**
+
+When namespace-level Istio sidecar injection is enabled (`istio-injection=enabled`), the kgateway-proxy pod also receives an Istio sidecar. This sidecar intercepts the ext_proc gRPC connection from kgateway-proxy to EPP (port 9002) and routes it through `PassthroughCluster`, which breaks the connection and causes all inference requests to return HTTP 500 with an empty body.
+
+The fix is to tell kgateway to stamp `sidecar.istio.io/inject: "false"` on the kgateway-proxy pod template so the Istio webhook skips that pod. EPP and worker pods still receive sidecars normally.
+
+You have two options to apply the annotation depending on how you installed kgateway:
+
+***Option A: Per-gateway `GatewayParameters` (recommended)***
+
+This is what `install_gaie_crd_kgateway.sh` does automatically. It only affects the `inference-gateway` proxy pods and leaves any other kgateway-managed gateways untouched.
+
+1. Create a `GatewayParameters` resource in **the same namespace as the `inference-gateway` Gateway** (e.g. `dynamo-cloud`). The `GatewayParameters` must be co-located with the `Gateway` because the Gateway API `spec.infrastructure.parametersRef` is a `LocalParametersReference` — it has no `namespace` field.
+
+   ```yaml
+   apiVersion: gateway.kgateway.dev/v1alpha1
+   kind: GatewayParameters
+   metadata:
+     name: inference-gateway-params
+     namespace: dynamo-cloud   # same as the Gateway
+   spec:
+     kube:
+       podTemplate:
+         extraAnnotations:
+           sidecar.istio.io/inject: "false"
+   ```
+
+2. Wire the existing `Gateway` to use it. If the Gateway already exists, patch it in place:
+
+   ```bash
+   kubectl patch gateway inference-gateway -n dynamo-cloud --type='merge' -p '{
+     "spec": {
+       "infrastructure": {
+         "parametersRef": {
+           "group": "gateway.kgateway.dev",
+           "kind":  "GatewayParameters",
+           "name":  "inference-gateway-params"
+         }
+       }
+     }
+   }'
+   ```
+
+   Or include the `infrastructure` block directly in your `Gateway` manifest:
+
+   ```yaml
+   apiVersion: gateway.networking.k8s.io/v1
+   kind: Gateway
+   metadata:
+     name: inference-gateway
+     namespace: dynamo-cloud
+   spec:
+     gatewayClassName: kgateway
+     infrastructure:
+       parametersRef:
+         group: gateway.kgateway.dev
+         kind: GatewayParameters
+         name: inference-gateway-params
+     listeners:
+       - name: http
+         port: 80
+         protocol: HTTP
+   ```
+
+3. kgateway will roll the proxy pod. Verify the new pod no longer has an `istio-proxy` container:
+
+   ```bash
+   kubectl get pod -l gateway.networking.k8s.io/gateway-name=inference-gateway \
+     -n dynamo-cloud \
+     -o jsonpath='{.items[0].spec.containers[*].name}{"\n"}'
+   # Expect: kgateway-proxy   (NOT "kgateway-proxy istio-proxy")
+   ```
+
+***Option B: Patch the default `GatewayParameters` CR (cluster-wide)***
+
+If you want every kgateway-managed proxy in the cluster (not just `inference-gateway`) to skip the Istio sidecar, edit the default `GatewayParameters` resource that the kgateway controller creates in `kgateway-system` at install time. Any `Gateway` that does not set `spec.infrastructure.parametersRef` falls back to this default.
+
+> [!WARNING]
+> The kgateway v2.1.1 Helm chart does not yet expose proxy `podTemplate.extraAnnotations` as a Helm value (tracked upstream in [kgateway-dev/kgateway#10696](https://github.com/kgateway-dev/kgateway/issues/10696)), so this annotation cannot be set via `helm install --set` for v2.1.1 today. Editing the default `GatewayParameters` directly is the only cluster-wide path that works on v2.1.1. The kgateway documentation cautions that manual edits to the default `GatewayParameters` may be overwritten on Helm upgrade — re-apply the patch after upgrading kgateway, or switch to Option A for a per-gateway fix that survives upgrades.
+
+Patch the default resource in place:
+
+```bash
+kubectl patch gatewayparameters kgateway -n kgateway-system --type='merge' -p '{
+  "spec": {
+    "kube": {
+      "podTemplate": {
+        "extraAnnotations": {
+          "sidecar.istio.io/inject": "false"
+        }
+      }
+    }
+  }
+}'
+```
+
+After patching, restart any existing kgateway-proxy pods (or recreate the `Gateway`) so they are re-provisioned with the new annotation:
+
+```bash
+kubectl rollout restart deployment \
+  -l gateway.networking.k8s.io/gateway-name=inference-gateway \
+  -n dynamo-cloud
+```
+
+This affects **all** kgateway-managed proxies in the cluster. Choose Option A unless you have only one `Gateway` in the cluster, or you genuinely want every kgateway proxy excluded from the mesh.
+
+The annotation is a no-op on clusters where Istio is not installed, so it is safe to set unconditionally.
+
+> [!NOTE]
+> With both the `DestinationRule` (for EPP) and the `GatewayParameters` sidecar exclusion (for kgateway-proxy) in place, end-to-end GAIE inference works correctly under Istio namespace-level injection.
 
 ### 6. Verify Installation ###
 
